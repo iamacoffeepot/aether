@@ -35,7 +35,7 @@ mod topology;
 
 pub use cell::{CellResult, CellSamples, run_cell};
 pub use keepup::KeepUp;
-pub use kinds::{CountQuery, CountReport, Ping};
+pub use kinds::{CountQuery, CountReport, PerfParticipant, Ping};
 pub use knobs::{
     DEFAULT_HEAVY_WORK_ITERS, DEFAULT_REAL_PACE_HZ, DEFAULT_SATURATE_BACKLOG, SCHEDULER_TUNING_ENV_KEYS,
     drive_for_tier, drive_from_env, effective_trace_ring_cap, heavy_work_iters_from_env, pace_hz_from_env,

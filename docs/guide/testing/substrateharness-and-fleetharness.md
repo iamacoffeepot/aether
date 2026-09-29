@@ -196,7 +196,8 @@ let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
 
 `load::<R>` sets the export to `R::NAMESPACE` and returns `(ActorRef<R>,
 ErasedActorPath)`; `load_any` sends the load as given and returns the erased
-reference, for a fixture actor the test cannot name. A drop takes the path,
+reference, for a fixture actor the test cannot name, which the test types with
+`SubstrateHarness::cast::<P>` before it sends. A drop takes the path,
 `DropComponent { target: path }`; a replace names no instance,
 `ReplaceComponent { wasm, configs }`, and moves every live instance of the
 module's namespaces (ADR-0241 §7), so a test that swaps identical code builds a
@@ -275,9 +276,17 @@ HarnessOp::send_and_settle(&synthetic, &SubscribeWindow {
 });
 ```
 
-A typed `&ActorRef<R>` compiles only when `R` handles that direct kind; an
-`ErasedActorRef` is accepted unchecked, for a fixture whose type the test
-cannot name or a query every actor answers, such as `log_tail`'s.
+A send has three typed doors, and the compiler picks the one the reference and
+the kind fit:
+
+- a `&ActorRef<R>` takes a kind `R` handles;
+- a `&ProtocolRef<P>` takes a kind the protocol `P` lists (ADR-0231 §3);
+- either takes the framework tails, `LogTail`, `TraceTail`, and `CostTail`,
+  which the dispatch loop answers for every actor whether or not its type
+  declares a handler for them. `log_tail` sends through any typed reference.
+
+An `ErasedActorRef` is still accepted unchecked until #6932 removes that door;
+new tests use the typed doors.
 
 A loaded wasm component's reference comes from the load itself:
 `SubstrateHarness::load::<R>` types the reply's stamped sender as the export
@@ -288,6 +297,24 @@ assertion against it or a `CaptureWithMails` bundle recipient:
 ```rust,ignore
 let (camera, _path) = harness.load::<CameraComponent>(load)?;
 HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() });
+```
+
+A wasm-only fixture's erased reference is cast with `SubstrateHarness::cast::<P>`
+against a test-local `#[protocol]` naming the rows the test sends. The cast is
+the registry's guard cast (ADR-0231 §4): it mints a `ProtocolRef<P>` only when
+the route is `Live` and publishes every row of `P` with its exact reply, and
+otherwise returns `SubstrateHarnessError::CastRefused` naming `P` and the path.
+Every later send through the reference is compile-checked against `P`:
+
+```rust,ignore
+#[protocol]
+trait StatefulCounter {
+    fn bump(mail: Bump);
+    fn count(mail: CountQuery) -> CountReport;
+}
+
+let counter = harness.cast::<StatefulCounter>(harness.load_any(&load)?.0)?;
+HarnessOp::send_and_settle(&counter, &Bump);
 ```
 
 A child an actor spawned — a widget beneath a panel, a window beneath the

@@ -5,7 +5,7 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, OutboundReply};
+use aether_actor::{ActorRef, Here, OutboundReply, Row, Silent, There};
 use aether_data::{Kind, KindId, ReplyContract};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname};
@@ -64,6 +64,23 @@ impl aether_actor::Addressable for Relay {
 }
 impl aether_actor::Root for Relay {}
 impl aether_actor::HandlesKind<Ping> for Relay {}
+impl aether_actor::HandlesKind<CountQuery> for Relay {}
+/// The type-level mirror of [`Dispatch::capabilities`], row for row and in the
+/// same order, so a [`Relay`] reference narrows to the protocols its dispatch
+/// answers, such as [`PerfParticipant`](super::PerfParticipant).
+impl aether_actor::Contracts for Relay {
+    type Rows = (Row<Ping, Silent>, (Row<CountQuery, CountReport>, ()));
+    const CONTRACTS: &'static [(KindId, ReplyContract)] =
+        &[(Ping::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))];
+}
+impl aether_actor::Contract<Ping> for Relay {
+    type Reply = Silent;
+    type Index = Here;
+}
+impl aether_actor::Contract<CountQuery> for Relay {
+    type Reply = CountReport;
+    type Index = There<Here>;
+}
 impl aether_actor::Lifecycle<Self> for Relay {
     type Config = RelayConfig;
     type Params = ();
@@ -237,7 +254,7 @@ mod cost_cell_liveness {
         for (i, relay) in relays.iter().enumerate() {
             let name = format!("mlat.relay:{i}");
             let bytes = tb
-                .request_prepared(&relay.erase().prepare(&CostTail { kind: Some(Ping::ID) }))
+                .request_prepared(&relay.prepare(&CostTail { kind: Some(Ping::ID) }))
                 .expect("the relay answers cost.tail");
             let Some(CostTailResult::Ok { rows }) = CostTailResult::decode_from_bytes(&bytes) else {
                 panic!("{name}: cost.tail did not answer Ok");

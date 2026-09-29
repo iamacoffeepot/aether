@@ -331,8 +331,9 @@ impl Registry {
     /// route answers `None`, as does a live one whose rows `T` does not admit,
     /// such as a closure route's empty contract.
     ///
-    /// Its one caller is
-    /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast).
+    /// Its callers are
+    /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast) and
+    /// [`PassiveChassis::cast`](crate::PassiveChassis::cast).
     pub(crate) fn cast<T: CastTarget>(&self, reference: ErasedActorRef) -> Option<ProtocolRef<T>> {
         let position = reference.id();
         let rows = self.published_contract(position)?.into_rows();

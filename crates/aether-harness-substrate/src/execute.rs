@@ -26,10 +26,11 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{ActorRef, ErasedActorRef, HandlesKind};
+use aether_actor::{ActorRef, At, Direct, ErasedActorRef, HandlesKind, Protocol, ProtocolRef, RowAt};
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, KindId};
-use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
+use aether_kinds::trace::TraceTail;
+use aether_kinds::{CostTail, LoadComponent, LoadComponentUnder, LogTail, NamedMail};
 use aether_substrate::{PassiveChassis, ReplyTarget, mail::MailId};
 use aether_window::{InjectWindowEvent, WindowCapability};
 use crossbeam_channel::Receiver;
@@ -73,7 +74,8 @@ pub const DEFAULT_TICK_DELTA_MICROS: u32 = 16_667;
 ///
 /// Recipients are proven references ([`SendTarget`], ADR-0230): a composed
 /// capability's from [`SubstrateHarness::actor_ref`], a loaded component's
-/// from [`SubstrateHarness::load`] / [`SubstrateHarness::load_any`], and a
+/// from [`SubstrateHarness::load`], a wasm-only fixture's from
+/// [`SubstrateHarness::load_any`] typed with [`SubstrateHarness::cast`], and a
 /// child's or window's from [`SubstrateHarness::child`] beneath a reference
 /// already held. No op takes an address to render or parse.
 ///
@@ -211,24 +213,50 @@ impl PreparedSend {
 }
 
 mod sealed {
-    /// Seals [`super::SendTarget`] to the two reference shapes it names.
+    use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef};
+    use aether_kinds::trace::TraceTail;
+    use aether_kinds::{CostTail, LogTail};
+
+    /// Seals [`super::SendTarget`] to the reference shapes it names.
     pub trait Sealed {}
+
+    impl<R> Sealed for &ActorRef<R> {}
+    impl<P> Sealed for &ProtocolRef<P> {}
+    impl Sealed for ErasedActorRef {}
+
+    /// Seals [`super::FrameworkTail`] to the three kinds the native dispatch
+    /// loop answers for every actor.
+    pub trait TailSealed {}
+
+    impl TailSealed for LogTail {}
+    impl TailSealed for TraceTail {}
+    impl TailSealed for CostTail {}
 }
 
 /// A proven reference a harness send can address mail of kind `K` to
-/// (ADR-0230).
+/// (ADR-0230), found through the index `I` the compiler infers from the
+/// reference and the kind.
 ///
-/// Two shapes implement it. A typed `&ActorRef<R>` compile-checks that `R`
-/// handles `K`, so a wrong-kind send is refused where it is written; an
-/// [`ErasedActorRef`] is retained only for framework-tail queries over
-/// heterogeneous participants. Its prepared send names the reference's
-/// canonical path and proves that path again through the chassis boundary
-/// before each delivery. This is the shape for a fixture loaded through
-/// [`SubstrateHarness::load_any`], or for a query every actor answers, such as
-/// [`SubstrateHarness::log_tail`]'s. `K` is inferred from the mail, so no call
-/// site names it.
+/// Three typed doors implement it:
 ///
-/// A kind the actor does not handle fails at compile time:
+/// - a typed `&ActorRef<R>` at [`Direct`], which compile-checks that `R`
+///   handles `K`, so a wrong-kind send is refused where it is written;
+/// - a `&ProtocolRef<P>` at the kind's row position `At<N>`, which
+///   compile-checks that `P` lists `K` (ADR-0231 §3). A wasm-only fixture
+///   from [`SubstrateHarness::load_any`] is typed this way, through
+///   [`SubstrateHarness::cast`] against a test-local `#[protocol]`;
+/// - either typed reference at [`Tail`] for a [`FrameworkTail`] kind — the
+///   log, trace, and cost queries the dispatch loop answers for every actor,
+///   whether or not its type declares a handler for them.
+///
+/// The [`ErasedActorRef`] impl is transitional and leaves with #6932: its
+/// prepared send proves the reference's retained path through the chassis
+/// boundary before each delivery and checks nothing about the kind. `K` and
+/// `I` are inferred from the reference and the mail, so no call site names
+/// them.
+///
+/// A kind the actor does not handle fails at compile time, and the tail
+/// index opens only the three framework kinds:
 ///
 /// ```compile_fail
 /// use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -239,16 +267,25 @@ mod sealed {
 /// let window = harness.actor_ref::<WindowCapability>();
 /// let _ = HarnessOp::send_and_settle(&window, &Tick::default());
 /// ```
-pub trait SendTarget<K: Kind>: sealed::Sealed {
+pub trait SendTarget<K: Kind, I = Direct>: sealed::Sealed {
     /// Bind the target and typed mail into an opaque send operation.
     fn prepare(self, mail: &K) -> PreparedSend;
 }
 
-impl<R> sealed::Sealed for &ActorRef<R> {}
+/// The index of [`SendTarget`]'s framework-tail arm: a [`FrameworkTail`] kind
+/// sent to any typed reference.
+pub struct Tail;
 
-impl sealed::Sealed for ErasedActorRef {}
+/// A framework query every actor answers from its dispatch loop, with no
+/// handler of its own: [`LogTail`], [`TraceTail`], and [`CostTail`]. Sealed,
+/// so the tail arm of [`SendTarget`] opens exactly these three kinds.
+pub trait FrameworkTail: Kind + Clone + 'static + sealed::TailSealed {}
 
-impl<K, R> SendTarget<K> for &ActorRef<R>
+impl FrameworkTail for LogTail {}
+impl FrameworkTail for TraceTail {}
+impl FrameworkTail for CostTail {}
+
+impl<K, R> SendTarget<K, Direct> for &ActorRef<R>
 where
     K: Kind + Clone + 'static,
     R: HandlesKind<K> + 'static,
@@ -269,27 +306,67 @@ where
     }
 }
 
-impl<K: Kind> SendTarget<K> for ErasedActorRef {
+impl<K, P, const N: usize> SendTarget<K, At<N>> for &ProtocolRef<P>
+where
+    K: Kind + Clone + 'static,
+    P: Protocol + 'static,
+    P::Rows: RowAt<K, At<N>>,
+{
     fn prepare(self, mail: &K) -> PreparedSend {
-        let kind = K::ID;
-        let payload = mail.encode_into_bytes();
-        PreparedSend(Box::new(move |chassis, mode| {
-            let path = chassis
-                .actor_path(self)
-                .ok_or_else(|| "the erased harness target has no retained actor path".to_owned())?;
-            let item = chassis.accept_call(&path, kind, payload.clone())?;
-            match mode {
-                PreparedMode::Tracked(reply) => {
-                    let (root, settlement) = chassis.deliver_tracked(item, reply);
-                    Ok(PreparedOutcome::Tracked(root, settlement))
-                }
-                PreparedMode::ForReply(reply) => {
-                    chassis.deliver_for_reply(item, reply);
-                    Ok(PreparedOutcome::Sent)
-                }
+        let target = *self;
+        let mail = mail.clone();
+        PreparedSend(Box::new(move |chassis, mode| match mode {
+            PreparedMode::Tracked(reply) => {
+                let (root, settlement) = chassis.send_tracked(target, &mail, reply);
+                Ok(PreparedOutcome::Tracked(root, settlement))
+            }
+            PreparedMode::ForReply(reply) => {
+                chassis.send_for_reply(target, &mail, reply);
+                Ok(PreparedOutcome::Sent)
             }
         }))
     }
+}
+
+impl<K: FrameworkTail, R> SendTarget<K, Tail> for &ActorRef<R> {
+    fn prepare(self, mail: &K) -> PreparedSend {
+        prepare_through_boundary(self.erase(), mail)
+    }
+}
+
+impl<K: FrameworkTail, P> SendTarget<K, Tail> for &ProtocolRef<P> {
+    fn prepare(self, mail: &K) -> PreparedSend {
+        prepare_through_boundary(self.erase(), mail)
+    }
+}
+
+impl<K: Kind> SendTarget<K> for ErasedActorRef {
+    fn prepare(self, mail: &K) -> PreparedSend {
+        prepare_through_boundary(self, mail)
+    }
+}
+
+/// The boundary push the framework-tail arm and the transitional erased impl
+/// share: name the reference's retained canonical path, prove it through
+/// `accept_call`, then deliver tracked or for a reply.
+fn prepare_through_boundary<K: Kind>(target: ErasedActorRef, mail: &K) -> PreparedSend {
+    let kind = K::ID;
+    let payload = mail.encode_into_bytes();
+    PreparedSend(Box::new(move |chassis, mode| {
+        let path =
+            chassis.actor_path(target).ok_or_else(|| "the harness target has no retained actor path".to_owned())?;
+        let item = chassis.accept_call(&path, kind, payload.clone())?;
+        match mode {
+            PreparedMode::Tracked(reply) => {
+                let (root, settlement) = chassis.deliver_tracked(item, reply);
+                Ok(PreparedOutcome::Tracked(root, settlement))
+            }
+            PreparedMode::ForReply(reply) => {
+                chassis.deliver_for_reply(item, reply);
+                Ok(PreparedOutcome::Sent)
+            }
+        }
+    }))
 }
 
 impl HarnessOp {
@@ -370,7 +447,7 @@ impl HarnessOp {
     /// [`Kind::encode_into_bytes`] — works for both cast and structured
     /// kinds.
     #[must_use]
-    pub fn send_and_settle<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
+    pub fn send_and_settle<K: Kind, I>(to: impl SendTarget<K, I>, mail: &K) -> Self {
         Self::SendAndSettle { send: to.prepare(mail), kind: K::ID }
     }
 
@@ -385,7 +462,7 @@ impl HarnessOp {
     /// rides the caller's chain, [`HarnessOp::send_and_settle`] is the
     /// barrier that orders it; see the rule on [`HarnessOp`].
     #[must_use]
-    pub fn send_and_await_reply<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
+    pub fn send_and_await_reply<K: Kind, I>(to: impl SendTarget<K, I>, mail: &K) -> Self {
         Self::SendAndAwaitReply { send: to.prepare(mail), kind: K::ID }
     }
 
@@ -424,7 +501,7 @@ impl HarnessOp {
     /// which reports the last reply the probe actually got — a red that
     /// names the state reached, not only that the wait ran out.
     #[must_use]
-    pub fn poll_until<K, R>(to: impl SendTarget<K>, probe: &K, observed: impl FnMut(&R) -> bool + 'static) -> Self
+    pub fn poll_until<K, I, R>(to: impl SendTarget<K, I>, probe: &K, observed: impl FnMut(&R) -> bool + 'static) -> Self
     where
         K: Kind,
         R: Kind + fmt::Debug,
@@ -440,9 +517,9 @@ impl HarnessOp {
     /// budget is a single-shot observation rather than an immediate
     /// failure.
     #[must_use]
-    pub fn poll_until_within<K, R>(
+    pub fn poll_until_within<K, I, R>(
         budget: Duration,
-        to: impl SendTarget<K>,
+        to: impl SendTarget<K, I>,
         probe: &K,
         mut observed: impl FnMut(&R) -> bool + 'static,
     ) -> Self

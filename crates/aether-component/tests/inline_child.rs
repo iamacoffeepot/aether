@@ -104,8 +104,8 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let child = await_child::<InlineStatefulParent, InlineStatefulChild>(&harness, parent, "widget");
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(&child, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&child, &Bump)),
             ("query", HarnessOp::send_and_await_reply(&child, &CountQuery)),
         ])
         .expect("bump + query sequence");
@@ -265,8 +265,8 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     let leaf = await_child::<NestedLineageChild, NestedLineageLeaf>(&harness, branch, "leaf");
     let before = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(&leaf, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(&leaf, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(&leaf, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&leaf, &Bump)),
             ("query", HarnessOp::send_and_await_reply(&leaf, &CountQuery)),
         ])
         .expect("deliver to nested inline leaf");
@@ -299,7 +299,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     // The reconstructed branch resolves its reconstructed child by logical
     // parent and retires that exact grandchild alias.
     harness
-        .execute(vec![("despawn_leaf", HarnessOp::send_and_settle::<DespawnChild>(&branch, &DespawnChild))])
+        .execute(vec![("despawn_leaf", HarnessOp::send_and_settle(&branch, &DespawnChild))])
         .expect("despawn reconstructed nested leaf");
     let retired = harness.child::<NestedLineageChild, NestedLineageLeaf>(&branch, key("leaf"));
     assert!(retired.is_err(), "the reconstructed grandchild route retires at its nested position; got {retired:?}");
@@ -349,8 +349,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let pre = harness
         .execute(vec![
             ("tag_report", HarnessOp::send_and_await_reply(&parent, &TagSpawnQuery)),
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(&child, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&child, &Bump)),
             ("query", HarnessOp::send_and_await_reply(&child, &CountQuery)),
         ])
         .expect("tag report + bump + query sequence");
@@ -461,7 +461,7 @@ fn despawn_inline_child_retires_the_alias_address() {
     // then look the *same* child up again. Its route is retired with the child,
     // and only a live route proves, so the lookup never lands on the parent.
     harness
-        .execute(vec![("despawn", HarnessOp::send_and_settle::<DespawnChild>(&parent, &DespawnChild))])
+        .execute(vec![("despawn", HarnessOp::send_and_settle(&parent, &DespawnChild))])
         .expect("despawn must settle");
 
     let orphan = harness.child::<InlineDespawnParent, InlineDespawnChild>(&parent, key("widget"));
@@ -517,7 +517,7 @@ fn a_despawned_inline_key_is_refused_when_respawned() {
     // Positive control: the key is spawnable, so a later refusal is the
     // despawn's doing.
     harness
-        .execute(vec![("spawn", HarnessOp::send_and_settle::<RespawnChild>(&parent, &RespawnChild))])
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&parent, &RespawnChild))])
         .expect("the first spawn must settle");
     harness
         .child::<InlineDespawnParent, InlineDespawnChild>(&parent, key("respawn"))
@@ -525,7 +525,7 @@ fn a_despawned_inline_key_is_refused_when_respawned() {
 
     let respawned = harness
         .execute(vec![
-            ("despawn", HarnessOp::send_and_settle::<DespawnChild>(&parent, &DespawnChild)),
+            ("despawn", HarnessOp::send_and_settle(&parent, &DespawnChild)),
             ("respawn", HarnessOp::send_and_await_reply(&parent, &RespawnChild)),
         ])
         .expect("the despawn settles and the re-spawn answers");

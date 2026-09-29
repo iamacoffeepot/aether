@@ -13,11 +13,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::{KindId, MailId};
 use aether_fs::{FsCapability, NamespaceRoots};
-use aether_kinds::FrameVerdict;
+use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameVerdict};
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -110,6 +110,18 @@ pub type ComposeFn = Box<dyn FnOnce(Builder<SubstrateHarnessChassis>) -> Builder
 /// `reference` (iamacoffeepot/aether#1780).
 pub type CaptureOutcome = Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>;
 
+/// The capture request the harness sends the pumped render actor through
+/// [`FrameHook::render`]: `aether.render` answers [`CaptureFrame`] with a
+/// [`CaptureFrameResult`], so the hook narrows its render reference to this
+/// protocol and the core sends the request through it without naming the
+/// render actor's type.
+#[aether_actor::protocol]
+pub trait FrameCapture {
+    /// Capture one frame, dispatching the request's pre- and after-mails
+    /// around the readback.
+    fn capture(mail: CaptureFrame) -> CaptureFrameResult;
+}
+
 /// Frame-pump seam for the pumped GPU render runtime (ADR-0161 slice R4).
 /// The core harness owns the advance / capture drive loop but no render
 /// types; a hook (the `GpuFrameHook` in `aether-harness-substrate-capture`)
@@ -172,10 +184,11 @@ pub trait FrameHook {
     /// deterministic barrier: a chain cannot settle until its terminal
     /// render handler dispatched the draw.
     fn capture_ready(&self) -> bool;
-    /// The pumped render actor's proven reference, where `capture_frame`
-    /// requests route — recorded when the hook booted the slot and supplied
-    /// by the hook so the core stays render-free.
-    fn render(&self) -> ErasedActorRef;
+    /// The pumped render actor's proven reference, narrowed to
+    /// [`FrameCapture`], where `capture_frame` requests route — recorded when
+    /// the hook booted the slot and supplied by the hook so the core stays
+    /// render-free.
+    fn render(&self) -> ProtocolRef<FrameCapture>;
     /// Run the pumped slot's Closed-path teardown (`unwire`, cost-row drop,
     /// registry close + monitor fan-out). Called once on harness drop.
     fn shutdown(&mut self);
