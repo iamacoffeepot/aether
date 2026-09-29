@@ -257,7 +257,9 @@ impl Registry {
             ResolvedRoute::Live { endpoint, .. } => {
                 Some(RouteContinuation { disposition: CapturedDisposition::Live { endpoint: endpoint.clone() }, mail })
             }
-            ResolvedRoute::Dropped => Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped }),
+            ResolvedRoute::Dropped { .. } => {
+                Some(RouteContinuation { mail, disposition: CapturedDisposition::Dropped })
+            }
             ResolvedRoute::Unknown => Some(RouteContinuation { mail, disposition: CapturedDisposition::Unknown }),
         }
     }

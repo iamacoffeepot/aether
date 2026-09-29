@@ -105,9 +105,10 @@ pub enum Error {
     DetachedBlob(BlobHash),
     /// A `ProtocolPath` decoded by a context with no published routes.
     ProtocolPathUnchecked { path: ErasedActorPath },
-    /// A `ProtocolPath` whose path has no `Live` route standing under it.
+    /// A `ProtocolPath` whose path no route has stood under, or whose route
+    /// is still starting and has published no contract.
     ProtocolPathUnpublished { path: ErasedActorPath },
-    /// A `ProtocolPath` whose live route does not publish `kind`'s row, or
+    /// A `ProtocolPath` whose route does not publish `kind`'s row, or
     /// publishes it with another reply.
     UncoveredProtocolPath { path: ErasedActorPath, kind: KindId },
     /// A hand-written kind with no decode body.
@@ -140,7 +141,7 @@ impl fmt::Display for Error {
                 write!(f, "aether wire: protocol path `{path}` refused: this context has no registry")
             }
             Self::ProtocolPathUnpublished { path } => {
-                write!(f, "aether wire: protocol path `{path}` refused: no live route publishes at this path")
+                write!(f, "aether wire: protocol path `{path}` refused: no route has published at this path")
             }
             Self::UncoveredProtocolPath { path, kind } => {
                 write!(f, "aether wire: protocol path `{path}` refused: `{kind}`'s row is missing or different")

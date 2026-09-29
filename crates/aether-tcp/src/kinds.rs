@@ -39,9 +39,9 @@ pub trait TcpConsumer {
 /// [`TcpConsumer`] (ADR-0231 §3): in code an `ActorPath<R>` narrowed with
 /// `.narrow::<TcpConsumer>()`, which compiles only when `R` handles both
 /// kinds silently; over MCP the `path` a component load returns. A short
-/// `root/:key` path, or one whose live route does not publish
-/// both silent rows, is refused at decode: the mail is logged at warn and
-/// gets no reply. A route that left between decode and receipt gets `Err`
+/// `root/:key` path, a path no route has stood at, or one whose route does
+/// not publish both silent rows, is refused at decode: the mail is logged at
+/// warn and gets no reply. A consumer that has closed decodes and gets `Err`
 /// without binding. `None` leaves the listener observer-less and drops
 /// inbound bytes. A consumer binding itself sends [`BindListenerSelf`].
 #[aether_data::kind(name = "aether.tcp.bind_listener", no_serde)]
@@ -73,9 +73,9 @@ pub struct BindListenerSelf {
 ///
 /// Optional `consumer` is the canonical path of the actor covering
 /// [`TcpConsumer`] the dialed session delivers inbound frames and close
-/// notices to, with [`BindListener`]'s rules: a short or non-covering path is
-/// refused at decode without a reply, and a route that left before receipt
-/// gets `Err` without dialing. `None` leaves the session observer-less and
+/// notices to, with [`BindListener`]'s rules: a short, never-registered, or
+/// non-covering path is refused at decode without a reply, and a consumer
+/// that has closed gets `Err` without dialing. `None` leaves the session observer-less and
 /// drops inbound bytes. A consumer dialing for itself sends [`ConnectSelf`].
 #[aether_data::kind(name = "aether.tcp.connect", no_serde)]
 pub struct Connect {

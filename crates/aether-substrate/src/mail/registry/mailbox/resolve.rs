@@ -24,7 +24,11 @@ pub(super) enum ResolvedRoute<'a> {
         endpoint: &'a RouteEndpoint,
         contract: &'a RouteContract,
     },
-    Dropped,
+    /// A retired route, and the contract it last published: an alias whose
+    /// target parent has dropped reports the alias's own rows.
+    Dropped {
+        contract: &'a RouteContract,
+    },
     Unknown,
 }
 
@@ -42,11 +46,11 @@ where
             match route_for(*target_parent).map(|route| &route.lifecycle) {
                 Some(RouteLifecycle::Starting { .. }) => ResolvedRoute::Starting { target: *target_parent },
                 Some(RouteLifecycle::Live { endpoint, .. }) => ResolvedRoute::Live { endpoint, contract },
-                Some(RouteLifecycle::Dropped) => ResolvedRoute::Dropped,
+                Some(RouteLifecycle::Dropped { .. }) => ResolvedRoute::Dropped { contract },
                 Some(RouteLifecycle::Alias { .. }) | None => ResolvedRoute::Unknown,
             }
         }
-        RouteLifecycle::Dropped => ResolvedRoute::Dropped,
+        RouteLifecycle::Dropped { contract } => ResolvedRoute::Dropped { contract },
     }
 }
 
@@ -215,7 +219,7 @@ impl Registry {
         let routes = self.routes.load();
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { endpoint, .. } => Some(endpoint.as_entry()),
-            ResolvedRoute::Dropped => Some(MailboxEntry::Dropped),
+            ResolvedRoute::Dropped { .. } => Some(MailboxEntry::Dropped),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => None,
         }
     }
@@ -232,7 +236,7 @@ impl Registry {
             let (endpoint, starting, dropped) = match resolve_route(recipient, |id| routes.entry_for(&id)) {
                 ResolvedRoute::Starting { .. } => (None, true, false),
                 ResolvedRoute::Live { endpoint, .. } => (Some(endpoint.clone()), false, false),
-                ResolvedRoute::Dropped => (None, false, true),
+                ResolvedRoute::Dropped { .. } => (None, false, true),
                 ResolvedRoute::Unknown => (None, false, false),
             };
             (endpoint, starting, dropped, routes.generation())
@@ -274,14 +278,16 @@ impl Registry {
     /// published view answers both whether the route is live and what it
     /// covers.
     ///
-    /// Consumers: `PassiveChassis::published_contract`, the test door, and
-    /// the registry's [`PublishedRoutes`] impl, which a `ProtocolPath` decode
-    /// reads.
+    /// A `Dropped` route answers `None`, so a closed actor is never typed as
+    /// a sender. The decode-side read, which does answer a `Dropped` route,
+    /// is [`Self::route_rows`].
+    ///
+    /// Consumers: `PassiveChassis::published_contract` and the test door.
     pub(crate) fn published_contract(&self, id: MailboxId) -> Option<RouteContract> {
         let routes = self.routes.load();
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { contract, .. } => Some(contract.clone()),
-            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped | ResolvedRoute::Unknown => None,
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped { .. } | ResolvedRoute::Unknown => None,
         }
     }
 
@@ -297,8 +303,8 @@ impl Registry {
     /// `Dropped`, and a name mismatch all answer `None`.
     ///
     /// Consumers: `Registry::resolve_protocol`, the native receipt of a
-    /// protocol path, and the registry's [`PublishedRoutes`] impl, which a
-    /// `ProtocolPath` decode reads.
+    /// protocol path. A `ProtocolPath` decode reads [`Self::route_rows`]
+    /// instead, which also answers a `Dropped` route.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
         let id = lineage_mailbox_id(path.as_str());
         let routes = self.routes.load();
@@ -308,7 +314,35 @@ impl Registry {
 
         match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
             ResolvedRoute::Live { .. } => Some(id),
-            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped | ResolvedRoute::Unknown => None,
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Dropped { .. } | ResolvedRoute::Unknown => None,
+        }
+    }
+
+    /// The contract rows of the `Live` or `Dropped` route standing under
+    /// exactly the canonical `path`, from one read of the published view
+    /// (ADR-0231 §3's decode of a typed path).
+    ///
+    /// The fold and canonical-name check are [`Self::live_route`]'s, so a
+    /// fold collision is refused the same way. A `Dropped` route answers the
+    /// contract it last published: names are never reused (ADR-0079 §7), so a
+    /// closed actor's path still proves its type, and the receiver's
+    /// `resolve` owns liveness and answers "not live". A `Starting` route has
+    /// no contract yet, and it and a never-registered path answer `None`.
+    ///
+    /// Consumer: the registry's [`PublishedRoutes`] impl, which a
+    /// `ProtocolPath` decode reads.
+    pub(crate) fn route_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        let id = lineage_mailbox_id(path.as_str());
+        let routes = self.routes.load();
+        if routes.entry_for(&id)?.canonical_name != *path {
+            return None;
+        }
+
+        match resolve_route(id, |candidate| routes.entry_for(&candidate)) {
+            ResolvedRoute::Live { contract, .. } | ResolvedRoute::Dropped { contract } => {
+                Some(contract.clone().into_rows())
+            }
+            ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => None,
         }
     }
 
@@ -333,11 +367,11 @@ impl Registry {
 }
 
 /// The engine's published route contracts for a decode (ADR-0231 §3, §4):
-/// the rows the `Live` route standing under exactly `path` published, read
-/// through the same two reads `resolve` uses. Coverage is decided by the
-/// decode's context, never here.
+/// the rows the `Live` or `Dropped` route standing under exactly `path`
+/// published, through `Registry::route_rows`. Coverage is decided by the
+/// decode's context, never here, and liveness by the receiver's `resolve`.
 impl PublishedRoutes for Registry {
     fn published_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
-        self.live_route(path).and_then(|id| self.published_contract(id)).map(RouteContract::into_rows)
+        self.route_rows(path)
     }
 }

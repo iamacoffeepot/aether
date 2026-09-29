@@ -72,7 +72,7 @@ pub trait Decoder<'de> {
         Err(Error::DetachedBlob(hash))
     }
 
-    /// Prove that the live route at `path` publishes every one of `rows`
+    /// Prove that the route at `path` publishes every one of `rows`
     /// ([`DecodeCtx::prove_route_covers`]). The default refuses.
     ///
     /// # Errors

@@ -247,7 +247,7 @@ impl Registry {
                         applied.push(RegistryApplied::AliasRetired(false));
                         continue;
                     };
-                    let RouteLifecycle::Alias { target_parent, .. } = record.lifecycle else {
+                    let RouteLifecycle::Alias { target_parent, contract } = record.lifecycle else {
                         applied.push(RegistryApplied::AliasRetired(false));
                         continue;
                     };
@@ -257,7 +257,7 @@ impl Registry {
                     let inventory_live = staged_route(&staged_routes, inner, target_parent)
                         .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. }));
 
-                    record.lifecycle = RouteLifecycle::Dropped;
+                    record.lifecycle = RouteLifecycle::Dropped { contract };
                     staged_routes.insert(alias, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(alias, record));
                     publication.inventory_dirty |= inventory_live;
@@ -374,20 +374,21 @@ impl Registry {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {
                         return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                     };
-                    let inventory_live = match &record.lifecycle {
+                    let (inventory_live, contract) = match record.lifecycle {
                         RouteLifecycle::Starting { .. } => {
                             return Err(RegistryEffectError::Drop(DropError::UnknownId(id)));
                         }
-                        RouteLifecycle::Dropped => {
+                        RouteLifecycle::Dropped { .. } => {
                             return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
                         }
-                        RouteLifecycle::Live { .. } => true,
-                        RouteLifecycle::Alias { target_parent, .. } => {
-                            staged_route(&staged_routes, inner, *target_parent)
-                                .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. }))
-                        }
+                        RouteLifecycle::Live { contract, .. } => (true, contract),
+                        RouteLifecycle::Alias { target_parent, contract } => (
+                            staged_route(&staged_routes, inner, target_parent)
+                                .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
+                            contract,
+                        ),
                     };
-                    record.lifecycle = RouteLifecycle::Dropped;
+                    record.lifecycle = RouteLifecycle::Dropped { contract };
                     let name = record.canonical_name.to_string();
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));
@@ -404,7 +405,7 @@ impl Registry {
                     };
                     match record.lifecycle {
                         RouteLifecycle::Live { .. } => {}
-                        RouteLifecycle::Dropped => {
+                        RouteLifecycle::Dropped { .. } => {
                             return Err(RegistryEffectError::Drop(DropError::AlreadyDropped(id)));
                         }
                         RouteLifecycle::Starting { .. } | RouteLifecycle::Alias { .. } => {

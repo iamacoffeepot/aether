@@ -31,11 +31,13 @@ published_stages!(subscription);
 
 /// Subscribe an explicitly named actor to a lifecycle stage broadcast
 /// (ADR-0082 §7). `subscription` names the stage and the subscriber's
-/// canonical path, which decodes only when the actor there handles the stage
-/// silently (ADR-0231 §3); the cap proves it live at receipt. Substrate
-/// replies with [`LifecycleSubscribeResult`] — `Err` when the chassis's
-/// lifecycle graph doesn't declare the stage (fail-fast at wire time per
-/// ADR-0082 §7) or when the subscriber is no longer live.
+/// canonical path, which decodes only when the actor there, live or closed,
+/// handles the stage silently (ADR-0231 §3); the cap proves it live at
+/// receipt. Substrate replies with [`LifecycleSubscribeResult`] — `Err` when
+/// the chassis's lifecycle graph doesn't declare the stage (fail-fast at wire
+/// time per ADR-0082 §7) or when the subscriber is no longer live, naming its
+/// path. A path no actor has stood at, or whose actor does not handle the
+/// stage silently, is refused at decode with a warn and gets no reply.
 #[aether_data::kind(name = "aether.lifecycle.subscribe", no_serde, eq)]
 pub struct LifecycleSubscribe {
     pub subscription: LifecycleSubscription,

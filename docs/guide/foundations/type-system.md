@@ -148,16 +148,22 @@ worth knowing beyond "it's a type tree":
   named `wire::Error`
   ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
   §3). The `DecodeCtx` offers a field two operations: resolve a tag-1 `Blob`
-  hash, and prove that the live route at a path publishes a protocol's rows.
+  hash, and prove that the route at a path, live or closed, publishes a
+  protocol's rows.
   A resolved `Blob` is always a reference to its store entry, never a copy;
   tag 0 needs no context and decodes owned. Native dispatch builds the
   context from the inbound mail's attachments and the mail registry; a guest's
   context carries its blob holds only. A field refuses what its context
   cannot prove: a tag-1 `Blob` with no resolver refuses `DetachedBlob`, and a
   `ProtocolPath<P>` refuses `ProtocolPathUnchecked` with no registry,
-  `ProtocolPathUnpublished` when no live route stands at its path, and
+  `ProtocolPathUnpublished` when no route has stood at its path or it is
+  still starting, and
   `UncoveredProtocolPath` when that route does not publish every row of `P`.
-  The plain shorthand, `decode_from_bytes`, decodes with an empty context.
+  A path whose actor has closed decodes, and the receiver's `resolve`
+  answers that it is not live. A refused decode reaches no handler: the
+  mail is logged at warn and nothing is sent back, a request's reply
+  included. The plain shorthand, `decode_from_bytes`, decodes with an empty
+  context.
   Serde carries no context, so `ProtocolPath<P>` has no `Deserialize`, and a
   kind carrying one is declared `#[aether_data::kind(.., no_serde)]`.
 

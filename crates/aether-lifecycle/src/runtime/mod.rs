@@ -233,9 +233,12 @@ impl NativeActor for LifecycleCapability {
     /// no longer live.
     ///
     /// The subscriber's path reached this handler only because its decode
-    /// proved the live route there handles the stage silently (ADR-0231 §3);
-    /// it is proven live once more here, at receipt, and the table keeps the
-    /// `ProtocolRef<Subscriber<K>>` that proof returns.
+    /// proved the route there, live or closed, handles the stage silently
+    /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
+    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A closed
+    /// subscriber is answered `Err` naming its path. A path no route has
+    /// stood at, or whose route does not handle the stage silently, is
+    /// refused at decode with a warn, and nothing is sent back.
     ///
     /// # Agent
     /// `LifecycleSubscribe { subscription }`, where `subscription` is
@@ -768,8 +771,11 @@ mod tests {
 
     /// An explicit `subscribe` proves its subscriber path live (ADR-0231 §3):
     /// a live path lands its reference in the stage set, and a path whose
-    /// actor has closed is refused and leaves the set alone rather than
-    /// registering a subscription whose broadcasts could never land.
+    /// actor has closed still decodes, so the handler answers `Err` naming
+    /// the path and leaves the set alone rather than registering a
+    /// subscription whose broadcasts could never land. A retire that drops
+    /// the route's contract refuses the closed path at decode, and the
+    /// request gets no reply at all.
     #[test]
     fn explicit_subscribe_holds_a_live_path_and_refuses_one_that_is_gone() {
         let mut booted = boot_lifecycle(render_present_graph());
@@ -784,6 +790,11 @@ mod tests {
         booted.driver.settle(&[gone, held]);
 
         assert!(matches!(booted.reply(2), LifecycleSubscribeResult::Ok), "a live path subscribes");
+        let LifecycleSubscribeResult::Err { stage, error } = booted.reply(1) else {
+            panic!("a closed path is refused");
+        };
+        assert_eq!(stage, Render::ID.0, "the refusal names the stage");
+        assert!(error.contains(listener("gone").as_erased().as_str()), "the refusal names the path: {error}");
         assert_eq!(booted.subscribers_of(Render::ID), [live.erase()], "only the live subscriber is held");
     }
 

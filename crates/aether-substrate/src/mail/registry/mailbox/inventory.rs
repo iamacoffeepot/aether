@@ -35,7 +35,7 @@ pub(super) fn live_inventory(
             RouteLifecycle::Alias { target_parent, .. } => mailboxes
                 .get(target_parent)
                 .is_some_and(|target| matches!(&target.lifecycle, RouteLifecycle::Live { .. })),
-            RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => false,
+            RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped { .. } => false,
         })
         .map(|(id, route)| MailboxDescriptor {
             id: *id,

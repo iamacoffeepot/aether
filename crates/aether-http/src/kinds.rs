@@ -463,8 +463,10 @@ pub struct WebSocketClose {
 /// `handler` is the canonical path of an actor covering [`HttpRouter`]
 /// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRouter>()`,
 /// which compiles only when `R` takes `aether.http.server.request` and
-/// replies `HttpRouterResult`; over MCP the `path` a component load returns, whose
-/// decode refuses a path no such live route stands at.
+/// replies `HttpRouterResult`; over MCP the `path` a component load returns.
+/// A path whose handler has closed decodes and gets `Err` naming it; a path
+/// no such route has stood at is refused at decode with a warn and gets no
+/// reply.
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member
 /// *set*: N handler instances that all register `shared: true` jointly serve
@@ -536,10 +538,10 @@ pub struct UnregisterRouteSelf {
 
 /// Reply to the route registration / unregistration kinds (ADR-0130).
 /// Failure modes: an invalid prefix (must start with `/`), a `handler` path
-/// no live route stands at, a `(prefix, method)` key already claimed by
+/// whose actor has closed, a `(prefix, method)` key already claimed by
 /// another handler, or a `_self` op from a sender with no local mailbox.
-/// A `handler` path whose live route does not cover [`HttpRouter`] never
-/// reaches the receipt at all: the decode refuses the mail, which is logged
+/// A `handler` path no route has stood at, or whose route does not cover
+/// [`HttpRouter`], never reaches the receipt at all: the decode refuses the mail, which is logged
 /// at warn and gets no reply of any kind. A `_self` registrant that does not
 /// cover it is answered `Err`.
 #[aether_data::kind(name = "aether.http.server.register_route_result")]
