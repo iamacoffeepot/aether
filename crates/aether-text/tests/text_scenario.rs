@@ -157,7 +157,7 @@ fn text_draws_a_screen_space_string() {
     // this turn.
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_and_settle::<DrawText>(&harness.actor_ref::<TextCapability>(), &draw)),
+            ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &draw)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -283,7 +283,7 @@ fn capture_pins_current_tick_content_not_stale_frame() {
     };
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_and_settle::<DrawText>(&harness.actor_ref::<TextCapability>(), &prime_draw)),
+            ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &prime_draw)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime atlas");
@@ -411,7 +411,7 @@ fn text_draw_clip_bounds_glyph_pixels() {
     };
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_and_settle::<DrawText>(&harness.actor_ref::<TextCapability>(), &unclipped)),
+            ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &unclipped)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -772,7 +772,7 @@ fn text_screen_origin_shifts_centroid() {
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
     harness
         .execute(vec![
-            ("prime", HarnessOp::send_and_settle::<DrawText>(&harness.actor_ref::<TextCapability>(), &draw_zero)),
+            ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &draw_zero)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");
@@ -904,12 +904,12 @@ fn text_draws_world_space_label() {
         .execute(vec![
             (
                 "cam",
-                HarnessOp::send_and_settle::<ViewProjection>(
+                HarnessOp::send_and_settle(
                     &harness.actor_ref::<RenderCapability>(),
                     &ViewProjection { view_proj: vp_near },
                 ),
             ),
-            ("prime", HarnessOp::send_and_settle::<DrawText>(&harness.actor_ref::<TextCapability>(), &draw_dist)),
+            ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &draw_dist)),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("prime draw");

@@ -13,9 +13,9 @@
 use std::any::Any;
 use std::time::Duration;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
 use aether_harness_substrate::{
-    ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
+    ExecutionError, FrameCapture, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
 };
 use aether_render::{
     DrawShapes, DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams,
@@ -41,9 +41,10 @@ pub struct GpuFrameHook {
     /// The chassis-root door to the pumped render actor — where `frame`
     /// mail goes.
     render_root: RootPusher<RenderCapability>,
-    /// The pumped render actor's proven reference, recorded by its boot —
-    /// where the harness routes `capture_frame`.
-    render: ErasedActorRef,
+    /// The pumped render actor's proven reference, recorded by its boot and
+    /// narrowed to [`FrameCapture`] — where the harness routes
+    /// `capture_frame`.
+    render: ProtocolRef<FrameCapture>,
     /// The harness's one [`PumpWake`] channel (ADR-0161 §Decision 2): the
     /// render slot's mailbox wake sends [`PumpWake::Mail`] on it after each
     /// accepted send, and each [`FrameHook::settle`] subscription sends
@@ -144,7 +145,7 @@ impl FrameHook for GpuFrameHook {
         self.slot.read_state(|state| state.capture_ready()).unwrap_or(false)
     }
 
-    fn render(&self) -> ErasedActorRef {
+    fn render(&self) -> ProtocolRef<FrameCapture> {
         self.render
     }
 
@@ -228,7 +229,7 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
             )
             .map_err(|e| anyhow::anyhow!("boot pumped render slot: {e}"))?;
         let render_root = passive.root_pusher::<RenderCapability>();
-        let render = passive.actor_ref::<RenderCapability>().erase();
+        let render = passive.actor_ref::<RenderCapability>().narrow::<FrameCapture>();
         install_pump_wake(&wake_slot, wake_tx.clone());
         Ok(Box::new(GpuFrameHook { slot, render_root, render, wake_tx }) as Box<dyn FrameHook>)
     }))

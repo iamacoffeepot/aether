@@ -424,9 +424,9 @@ fn emit_settlement_settles_with_holds() {
 
 /// Query one actor's per-actor trace ring over the mail wire
 /// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
-fn trace_tail(tb: &mut SubstrateHarness, actor: ErasedActorRef, root: MailId) -> Vec<TraceRingEntry> {
+fn trace_tail(tb: &mut SubstrateHarness, actor: ActorRef<Relay>, root: MailId) -> Vec<TraceRingEntry> {
     let reply = tb
-        .request_prepared(&actor.prepare(&TraceTail { max: 0, since: None, root: Some(root) }))
+        .request_prepared(&(&actor).prepare(&TraceTail { max: 0, since: None, root: Some(root) }))
         .expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, .. } => entries,
@@ -457,7 +457,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     assert_settled(&rx, "mlat.trace_ring_dual_write");
 
     // The recipient relay's own ring holds the mail's Received + Finished.
-    let relay = trace_tail(&mut tb, relays[0].erase(), root);
+    let relay = trace_tail(&mut tb, relays[0], root);
     assert!(
         relay.iter().any(|e| matches!(e.event, TraceEvent::Received { .. })),
         "relay ring missing Received; got {relay:?}"
@@ -565,7 +565,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
     }
 
     let reply = tb
-        .request_prepared(&relays[0].erase().prepare(&TraceTail { max: 0, since: None, root: None }))
+        .request_prepared(&(&relays[0]).prepare(&TraceTail { max: 0, since: None, root: None }))
         .expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, truncated_before, .. } => {
@@ -616,7 +616,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // also drop the trace-query mail's own Received/Finished, but the gap
     // cursor is computed over the whole ring regardless of the filter).
     let reply = tb
-        .request_prepared(&relays[0].erase().prepare(&TraceTail { max: 0, since: None, root: None }))
+        .request_prepared(&(&relays[0]).prepare(&TraceTail { max: 0, since: None, root: None }))
         .expect("aether.trace.tail reply");
     let truncated_before = match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, truncated_before, .. } => {
@@ -653,9 +653,8 @@ fn guided_walk_reconstructs_causal_tree() {
         return;
     };
 
-    let typed_relays = spawn_topology(&tb, &two_level_tree());
-    let relays: Vec<ErasedActorRef> = typed_relays.iter().copied().map(ActorRef::erase).collect();
-    let (root, rx) = tb.inject_root(typed_relays[0], &Ping { seq: 0 });
+    let relays = spawn_topology(&tb, &two_level_tree());
+    let (root, rx) = tb.inject_root(relays[0], &Ping { seq: 0 });
     assert_settled(&rx, "mlat.guided_walk");
 
     let mails = match tb.describe_tree_walked(root, &relays) {

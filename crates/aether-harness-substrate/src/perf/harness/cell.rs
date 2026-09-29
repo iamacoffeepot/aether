@@ -5,7 +5,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
 use aether_data::Kind;
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_lifecycle::LifecycleCapability;
@@ -19,8 +19,8 @@ use super::relay::RELAY_NS;
 use super::throughput::throughput_from_nodes;
 use super::tick::TICKSRC_NS;
 use super::{
-    Drive, KeepUp, Ping, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree, scheduler_tuning_from_env,
-    spawn_relays, summarize,
+    Drive, KeepUp, PerfParticipant, Ping, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree,
+    scheduler_tuning_from_env, spawn_relays, summarize,
 };
 use crate::{DEFAULT_TICK_DELTA_MICROS, SendTarget, SubstrateHarness};
 
@@ -295,9 +295,9 @@ pub fn run_cell(
     // truncation: a relay ring (cap 4096) laps under a long wide
     // fan-out, leaving stats from the most-recent window — valid
     // percentiles, fewer samples.
-    let mut participants: Vec<(String, ErasedActorRef)> = Vec::with_capacity(relays.len() + 1);
-    participants.push((format!("{TICKSRC_NS}:src"), source.erase()));
-    participants.extend(relays.iter().enumerate().map(|(i, relay)| (format!("{RELAY_NS}:{i}"), relay.erase())));
+    let mut participants: Vec<(String, ProtocolRef<PerfParticipant>)> = Vec::with_capacity(relays.len() + 1);
+    participants.push((format!("{TICKSRC_NS}:src"), source.narrow()));
+    participants.extend(relays.iter().enumerate().map(|(i, relay)| (format!("{RELAY_NS}:{i}"), relay.narrow())));
 
     let mut entries: Vec<TraceRingEntry> = Vec::new();
     let mut truncated = false;
@@ -305,7 +305,7 @@ pub fn run_cell(
     for (name, participant) in &participants {
         // `max: u32::MAX` clamps to the ring capacity — pull the
         // whole ring, `root: None` across every tree in the run.
-        match tb.request_prepared(&(*participant).prepare(&TraceTail { max: u32::MAX, since: None, root: None })) {
+        match tb.request_prepared(&participant.prepare(&TraceTail { max: u32::MAX, since: None, root: None })) {
             Ok(reply) => match TraceTailResult::decode_from_bytes(&reply) {
                 Some(TraceTailResult::Ok { entries: ring, truncated_before, .. }) => {
                     truncated |= truncated_before.is_some();

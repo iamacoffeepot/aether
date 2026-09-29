@@ -25,6 +25,7 @@
 // not routed through `tracing` (issue 891).
 #![cfg_attr(test, allow(clippy::print_stderr))]
 
+use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -43,7 +44,7 @@ use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResu
 use aether_trace::walk::TreeWalk;
 // The driver sends encode each kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
-use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
+use aether_actor::{ActorRef, Addressable, CastTarget, ChildOf, ErasedActorRef, Instanced, ProtocolRef, Root};
 use aether_fs::NamespaceRoots;
 use aether_substrate::PumpedSlot;
 use aether_substrate::chassis::ctx::MailboxWakeFn;
@@ -133,6 +134,14 @@ pub enum SubstrateHarnessError {
     /// A component load the harness drove itself ([`SubstrateHarness::load`])
     /// was refused, or its reply could not be adopted as the loaded actor.
     Load(String),
+    /// [`SubstrateHarness::cast`] found the reference's route not `Live`, or
+    /// its published rows do not answer `protocol`. `path` is the canonical
+    /// path the registry retains for the reference, when it retains one.
+    CastRefused {
+        /// The protocol's type name.
+        protocol: &'static str,
+        path: Option<ErasedActorPath>,
+    },
     SettlementTimeout {
         /// The sent mail's kind, as the registry labels it.
         kind: String,
@@ -156,6 +165,12 @@ impl fmt::Display for SubstrateHarnessError {
             Self::Capture(e) => write!(f, "capture failed: {e}"),
             Self::ChildRefused(refused) => write!(f, "child lookup refused: {refused}"),
             Self::Load(e) => write!(f, "component load failed: {e}"),
+            Self::CastRefused { protocol, path: Some(path) } => {
+                write!(f, "the actor at {path} does not answer the protocol {protocol}")
+            }
+            Self::CastRefused { protocol, path: None } => {
+                write!(f, "a reference with no retained path does not answer the protocol {protocol}")
+            }
             Self::SettlementTimeout { kind, pending } => write!(
                 f,
                 "send of {kind} did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
@@ -800,16 +815,17 @@ impl SubstrateHarness {
     /// message substring filter substrate-side. `max: 0` resolves to the
     /// substrate-default cap (currently 100). The framework dispatch loop
     /// answers [`LogTail`] for every native actor and wasm trampoline, so
-    /// `to` is any reference — erased with `.erase()` when the actor's type
-    /// declares no [`LogTail`] handler of its own.
+    /// `to` is any typed reference — an `&ActorRef<R>` or a
+    /// `&ProtocolRef<P>` — through [`SendTarget`]'s framework-tail arm,
+    /// whether or not its type declares a [`LogTail`] handler.
     ///
     /// # Panics
     /// Panics on a decode failure — implies a kind shape mismatch,
     /// matching the fail-fast disposition of [`Self::count_observed`] /
     /// [`Self::observed_kinds`].
-    pub fn log_tail(
+    pub fn log_tail<I>(
         &mut self,
-        to: impl SendTarget<LogTail>,
+        to: impl SendTarget<LogTail, I>,
         since: Option<u64>,
         contains: Option<String>,
     ) -> LogTailResult {
@@ -909,7 +925,9 @@ impl SubstrateHarness {
     /// [`Self::load`] for a component whose actor type the test cannot name,
     /// such as a fixture that ships only as wasm: the loaded actor's erased
     /// reference, read off the reply's stamped sender, and its canonical
-    /// lineage path. `component` is sent as given.
+    /// lineage path. `component` is sent as given. Type the reference with
+    /// [`Self::cast`] against a test-local `#[protocol]` naming the rows the
+    /// test sends.
     ///
     /// # Errors
     ///
@@ -938,6 +956,24 @@ impl SubstrateHarness {
             Some(LoadResult::Err { error }) => Err(SubstrateHarnessError::Load(error)),
             None => Err(SubstrateHarnessError::Decode("LoadResult decode failed".to_owned())),
         }
+    }
+
+    /// Type the erased reference `actor` as the protocol `P` (ADR-0231 §4's
+    /// guard cast): the registry reads the route's `Live` published rows and
+    /// mints a reference only when they answer every row of `P` with the exact
+    /// reply. A wasm-only fixture from [`Self::load_any`] is sent to this way,
+    /// against a test-local `#[protocol]`.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::CastRefused`], naming `P` and the reference's
+    /// retained path, when the route is not `Live` or its rows do not answer
+    /// `P`.
+    pub fn cast<P: CastTarget>(&self, actor: ErasedActorRef) -> Result<ProtocolRef<P>, SubstrateHarnessError> {
+        self.passive.cast::<P>(actor).ok_or_else(|| SubstrateHarnessError::CastRefused {
+            protocol: type_name::<P>(),
+            path: self.passive.actor_path(actor),
+        })
     }
 
     /// The component host's `ListComponents` answer: every loaded guest's
@@ -1150,7 +1186,7 @@ impl SubstrateHarness {
     /// The `root` filter on every tail isolates the tree from the
     /// trace-query traffic itself.
     #[cfg(test)]
-    pub(crate) fn describe_tree_walked(&mut self, root: MailId, actors: &[ErasedActorRef]) -> DescribeTreeResult {
+    pub(crate) fn describe_tree_walked<R>(&mut self, root: MailId, actors: &[ActorRef<R>]) -> DescribeTreeResult {
         // The in-process harness reaches the substrate's reverse-lookup
         // registry directly, so it resolves each node's thread name
         // (ADR-0102: the resolver is the caller's; the MCP path passes
@@ -1165,7 +1201,7 @@ impl SubstrateHarness {
             let result = if mailbox == MailboxId::CHASSIS_MAILBOX_ID {
                 Some(self.chassis_host_trace_tail(&request))
             } else {
-                actors.iter().find(|actor| actor.id() == mailbox).and_then(|&actor| {
+                actors.iter().find(|actor| actor.id() == mailbox).and_then(|actor| {
                     self.request_prepared(&actor.prepare(&request))
                         .ok()
                         .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
@@ -1220,15 +1256,15 @@ impl SubstrateHarness {
     }
 
     /// [`Self::send_deferred`] to a reference the harness handed out, such as
-    /// a loaded guest's erased reference, which no chassis target names.
+    /// a wasm-only fixture's protocol reference from [`Self::cast`].
     ///
     /// # Errors
     ///
     /// [`SubstrateHarnessError::Decode`] when `mail` cannot be prepared for
     /// `to`.
-    pub fn send_deferred_to<K: Kind>(
+    pub fn send_deferred_to<K: Kind, I>(
         &self,
-        to: impl SendTarget<K>,
+        to: impl SendTarget<K, I>,
         mail: &K,
     ) -> Result<PendingBenchReply, SubstrateHarnessError> {
         let cid = self.fresh_correlation_id();
@@ -1255,7 +1291,11 @@ impl SubstrateHarness {
     /// # Errors
     ///
     /// [`SubstrateHarnessError::Decode`] when the send cannot be prepared.
-    pub fn send_tracked<K: Kind>(&self, to: impl SendTarget<K>, mail: &K) -> Result<MailId, SubstrateHarnessError> {
+    pub fn send_tracked<K: Kind, I>(
+        &self,
+        to: impl SendTarget<K, I>,
+        mail: &K,
+    ) -> Result<MailId, SubstrateHarnessError> {
         to.prepare(mail)
             .tracked(&self.passive, None)
             .map(|(root, _)| root)
@@ -1414,7 +1454,7 @@ impl SubstrateHarness {
             checks: Vec::new(),
             similarity: None,
         };
-        render
+        (&render)
             .prepare(&mail)
             .for_reply(&self.passive, self.session_reply(cid))
             .map_err(|error| SubstrateHarnessError::Capture(format!("prepare capture request: {error}")))?;
@@ -1838,6 +1878,50 @@ mod tests {
         assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}");
     }
 
+    /// The window capability's listing row, as a test names a fixture it
+    /// cannot type.
+    #[aether_actor::protocol]
+    trait WindowLister {
+        fn list(mail: aether_window::ListWindows) -> aether_window::ListWindowsResult;
+    }
+
+    /// A row the window capability does not publish.
+    #[aether_actor::protocol]
+    trait Pinger {
+        fn ping(mail: aether_kinds::Ping) -> aether_kinds::Pong;
+    }
+
+    /// `cast` types an erased reference only when the route's published rows
+    /// answer the protocol, and a send through the cast reference reaches the
+    /// actor: the window capability publishes `ListWindows -> ListWindowsResult`,
+    /// so the cast mints and its reply decodes, while `Ping -> Pong` is refused
+    /// with the protocol named.
+    #[test]
+    fn cast_types_an_erased_reference_by_its_published_rows() {
+        use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
+
+        let mut harness = SubstrateHarness::start().expect("boot harness");
+        let window = harness.actor_ref::<WindowCapability>().erase();
+
+        let listed = harness.cast::<WindowLister>(window).expect("the window publishes the listing row");
+        let result = harness
+            .execute(vec![("list", HarnessOp::send_and_await_reply(&listed, &ListWindows))])
+            .expect("the listing round trip completes");
+        assert_eq!(
+            result.reply::<ListWindowsResult>("list").expect("the reply decodes"),
+            ListWindowsResult::Ok { windows: Vec::new() },
+        );
+
+        let Err(refused) = harness.cast::<Pinger>(window) else {
+            panic!("the window publishes no Ping row");
+        };
+        let SubstrateHarnessError::CastRefused { protocol, path } = &refused else {
+            panic!("expected CastRefused, got {refused:?}");
+        };
+        assert_eq!(*protocol, type_name::<Pinger>());
+        assert!(path.is_some(), "a composed capability retains its path");
+    }
+
     use aether_substrate::{BootError, NativeCtx, NativeInitCtx};
 
     /// A lifecycle stage subscriber for the scenarios below: silent `Tick`
@@ -1920,9 +2004,8 @@ mod tests {
             .expect("subscribe + advance");
         assert!(tb.count_observed(Tick::NAME) > 0, "subscriber received no Tick — fanout never reached it");
 
-        let relay = tb.actor_ref::<StageRelay>().erase();
         let reply = tb
-            .request_prepared(&relay.prepare(&TraceTail { max: 0, since: None, root: None }))
+            .request_prepared(&(&tb.actor_ref::<StageRelay>()).prepare(&TraceTail { max: 0, since: None, root: None }))
             .expect("the relay's ring answers");
         let Some(TraceTailResult::Ok { entries, .. }) = TraceTailResult::decode_from_bytes(&reply) else {
             panic!("the relay's trace tail decodes");

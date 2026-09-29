@@ -1,7 +1,7 @@
 //! The tick source — the lifecycle bridge that turns the substrate's own
 //! `Tick` fan-out into the sweep's offered load.
 
-use aether_actor::{ActorRef, OutboundReply, Publisher};
+use aether_actor::{ActorRef, Here, OutboundReply, Publisher, Row, Silent, There};
 use aether_data::{Kind, KindId, ReplyContract};
 use aether_kinds::{ComponentCapabilities, HandlerCapability, Tick};
 use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
@@ -40,6 +40,30 @@ impl aether_actor::Addressable for TickSource {
 }
 impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
+impl aether_actor::HandlesKind<CountQuery> for TickSource {}
+/// The type-level mirror of [`Dispatch::capabilities`], row for row and in the
+/// same order, so a [`TickSource`] reference narrows to the protocols its
+/// dispatch answers, such as [`PerfParticipant`](super::PerfParticipant).
+impl aether_actor::Contracts for TickSource {
+    type Rows = (Row<Tick, Silent>, (Row<CountQuery, CountReport>, (Row<LifecycleSubscribeResult, Silent>, ())));
+    const CONTRACTS: &'static [(KindId, ReplyContract)] = &[
+        (Tick::ID, ReplyContract::None),
+        (CountQuery::ID, ReplyContract::One(CountReport::ID)),
+        (LifecycleSubscribeResult::ID, ReplyContract::None),
+    ];
+}
+impl aether_actor::Contract<Tick> for TickSource {
+    type Reply = Silent;
+    type Index = Here;
+}
+impl aether_actor::Contract<CountQuery> for TickSource {
+    type Reply = CountReport;
+    type Index = There<Here>;
+}
+impl aether_actor::Contract<LifecycleSubscribeResult> for TickSource {
+    type Reply = Silent;
+    type Index = There<There<Here>>;
+}
 impl aether_actor::Lifecycle<Self> for TickSource {
     /// `(entry, pings_per_tick, lifecycle)`: relay 0's proof — the first of those
     /// [`spawn_relays`](super::spawn_relays) returns — the number of `Ping`s

@@ -63,9 +63,12 @@
 //!
 //! Every send addresses a proven reference ([`SendTarget`], ADR-0230): a
 //! composed capability's from [`SubstrateHarness::actor_ref`], a loaded
-//! component's from [`SubstrateHarness::load`] / [`SubstrateHarness::load_any`],
-//! and a spawned child's or opened window's from [`SubstrateHarness::child`]
-//! beneath a reference already held.
+//! component's from [`SubstrateHarness::load`], a wasm-only fixture's from
+//! [`SubstrateHarness::load_any`] typed with [`SubstrateHarness::cast`], and
+//! a spawned child's or opened window's from [`SubstrateHarness::child`]
+//! beneath a reference already held. An `&ActorRef<R>` takes the kinds `R`
+//! handles, a `&ProtocolRef<P>` the kinds `P` lists, and either takes the
+//! framework tails ([`FrameworkTail`]: the log, trace, and cost queries).
 //!
 //! The other ops compose the same way: [`HarnessOp::send_and_settle`] waits
 //! for a whole causal chain rather than one reply,
@@ -86,12 +89,13 @@ pub mod perf;
 pub mod test_helpers;
 
 pub use chassis::{
-    CaptureOutcome, ComponentHostMode, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-    SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
+    CaptureOutcome, ComponentHostMode, ComposeFn, FrameCapture, FrameHook, RenderHookWiring,
+    SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
+    WORKERS,
 };
 pub use execute::{
-    DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, HarnessOp, HarnessOutput,
-    PollObserver, PreparedSend, SendTarget,
+    DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, FrameworkTail, HarnessOp,
+    HarnessOutput, PollObserver, PreparedSend, SendTarget, Tail,
 };
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,
