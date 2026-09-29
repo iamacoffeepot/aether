@@ -1,23 +1,19 @@
 #![allow(clippy::needless_pass_by_value)]
 
-use std::collections::HashSet;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use aether_actor::Single;
 use aether_data::ErasedActorPath;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, TaskDone};
-use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
-use aether_substrate::mail::KindId;
 use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
-use crate::component::replacement_refusal;
+use crate::component::{Prepared, replacement_refusal};
 use crate::trampoline::WasmTrampoline;
 
 use super::contract;
+use super::republish::CandidateType;
 use super::state::WasmTrampolineState;
 
 impl WasmTrampolineState {
@@ -85,7 +81,6 @@ impl WasmTrampolineState {
         &self,
         export: Option<&str>,
         actors: &'a [ActorInputs],
-        boot: Option<&str>,
     ) -> Result<(Option<&'a ActorInputs>, Option<u64>), String> {
         if let Some(requested) = export {
             let group = actors.iter().find(|a| a.namespace.as_deref() == Some(requested)).ok_or_else(|| {
@@ -102,11 +97,11 @@ impl WasmTrampolineState {
         }
         // Bare replace (`export: None`): reuse the type this trampoline
         // currently hosts. With no tag (a load by the module's default) that's
-        // the first non-boot actor, as `begin_load` picks it, with a `None`
-        // tag — `export!(boot = B, default = A, …)` lists `B` first.
+        // the module's first actor, with a `None` tag. A module that declares
+        // a boot never reaches here: the host refuses its replace before
+        // forwarding (ADR-0147).
         let Some(tag) = self.type_tag else {
-            let hosted = actors.iter().find(|a| boot.is_none_or(|boot| a.namespace.as_deref() != Some(boot)));
-            return Ok((hosted, None));
+            return Ok((actors.first(), None));
         };
         actors
             .iter()
@@ -139,8 +134,7 @@ impl WasmTrampolineState {
 
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
     /// row, and the `#[fallback]` if it has one, of the type this slot hosts
-    /// now — the live guest, or the dropped one a refill takes over from —
-    /// and may add rows. The predecessor resolves from the resident module's
+    /// now, and may add rows. The predecessor resolves from the resident module's
     /// manifest the way the replacement does, and a failure to resolve it
     /// refuses the replace.
     fn check_contract(
@@ -150,82 +144,11 @@ impl WasmTrampolineState {
         replacement: &ComponentCapabilities,
     ) -> Result<(), String> {
         let resident = self.module.manifest();
-        let (predecessor, _) = self.resolve_replace_target(None, resident.actors(), resident.boot())?;
+        let (predecessor, _) = self.resolve_replace_target(None, resident.actors())?;
         let predecessor = predecessor.map(|group| group.capabilities.clone()).unwrap_or_default();
         contract::contract_break(&predecessor, replacement).map_or(Ok(()), |contract_break| {
             Err(contract::contract_refusal(target, contract_break, |kind| ctx.kind_label(kind)))
         })
-    }
-
-    /// ADR-0139 §4 (#6429): every request context the old instance carries
-    /// in its saved bundle must have a kind the replacement module declares.
-    /// Only kinds the predecessor module declares are judged: a context kind
-    /// defined in a shared kinds crate may be missing from both sections, and
-    /// the host has no record to judge it by.
-    fn check_carried_contexts(
-        &self,
-        ctx: &NativeCtx<'_, WasmTrampoline>,
-        target: &impl Display,
-        saved: Option<&StateBundle>,
-        replacement: &HashSet<KindId>,
-    ) -> Result<(), String> {
-        let Some(bundle) = saved else {
-            return Ok(());
-        };
-        let (table, _, _) = aether_actor::split_state_envelope(bundle.version, &bundle.bytes);
-        if table.is_empty() {
-            return Ok(());
-        }
-
-        contract::undeclared_context(table.kinds(), self.module.manifest().kind_ids(), replacement)
-            .map_or(Ok(()), |kind| Err(contract::context_refusal(target, &ctx.kind_label(kind))))
-    }
-
-    /// Run `unwire` then `on_dehydrate` on the old instance and lift any
-    /// saved-state bundle, handing the retired guest back with it so a
-    /// replacement that fails to rehydrate can reinstall it (#6134). If the
-    /// trampoline is currently empty (a refill after `DropComponent`), there's
-    /// no prior wasm to drain and this returns `None`; the new instance starts
-    /// from scratch. Issue 584 Phase 2b: `unwire` fires first so the old
-    /// instance can announce its retirement before the swap.
-    fn retire_guest(
-        &mut self,
-        ctx: &NativeCtx<'_, WasmTrampoline>,
-        target: &impl Display,
-        replacement: &HashSet<KindId>,
-    ) -> Result<Option<(Component, Option<StateBundle>)>, String> {
-        let Some(mut old) = self.component.take() else {
-            return Ok(None);
-        };
-        old.unwire();
-        old.on_dehydrate();
-        if let Some(err) = old.take_save_error() {
-            // Restore the old component so the trampoline isn't
-            // accidentally emptied by a save-state failure.
-            self.component = Some(old);
-            return Err(err);
-        }
-        let saved = old.take_saved_state();
-        // #6429: refuse a replacement that cannot take a carried request
-        // context, restoring the old component as the save-error arm does.
-        // It runs before the cursor and reply table move out, so the old
-        // guest keeps both, and its context table was only borrowed to
-        // compose the bundle. Whatever `unwire` and `on_dehydrate` tore down
-        // stays gone, as ADR-0016 §4 accepts for a rollback after the hooks.
-        if let Err(error) = self.check_carried_contexts(ctx, target, saved.as_ref(), replacement) {
-            self.component = Some(old);
-            return Err(error);
-        }
-        // #6400: record the leaving guest's cursor after `unwire` and
-        // `on_dehydrate`, which may still send or reply, so the
-        // replacement — or a later refill — resumes past its request ids
-        // and, #6422, its reply ids.
-        self.retired_correlations = Some(old.correlation_cursor());
-        // #6409: likewise move out its reply table, after both hooks
-        // (which may still answer handles), so the replacement answers
-        // the rest to their own requesters.
-        self.retired_replies = Some(old.take_pending_replies());
-        Ok(Some((old, saved)))
     }
 
     pub fn handle_replace(
@@ -254,15 +177,13 @@ impl WasmTrampolineState {
         // instantiates plus the capability group to advertise —
         // export-named, or the trampoline's current hosted type for a
         // bare replace. See [`Self::resolve_replace_target`].
-        let (group, effective_tag) =
-            match self.resolve_replace_target(export.as_deref(), manifest.actors(), manifest.boot()) {
-                Ok(resolved) => resolved,
-                Err(error) => return ReplaceResult::Err { error },
-            };
+        let (group, type_tag) = match self.resolve_replace_target(export.as_deref(), manifest.actors()) {
+            Ok(resolved) => resolved,
+            Err(error) => return ReplaceResult::Err { error },
+        };
 
         // ADR-0230 and ADR-0231 §5: checked before anything is touched, so a
-        // refusal leaves the old module (or the empty post-drop slot) as it
-        // was.
+        // refusal leaves the old guest as it was.
         if let Err(error) = Self::check_dependencies(ctx, &ctx.path(), group) {
             return ReplaceResult::Err { error };
         }
@@ -272,123 +193,21 @@ impl WasmTrampolineState {
         }
 
         // ADR-0163 §3 (#3984): the replacement's asset catalog feeds the
-        // post-swap `describe_component` / `ReplaceResult`; a load window over
-        // its asset blobs is installed on the new instance's ctx below so the
-        // replacement's `init` can pull asset bytes (replace re-runs `init`,
-        // not `wire`, so the window closes after instantiate).
+        // post-swap `describe_component` / `ReplaceResult`.
         capabilities.assets = manifest.asset_catalog().to_vec();
 
-        // Build a fresh `ComponentCtx` for the new instance — same
-        // binding + outbound reference. The binding
-        // carries the mailbox id, so it is preserved across replace per
-        // ADR-0022 §4. The correlation cursor and reply table it inherits
-        // are known only once the old guest's hooks have run, so both are
-        // resumed after instantiate, below.
-        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&self.outbound));
-        // ADR-0163 §3 (#3984): install the load window before instantiate so
-        // the replacement's `init` can pull assets; closed after instantiate
-        // (replace re-runs `init`, not `wire`).
-        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&module));
-        // ADR-0231 §4: an inline child the replacement spawns publishes its
-        // own namespace and rows, read from the replacement module.
-        substrate_ctx.install_inline_children(contract::inline_children(manifest));
-
-        // #6134: instantiate the candidate while the old guest is still
-        // installed and wired. `init` cannot send mail, so starting it early
-        // makes nothing visible outside its own store, and a failed `init`
-        // drops the candidate before the old guest runs any hook.
-        //
-        // ADR-0090 (issue 1257): thread the replace mail's config
-        // bytes into the new instance's typed `init`, the same way
-        // the load path does. Empty means "no config"; a typed-config
-        // guest decodes its `Self::Config` from these bytes.
-        let mut new_component = match Component::instantiate(
-            &self.engine,
-            &self.linker,
-            module.compiled(),
-            substrate_ctx,
-            &config,
-            effective_tag,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
+        // ADR-0241 §7: a single-instance replace prepares and, on `Ready`,
+        // commits in the same turn, so the candidate's held mail leaves on
+        // this replace's chain. An empty config means the stored one.
+        let candidate = CandidateType { module, type_tag, capabilities: capabilities.clone() };
+        let config = (!config.is_empty()).then_some(config);
+        match self.prepare(ctx, &target, candidate, config) {
+            Prepared::Ready => {
+                self.commit(ctx);
+                ReplaceResult::Ok { capabilities }
             }
-        };
-
-        // #6429: the carried contexts are checked against the replacement's
-        // kind vocabulary once the old guest's `on_dehydrate` surfaced them.
-        let predecessor = match self.retire_guest(ctx, &target, manifest.kind_ids()) {
-            Ok(predecessor) => predecessor,
-            Err(error) => return ReplaceResult::Err { error },
-        };
-
-        // ADR-0139 §3 (#6400, #6422): continue the mailbox's correlation and
-        // reply-lineage sequences from the guest that last left the slot, so
-        // the new instance reuses neither a request id nor a reply `MailId`.
-        // #6409: resume the carried reply table the same way. `init` sent
-        // nothing, and both precede `on_rehydrate` and every delivery.
-        if let Some(cursor) = self.retired_correlations {
-            new_component.resume_correlations(cursor);
+            Prepared::Refused { error } => ReplaceResult::Err { error },
         }
-        if let Some(replies) = self.retired_replies.take() {
-            new_component.resume_replies(replies);
-        }
-        // ADR-0163 §3 (#3984): replace re-runs `init` but not `wire`, so the
-        // load window's job ends once the replacement instantiated — close
-        // it, retaining the catalog metadata for the instance's life.
-        new_component.close_load_window();
-
-        // ADR-0016 §4: rehydrate the new instance if the old one produced a
-        // bundle. A failed rehydrate aborts the replace: the candidate drops
-        // without publishing its aliases, and the old guest is reinstalled
-        // with its reply table and past every id the candidate minted. The
-        // old guest's `unwire` / `on_dehydrate` effects and any mail the
-        // candidate sent from `on_rehydrate` stay, as ADR-0016 §4 accepts.
-        // The module, hosted type, capability registration and cost cells
-        // are only written below, so they stay the old guest's. On success
-        // the retired guest drops here — the `Component`'s own `Drop`
-        // releases its wasm store.
-        if let Some((mut old, Some(bundle))) = predecessor
-            && let Err(e) = new_component.call_on_rehydrate(&bundle)
-        {
-            old.resume_replies(new_component.take_pending_replies());
-            old.resume_correlations(new_component.correlation_cursor());
-            self.component = Some(old);
-            return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
-        }
-
-        // The new module is now resident — retain it so a later replace
-        // checks its replacement against the new manifest, not the replaced
-        // module's.
-        self.module = module;
-        // ADR-0096: track the actor type this trampoline now hosts, so
-        // a later bare (`export: None`) replace reuses the *current*
-        // type rather than reverting to the original load's. A bare
-        // replace leaves this unchanged (`effective_tag == self.type_tag`).
-        self.type_tag = effective_tag;
-
-        let (aliases, retired) =
-            (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
-        self.capabilities = capabilities.clone();
-        self.component = Some(new_component);
-        Self::stage_inline_aliases(ctx, aliases);
-        Self::stage_inline_alias_retirements(ctx, retired);
-
-        // Sync the post-replace declaration. iamacoffeepot/aether#1037: the
-        // mailbox id is stable across replace (ADR-0022 §4), so the accept set
-        // is overwritten in place and the validator sees it immediately.
-        // iamacoffeepot/aether#1128: the cost cells re-seed into both indexes,
-        // reusing the prior cell for an unchanged kind (keeping its
-        // accumulated EWMA) and adding a neutral cell for a new one; this
-        // handler runs on the trampoline's own dispatch thread inside
-        // `with_stamped`, so the per-actor cache stays exact across replace.
-        // The trampoline's own framework arms ride along
-        // (iamacoffeepot/aether#4269), `ReplaceComponent` among them, so this
-        // very handler's cost stays measured.
-        ctx.sync_guest(self);
-
-        ReplaceResult::Ok { capabilities }
     }
 }
 

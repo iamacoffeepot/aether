@@ -24,7 +24,7 @@ mod load;
 mod placement;
 
 use super::{ComponentHostCapability, LoadResult};
-use crate::component::LoadDelivered;
+use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared};
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
@@ -156,11 +156,15 @@ pub struct LoadedGuest {
 /// The rows the component host controls a guest through: its trampoline's
 /// own framework rows, never the guest's published surface. A guest birth
 /// completes with this proof (ADR-0241 §6), and the host hands a load's
-/// reply off and forwards a drop through it.
+/// reply off, forwards a drop, and drives a republish's prepare, commit and
+/// abort (ADR-0241 §7) through it.
 #[aether_actor::protocol]
 trait GuestControl {
     fn load_delivered(mail: LoadDelivered) -> LoadResult;
     fn drop_component(mail: DropComponent) -> DropResult;
+    fn prepare(mail: Prepare) -> Prepared;
+    fn commit(mail: Commit) -> Committed;
+    fn abort(mail: Abort) -> Aborted;
 }
 
 #[runtime]

@@ -2,7 +2,9 @@
 //! guest in place (ADR-0016 §4). A candidate whose `init` fails is dropped
 //! before the old guest runs any hook; a candidate whose `on_rehydrate` traps
 //! is dropped and the old guest is reinstalled, and the slot keeps hosting
-//! the old type, so a later bare replace rebuilds it.
+//! the old type, so a later bare replace rebuilds it. The reinstated guest
+//! runs `wire` again, and nothing the failed candidate sent leaves
+//! (ADR-0241 §7).
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -15,7 +17,9 @@ use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
-use aether_test_fixtures_kinds::{Bump, ConfigEcho, ConfigQuery, CountQuery, CountReport, ProbeConfig};
+use aether_test_fixtures_kinds::{
+    Bump, ConfigEcho, ConfigQuery, CountQuery, CountReport, ProbeConfig, TickObserved, WireObserved,
+};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
@@ -132,4 +136,64 @@ fn a_replace_whose_candidate_fails_rehydrate_keeps_the_running_guest() {
         3,
         "the rebuilt counter rehydrates the reinstated counter's count",
     );
+}
+
+/// Load `test.stateful.counter`, then replace it with the
+/// `test.stateful.rehydrate_trap` candidate, which reports `TickObserved`
+/// from `on_rehydrate` and traps. Returns the harness and the
+/// `WireObserved` count before the replace, or `None` when the fixture wasm
+/// is not built.
+///
+/// The observer is an inline sink, so a report reaches its count inside the
+/// sender's call: anything the candidate or the reinstated guest mails it is
+/// counted before the replace answers.
+fn replace_with_rehydrate_trap() -> Option<(SubstrateHarness, usize)> {
+    let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
+
+    let (_, path) = harness
+        .load_any(&LoadComponent {
+            wasm: wasm.clone(),
+            name: None,
+            config: Vec::new(),
+            export: Some("test.stateful.counter".to_owned()),
+        })
+        .expect("load test.stateful.counter");
+    let wired = harness.count_observed(WireObserved::NAME);
+
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let result = harness
+        .execute(vec![(
+            "trap",
+            HarnessOp::send_and_await_reply(
+                &host,
+                &replace(&path, &wasm, Vec::new(), Some("test.stateful.rehydrate_trap")),
+            ),
+        )])
+        .expect("replace sequence");
+    expect_refused(&result.reply::<ReplaceResult>("trap").expect("decode ReplaceResult"), "on_rehydrate failed");
+
+    Some((harness, wired))
+}
+
+#[test]
+fn a_candidate_that_fails_rehydrate_sends_nothing() {
+    // Catches: the candidate's `on_rehydrate` mail leaves before the swap is
+    // known to succeed, so a candidate that then traps is still heard from.
+    let Some((harness, _)) = replace_with_rehydrate_trap() else {
+        return;
+    };
+
+    assert_eq!(harness.count_observed(TickObserved::NAME), 0, "the failed candidate's mail never leaves");
+}
+
+#[test]
+fn a_reinstated_guest_is_wired_again() {
+    // Catches: the old guest is reinstated after its `unwire` without running
+    // `wire` again, so whatever `wire` set up stays torn down.
+    let Some((harness, wired)) = replace_with_rehydrate_trap() else {
+        return;
+    };
+
+    assert_eq!(harness.count_observed(WireObserved::NAME), wired + 1, "the reinstated counter runs `wire` again");
 }
