@@ -3,7 +3,7 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
+    ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
     Endpoint, ModelName, MuseTurn, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems, TurnOutcome,
@@ -17,6 +17,12 @@ const COMPLETED: &str = include_str!("../fixtures/completed.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const URL: &str = "https://example.test/v1/responses";
 
+/// A staged artifact's payload, read whole and verified against its digest.
+fn payload(artifact: &EncodedArtifact) -> Result<Vec<u8>, DigestMismatch> {
+    let (kind, bytes, _) = artifact.clone().into_parts();
+    ClosureArtifact::new(kind, bytes).load(artifact.digest())
+}
+
 /// Start one turn whose closure carries the input and every cited text, and
 /// return the session parked on its first cap send.
 fn start_turn() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
@@ -29,8 +35,8 @@ fn start_turn() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
     );
-    let encoded = EncodedArtifact::new(&input)?;
-    let input_artifact = ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec());
+    let (kind, payload, _) = EncodedArtifact::new(&input)?.into_parts();
+    let input_artifact = ClosureArtifact::new(kind, payload);
     let mut closure: Vec<_> =
         texts.iter().map(|(_, text)| ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec())).collect();
     closure.push(input_artifact.clone());
@@ -65,7 +71,7 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
     };
 
     let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
-    let recorded = TurnResult::decode_storage(result_artifact.bytes())?.value;
+    let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
     let TurnOutcome::Completed { text, usage } = recorded.outcome() else {
         panic!("expected Completed, got {:?}", recorded.outcome());
     };
@@ -104,7 +110,7 @@ fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box
     };
 
     let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
-    let recorded = TurnResult::decode_storage(result_artifact.bytes())?.value;
+    let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
     assert_eq!(*recorded.outcome(), TurnOutcome::Transient { retry_after_secs: Some(7) });
     assert_eq!(recorded.status().get(), 503);
     assert_eq!(recorded.body(), Ref::of_bytes(OVERLOADED.as_bytes()));

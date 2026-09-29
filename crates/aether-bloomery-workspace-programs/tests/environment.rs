@@ -65,9 +65,11 @@ struct Closure {
 impl Closure {
     /// Encode `value` and carry it in the closure.
     fn carry<K: Storage + Clone + Cites>(&mut self, value: &K) -> Result<Ref<K>, Box<dyn Error>> {
-        let encoded = EncodedArtifact::new(value)?;
-        self.members.push(ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec()));
-        Ok(Ref::from_digest(encoded.digest()))
+        let (kind, bytes, _) = EncodedArtifact::new(value)?.into_parts();
+        let member = ClosureArtifact::new(kind, bytes);
+        let digest = member.claimed().unverified();
+        self.members.push(member);
+        Ok(Ref::from_digest(digest))
     }
 
     /// A directory of `entries`, carried in the closure.
@@ -197,8 +199,9 @@ fn the_merge_places_the_toolchain_and_declares_what_its_names_state() -> Result<
     let Invoked::Completed { seq: 7, result, staged } = merge(&built)? else {
         panic!("expected the merge to complete");
     };
-    let recorded = staged.iter().find(|artifact| artifact.digest() == result).ok_or("the result is staged")?;
-    let environment = Environment::decode_storage(recorded.bytes())?.value;
+    let (kind, bytes, _) =
+        staged.into_iter().find(|artifact| artifact.digest() == result).ok_or("the result is staged")?.into_parts();
+    let environment = Environment::decode_storage(&ClosureArtifact::new(kind, bytes).load(result)?)?.value;
 
     let tool = |name: &str| -> Result<Tool, Box<dyn Error>> {
         Ok(Tool { name: ToolName::new(name)?, path: TreePath::new(format!("{PLACED}/bin/{name}"))? })

@@ -5,7 +5,8 @@
 //! `Vec<u8>`s, on whatever thread owns the journal. An [`ArtifactStore`] is
 //! derived from the open journal and can move to a worker thread: each of its
 //! [`ArtifactBatch`]es streams blobs into digest-named files a chunk at a
-//! time, stages encoded values such as trees, and commits their rows and
+//! time, stages encoded values such as trees and encoded artifacts carried as
+//! a [`aether_data::Blob`], and commits their rows and
 //! citation edges in one transaction through the same row insert and
 //! citation check `append` runs. The store holds the root's lock, so the root
 //! stays locked while any store or batch lives.
@@ -20,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, artifact_blob, hash_bytes};
-use aether_data::{Citation, Citations, Cites, Storage, StorageData};
+use aether_data::{Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use crate::runtime::blobs::BlobDir;
@@ -115,7 +116,36 @@ impl ArtifactBatch {
     ///
     /// [`JournalError::Io`] when the temp file cannot be created or written.
     pub fn blob(&mut self, len: u64) -> Result<BlobFile<'_>, JournalError> {
-        BlobFile::open(self, len)
+        BlobFile::open(self, OpaqueBytes::ID, len, Vec::new())
+    }
+
+    /// Stream `payload` into its blob file under `kind`'s prefix, one
+    /// [`BlobReader`] window at a time, hashing as it goes, and record its row
+    /// with `citations`. Memory is one window, never the payload. The
+    /// citations are checked at [`ArtifactBatch::commit`].
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::BlobLength`] when the payload reads shorter than its
+    /// length. [`JournalError::Io`] when the blob file cannot be written.
+    pub fn stage_blob(
+        &mut self,
+        kind: KindId,
+        payload: &Blob,
+        citations: Vec<Citation>,
+    ) -> Result<Digest, JournalError> {
+        let reader = BlobReader::open(payload);
+        let mut file = BlobFile::open(self, kind, reader.len(), citations)?;
+        let mut window = vec![0; usize::try_from(reader.len()).map_or(MAX_READ_BYTES, |len| len.min(MAX_READ_BYTES))];
+        let mut offset = 0;
+        loop {
+            let copied = reader.read_range(offset, &mut window);
+            if copied == 0 {
+                return file.place();
+            }
+            file.write_chunk(&window[..copied])?;
+            offset += copied as u64;
+        }
     }
 
     /// Encode `value`, prefix `K::ID`, write its blob file, and record its row

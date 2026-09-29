@@ -33,8 +33,8 @@ fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box
 }
 
 fn closure_of<K: Storage + Clone + Cites>(value: &K) -> Result<ClosureArtifact, Box<dyn Error>> {
-    let encoded = encoded(value)?;
-    Ok(ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec()))
+    let (kind, bytes, _) = encoded(value)?.into_parts();
+    Ok(ClosureArtifact::new(kind, bytes))
 }
 
 fn section_bytes(wasm: &[u8], name: &str) -> Vec<u8> {
