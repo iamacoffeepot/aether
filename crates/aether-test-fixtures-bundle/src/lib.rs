@@ -55,7 +55,7 @@ pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use paint_probe::PaintProbe;
-pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
+pub use peer_routing::{ParentPeerCaller, ParentPeerStandIn, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
 pub use quiet_probe::QuietProbe;
 pub use source_forwarder::SourceForwarder;
@@ -78,6 +78,7 @@ aether_actor::export!(
         Panel,
         ParentPeerCaller,
         ParentPeerTarget,
+        ParentPeerStandIn,
         Cube,
         EditorRegionProbe,
         MatSource,

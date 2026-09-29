@@ -247,7 +247,9 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
                     &harness.actor_ref::<ComponentHostCapability>(),
                     &LoadComponent {
                         wasm: wasm.to_vec(),
-                        name: None,
+                        // Each export is instanced, so an unnamed load would
+                        // take a counter key; the load names it by its type.
+                        name: Some(export.to_owned()),
                         config: encoded_config_for(export),
                         export: Some(export.to_owned()),
                     },

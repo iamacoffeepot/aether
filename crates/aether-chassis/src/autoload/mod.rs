@@ -103,15 +103,12 @@ pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, Con
 /// An entry with no `replicas` set stays a single unmodified
 /// `AutoloadComponent` (today's byte-identical behaviour). Otherwise each
 /// instance is named by [`replica_load_name`] — replica 0 claims the bare
-/// `base`, later replicas `{base}-{index}` — where `base` follows the same
-/// precedence the component host itself applies when resolving a load's name
-/// (`caller name > export > wasm-declared entry namespace`,
-/// `aether-component`'s `handle_load` step 4), so a replicated load's derived
-/// name matches what an unreplicated load of the same entry would have
-/// resolved to. The bare instance is what keeps a replicated component
-/// reachable through bare-type peer addressing
-/// (iamacoffeepot/aether#5727); `replicas: 1` is therefore exactly an
-/// unreplicated load.
+/// `base`, later replicas `{base}-{index}` — where `base` is the caller
+/// name, else the export, else the wasm-declared entry namespace. Every
+/// replica load names a key, and the component host refuses a load that
+/// names a key for a singleton (ADR-0241 §5), so a replicated entry must
+/// select an `#[actor(instanced)]` type; a singleton loads once, unreplicated
+/// and unnamed.
 ///
 /// # Errors
 ///

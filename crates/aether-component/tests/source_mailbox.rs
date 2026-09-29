@@ -44,31 +44,12 @@ use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 
-/// Load one non-entry actor out of the fixture bundle, under `name` or — with
-/// `None` — under the actor's own namespace, which is where a declared
-/// dependency looks for it.
-fn load_fixture(
-    harness: &mut SubstrateHarness,
-    wasm: Vec<u8>,
-    export: &str,
-    name: Option<&str>,
-) -> (ErasedActorRef, ErasedActorPath) {
+/// Load one non-entry actor out of the fixture bundle, under the actor's own
+/// namespace, which is where a declared dependency looks for it.
+fn load_fixture(harness: &mut SubstrateHarness, wasm: Vec<u8>, export: &str) -> (ErasedActorRef, ErasedActorPath) {
     harness
-        .load_any(&LoadComponent {
-            wasm,
-            name: name.map(str::to_owned),
-            config: Vec::new(),
-            export: Some(export.to_owned()),
-        })
-        .unwrap_or_else(|error| panic!("load_component {export} as {name:?}: {error}"))
-}
-
-fn load_source_observer(
-    harness: &mut SubstrateHarness,
-    wasm: Vec<u8>,
-    name: &str,
-) -> (ErasedActorRef, ErasedActorPath) {
-    load_fixture(harness, wasm, "test.source_observer", Some(name))
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some(export.to_owned()) })
+        .unwrap_or_else(|error| panic!("load_component {export}: {error}"))
 }
 
 /// Session-source case: the harness sends `SourceQuery` directly to the reader.
@@ -81,7 +62,7 @@ fn session_source_returns_none() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (reader, _) = load_source_observer(&mut harness, wasm, "reader");
+    let (reader, _) = load_fixture(&mut harness, wasm, "test.source_observer");
 
     let result = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(reader, &SourceQuery))])
@@ -106,8 +87,8 @@ fn component_source_returns_sender_mailbox() {
     // The reader loads under its own namespace and first: the forwarder
     // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (_, reader_path) = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
-    let (sender, sender_path) = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
+    let (_, reader_path) = load_fixture(&mut harness, wasm.clone(), "test.source_observer");
+    let (sender, sender_path) = load_fixture(&mut harness, wasm, "test.source_forwarder");
 
     // `send_and_settle`: the whole chain (forwarder → reader → forwarder)
     // settles before `execute` returns, so the log entry is already in the ring.

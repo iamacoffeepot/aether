@@ -30,14 +30,14 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Caller-supplied component name passed to `LoadComponent`.
-const PROBE_NAME: &str = "probe";
+/// The probe's namespace, which keys the singleton's unnamed load.
+const PROBE_NAME: &str = "test.probe";
 
 /// Full trampoline address the substrate registers the loaded probe
 /// under: the component host `aether.component` `/`-joined to the
 /// trampoline node (ADR-0099 §4) — exactly what `LoadResult.path`
 /// reports. Mail destined for the probe goes here, not to the bare
-/// `PROBE_NAME` (which isn't a registered mailbox).
+/// namespace (which isn't a registered mailbox).
 fn probe_address() -> String {
     use aether_actor::Addressable;
     format!("aether.component/{}:{PROBE_NAME}", WasmTrampoline::NAMESPACE)
@@ -58,7 +58,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPa
             "load",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
@@ -82,7 +82,7 @@ fn list_components_reports_loaded_probe_lineage() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let name = harness
-        .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component: {error}"))
         .1
         .to_string();
@@ -193,8 +193,9 @@ fn multi_actor_module_loads_selected_export() {
                 &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
-                    // No name: defaults to the selected export's namespace.
-                    name: None,
+                    // Panel is instanced, so an unnamed load would take a
+                    // counter key; the load names it by its type.
+                    name: Some("test.ui.panel".to_owned()),
                     config: Vec::new(),
                     export: Some("test.ui.panel".to_owned()),
                 },
@@ -429,8 +430,6 @@ fn replace_component_preserves_mailbox_identity() {
 /// the hooks as no-ops and the replacement booted fresh at 0.
 #[test]
 fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
-    const FIXTURE_NAME: &str = "stateful_replace";
-
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
@@ -438,12 +437,12 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load the `Counter` actor (a non-entry actor in the bundle) under the
-    // `stateful_replace` name and capture its mailbox id.
+    // Load the `Counter` actor (a non-entry actor in the bundle) and capture
+    // its mailbox id.
     let (counter, path) = harness
         .load_any(&LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.stateful.counter".to_owned()),
         })
@@ -504,8 +503,6 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 /// `decode_kind`, so the count survives the swap.
 #[test]
 fn replace_preserves_state_via_typed_state_kind() {
-    const FIXTURE_NAME: &str = "stateful_replace_typed";
-
     let Some(wasm_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
@@ -514,7 +511,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let (counter, path) = harness
-        .load_any(&LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
     // Bump the counter to 3, then read it back.
@@ -572,8 +569,6 @@ fn replace_preserves_state_via_typed_state_kind() {
 /// route `aether.log` mail through its observed sinks).
 #[test]
 fn typed_state_decode_miss_boots_fresh() {
-    const TYPED_NAME: &str = "stateful_replace_typed";
-
     let Some(typed_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
@@ -585,12 +580,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
 
     let (counter, path) = harness
-        .load_any(&LoadComponent {
-            wasm: typed_wasm,
-            name: Some(TYPED_NAME.to_owned()),
-            config: Vec::new(),
-            export: None,
-        })
+        .load_any(&LoadComponent { wasm: typed_wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
     let pre = harness
@@ -651,8 +641,6 @@ fn typed_state_decode_miss_boots_fresh() {
 /// guards it at the bundle layer.
 #[test]
 fn childless_component_hot_reloads_unchanged() {
-    const FIXTURE_NAME: &str = "stateful_replace";
-
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
@@ -663,7 +651,7 @@ fn childless_component_hot_reloads_unchanged() {
     let (counter, path) = harness
         .load_any(&LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             // `Counter` is a non-entry actor in the bundle.
             export: Some("test.stateful.counter".to_owned()),

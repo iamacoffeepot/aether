@@ -84,7 +84,6 @@ where
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_child_stateful";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -97,7 +96,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let (parent, path) = harness
         .load::<InlineStatefulParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.stateful_parent".to_owned()),
         })
@@ -164,7 +163,6 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 #[test]
 fn replace_rebuilds_a_private_inline_child() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_child_private";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -175,7 +173,7 @@ fn replace_rebuilds_a_private_inline_child() {
     let (parent, path) = harness
         .load::<InlineParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.parent".to_owned()),
         })
@@ -232,7 +230,7 @@ fn a_private_inline_child_is_not_loadable_by_selector() {
 
     let loaded = harness.load_any(&LoadComponent {
         wasm,
-        name: Some("inline_child_private_selector".to_owned()),
+        name: None,
         config: Vec::new(),
         export: Some(InlineChild::NAMESPACE.to_owned()),
     });
@@ -252,7 +250,6 @@ fn a_private_inline_child_is_not_loadable_by_selector() {
 #[test]
 fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_nested_lineage";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -262,7 +259,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     let (root, path) = harness
         .load::<NestedLineageParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.nested_parent".to_owned()),
         })
@@ -331,7 +328,6 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
 #[allow(clippy::too_many_lines)]
 fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_child_tag";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -343,7 +339,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let (parent, path) = harness
         .load::<InlineTagParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.tag_parent".to_owned()),
         })
@@ -437,7 +433,6 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
 #[test]
 fn despawn_inline_child_retires_the_alias_address() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_child_despawn";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -452,7 +447,7 @@ fn despawn_inline_child_retires_the_alias_address() {
     let (parent, _) = harness
         .load::<InlineDespawnParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.despawn_parent".to_owned()),
         })
@@ -514,7 +509,7 @@ fn despawn_inline_child_retires_the_alias_address() {
 #[test]
 fn settled_load_covers_the_inline_child_alias_publication() {
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
-    const FIXTURE_NAME: &str = "inline_child_settled_load";
+    const PARENT_EXPORT: &str = "test.inline.despawn_parent";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
@@ -532,12 +527,7 @@ fn settled_load_covers_the_inline_child_alias_publication() {
             "load",
             HarnessOp::send_and_settle(
                 &host,
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.inline.despawn_parent".to_owned()),
-                },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PARENT_EXPORT.to_owned()) },
             ),
         )])
         .expect("the load chain settles");
@@ -547,7 +537,7 @@ fn settled_load_covers_the_inline_child_alias_publication() {
     // child's alias resolves to that trampoline's endpoint, keyed `widget`
     // beneath it, so it is looked up as a trampoline too and probed erased.
     let parent = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(FIXTURE_NAME))
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(PARENT_EXPORT))
         .expect("the settled load's trampoline is live");
     let child = harness
         .child::<WasmTrampoline, WasmTrampoline>(&parent, key("widget"))
@@ -571,7 +561,6 @@ fn settled_load_covers_the_inline_child_alias_publication() {
 #[test]
 fn inline_child_matches_host_replies_to_its_own_requests() {
     const FS_DEMUX_STEM: &str = "aether_test_fixtures_fs_demux";
-    const FIXTURE_NAME: &str = "inline_child_reply";
 
     let Some(wasm_path) = require_wasm(FS_DEMUX_STEM) else {
         return;
@@ -588,7 +577,7 @@ fn inline_child_matches_host_replies_to_its_own_requests() {
     let (parent, _path) = harness
         .load::<InlineFsDemuxParent>(LoadComponent {
             wasm,
-            name: Some(FIXTURE_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("test.inline.fs_demux_parent".to_owned()),
         })

@@ -31,13 +31,9 @@ const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 const FS_DEMUX_PARENT_EXPORT: &str = "test.inline.fs_demux_parent";
 const PRIVATE_REFUSAL: &str = "test.inline.fs_demux_child depends on aether.fs, which is not live";
 
-fn load_result(harness: &mut SubstrateHarness, wasm: &[u8], label: &str, name: &str, export: &str) -> LoadResult {
-    let component = LoadComponent {
-        wasm: wasm.to_vec(),
-        name: Some(name.to_owned()),
-        config: Vec::new(),
-        export: Some(export.to_owned()),
-    };
+fn load_result(harness: &mut SubstrateHarness, wasm: &[u8], label: &str, export: &str) -> LoadResult {
+    let component =
+        LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: Some(export.to_owned()) };
     let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &component);
     let result = harness.execute(vec![(label, operation)]).expect("component load operation");
     result.reply::<LoadResult>(label).expect("decode LoadResult")
@@ -59,14 +55,14 @@ fn an_inline_child_dependency_refuses_its_module_load() {
     };
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "absent", "holder", HOLDER_EXPORT) else {
+    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "absent", HOLDER_EXPORT) else {
         panic!("a module whose inline child's dependency is not live must be refused");
     };
     assert_eq!(error, REFUSAL, "the refusal names the inline child and the missing namespace");
 
-    // Refusal happens before creation: no trampoline stands under the name.
+    // Refusal happens before creation: no trampoline stands under its namespace.
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key("holder"));
+    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key(HOLDER_EXPORT));
     assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
 
     let mut satisfied = SubstrateHarness::builder()
@@ -75,7 +71,7 @@ fn an_inline_child_dependency_refuses_its_module_load() {
         .with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
         .build()
         .expect("boot with clipboard");
-    match load_result(&mut satisfied, &wasm, "present", "holder", HOLDER_EXPORT) {
+    match load_result(&mut satisfied, &wasm, "present", HOLDER_EXPORT) {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("a module whose inline child's dependency is live must load: {error}"),
     }
@@ -91,15 +87,14 @@ fn a_private_inline_child_dependency_refuses_its_module_load() {
     let wasm = fs::read(wasm_path).expect("read fs-demux fixture wasm");
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "absent", "fs-demux", FS_DEMUX_PARENT_EXPORT)
-    else {
+    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "absent", FS_DEMUX_PARENT_EXPORT) else {
         panic!("a module whose private inline child's dependency is not live must be refused");
     };
     assert_eq!(error, PRIVATE_REFUSAL, "the refusal names the private child and the missing namespace");
 
-    // Refusal happens before creation: no trampoline stands under the name.
+    // Refusal happens before creation: no trampoline stands under its namespace.
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key("fs-demux"));
+    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key(FS_DEMUX_PARENT_EXPORT));
     assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
 }
 
@@ -114,7 +109,7 @@ fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
     let bundle = fs::read(bundle_path).expect("read bundle wasm");
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let victim = match load_result(&mut harness, &bundle, "victim", "victim", TARGET_EXPORT) {
+    let victim = match load_result(&mut harness, &bundle, "victim", TARGET_EXPORT) {
         LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("the victim must load: {error}"),
     };
@@ -138,8 +133,9 @@ fn a_replace_toward_an_unmet_inline_dependency_keeps_the_running_module() {
     // A refused replacement keeps the running module: the victim still
     // answers `Bump` with exactly one `TickObserved`.
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let victim_trampoline =
-        harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key("victim")).expect("the victim is live");
+    let victim_trampoline = harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(TARGET_EXPORT))
+        .expect("the victim is live");
     let baseline = harness.count_observed(TICK_OBSERVED);
     harness
         .execute(vec![("bump", HarnessOp::send_and_settle(victim_trampoline.erase(), &Bump))])

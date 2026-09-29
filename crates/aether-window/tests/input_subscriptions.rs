@@ -23,7 +23,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
 use aether_window::{SyntheticWindowCapability, window_path};
 
@@ -41,11 +41,27 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ErasedActorPath) {
+/// Load the bundle's default export, the singleton `test.probe`, at the
+/// component host.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load_component({name}): {error}"))
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
+}
+
+/// Load a second `test.probe` beneath the loaded `parent`: a singleton is one
+/// per parent, so this is how one harness hosts two independent probes.
+fn load_probe_under(harness: &mut SubstrateHarness, wasm_path: &Path, parent: &ErasedActorPath) {
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let load = LoadComponent { wasm, name: None, config: Vec::new(), export: None };
+    let operation =
+        HarnessOp::load_component_under(&harness.actor_ref::<ComponentHostCapability>(), parent.to_string(), load);
+    let result = harness.execute(vec![("load-under", operation)]).expect("component load operation");
+    match result.reply::<LoadResult>("load-under").expect("decode LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load_component(test.probe) beneath {parent}: {error}"),
+    }
 }
 
 /// Inject `count` synthetic `Key` presses from one window. The synthetic
@@ -116,7 +132,7 @@ fn subscribed_component_receives_published_text_input() {
         return;
     };
     let mut harness = boot_bench();
-    let _probe = load_probe_named(&mut harness, &wasm_path, "typist");
+    let _probe = load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(TextInputObserved::NAME);
 
     harness
@@ -141,7 +157,7 @@ fn subscribed_component_receives_published_keys() {
         return;
     };
     let mut harness = boot_bench();
-    let _probe = load_probe_named(&mut harness, &wasm_path, "listener");
+    let _probe = load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 3);
@@ -158,8 +174,8 @@ fn two_subscribers_each_receive_every_key() {
         return;
     };
     let mut harness = boot_bench();
-    let _probe_a = load_probe_named(&mut harness, &wasm_path, "a");
-    let _probe_b = load_probe_named(&mut harness, &wasm_path, "b");
+    let (_, probe_a) = load_probe(&mut harness, &wasm_path);
+    load_probe_under(&mut harness, &wasm_path, &probe_a);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 2);
@@ -181,7 +197,7 @@ fn unsubscribe_stops_delivery() {
         return;
     };
     let mut harness = boot_bench();
-    let (probe, _) = load_probe_named(&mut harness, &wasm_path, "listener");
+    let (probe, _) = load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -213,7 +229,7 @@ fn drop_clears_subscriptions() {
         return;
     };
     let mut harness = boot_bench();
-    let (_, probe) = load_probe_named(&mut harness, &wasm_path, "victim");
+    let (_, probe) = load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);

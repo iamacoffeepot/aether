@@ -27,15 +27,10 @@ use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsConte
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_fs_demux";
 
-fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> ErasedActorRef {
+fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ErasedActorRef {
     harness
-        .load_any(&LoadComponent {
-            wasm,
-            name: Some(name.to_owned()),
-            config: Vec::new(),
-            export: Some("test.fs_demux".to_owned()),
-        })
-        .unwrap_or_else(|error| panic!("load_component {name}: {error}"))
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.fs_demux".to_owned()) })
+        .unwrap_or_else(|error| panic!("load_component test.fs_demux: {error}"))
         .0
 }
 
@@ -57,7 +52,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let fixture = load_fs_demux(&mut harness, wasm, "fs-demux");
+    let fixture = load_fs_demux(&mut harness, wasm);
     let baseline = harness.count_observed(FsDemuxReport::NAME);
 
     harness
@@ -91,7 +86,7 @@ fn typed_fs_replies_demux_by_trying_each_context_type() {
 
     let path = write_fixture("typed-context.txt", b"same path, distinct typed contexts");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let fixture = load_fs_demux(&mut harness, wasm, "fs-context-demux");
+    let fixture = load_fs_demux(&mut harness, wasm);
     let baseline = harness.count_observed(FsContextDemuxReport::NAME);
     let raw_baseline = harness.count_observed(FsDemuxReport::NAME);
 

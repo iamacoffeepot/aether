@@ -30,8 +30,26 @@ pub(super) struct PreparedLoad {
     /// slot, the boot registry's key.
     module: Module,
     config: Vec<u8>,
-    name: String,
+    /// The selected type's namespace, which names it in a refusal.
+    namespace: String,
+    key: LoadKey,
     placement: LoadPlacement,
+}
+
+/// The key a load spawns its trampoline under (ADR-0241 §5): a singleton's
+/// is its namespace, an instanced type's is the load's name or a counter.
+enum LoadKey {
+    Named(String),
+    Counter,
+}
+
+impl LoadKey {
+    fn subname(&self) -> Subname<'_> {
+        match self {
+            Self::Named(name) => Subname::Named(name),
+            Self::Counter => Subname::Counter,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -226,7 +244,7 @@ impl ComponentHostCapabilityState {
         reason = "cold synchronous preparation returns the exact public LoadResult error shape"
     )]
     fn prepare_load<A, M: ReplyMode>(
-        &mut self,
+        &self,
         ctx: &NativeCtx<'_, A, M>,
         payload: LoadComponent,
         placement: LoadPlacement,
@@ -309,30 +327,40 @@ impl ComponentHostCapabilityState {
             )
         };
 
+        let Some(namespace) = selected_namespace.or_else(|| manifest.namespace().map(str::to_owned)) else {
+            return Err(LoadResult::Err {
+                error: "the load selects no actor namespace, so it cannot be placed or keyed".to_owned(),
+            });
+        };
+
         // ADR-0241 §5: a host load places the selected type at the component
         // host, so it must declare `root`; a single-actor module's implicit
         // group is named by the module's namespace. `load_under` places
         // beneath a parent and is not checked here.
-        if matches!(placement, LoadPlacement::ComponentHost) {
-            let Some(namespace) = selected_namespace.as_deref().or_else(|| manifest.namespace()) else {
-                return Err(LoadResult::Err {
-                    error: "the load selects no actor namespace, so its host placement cannot be checked".to_owned(),
-                });
-            };
-            if let Some(error) = root_refusal(manifest.lineage(), namespace) {
-                return Err(LoadResult::Err { error });
-            }
+        if matches!(placement, LoadPlacement::ComponentHost)
+            && let Some(error) = root_refusal(manifest.lineage(), &namespace)
+        {
+            return Err(LoadResult::Err { error });
         }
 
-        capabilities.assets = manifest.asset_catalog().to_vec();
-        let name =
-            name.or(selected_namespace).or_else(|| manifest.namespace().map(str::to_owned)).unwrap_or_else(|| {
-                let counter = self.default_name_counter;
-                self.default_name_counter += 1;
-                format!("component_{counter}")
-            });
+        // ADR-0241 §5: a singleton is named by its namespace, so a load names
+        // no key for it; an instanced load's name is its key, or the spawn
+        // allocates a counter. Refused here, before the module publishes.
+        let key = match (manifest.instanced(&namespace), name) {
+            (Some(false), Some(_)) => {
+                return Err(LoadResult::Err { error: format!("{namespace} is a singleton; a load names no key") });
+            }
+            (Some(false), None) => LoadKey::Named(namespace.clone()),
+            (Some(true), Some(name)) => LoadKey::Named(name),
+            (Some(true), None) => LoadKey::Counter,
+            (None, _) => {
+                return Err(LoadResult::Err { error: format!("{namespace} is not an exported type of this module") });
+            }
+        };
 
-        Ok(Arc::new(PreparedLoad { capabilities, dependencies, type_tag, module, config, name, placement }))
+        capabilities.assets = manifest.asset_catalog().to_vec();
+
+        Ok(Arc::new(PreparedLoad { capabilities, dependencies, type_tag, module, config, namespace, key, placement }))
     }
 
     /// Continue a load or a replace once its module publish settles. A
@@ -434,7 +462,7 @@ impl ComponentHostCapabilityState {
             LoadPlacement::Under { parent } => ctx.missing_dependency(Some(*parent), &load.dependencies),
         };
         if let Some(namespace) = missing {
-            owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.name, namespace) });
+            owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.namespace, namespace) });
             return;
         }
         let config = load.requested_config(self);
@@ -442,10 +470,10 @@ impl ComponentHostCapabilityState {
         let placement = load.placement.clone();
         let staged = match placement {
             LoadPlacement::ComponentHost => {
-                ctx.spawn_child::<WasmTrampoline>(Subname::Named(&load.name), config, ()).continue_from(owed, context)
+                ctx.spawn_child::<WasmTrampoline>(load.key.subname(), config, ()).continue_from(owed, context)
             }
             LoadPlacement::Under { parent } => ctx
-                .spawn_child_scoped::<WasmTrampoline>(parent, Subname::Named(&load.name), config, ())
+                .spawn_child_scoped::<WasmTrampoline>(parent, load.key.subname(), config, ())
                 .continue_from(owed, context),
         };
         match staged {
@@ -848,7 +876,6 @@ mod tests {
             outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
-            default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),

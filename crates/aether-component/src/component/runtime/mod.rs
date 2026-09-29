@@ -64,8 +64,7 @@ use aether_substrate::mail::registry::RegistrySubscription;
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
 /// `engine` + `linker` every load instantiates against, the registry-inventory
-/// subscription, the `outbound` egress handle, and the monotonic
-/// `default_name_counter` for `component_N` default names. Plain fields (no
+/// subscription, and the `outbound` egress handle. Plain fields (no
 /// `Arc<Inner>` wrapper) per ADR-0078 — the cap is single-threaded, every
 /// handler runs on the cap's dispatcher thread. The host addresses no
 /// sibling cap: drop-time registration cleanup rides the ADR-0079
@@ -90,9 +89,6 @@ pub struct ComponentHostCapabilityState {
     /// Mailbox and kind generations advance independently, so both form the
     /// idempotence key.
     pub last_egressed_inventory: Option<(u64, u64)>,
-    /// Monotonic counter for `component_N` default names when an agent passes
-    /// `name: None` and the wasm doesn't declare an `aether.namespace`.
-    pub default_name_counter: u64,
     /// The engine's one module cache (ADR-0240 D5, ADR-0241 §2), built here
     /// on the engine every load instantiates against and handed to every
     /// trampoline, so a load, a boot and a replace of the same bytes all
@@ -223,7 +219,6 @@ impl NativeActor for ComponentHostCapability {
             outbound: params.hub_outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
-            default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
@@ -245,10 +240,12 @@ impl NativeActor for ComponentHostCapability {
     /// Pass the wasm bytes plus an optional `name`. The cap publishes the
     /// module (ADR-0241 §3): admission checks its exported namespaces and
     /// their contracts, and the kinds the wasm declared in its `aether.kinds`
-    /// section register. On Ok it picks a final name (caller value > wasm's
-    /// `aether.namespace` > `component_N`), spawns a
+    /// section register. On Ok it keys the selected type by its cardinality
+    /// (ADR-0241 §5): a singleton by its namespace, where a load that names
+    /// any key is refused before the publish; an instanced type by the load's
+    /// `name`, or by a spawn counter when it names none. It spawns a
     /// [`WasmTrampoline`] under
-    /// `aether.embedded:NAME`, and hands the trampoline the held reply: the
+    /// `aether.embedded:KEY`, and hands the trampoline the held reply: the
     /// loaded trampoline itself replies `LoadResult::Ok { path, capabilities }`,
     /// where `path` is its full lineage address — agents send subsequent mail
     /// to that address, and an actor requester keeps the reply's stamped
@@ -563,7 +560,6 @@ mod tests {
                     .subscribe_inventory(),
             ),
             last_egressed_inventory: None,
-            default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
@@ -635,7 +631,6 @@ mod tests {
             outbound,
             registry_subscription: None,
             last_egressed_inventory: None,
-            default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),

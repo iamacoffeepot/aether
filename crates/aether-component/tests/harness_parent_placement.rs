@@ -29,6 +29,7 @@ const PROBE_EXPORT: &str = "test.probe";
 const CHILD_ONLY_EXPORT: &str = "test.matrix.child";
 const CALLER_EXPORT: &str = "test.parent_peer.caller";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
+const PANEL_EXPORT: &str = "test.ui.panel";
 
 fn load(
     harness: &mut SubstrateHarness,
@@ -93,14 +94,14 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
-    let outer = load(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
+    let outer = load(&mut harness, &wasm, "outer", None, None, PROBE_EXPORT);
     let outer_target = load(&mut harness, &wasm, "outer-target", Some(&outer), None, TARGET_EXPORT);
     let outer_caller = load(&mut harness, &wasm, "outer-caller", Some(&outer), None, CALLER_EXPORT);
     assert_child_identity(&outer_target, &outer, TARGET_EXPORT);
     assert_child_identity(&outer_caller, &outer, CALLER_EXPORT);
 
-    let nested = load(&mut harness, &wasm, "nested", Some(&outer), Some("nested"), PROBE_EXPORT);
-    assert_child_identity(&nested, &outer, "nested");
+    let nested = load(&mut harness, &wasm, "nested", Some(&outer), None, PROBE_EXPORT);
+    assert_child_identity(&nested, &outer, PROBE_EXPORT);
     let nested_target = load(&mut harness, &wasm, "nested-target", Some(&nested), None, TARGET_EXPORT);
     let nested_caller = load(&mut harness, &wasm, "nested-caller", Some(&nested), None, CALLER_EXPORT);
     assert_child_identity(&nested_target, &nested, TARGET_EXPORT);
@@ -108,10 +109,13 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let outer = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new("outer").expect("a valid load name"))
+        .child::<ComponentHostCapability, WasmTrampoline>(
+            &host,
+            LoadName::new(PROBE_EXPORT).expect("a valid load name"),
+        )
         .expect("the outer trampoline is live");
     let outer_caller = nested_trampoline(&harness, outer, CALLER_EXPORT);
-    let nested_caller = nested_trampoline(&harness, nested_trampoline(&harness, outer, "nested"), CALLER_EXPORT);
+    let nested_caller = nested_trampoline(&harness, nested_trampoline(&harness, outer, PROBE_EXPORT), CALLER_EXPORT);
 
     let baseline = harness.count_observed(TickObserved::NAME);
     harness
@@ -158,7 +162,7 @@ fn a_host_load_of_a_child_only_type_is_refused_before_staging() {
     };
     assert!(error.contains(CHILD_ONLY_EXPORT), "the refusal names the type: {error}");
 
-    load(&mut harness, &wasm, "root", None, Some("stray"), PROBE_EXPORT);
+    load(&mut harness, &wasm, "root", None, Some("stray"), PANEL_EXPORT);
 }
 
 #[test]

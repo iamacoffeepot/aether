@@ -18,8 +18,6 @@ mod tests {
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::{LoadComponent, LogTailResult};
 
-    const PROBE_NAME: &str = "probe";
-
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
     /// `aether.log.*`.
     const LEVEL_INFO: u8 = 2;
@@ -46,7 +44,7 @@ mod tests {
         let (probe, _) = harness
             .load_any(&LoadComponent {
                 wasm,
-                name: Some(PROBE_NAME.to_owned()),
+                name: None,
                 config: Vec::new(),
                 export: Some("test.quiet_probe".to_owned()),
             })

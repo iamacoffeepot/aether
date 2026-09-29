@@ -41,9 +41,6 @@ use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
-/// Component name passed to `LoadComponent`.
-const COMPONENT_NAME: &str = "cam";
-
 /// Load `aether-kit`'s pre-built wasm into the harness, selecting the
 /// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
@@ -54,7 +51,7 @@ fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Cam
     harness
         .load::<CameraComponent>(LoadComponent {
             wasm,
-            name: Some(COMPONENT_NAME.to_owned()),
+            name: None,
             config: Vec::new(),
             export: Some("aether.kit.camera".to_owned()),
         })

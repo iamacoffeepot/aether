@@ -34,7 +34,7 @@ use aether_test_fixtures_kinds as _;
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .map_or_else(|error| panic!("load_component: {error}"), |(probe, _)| probe)
 }
 
@@ -103,7 +103,7 @@ fn replace_and_drop_keep_framework_arms_measured() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let base = LoadComponent {
         wasm: wasm.clone(),
-        name: Some("swappable".to_owned()),
+        name: None,
         config: Vec::new(),
         export: Some("test.contract.base".to_owned()),
     };

@@ -26,7 +26,10 @@ use aether_test_fixtures_kinds as _;
 fn echo_config(harness: &mut SubstrateHarness) -> ConfigEcho {
     let host = harness.actor_ref::<ComponentHostCapability>();
     let probe = harness
-        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new("probe_with_config").expect("load name"))
+        .child::<ComponentHostCapability, WasmTrampoline>(
+            &host,
+            LoadName::new("test.probe_with_config").expect("load name"),
+        )
         .expect("the loaded probe_with_config is live");
     harness
         .execute(vec![("echo", HarnessOp::send_and_await_reply(probe.erase(), &ConfigQuery))])
@@ -52,7 +55,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
                 &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
-                    name: Some("probe_with_config".to_owned()),
+                    name: None,
                     config: Vec::new(),
                     export: Some("test.probe_with_config".to_owned()),
                 },
@@ -105,7 +108,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
                 &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
-                    name: Some("probe_with_config".to_owned()),
+                    name: None,
                     config: config_bytes,
                     export: Some("test.probe_with_config".to_owned()),
                 },

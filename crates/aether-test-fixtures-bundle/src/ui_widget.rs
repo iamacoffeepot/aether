@@ -21,7 +21,8 @@
 //!   so this floor is the upper bound on what cached replay leaves behind.
 //!
 //! Not a demo — its only job is to expose a realistic per-frame widget
-//! cost to the measurement.
+//! cost to the measurement. It is `instanced`: the measurement loads many
+//! widgets side by side, each keyed by its load's name (ADR-0241 §5).
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{QuadSpace, Tick};
@@ -34,7 +35,7 @@ pub struct UiWidget {
     config: UiWidgetConfig,
 }
 
-#[actor(root, depends(LifecycleCapability, RenderCapability))]
+#[actor(instanced, root, depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for UiWidget {
     type Config = UiWidgetConfig;
     const NAMESPACE: &'static str = "test.ui_widget";

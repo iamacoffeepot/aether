@@ -47,27 +47,20 @@ fn test_window() -> ErasedActorPath {
     aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
 }
 
-/// Load-time name for the controller instance.
-const CONTROLLER_NAME: &str = "controller";
-
-/// Load the `aether_kit` export `R` under `name` with optional
+/// Load the `aether_kit` export `R` under its own namespace with optional
 /// init-config bytes, blocking on `LoadResult` so the component is
 /// instantiated and subscribed before the next op. Returns its reference and
 /// the lineage path a capture bundle's `NamedMail` carries.
 fn load_kit_export<R: Addressable>(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
-    name: &str,
     config: Vec<u8>,
 ) -> (ActorRef<R>, ErasedActorPath) {
+    let name = R::NAMESPACE;
     let (actor, path) = harness
-        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: Some(name.to_owned()), config, export: None })
-        .unwrap_or_else(|error| panic!("load {}: {error}", R::NAMESPACE));
-    assert!(
-        path.to_string().ends_with(&format!(":{name}")),
-        "export {} should register under :{name}; got {path}",
-        R::NAMESPACE,
-    );
+        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config, export: None })
+        .unwrap_or_else(|error| panic!("load {name}: {error}"));
+    assert!(path.to_string().ends_with(&format!(":{name}")), "export {name} should register under :{name}; got {path}");
     (actor, path)
 }
 
@@ -140,13 +133,12 @@ fn held_key_pans_the_camera_over_the_painted_world() {
 
     // The controller resolves its target camera by the camera export's default
     // load name (`aether.kit.camera`), so the camera must be loaded under it.
-    let (camera, camera_path) =
-        load_kit_export::<CameraComponent>(&mut harness, &kit_wasm, CameraComponent::NAMESPACE, Vec::new());
+    let (camera, camera_path) = load_kit_export::<CameraComponent>(&mut harness, &kit_wasm, Vec::new());
     // Default config drives the camera's boot `"main"` orbit camera — the
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    let (controller, _) = load_kit_export::<CameraController>(&mut harness, &kit_wasm, CONTROLLER_NAME, config);
+    let (controller, _) = load_kit_export::<CameraController>(&mut harness, &kit_wasm, config);
 
     // Feed the camera a real window aspect, then settle the seed +
     // subscriptions before the first capture.

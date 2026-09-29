@@ -98,7 +98,7 @@ mod tests {
         let sandbox = init_save_sandbox("headless-runtime-manifest");
         let manifest_path = sandbox.join("boot-manifest.json");
         let manifest_json = serde_json::json!({
-            "components": [{ "wasm": wasm_path, "name": "probe", "export": "test.quiet_probe" }],
+            "components": [{ "wasm": wasm_path, "export": "test.quiet_probe" }],
         });
         fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
             .expect("write boot manifest");
@@ -109,7 +109,8 @@ mod tests {
         // `build` returns only once every boot component has answered its
         // load, so the probe resolves at once, with no wait.
         let built = HeadlessChassis::build(headless_env(sandbox, autoload)).expect("build headless chassis");
-        let address = ErasedActorPath::new("aether.component/aether.embedded:probe").expect("a well-formed actor path");
+        let address = ErasedActorPath::new("aether.component/aether.embedded:test.quiet_probe")
+            .expect("a well-formed actor path");
         let resolved = built.resolve_address(&address);
         assert!(resolved.is_ok(), "boot component {address} is not live when build returns: {resolved:?}");
     }

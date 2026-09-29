@@ -34,9 +34,10 @@ pub(super) enum ComponentSource {
 }
 
 /// The discover-everything dev sweep component set: build every
-/// structurally discovered component and read its wasm into a name-labelled
-/// [`PackComponent`]. Stem-sorted so a rebuild of the same sources yields a
-/// byte-identical `pack/manifest`; each package builds in its own cargo
+/// structurally discovered component and read its wasm into an unnamed
+/// [`PackComponent`], loaded under its type's own name (a load names no key
+/// for a singleton, ADR-0241 §5). Stem-sorted so a rebuild of the same
+/// sources yields a byte-identical `pack/manifest`; each package builds in its own cargo
 /// invocation (never batch multiple `-p`, see `inventory::build_plans`).
 pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: Profile) -> Result<Vec<PackComponent>> {
     let mut components = discover_components(metadata);
@@ -54,7 +55,7 @@ pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: 
         .map(|component| {
             let src = wasm_artifact_path(&wasm_profile_dir, component);
             let wasm = fs::read(&src).with_context(|| format!("read component wasm {}", src.display()))?;
-            Ok(PackComponent { wasm, config: None, name: Some(component.stem.clone()), export: None, replicas: None })
+            Ok(PackComponent { wasm, config: None, name: None, export: None, replicas: None })
         })
         .collect()
 }
