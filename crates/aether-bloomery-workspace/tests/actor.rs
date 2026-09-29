@@ -46,13 +46,13 @@ fn an_import_answers_ok_and_holds_settlement_until_it_is_done() -> TestResult {
     let script = StubReply::import_script(IMAGE, "c0ffee", &export);
     let expected = script.len();
     let requests_before = stub.requests_read();
-    thread::scope(|scope| -> TestResult {
+    let requests_read = thread::scope(|scope| -> Result<usize, Box<dyn Error>> {
         let served = scope.spawn(|| stub.answer(script));
         harness.execute(vec![("settle", HarnessOp::send_and_settle(&workspace, &import))])?;
+        let requests_read = stub.requests_read() - requests_before;
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(())
+        Ok(requests_read)
     })?;
-    let requests_read = stub.requests_read() - requests_before;
     assert_eq!(requests_read, expected, "the chain settled before the import's last request was served");
 
     let answer = thread::scope(|scope| -> Result<ImportResult, Box<dyn Error>> {
@@ -127,13 +127,13 @@ fn a_run_answers_its_result_and_holds_settlement_until_it_is_done() -> TestResul
 
     let expected = script.replies().len();
     let requests_before = stub.requests_read();
-    thread::scope(|scope| -> TestResult {
+    let requests_read = thread::scope(|scope| -> Result<usize, Box<dyn Error>> {
         let served = scope.spawn(|| stub.answer(script.replies()));
         harness.execute(vec![("settle", HarnessOp::send_and_settle(&workspace, &run))])?;
+        let requests_read = stub.requests_read() - requests_before;
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(())
+        Ok(requests_read)
     })?;
-    let requests_read = stub.requests_read() - requests_before;
     assert_eq!(requests_read, expected, "the chain settled before the run's last request was served");
 
     let answer = thread::scope(|scope| -> Result<RunResult, Box<dyn Error>> {
@@ -169,14 +169,14 @@ fn on_one_core_a_second_run_waits_for_the_first_holding_its_settlement_and_both_
 
     let expected = back_to_back().len();
     let requests_before = stub.requests_read();
-    thread::scope(|scope| -> TestResult {
+    let requests_read = thread::scope(|scope| -> Result<usize, Box<dyn Error>> {
         let served = scope.spawn(|| stub.answer(back_to_back()));
         let _first = harness.send_deferred(workspace, &run);
         harness.execute(vec![("second", HarnessOp::send_and_settle(&workspace, &run))])?;
+        let requests_read = stub.requests_read() - requests_before;
         served.join().map_err(|_| "the stub thread panicked")??;
-        Ok(())
+        Ok(requests_read)
     })?;
-    let requests_read = stub.requests_read() - requests_before;
     assert_eq!(requests_read, expected, "the queued run's chain settled before its requests were served");
 
     let (first, second, requests) = thread::scope(|scope| -> Result<_, Box<dyn Error>> {
