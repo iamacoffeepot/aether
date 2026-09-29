@@ -1262,6 +1262,44 @@ impl SubstrateHarness {
             .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))
     }
 
+    /// Block, without dispatching anything, until a mail of kind `K` is
+    /// queued for the pumped component host, waiting on its mailbox wake.
+    /// Nothing the host would do in reply to its queue happens meanwhile, so
+    /// every mail queued ahead of that one arrived while the host held
+    /// still; [`Self::step_component_host_through`] then dispatches exactly
+    /// those, and that one.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::SettlementTimeout`] when no such mail is
+    /// queued within the settlement cap.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness was built without
+    /// [`SubstrateHarnessBuilder::with_pumped_component_host`].
+    pub fn await_component_host_queued<K: Kind>(&mut self) -> Result<(), SubstrateHarnessError> {
+        let gate = "substrate_harness.await_component_host_queued";
+        let start = Instant::now();
+        loop {
+            let PumpedHost(slot) = self.component_host.as_mut().expect("the harness composed a pumped component host");
+            if slot.queued_kinds().contains(&K::ID) {
+                return Ok(());
+            }
+            match self.wake_rx.recv_timeout(SETTLEMENT_TIMEOUT) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) if start.elapsed() < self.settlement_cap => tracing::warn!(
+                    target: "aether_substrate::substrate_harness",
+                    gate,
+                    waited_millis = start.elapsed().as_millis(),
+                    "component host queue slow: still waiting for {}, extending",
+                    K::NAME,
+                ),
+                Err(_) => return Err(self.settlement_timeout(K::NAME.to_owned(), gate)),
+            }
+        }
+    }
+
     /// Run the pumped component host one envelope at a time until it has
     /// dispatched `count` mails of kind `K`, waiting on its mailbox wake
     /// whenever its inbox is empty. It stops right after the last one, so

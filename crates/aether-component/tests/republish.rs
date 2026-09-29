@@ -306,18 +306,24 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
         .load_any(&LoadComponent { wasm: loader_wasm, name: None, config: Vec::new(), export: None })
         .expect("load the loader");
 
-    // Both requests are queued before the pumped host runs at all. The
-    // replace sits first in the host's inbox; the loader, on the pool,
-    // relays its `LoadComponent` one hop behind it. The host dispatches the
-    // replace before that load can reach it, and the republish still needs
-    // its member's prepare, the publish, the commit and its settlement, so
-    // the load lands while the namespace is held unless that single relay
-    // hop outruns all of those. A load that skipped the hold would be
-    // admitted against the old publication and succeed.
+    // Race-free by ordering on the pumped host. Once the host has dispatched
+    // the gate's `Prepared`, the republish holds the namespace and has only
+    // staged its publish: no commit is sent until the host dispatches that
+    // publish's completion. The test then waits, dispatching nothing, until
+    // the loader's `LoadComponent` is queued for the host, so everything
+    // queued ahead of it arrived before any commit went out, and steps the
+    // host through it. The commits' `Committed` and `Settled` can only queue
+    // behind the load, so the load reaches the host while the republish is
+    // still open. A load that skipped the hold would be admitted against the
+    // old publication and succeed.
     let host = harness.actor_ref::<ComponentHostCapability>();
     let replacing = harness.send_deferred(host, &replace(&fixtures.v2));
+    harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
+
     let guest_load = GuestLoad { wasm: fixtures.v1.clone(), name: Some("c".to_owned()), export: Some(GATE.to_owned()) };
     let loading = harness.send_deferred_to(loader, &guest_load).expect("send the guest load");
+    harness.await_component_host_queued::<LoadComponent>().expect("the loader's load reaches the host");
+    harness.step_component_host_through::<LoadComponent>(1).expect("the host takes the load mid-republish");
 
     let replaced = harness.await_deferred::<ReplaceResult>(replacing).expect("replace reply");
     let guest_loaded = harness.await_deferred::<LoadResult>(loading).expect("guest load reply");

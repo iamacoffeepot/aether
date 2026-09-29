@@ -24,6 +24,7 @@
 //! + monitor fan-out.
 
 use core::marker::PhantomData;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use aether_actor::Single;
@@ -33,6 +34,7 @@ use super::dispatcher::{dispatch_envelope, finalize_close_and_fan_out};
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::{KindId, MailboxId, Source};
@@ -64,11 +66,21 @@ where
     /// This slot's mailbox id — passed to the cost-table drop and the
     /// registry close.
     self_id: MailboxId,
+    /// Envelopes [`Self::queued_kinds`] took off the inbox to read, in
+    /// arrival order. Every dispatch takes from here before the inbox, so
+    /// reading the queue never reorders it.
+    lookahead: VecDeque<Envelope>,
     /// Deliberately `!Send` / `!Sync` (ADR-0160 §1): the slot is owned by
     /// one pump thread and must not cross to another. Nothing in the real
     /// fields forbids `Send` on its own (the slots box is `Send`), so this
     /// marker pins the invariant into the type.
     _not_send: PhantomData<*const ()>,
+}
+
+/// The next envelope in arrival order: one a read of the queue already took
+/// off the inbox, else the inbox's next.
+fn next_envelope(lookahead: &mut VecDeque<Envelope>, binding: &NativeBinding) -> Option<Envelope> {
+    lookahead.pop_front().or_else(|| binding.try_recv())
 }
 
 impl<A> PumpedSlot<A>
@@ -89,7 +101,15 @@ where
         actor_registry: Arc<ActorRegistry>,
         self_id: MailboxId,
     ) -> Self {
-        Self { actor: Some(actor), binding, slots, actor_registry, self_id, _not_send: PhantomData }
+        Self {
+            actor: Some(actor),
+            binding,
+            slots,
+            actor_registry,
+            self_id,
+            lookahead: VecDeque::new(),
+            _not_send: PhantomData,
+        }
     }
 
     /// Release the mail `wire` sent, held since before `wire` ran, once the
@@ -113,7 +133,7 @@ where
         let Some(actor) = self.actor.as_mut() else {
             return;
         };
-        while let Some(env) = self.binding.try_recv() {
+        while let Some(env) = next_envelope(&mut self.lookahead, &self.binding) {
             dispatch_envelope::<A>(actor, &self.binding, &self.slots, env);
         }
     }
@@ -126,10 +146,22 @@ where
     /// work that turn staged comes back to it.
     pub fn dispatch_one(&mut self) -> Option<KindId> {
         let actor = self.actor.as_mut()?;
-        let env = self.binding.try_recv()?;
+        let env = next_envelope(&mut self.lookahead, &self.binding)?;
         let kind = env.kind;
         dispatch_envelope::<A>(actor, &self.binding, &self.slots, env);
         Some(kind)
+    }
+
+    /// The kinds of every envelope queued for the actor right now, in the
+    /// order it will dispatch them, without dispatching any. The envelopes
+    /// wait here until a drain or step takes them, so a driver can hold the
+    /// actor until a mail it expects has arrived and then step through
+    /// exactly what precedes it.
+    pub fn queued_kinds(&mut self) -> Vec<KindId> {
+        while let Some(env) = self.binding.try_recv() {
+            self.lookahead.push_back(env);
+        }
+        self.lookahead.iter().map(|env| env.kind).collect()
     }
 
     /// Run one bounded host-originated turn against this actor's mutable
@@ -186,7 +218,7 @@ where
         // tail settles held replies silently (ADR-0243 §1).
         self.binding.signal_engine_teardown();
         // Phase 2: drain residual inbox synchronously.
-        while let Some(env) = self.binding.try_recv() {
+        while let Some(env) = next_envelope(&mut self.lookahead, &self.binding) {
             dispatch_envelope::<A>(&mut actor, &self.binding, &self.slots, env);
         }
         // Phase 3: the `unwire` hook, under this actor's stamped slots so any
