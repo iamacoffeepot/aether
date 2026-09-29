@@ -13,10 +13,7 @@ use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind, HeldReply
 use aether_data::{ErasedActorPath, Kind, KindId, MailId};
 
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{
-    Dispatch, DispatchId, Held, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatch, RegistryBatchResult,
-    Subname, TaskDone,
-};
+use crate::actor::native::{Dispatch, DispatchId, Held, NativeActor, NativeCtx, NativeInitCtx, Pending, Subname};
 use crate::chassis::builder::ReplyTarget;
 use crate::chassis::error::BootError;
 use crate::mail::mailer::Mailer;
@@ -146,10 +143,6 @@ pub(super) struct ParkReq {
 #[aether_data::kind(name = "test.native_held.hold")]
 pub(super) struct HoldReq;
 
-/// Asks [`HeldHost`] to hold its reply and stage a registry batch from it.
-#[aether_data::kind(name = "test.native_held.stage")]
-pub(super) struct StageReq;
-
 /// A pooled root that answers every [`Poke`].
 pub(super) struct Bouncer {
     pokes: u32,
@@ -201,10 +194,6 @@ pub(super) struct HeldHost {
     pub(super) parked: Option<LedgerRead>,
     /// The context's tag and the entry's state once `on_poked` took it.
     pub(super) taken: Option<(u32, Option<&'static str>)>,
-    /// The held entry once `on_stage` staged a batch from it.
-    pub(super) staged: Option<LedgerRead>,
-    /// The registry batches whose completion `on_batch_done` resolved.
-    pub(super) batches: u32,
 }
 
 #[aether_actor::actor(singleton, root, depends(Bouncer))]
@@ -237,21 +226,6 @@ impl NativeActor for HeldHost {
         let HeldContext { held, tag } = ctx.take_context::<HeldContext>().expect("the reply takes its stored context");
         self.taken = Some((tag, ctx.binding.dispatch_state_of(held.dispatch_id())));
         held.answer(ctx, &TestReply { value: tag });
-    }
-
-    #[handler::single]
-    fn on_stage(&mut self, ctx: &mut NativeCtx<'_>, _stage: StageReq) -> Pending<TestReply> {
-        let (pending, held) = ctx.hold::<TestReply>();
-        let id = held.dispatch_id();
-        let _batch = ctx.stage_registry_batch_from(held, RegistryBatch::register_kinds(Vec::new()), ());
-        self.staged = Some(LedgerRead::at(ctx, id));
-        pending
-    }
-
-    #[handler(task)]
-    fn on_batch_done(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<RegistryBatchResult>) {
-        self.batches += 1;
-        done.resolve_value(ctx, &TestReply { value: 5 });
     }
 }
 

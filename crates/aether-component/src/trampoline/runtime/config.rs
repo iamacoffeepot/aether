@@ -23,8 +23,8 @@ pub struct WasmTrampolineConfig {
     /// for this content hash alive (ADR-0240 D5, ADR-0241 §2), so a sibling
     /// spawn or a same-hash load reuses it until every holder drops.
     pub module: Module,
-    /// The engine's one module cache, through which a replace checks its
-    /// replacement module in (ADR-0241 §2).
+    /// The engine's one module cache, through which a republish's prepare
+    /// checks its candidate module in (ADR-0241 §2).
     pub modules: ModuleCache,
     pub outbound: Arc<HubOutbound>,
     /// Component capabilities parsed from the wasm's
@@ -44,7 +44,7 @@ pub struct WasmTrampolineConfig {
     /// `Component::instantiate` so it calls `init_typed_p32`.
     /// `None` instantiates the module's entry type via the legacy
     /// `init_with_config_p32` path — the only type a single-actor
-    /// module has. Stored on the trampoline so a later
-    /// `ReplaceComponent` rebuilds the same export.
+    /// module has. Stored on the trampoline so a republish's prepare
+    /// rebuilds the same export.
     pub type_tag: Option<u64>,
 }

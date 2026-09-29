@@ -1,17 +1,16 @@
 //! Registry reads off a ctx: a proven reference answers its actor's
 //! canonical path, before and after that actor departs, and so does the
-//! sender reference a real dispatch stamps. A registry batch staged from a
-//! held reply answers the caller that reply captured.
+//! sender reference a real dispatch stamps.
 
 use std::sync::Arc;
 
 use aether_actor::Addressable;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::ErasedActorPath;
 
 use crate::mail::registry::{InboxHandler, OwnedDispatch};
 use crate::testing::{drop_ref, registered_ref};
 
-use super::support::{HeldRig, LedgerRead, Ping, Pinger, ReaderRig, StageReq, TestReply};
+use super::support::{Ping, Pinger, ReaderRig};
 
 fn discharging() -> Arc<dyn InboxHandler> {
     Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
@@ -65,31 +64,4 @@ fn actor_path_names_the_sender_a_real_dispatch_stamps() {
         Some((pinger.erase(), expected)),
         "a departed sender still holds its route record, so a knock it sent before departing still proves it",
     );
-}
-
-/// Catches `stage_registry_batch_from` arming its completion from the staging
-/// ctx instead of the owed value: that would take a second settlement hold on
-/// the caller's chain, which the completion's resolve never releases. The
-/// batch's completion must own the one hold the `Held` took and answer the
-/// caller the `Held` captured, from the later completion turn.
-#[test]
-fn a_batch_staged_from_a_held_reply_answers_the_held_caller() {
-    let mut rig = HeldRig::boot();
-    let (caller, replies) = rig.caller("test.native.batch_from.caller");
-
-    let root = rig.push(&StageReq, Some(caller));
-    rig.driver.settle(&[root]);
-
-    let (staged, batches) = rig.driver.read_state(|host| (host.staged, host.batches)).expect("the host is live");
-    assert_eq!(
-        staged,
-        Some(LedgerRead { entry: None, held_open: 1 }),
-        "staging moved the held entry into the batch's, which owns the one hold the Held took, not a second",
-    );
-    assert_eq!(batches, 1, "the batch's completion ran on a later turn");
-
-    let reply = replies.try_recv().expect("the answer reaches the held caller");
-    assert_eq!(reply.sender.correlation_id, 77, "the held correlation is echoed, not the completion turn's");
-    assert_eq!(TestReply::decode_from_bytes(reply.payload.bytes()), Some(TestReply { value: 5 }));
-    assert_eq!(rig.held_open(root), 0, "resolving releases the one hold");
 }

@@ -35,12 +35,15 @@ publish = false
 
 [features]
 default = ["runtime"]
-runtime = ["dep:aether-substrate", "dep:wasmtime", "dep:tracing"]
+runtime = ["dep:aether-codec", "dep:aether-substrate", "dep:wasmtime", "dep:tracing"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# A republish decodes each supplied instance config strictly against its
+# successor type's config kind (ADR-0241 §4). Runtime half only.
+aether-codec = { path = "../aether-codec", optional = true }
 # Native-only runtime half — gated so wasm/marker builds skip the
 # substrate runtime.
 aether-substrate = { path = "../aether-substrate", optional = true }
@@ -106,6 +109,9 @@ aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-state
 aether-test-fixtures-carry-reshaped = { path = "../aether-test-fixtures-carry-reshaped" }
 aether-test-fixtures-inline-dependency = { path = "../aether-test-fixtures-inline-dependency" }
 aether-test-fixtures-fs-demux = { path = "../aether-test-fixtures-fs-demux" }
+# `republish` and the migrated replace tests load the same-namespace successor
+# modules this crate's examples build (issue 7109).
+aether-test-fixtures-republish = { path = "../aether-test-fixtures-republish" }
 # `harness_guest_addresses` loads the short-path fixture, whose guest parents
 # each declare one instanced child type, so their holes resolve; the test
 # names each fixture type's namespace through the rlib.
@@ -138,6 +144,7 @@ ignored = [
     "aether-test-fixtures-stateful-reshaped",
     "aether-test-fixtures-carry-reshaped",
     "aether-test-fixtures-inline-dependency",
+    "aether-test-fixtures-republish",
 ]
 
 [lints]

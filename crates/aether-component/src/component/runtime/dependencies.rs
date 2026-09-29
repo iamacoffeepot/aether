@@ -1,10 +1,10 @@
 //! Declared-dependency refusal (ADR-0230): an actor whose `#[actor(depends(R))]`
 //! entry has no `Live` route is refused before it is created — the load, the
-//! module boot actor, or the replacement replies its operation's `Err`
-//! naming the actor and the missing namespace, before `init` runs. The
-//! trampoline checks the replacement site against the type it will host;
-//! the other sites are checked by the component host. The fourth site is
-//! the module itself (ADR-0230 §3): a load or replace also refuses when an
+//! module boot actor, or the republish replies its operation's `Err` naming
+//! the actor and the missing namespace, before `init` runs. A republish
+//! checks each live member for a dependency its successor type adds, and
+//! names every member it refuses (ADR-0241 §4). The fourth site is the
+//! module itself (ADR-0230 §3): a load or replace also refuses when an
 //! actor its module can spawn inline declares a dependency with no `Live`
 //! route, before anything in the module runs. Those actors are the exported
 //! inline-spawnable types and every private inline child (issue 6590), read
@@ -30,17 +30,28 @@ pub(super) fn dependency_refusal(actor: &str, namespace: &str) -> String {
     format!("{actor} depends on {namespace}, which is not live")
 }
 
-/// The refusal error for a replacement whose hosted type declares a
-/// dependency with no `Live` route, or `None` when the replacement may
-/// proceed. The caller is the trampoline, which passes its own canonical
-/// name and the dependencies of the type the replacement will host: the
-/// named export, or its current hosted type for a bare replace.
-pub fn replacement_refusal<A, M: ReplyMode>(
+/// The refusal error for a republish one of whose live members' successor
+/// type adds a dependency with no `Live` route, naming every such member by
+/// its path, or `None` when every member may prepare (ADR-0241 §4). Each
+/// member is its path, its type's dependencies before the republish, and
+/// after. A dependency the type already declared was live when the member
+/// was created, so only an added one is checked.
+pub(super) fn replacement_refusal<'a, A, M: ReplyMode>(
     ctx: &NativeCtx<'_, A, M>,
-    canonical: &str,
-    dependencies: &[Dependency],
+    members: impl IntoIterator<Item = (&'a str, &'a [Dependency], &'a [Dependency])>,
 ) -> Option<String> {
-    ctx.missing_dependency(dependencies).map(|namespace| dependency_refusal(canonical, namespace))
+    let refused: Vec<String> = members
+        .into_iter()
+        .filter_map(|(path, before, after)| {
+            let added: Vec<Dependency> = after
+                .iter()
+                .filter(|dependency| before.iter().all(|kept| kept.namespace != dependency.namespace))
+                .cloned()
+                .collect();
+            ctx.missing_dependency(&added).map(|namespace| dependency_refusal(path, namespace))
+        })
+        .collect();
+    (!refused.is_empty()).then(|| refused.join("; "))
 }
 
 /// The module's inline-spawnable exported groups, in declaration order, each

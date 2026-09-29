@@ -86,7 +86,7 @@ pub mod perf;
 pub mod test_helpers;
 
 pub use chassis::{
-    CaptureOutcome, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+    CaptureOutcome, ComponentHostMode, ComposeFn, FrameHook, RenderHookWiring, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
 };
 pub use execute::{

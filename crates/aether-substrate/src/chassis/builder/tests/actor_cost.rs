@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// `WasmTrampoline` is the actor this is really about: it pre-seeds the loaded
 /// *guest's* handler set from `init`, and while that pre-seed short-circuited
 /// the declaration, the trampoline's own framework arms owned no cell — so
-/// every loaded component ran `ReplaceComponent` and the ADR-0093 completion
+/// every loaded component ran `Prepare` and the ADR-0093 completion
 /// wake unmeasured, and `actor_cost` reported no row for either. Reproduced
 /// here on a plain native actor because the condition is the spawn path's, not
 /// the trampoline's: any actor that pre-seeds would have hit it.

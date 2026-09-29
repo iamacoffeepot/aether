@@ -8,6 +8,7 @@ use std::fmt::Display;
 use std::mem;
 use std::sync::Arc;
 
+use aether_data::ActorId;
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::asset_manifest;
@@ -30,6 +31,39 @@ pub(super) struct CandidateType {
 }
 
 impl WasmTrampolineState {
+    /// The candidate a republish builds from `module`: the group of the type
+    /// this trampoline hosts, which a republish never changes (ADR-0241 §4),
+    /// with its actor-type tag and its receive surface. The hosted type is
+    /// the one the resident module's tag names, or the resident module's
+    /// first exported type for a guest loaded by the module's default. The
+    /// candidate's tag names the type explicitly, so a successor that adds
+    /// an export ahead of it still instantiates the hosted type.
+    pub(super) fn candidate_type(&self, module: Module) -> Result<CandidateType, String> {
+        let resident = self.module.manifest();
+        let hosted = self
+            .type_tag
+            .map_or_else(
+                || resident.exported_groups().next(),
+                |tag| resident.exported_groups().find(|(namespace, _)| ActorId::singleton(namespace).0 == tag),
+            )
+            .map(|(namespace, _)| namespace.to_owned());
+        let manifest = module.manifest();
+        let group = hosted
+            .as_deref()
+            .map_or_else(
+                || manifest.actors().first(),
+                |hosted| manifest.exported_groups().find(|(namespace, _)| *namespace == hosted).map(|(_, group)| group),
+            )
+            .ok_or_else(|| {
+                format!("the module does not export the hosted type {}", hosted.as_deref().unwrap_or("?"))
+            })?;
+
+        let type_tag = group.namespace.as_deref().map(|namespace| ActorId::singleton(namespace).0);
+        let mut capabilities = group.capabilities.clone();
+        capabilities.assets = manifest.asset_catalog().to_vec();
+        Ok(CandidateType { module, type_tag, capabilities })
+    }
+
     /// Build a candidate of `candidate` beside the running guest and hold it
     /// for a commit or an abort. `config` is the candidate's init config, or
     /// `None` for the stored one; `target` names this actor in a refusal.

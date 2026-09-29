@@ -473,7 +473,7 @@ impl Registry {
                         |kind| staged_kind(&staged_kinds, inner, kind).map(|slot| Arc::clone(&slot.name)),
                     )
                     .map_err(RegistryEffectError::Admission)?;
-                    if admitted == Admitted::Publish {
+                    if admitted != Admitted::Unchanged {
                         staged_publications.get_or_insert_with(|| inner.publications.clone()).publish(module, surface);
                     }
                     applied.push(RegistryApplied::Published);

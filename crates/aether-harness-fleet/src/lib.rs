@@ -60,8 +60,9 @@ use aether_kinds::{
     BinarySelector, ComponentCapabilities, ComponentSelector, DeadEngineDescriptor, EngineDescriptor,
     ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
     ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine, SpawnEngineResult,
-    TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    ReplaceComponent, ReplaceResult, ReplacedType, ResolveComponent, ResolveComponentResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
 };
 use aether_rpc::{
     Hello, HelloAck, MailEnvelope, PeerKind, Recipient, ReplyEnvelope, RpcBind, RpcError, RpcServerCapability,
@@ -246,8 +247,8 @@ enum DistComponentRequirement {
 }
 
 /// The two `LoadResult::Ok` fields a loaded component exposes: the rendered
-/// ADR-0099 lineage `addr` (the [`replace`](FleetHarness::replace) target and
-/// every later recipient), and the advertised receive-side `capabilities`.
+/// ADR-0099 lineage `addr` (the recipient of every later mail, which a
+/// [`replace`](FleetHarness::replace) keeps), and the advertised receive-side `capabilities`.
 /// Returned by [`load_full`](FleetHarness::load_full) for the lifecycle rows
 /// that need the capabilities the thin [`load`](FleetHarness::load) delegate
 /// discards.
@@ -563,44 +564,28 @@ impl FleetHarness {
         }
     }
 
-    /// Replace the component at `address` on `engine` with a build
-    /// resolved from a registry selector (ADR-0116, issue 1956) — the
-    /// resolve-then-forward twin of [`replace`](Self::replace), which loads
-    /// by dist stem. Returns the swapped binary's advertised capabilities.
-    pub fn replace_by_selector(&mut self, engine: EngineId, address: &str, selector: &str) -> ComponentCapabilities {
+    /// Republish on `engine` the module a registry selector resolves to
+    /// (ADR-0116, issue 1956; ADR-0241 §7) — the resolve-then-forward twin
+    /// of [`replace`](Self::replace), which reads a dist stem. Every live
+    /// instance of the module's namespaces moves to it; returns each type it
+    /// publishes. A replace names no actor, so a selector carrying an
+    /// `@actor` half is a scenario bug.
+    pub fn replace_by_selector(&mut self, engine: EngineId, selector: &str) -> Vec<ReplacedType> {
         let resolved = self.resolve_component(ComponentSelector {
             query: Some(selector.to_owned()),
             namespace: None,
             handled_kind: None,
         });
-        let (wasm, export) = match resolved {
-            ResolveComponentResult::Ok { wasm, export, .. } => (wasm, export),
+        let wasm = match resolved {
+            ResolveComponentResult::Ok { wasm, export: None, .. } => wasm,
+            ResolveComponentResult::Ok { export: Some(export), .. } => {
+                panic!("replace selector {selector:?} names the actor {export:?}; a replace names no actor")
+            }
             ResolveComponentResult::Err { error } => {
                 panic!("resolve of selector {selector:?} failed: {error}")
             }
         };
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &ReplaceComponent {
-                target: replace_target(address),
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                // ADR-0096: thread the selector's `@actor` half, so a
-                // `module@actor` replace instantiates the named export
-                // instead of the trampoline's current hosted type.
-                export,
-            },
-        );
-        let payload = single_reply(&replies, "ReplaceComponent");
-        match ReplaceResult::decode_from_bytes(&payload) {
-            Some(ReplaceResult::Ok { capabilities }) => capabilities,
-            Some(ReplaceResult::Err { error }) => {
-                panic!("replace by selector {selector:?} failed: {error}")
-            }
-            None => panic!("undecodable ReplaceResult"),
-        }
+        self.replace_wasm(engine, wasm, selector)
     }
 
     /// Load the `<stem>` component wasm (located through
@@ -616,8 +601,8 @@ impl FleetHarness {
     }
 
     /// Load the `<stem>` component and surface both `LoadResult::Ok` fields
-    /// as a [`Loaded`]: the rendered lineage `addr` (the
-    /// [`replace`](Self::replace) target) and the advertised `capabilities`,
+    /// as a [`Loaded`]: the rendered lineage `addr` (which a
+    /// [`replace`](Self::replace) keeps) and the advertised `capabilities`,
     /// which the thin [`load`](Self::load) delegate drops.
     pub fn load_full(&mut self, engine: EngineId, stem: &str) -> Loaded {
         let wasm = read_component_wasm(stem);
@@ -676,65 +661,22 @@ impl FleetHarness {
         self.spawned.retain(|e| *e != engine);
     }
 
-    /// Replace the component at `address` on `engine` with the `<stem>` wasm
-    /// (ADR-0022 in-place swap) and return the swapped binary's advertised
-    /// capabilities. The trampoline keeps its load-time name across replace,
-    /// so targeting the captured lineage address rebinds it to the new
-    /// instance.
-    pub fn replace(&mut self, engine: EngineId, address: &str, stem: &str) -> ComponentCapabilities {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &ReplaceComponent {
-                target: replace_target(address),
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                // Replace-by-stem reuses the trampoline's current hosted
-                // type — no export selector.
-                export: None,
-            },
-        );
-        let payload = single_reply(&replies, "ReplaceComponent");
-        match ReplaceResult::decode_from_bytes(&payload) {
-            Some(ReplaceResult::Ok { capabilities }) => capabilities,
-            Some(ReplaceResult::Err { error }) => panic!("replace with {stem:?} failed: {error}"),
-            None => panic!("undecodable ReplaceResult"),
-        }
+    /// Republish on `engine` the module in the `<stem>` wasm (ADR-0241 §7):
+    /// every live instance of its namespaces moves to it as one group, each
+    /// keeping its mailbox and its stored config. Returns each type the
+    /// module publishes with its advertised capabilities.
+    pub fn replace(&mut self, engine: EngineId, stem: &str) -> Vec<ReplacedType> {
+        self.replace_wasm(engine, read_component_wasm(stem), stem)
     }
 
-    /// Replace by stem like [`replace`](Self::replace), but select a
-    /// specific exported actor type from a multi-actor replacement
-    /// module via `export` (ADR-0096) — the `ReplaceComponent.export`
-    /// twin of [`load_full_export`](Self::load_full_export). The
-    /// `export` string is the target actor's `NAMESPACE`. Returns the
-    /// instantiated export's advertised capabilities.
-    pub fn replace_export(
-        &mut self,
-        engine: EngineId,
-        address: &str,
-        stem: &str,
-        export: &str,
-    ) -> ComponentCapabilities {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &ReplaceComponent {
-                target: replace_target(address),
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                export: Some(export.to_owned()),
-            },
-        );
+    /// Send `wasm` as a republish with no instance configs and return the
+    /// types it published, panicking with `label` on a refusal.
+    fn replace_wasm(&mut self, engine: EngineId, wasm: Vec<u8>, label: &str) -> Vec<ReplacedType> {
+        let replies = self.call(Some(engine), "aether.component", &ReplaceComponent { wasm, configs: Vec::new() });
         let payload = single_reply(&replies, "ReplaceComponent");
         match ReplaceResult::decode_from_bytes(&payload) {
-            Some(ReplaceResult::Ok { capabilities }) => capabilities,
-            Some(ReplaceResult::Err { error }) => {
-                panic!("replace with {stem:?}@{export:?} failed: {error}")
-            }
+            Some(ReplaceResult::Ok { types }) => types,
+            Some(ReplaceResult::Err { error }) => panic!("replace with {label:?} failed: {error}"),
             None => panic!("undecodable ReplaceResult"),
         }
     }
@@ -1139,13 +1081,6 @@ fn boot_hub(
 
 /// Exactly one `ReplyEvent` payload, panicking if a call that should
 /// yield a single reply yielded zero or many.
-/// The `ReplaceComponent.target` for a scenario-supplied component address.
-/// A malformed address is a scenario bug, so it panics naming the text.
-fn replace_target(address: &str) -> ErasedActorPath {
-    ErasedActorPath::new(address)
-        .unwrap_or_else(|error| panic!("replace target {address:?} is not an actor path: {error}"))
-}
-
 fn single_reply(replies: &[ReplyEnvelope], label: &str) -> Vec<u8> {
     match replies {
         [one] => one.payload.clone(),

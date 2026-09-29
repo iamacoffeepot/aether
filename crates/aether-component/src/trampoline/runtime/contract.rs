@@ -1,11 +1,3 @@
-//! Contract refusal on replace (ADR-0231 §5): a replacement whose hosted type
-//! drops or changes a handler row of the predecessor's hosted type, or drops
-//! its `#[fallback]`, is refused before the old instance is touched. Added
-//! rows and an added fallback are allowed; config, docs and assets are not
-//! compared. The rule is the one the registry holds a republished route
-//! contract to, [`RouteContract::first_break`], so a replace the trampoline
-//! lets through is one whose republish the registry accepts.
-//!
 //! Carried-context refusal (ADR-0139 §4, #6429): a replacement whose module
 //! does not declare the kind of a request context the old instance carries is
 //! refused after the old instance's hooks ran, and the old instance is
@@ -20,36 +12,10 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use aether_data::ActorId;
-use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::wasm::component::InlineChildType;
 use aether_substrate::actor::wasm::module::ModuleManifest;
 use aether_substrate::mail::KindId;
-use aether_substrate::mail::registry::{ContractBreak, RouteContract};
-
-/// The first break the replacement makes in the predecessor's contract, or
-/// `None` when it keeps every row and, if the predecessor has one, the
-/// fallback.
-pub(super) fn contract_break(
-    predecessor: &ComponentCapabilities,
-    replacement: &ComponentCapabilities,
-) -> Option<ContractBreak> {
-    RouteContract::from_capabilities(predecessor).first_break(&RouteContract::from_capabilities(replacement))
-}
-
-/// The refusal error naming the actor, by the replace request's own target,
-/// and the break: the first kind whose contract the replacement changes, by
-/// `kind_label`, or its dropped fallback. One constructor, so every refusal
-/// reads the same.
-pub(super) fn contract_refusal(
-    actor: &impl Display,
-    contract_break: ContractBreak,
-    kind_label: impl FnOnce(KindId) -> String,
-) -> String {
-    match contract_break {
-        ContractBreak::Row(kind) => format!("{actor} replacement changes its contract for {}", kind_label(kind)),
-        ContractBreak::Fallback => format!("{actor} replacement drops its fallback"),
-    }
-}
+use aether_substrate::mail::registry::RouteContract;
 
 /// The type every actor a module can spawn inline publishes on its alias,
 /// keyed by its actor-type tag (`ActorId::singleton(NAMESPACE)`): the

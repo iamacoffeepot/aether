@@ -35,7 +35,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
-use crate::mail::{MailboxId, Source};
+use crate::mail::{KindId, MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 
 /// The externally-pumped dispatch home for a native actor (ADR-0160 §1).
@@ -116,6 +116,20 @@ where
         while let Some(env) = self.binding.try_recv() {
             dispatch_envelope::<A>(actor, &self.binding, &self.slots, env);
         }
+    }
+
+    /// Dispatch the one envelope at the head of the actor's inbox, through
+    /// the same `dispatch_envelope` body [`Self::drain_available`] runs, and
+    /// answer its kind; `None` when the inbox is empty or the slot has shut
+    /// down. A driver that must stop between two envelopes steps with this —
+    /// a test holding the component host after one reply's turn, before the
+    /// work that turn staged comes back to it.
+    pub fn dispatch_one(&mut self) -> Option<KindId> {
+        let actor = self.actor.as_mut()?;
+        let env = self.binding.try_recv()?;
+        let kind = env.kind;
+        dispatch_envelope::<A>(actor, &self.binding, &self.slots, env);
+        Some(kind)
     }
 
     /// Run one bounded host-originated turn against this actor's mutable

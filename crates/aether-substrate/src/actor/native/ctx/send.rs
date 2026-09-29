@@ -180,21 +180,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.push_envelope_tracked(target, kind, bytes, self.outbound_parent(), self.outbound_root())
     }
 
-    /// [`Self::send_envelope_tracked_to`] under an explicit `root` in place of
-    /// this handler's in-flight lineage, with no parent: the send a later
-    /// turn makes on behalf of the chain a deferred reply holds open. `None`
-    /// mints a fresh root, as a chain-root send does. The body of
-    /// [`TaskDone::forward_tracked`](crate::actor::native::TaskDone::forward_tracked).
-    pub(crate) fn send_envelope_tracked_under(
-        &self,
-        target: ErasedActorRef,
-        kind: KindId,
-        bytes: &[u8],
-        root: Option<MailId>,
-    ) -> Option<MailId> {
-        self.push_envelope_tracked(target, kind, bytes, None, root)
-    }
-
     /// The push behind the tracked and detached envelope sends: refuse an
     /// engine-only `kind`, then [`Self::push_encoded`].
     fn push_envelope_tracked(

@@ -14,7 +14,6 @@ use aether_data::{ErasedActorPath, Kind, KindDescriptor, KindId, RequestId};
 use aether_kinds::ComponentCapabilities;
 
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::offload::blocking::{DispatchId, IntoDeferredReply};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
 use crate::mail::attachments::plain_payload;
@@ -131,8 +130,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The [`AdmissionRefusal`] a publish of `module` would be refused with.
     ///
-    /// Consumer: the component host's republish, which refuses a contract
-    /// break before any guest is touched.
+    /// Consumer: the component host's republish pre-check, which answers an
+    /// unchanged module with no swap, refuses a module with no predecessor,
+    /// and refuses a contract break before any guest prepares.
     #[cfg(feature = "wasm")]
     pub fn admission_preview(&self, module: &Module) -> Result<Admitted, AdmissionRefusal> {
         self.binding.mailer().registry().admission_preview(module)
@@ -176,30 +176,5 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let completion = self.binding.dispatch_stage::<RegistryBatchResult>(self.acquire_settlement_hold(), request);
         self.binding.stage_owner_batch(batch, completion);
         request
-    }
-
-    /// Stage a typed registry-owner batch whose completion inherits an
-    /// already-owed reply: a [`Held`](crate::actor::native::Held) the
-    /// handler armed with [`Self::hold`], a [`DeferredReply`](crate::actor::native::DeferredReply),
-    /// or a [`TaskDone`](crate::actor::native::TaskDone). The completion
-    /// carries `owed`'s settlement hold and reply target, so the eventual
-    /// terminal reply reaches the caller `owed` captured (ADR-0243 §1).
-    ///
-    /// [`Self::stage_registry_batch`] arms from this ctx's own hold and reply
-    /// target instead; after a `hold` has taken that obligation, arming it
-    /// again would owe the caller a second reply.
-    ///
-    /// Consumer: the component host, which publishes a loaded or replacing
-    /// module with the reply its load or replace handler holds.
-    pub fn stage_registry_batch_from<R, C>(&mut self, owed: R, batch: RegistryBatch, context: C) -> DispatchId
-    where
-        R: IntoDeferredReply,
-        C: Send + 'static,
-    {
-        let (hold, reply_to) = owed.into_deferred_reply().into_parts();
-        let completion = self.binding.dispatch_arm::<RegistryBatchResult, _>(hold, reply_to, context);
-        let id = completion.dispatch_id();
-        self.binding.stage_owner_batch(batch, completion);
-        id
     }
 }
