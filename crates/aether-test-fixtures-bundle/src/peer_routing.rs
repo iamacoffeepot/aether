@@ -7,8 +7,6 @@
 //! actors and observe whether the caller reached the target at its published
 //! name.
 
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{Bump, SubstrateHarnessObserver, TickObserved};
 

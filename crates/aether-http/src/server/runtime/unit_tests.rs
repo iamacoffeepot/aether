@@ -58,9 +58,8 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
 
 /// ADR-0155 §3: a server composed disabled claims its mailbox but binds
 /// no socket, so its route-registration surface must fail fast with an
-/// `Err` reply (the fail-fast convention the headless caps use) rather
-/// than the mail warn-dropping at an unknown mailbox. The request names a
-/// live `HttpRouter` holder, so the mail decodes and reaches the handler:
+/// `Err` reply rather than the mail warn-dropping at an unknown mailbox. The
+/// request names a live `HttpRouter` holder, so the mail decodes and reaches the handler:
 /// the bug this catches is the disabled branch no longer answering.
 #[test]
 fn disabled_http_server_err_replies_to_register_route() {

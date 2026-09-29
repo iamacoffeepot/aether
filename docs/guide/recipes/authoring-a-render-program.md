@@ -413,8 +413,8 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 fn on_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResult) {
     match result {
         ProgramRegisterResult::Ok { program_id } => self.program_id = Some(program_id),
-        // Err is also the headless chassis's fail-fast reply — disable
-        // the feature for the session rather than re-registering.
+        // Err means this session cannot run the program — disable the
+        // feature for the session rather than re-registering.
         ProgramRegisterResult::Err { error } => tracing::warn!(%error, "program register refused"),
     }
 }

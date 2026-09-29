@@ -226,10 +226,10 @@ it's handed. The shipped graphs:
   submit/present runs after `Render` settles, so a submission integrates the
   fully-settled state of the frame.
 - **Headless** runs `tick_only_lifecycle_params` — `Tick → Tick`, looping, with
-  the `Quit` escape to `Shutdown` on `Tick`. Its render capability is a no-op, so
-  a `Render` stage would settle to no work; a component that subscribes `Render`
-  here gets the fail-fast `Err` and is a no-op on render, while its `Tick` path
-  runs unchanged.
+  the `Quit` escape to `Shutdown` on `Tick`. Headless composes no render actor,
+  so a component that depends on render is refused at load there; one that
+  subscribes `Render` without depending on render gets the lifecycle's `Err`
+  for a stage the graph omits, while its `Tick` path runs unchanged.
 - **The hub** is a coordinator, not a frame-driven host — it runs no lifecycle
   graph.
 

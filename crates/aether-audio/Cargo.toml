@@ -77,9 +77,8 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # The cap unit tests use the `aether_substrate::testing` fixtures, enabled by
 # the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The integration tests compose `AudioCapability` (on a `null` output) and the
-# fail-fast `HeadlessAudioCapability` on the in-process harness and assert on
-# their replies.
+# The integration tests compose `AudioCapability` (on a `null` output) on the
+# in-process harness and assert on its replies.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The handler integration tests write their WAV fixtures with it.
 hound = { workspace = true }

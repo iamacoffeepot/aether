@@ -10,11 +10,9 @@ publish = false
 # crate. Owns the full clipboard stack: the
 # request/reply mail kinds (`kinds`), the `ClipboardConfig` backend
 # selector (`config`), the `ClipboardCapability` identity + system /
-# in-memory runtime (`runtime`), and the fail-fast
-# `HeadlessClipboardCapability` companion (`headless` +
-# `runtime::headless`). It is a
-# pure leaf — no other capability depends on it, so capabilities keeps no
-# `aether-clipboard` dependency (no facade).
+# in-memory runtime (`runtime`). It is a pure leaf — no other capability
+# depends on it, so capabilities keeps no `aether-clipboard` dependency (no
+# facade).
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity, kinds, and `HandlesKind` markers compile always-on;
@@ -44,11 +42,8 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-# The fail-fast companion test boots the `aether_substrate::testing`
-# mailer fixture, enabled by the substrate `test-support` feature.
-aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The clipboard round-trip / unavailable-path integration test boots the
-# in-process harness harness and composes each clipboard variant on it.
+# The clipboard round-trip integration test boots the in-process harness and
+# composes the clipboard cap on it.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 
 [lints]

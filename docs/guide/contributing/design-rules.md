@@ -668,6 +668,25 @@ There is no optional dependency and no optional send.
   send site.
 - **Settled:** ADR-0232 §6 (no optional peers; headless stubs claim the
   mailbox).
+- **Superseded by:** [R-0047](#r-0047)
+
+### R-0047: Compose only the capabilities a chassis serves {#r-0047}
+
+A chassis composes an actor for a capability only where it serves that
+capability. A capability it cannot serve has no actor there, and nothing
+stands in for it at its mailbox. A component that depends on an absent
+capability is refused where it would stand up, and the refusal names the
+dependency (`<actor> depends on aether.render, which is not live`); an actor
+that needs a capability a chassis cannot serve is not supported on that
+chassis. A capability that depends on an absent one is absent with it. There
+is no optional dependency and no optional send.
+
+- **Why:** a stub lets an actor load where it cannot work and fail one request
+  at a time; the refusal at load says so once, where the actor stands up.
+- **Settled:** ADR-0232 §6 as amended 2026-09-29 (a chassis composes only
+  what it serves); #7136 (the headless window stub deleted); #6942 (the
+  render, audio, clipboard, and substrate-harness stubs deleted, and text
+  leaves headless with render).
 
 ### R-0024: Keep a service that owns a shared resource as one actor {#r-0024}
 
@@ -856,3 +875,4 @@ line is edited or removed:
 - 2026-09-27 · #6923 · how the component host holds a guest it spawned → as a protocol reference over a minimum control protocol every wasm actor publishes at its own route (drop, boot teardown, replace), since the host cannot name the guest's concrete type · follows [R-0044](#r-0044), [R-0045](#r-0045)
 - 2026-09-27 · #6920 · a native namespace several linked types publish → allowed; the chassis selects one by composing it, and a second composition fails the boot (and so the bootstrap), replacing the build-time contest · follows [R-0046](#r-0046)
 - 2026-09-28 · #6920 · a module publish whose actors declare dependencies this engine lacks → admitted; publishing imports code, and `depends(R)` is checked when an actor is stood up
+- 2026-09-29 · #6942 (ADR-0232 §6) · the stubs R-0046 cited as the declared possibility of companion singletons → deleted; no chassis composes a stand-in at a capability's mailbox, and several linked types at one native namespace stays allowed with at most one composed · follows [R-0046](#r-0046), [R-0047](#r-0047)

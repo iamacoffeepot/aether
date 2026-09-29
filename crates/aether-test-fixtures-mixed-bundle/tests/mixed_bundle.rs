@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{ProtocolRef, Undeclared};
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, CallInput, CallProgram, ClosureArtifact, Digest, EncodedArtifact, Evaluated, Event, Head,
     HeadMoved, Invoke, Invoked, JournalEntry, OpaqueBytes, PROGRAMS_SECTION, ProgramName, REACTORS_SECTION, Ref,
@@ -12,7 +12,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_program::declarations;
 use aether_data::{Cites, ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness};
 use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 use wasmparser::{Parser, Payload};
@@ -49,17 +49,28 @@ fn section_bytes(wasm: &[u8], name: &str) -> Vec<u8> {
     section
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> (ErasedActorRef, ErasedActorPath) {
+/// The mixed root's program and reactor rows, as the test names a root type it cannot type.
+#[aether_actor::protocol]
+trait MixedRoot {
+    fn invoke(mail: Invoke) -> Invoked;
+    fn warm(mail: Warm) -> Undeclared;
+    fn event(mail: Event) -> Undeclared;
+    fn status(mail: StatusQuery) -> Status;
+}
+
+fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> (ProtocolRef<MixedRoot>, ErasedActorPath) {
     let loaded = harness.load_any(&LoadComponent {
         wasm,
         name: Some(digest.to_owned()),
         config: Vec::new(),
         export: Some(BUNDLE_NAMESPACE.to_owned()),
     });
-    loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}"))
+    let (root, path) = loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}"));
+    let root = harness.cast::<MixedRoot>(root).unwrap_or_else(|error| panic!("cast {path}: {error}"));
+    (root, path)
 }
 
-fn reply<K: Kind>(harness: &mut SubstrateHarness, root: ErasedActorRef, mail: &impl Kind, label: &str) -> K {
+fn reply<K: Kind, M: Kind, I>(harness: &mut SubstrateHarness, root: impl SendTarget<M, I>, mail: &M, label: &str) -> K {
     harness
         .execute(vec![(label, HarnessOp::send_and_await_reply(root, mail))])
         .unwrap_or_else(|error| panic!("{label}: {error}"))
@@ -102,20 +113,23 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         input_artifact.claimed().unverified(),
         vec![text_artifact, input_artifact],
     );
-    match reply::<Invoked>(&mut harness, root, &invoke, "invoke-one") {
+    let invoked: Invoked = reply(&mut harness, &root, &invoke, "invoke-one");
+    match invoked {
         Invoked::Completed { seq: 1, .. } => {}
         other => panic!("expected Completed seq 1, got {other:?}"),
     }
 
     let tree = Ref::<Tree>::from_digest(Digest::from_bytes([2; 32]));
     let warmup = Warm::new(WarmEntries::new(vec![moved_to(1, "current", tree)]).expect("dense"));
-    match reply::<Warmed>(&mut harness, root, &warmup, "warm") {
+    let warmed: Warmed = reply(&mut harness, &root, &warmup, "warm");
+    match warmed {
         Warmed::Folded { through: 1 } => {}
         other => panic!("expected Folded through 1, got {other:?}"),
     }
 
     let moved = moved_to(2, "inputs", Ref::<SummarizeInput>::from_digest(Digest::from_bytes([7; 32])));
-    match reply::<Evaluated>(&mut harness, root, &Event::new(moved), "event") {
+    let evaluated: Evaluated = reply(&mut harness, &root, &Event::new(moved), "event");
+    match evaluated {
         Evaluated::Completed { seq: 2, intents } => {
             assert_eq!(intents.len(), 1);
             let intent = &intents[0];
@@ -132,7 +146,8 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         other => panic!("{other:?}"),
     }
 
-    assert_eq!(reply::<Status>(&mut harness, root, &StatusQuery, "status"), Status::new(2, false));
+    let status: Status = reply(&mut harness, &root, &StatusQuery, "status");
+    assert_eq!(status, Status::new(2, false));
 
     let second_artifact = closure_of(&input)?;
     let second = Invoke::new(
@@ -141,7 +156,8 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         second_artifact.claimed().unverified(),
         vec![ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec()), second_artifact],
     );
-    match reply::<Invoked>(&mut harness, root, &second, "invoke-two") {
+    let invoked: Invoked = reply(&mut harness, &root, &second, "invoke-two");
+    match invoked {
         Invoked::Completed { seq: 2, .. } => {}
         other => panic!("expected Completed seq 2, got {other:?}"),
     }

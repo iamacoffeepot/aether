@@ -70,10 +70,6 @@ mod device;
 // lazily as wgpu buffers at first GPU use (the draw-pass slice records
 // against the realized side).
 mod geometry;
-// The `HeadlessRenderCapability` companion's runtime half (identity in the
-// crate-root `headless` module) — a nested child so the same `mod runtime;`
-// gate covers it.
-mod headless;
 mod material;
 // The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
 // so painter order inside the overlay pass is receipt order across the three.

@@ -1,14 +1,12 @@
 //! `aether.clipboard` request/reply round trips over a
-//! [`SubstrateHarness`]: the in-memory backend's set-then-get and the
-//! fail-fast unavailable path (`HeadlessClipboardCapability`).
+//! [`SubstrateHarness`]: the in-memory backend's set-then-get.
 //!
-//! Minimal composition (issue #3764): each test composes exactly the
-//! clipboard cap variant it exercises on the harness basics — no render,
-//! no wgpu gate.
+//! Minimal composition (issue #3764): the test composes exactly the
+//! clipboard cap on the harness basics — no render, no wgpu gate.
 
 use aether_clipboard::{
-    ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability,
-    SetClipboardText, SetClipboardTextResult,
+    ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult, SetClipboardText,
+    SetClipboardTextResult,
 };
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
@@ -36,28 +34,4 @@ fn clipboard_set_then_get_round_trips_in_memory() {
         result.reply::<GetClipboardTextResult>("get").expect("decode GetClipboardTextResult"),
         GetClipboardTextResult::Ok { text: "copy then paste".to_owned() },
     );
-}
-
-#[test]
-fn unavailable_clipboard_err_replies_to_get_and_set() {
-    // Issue #3765: the unavailable-mode round trip needs only the
-    // fail-fast clipboard on the harness basics.
-    let mut harness = SubstrateHarness::builder().with_actor::<HeadlessClipboardCapability>(()).build().expect("boot");
-    let clipboard = harness.actor_ref::<HeadlessClipboardCapability>();
-
-    let result = harness
-        .execute(vec![
-            ("get", HarnessOp::send_and_await_reply(&clipboard, &GetClipboardText)),
-            ("set", HarnessOp::send_and_await_reply(&clipboard, &SetClipboardText { text: "ignored".to_owned() })),
-        ])
-        .expect("unavailable clipboard replies");
-
-    assert!(matches!(
-        result.reply::<GetClipboardTextResult>("get").expect("decode GetClipboardTextResult"),
-        GetClipboardTextResult::Err { .. }
-    ));
-    assert!(matches!(
-        result.reply::<SetClipboardTextResult>("set").expect("decode SetClipboardTextResult"),
-        SetClipboardTextResult::Err { .. }
-    ));
 }

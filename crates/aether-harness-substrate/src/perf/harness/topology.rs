@@ -121,6 +121,21 @@ pub fn depth_chain(d: usize) -> Topology {
     Topology { name: format!("depth-{d}"), work_iters: vec![0; downstreams.len()], tier: Tier::Light, downstreams }
 }
 
+/// `0 -> {1..=b} -> b+1`: the entry fans to `b` relays, and each sends one
+/// mail on to the shared nexus `b+1`, which so receives `b` single-mail
+/// flushes per root. The many-senders-one-receiver shape of a hub actor,
+/// where a lone mail per flush and a busy recipient dominate
+/// (iamacoffeepot/aether#7130, #7134).
+#[must_use]
+pub fn fanin(b: usize) -> Topology {
+    let mut downstreams = vec![vec![]; b + 2];
+    downstreams[0] = (1..=b).collect();
+    for relay in &mut downstreams[1..=b] {
+        *relay = vec![b + 1];
+    }
+    Topology { name: format!("fanin-{b}"), work_iters: vec![0; downstreams.len()], tier: Tier::Light, downstreams }
+}
+
 /// `0 -> {1, 2, ..., b}`. Entry fans to b leaves.
 #[must_use]
 pub fn fanout(b: usize) -> Topology {
@@ -359,6 +374,7 @@ pub fn default_topologies() -> Vec<Topology> {
         t.push(fanout(b));
     }
     t.push(two_level_tree());
+    t.push(fanin(8));
     t
 }
 
@@ -380,7 +396,7 @@ fn light_topologies() -> Vec<Topology> {
     let mut topos = if topos_full() {
         default_topologies()
     } else {
-        vec![depth_chain(1), depth_chain(8), fanout(4), fanout(8), two_level_tree()]
+        vec![depth_chain(1), depth_chain(8), fanout(4), fanout(8), two_level_tree(), fanin(8)]
     };
     for w in wide_fanout_widths_from_env() {
         topos.push(fanout(w));
@@ -526,6 +542,20 @@ mod tests {
         // last is a leaf — bounded, unrolled, never a cycle.
         let leaves = t.downstreams.iter().filter(|d| d.is_empty()).count();
         assert_eq!(leaves, 1, "a chain has a single leaf");
+    }
+
+    /// Every relay of a fan-in feeds the one nexus, so it receives `b` mails
+    /// per root: a mis-indexed nexus would scatter them and measure fan-out.
+    #[test]
+    fn fanin_converges_every_relay_on_one_nexus() {
+        let b = 8;
+        let t = fanin(b);
+        let nexus = b + 1;
+
+        assert_eq!(t.downstreams[0], (1..=b).collect::<Vec<_>>(), "the entry fans to every relay");
+        assert!(t.downstreams[1..=b].iter().all(|d| d == &vec![nexus]), "every relay sends only to the nexus");
+        assert!(t.downstreams[nexus].is_empty(), "the nexus is the leaf");
+        assert_eq!(runtime_ping_volume(&t), 1 + 2 * b, "one root, b relay hops, b nexus arrivals");
     }
 
     #[test]

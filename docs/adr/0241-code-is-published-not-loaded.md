@@ -102,9 +102,10 @@ one implementation is published per namespace per engine.
   records the namespace, the linked types that declare it, and which of them
   this engine has born there: its rows, `Dispatch::capabilities()`, already
   stand on every route it publishes at birth, and join the table with their
-  first reader. Several linked types may share one native namespace, because
-  a chassis composes exactly one of them (a capability and its headless stub,
-  say). The engine's first birth at a native namespace holds it for the
+  first reader. Several linked types may share one native namespace, and a
+  chassis composes at most one of them; no two capabilities pair that way
+  today, since a chassis composes nothing for a capability it cannot serve
+  (ADR-0232 §6). The engine's first birth at a native namespace holds it for the
   engine's lifetime, and a birth of any other type there is refused, so a
   second type composed at a held namespace fails the boot and with it the
   bootstrap (R-0046).

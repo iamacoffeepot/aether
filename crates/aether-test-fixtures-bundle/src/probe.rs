@@ -48,11 +48,6 @@
 //! Consumers load it from the `probe` bundle stem with
 //! `export: Some("test.probe_with_config")` (ADR-0096).
 
-// `on_key` only re-broadcasts the inbound payload, so it doesn't touch
-// `self`; it keeps `&mut self` to match the `#[handler]` dispatch ABI.
-// `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;

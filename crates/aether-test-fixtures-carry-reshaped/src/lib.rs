@@ -18,8 +18,6 @@
 //! §4), so the context's `Kind::ID` changes, and swapping the bundle's relay
 //! to this export while a held reply is carried must be refused.
 
-#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `CarryRequester` is stateless — the same allow the bundle's `correlation_carry` carries
-
 use aether_actor::{ActorInitError, Held, Pending, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
     CarriedReplyMatched, CarriedRequestResult, HeldRequest, HeldRequestResult, RunCarriedRequest,

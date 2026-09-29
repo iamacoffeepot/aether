@@ -311,7 +311,6 @@ impl WasmActor for LabelWidget {
     /// motion and presses over it are routed here. It acts on the hover edges
     /// the root derives, never on raw pointer mail, so the rest is dropped
     /// rather than warned about once per kind.
-    #[allow(clippy::unused_self)] // the fallback ABI always receives the actor
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }

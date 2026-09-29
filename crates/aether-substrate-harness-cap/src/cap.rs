@@ -7,11 +7,6 @@
 //! `ChassisEvent::Advance` onto the embedder's event channel; the
 //! embedder's `run_frame` loop processes the event and replies through the
 //! request's retained inbound when the requested ticks finish.
-//!
-//! Companion: [`UnsupportedSubstrateHarnessCapability`](crate::unsupported_cap::UnsupportedSubstrateHarnessCapability)
-//! claims the same mailbox on desktop / headless and replies `Err` so
-//! agents fail fast. Mirrors the pattern from
-//! `RenderCapability` / `HeadlessRenderCapability`.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the

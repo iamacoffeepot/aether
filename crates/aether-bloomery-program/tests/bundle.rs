@@ -35,6 +35,12 @@ struct RefuseInput {
     marker: u32,
 }
 
+/// The bundle root's program row, as the test names a root type it cannot type.
+#[aether_actor::protocol]
+trait ProgramRoot {
+    fn invoke(mail: Invoke) -> Invoked;
+}
+
 fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box<dyn Error>> {
     Ok(EncodedArtifact::new(value)?)
 }
@@ -111,6 +117,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
         hash.is_some_and(|hash| hash.len() == 64),
         "the root publishes as {BUNDLE_NAMESPACE}.<module hash>: {namespace}"
     );
+    let root = harness.cast::<ProgramRoot>(root)?;
 
     let text = "hello";
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
@@ -123,7 +130,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
         vec![text_artifact, input_artifact],
     );
     let summarized = harness
-        .execute(vec![("summarize", HarnessOp::send_and_await_reply(root, &summarize))])
+        .execute(vec![("summarize", HarnessOp::send_and_await_reply(&root, &summarize))])
         .expect("summarize invoke");
     let Invoked::Completed { seq, result, staged } =
         summarized.reply::<Invoked>("summarize").expect("decode summarize Invoked")
@@ -157,7 +164,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
         vec![refuse_artifact],
     );
     let refused =
-        harness.execute(vec![("refuse", HarnessOp::send_and_await_reply(root, &refuse))]).expect("refuse invoke");
+        harness.execute(vec![("refuse", HarnessOp::send_and_await_reply(&root, &refuse))]).expect("refuse invoke");
     match refused.reply::<Invoked>("refuse").expect("decode refuse Invoked") {
         Invoked::Refused { seq, refusal: Refusal::Refused { .. } } => assert_eq!(seq, 2),
         other => panic!("expected Refused, got {other:?}"),
@@ -165,7 +172,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
 
     let unknown = Invoke::new(3, program_name("test.program.missing"), summarize.input(), Vec::new());
     let rejected =
-        harness.execute(vec![("unknown", HarnessOp::send_and_await_reply(root, &unknown))]).expect("unknown invoke");
+        harness.execute(vec![("unknown", HarnessOp::send_and_await_reply(&root, &unknown))]).expect("unknown invoke");
     match rejected.reply::<Invoked>("unknown").expect("decode unknown Invoked") {
         Invoked::Rejected { seq, .. } => assert_eq!(seq, 3),
         other => panic!("expected Rejected, got {other:?}"),

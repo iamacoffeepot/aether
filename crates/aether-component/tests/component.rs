@@ -452,9 +452,9 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // each bump's whole chain, so all three land before the query.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
             ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
@@ -517,9 +517,9 @@ fn replace_preserves_state_via_typed_state_kind() {
     // Bump the counter to 3, then read it back.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
             ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
@@ -585,9 +585,9 @@ fn typed_state_decode_miss_boots_fresh() {
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
             ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
@@ -654,8 +654,8 @@ fn childless_component_hot_reloads_unchanged() {
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
             ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");

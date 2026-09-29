@@ -22,7 +22,8 @@ Across these systems, preserve the same boundary rules:
 - inputs, buffers, in-flight work, and lifetimes are bounded;
 - failures become typed replies or terminal events;
 - credentials and raw handles stay native;
-- headless/disabled backends fail fast rather than hang settlement.
+- disabled backends fail fast rather than hang settlement, and a chassis that
+  cannot serve a capability composes none, so a dependent is refused at load.
 
 Use a higher-level capability when it exists. HTTP route actors are safer and
 more observable than reimplementing HTTP over raw TCP; content-generation

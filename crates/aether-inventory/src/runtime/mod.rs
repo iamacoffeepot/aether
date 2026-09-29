@@ -50,7 +50,7 @@ impl NativeActor for InventoryCapability {
     type Config = ();
 
     /// ADR-0088 §6 chassis-owned mailbox. Registered on the desktop +
-    /// headless chassis (via `with_full_stack_caps`), matching `aether.fs`.
+    /// headless chassis (via `with_rpc_server`).
     const NAMESPACE: &'static str = "aether.inventory";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<InventoryCapabilityState, BootError> {
@@ -201,14 +201,15 @@ impl NativeActor for InventoryCapability {
     // Read from the process-global link-time inventory.
     //
     // Field-identical rows are deduped (ADR-0160 §Decision 2): two
-    // `#[actor]` blocks can legitimately share one `NAMESPACE` — the
-    // pumped `RenderCapability` and its headless companion both claim
-    // `aether.render` and, linked into one binary, each submit the same
-    // `(namespace, id, name, reply)` handler rows into the link-time-global
-    // inventory. The rows carry no per-instance state, so equality-dedup is
-    // lossless and keeps `describe_handlers` from double-reporting each
-    // shared handler. `HashSet::insert` keeps the
-    // first occurrence, preserving inventory order for the survivors.
+    // `#[actor]` blocks that share one `NAMESPACE` and are linked into one
+    // binary each submit the same `(namespace, id, name, reply)` handler
+    // rows into the link-time-global inventory. No capability pairs a
+    // served actor with a stand-in at its namespace any more (ADR-0232 §6),
+    // but nothing in the link-time inventory forbids a shared namespace. The
+    // rows carry no per-instance state, so equality-dedup is lossless and
+    // keeps `describe_handlers` from double-reporting a shared handler.
+    // `HashSet::insert` keeps the first occurrence, preserving inventory
+    // order for the survivors.
     #[handler::single]
     fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
         let mut seen = HashSet::new();
@@ -549,7 +550,6 @@ mod tests {
         /// A synchronous `-> ProbeReply` handler — the reply contract
         /// the link-time inventory captures. Stateless: the link-time
         /// `HandlerEntry` is what the test reads, not handler state.
-        #[allow(clippy::unused_self)]
         #[handler::single]
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}
@@ -557,13 +557,11 @@ mod tests {
     }
 
     // Two field-identical link-time `HandlerEntry` rows submitted directly
-    // into the process-global inventory — the shape a binary linking both
-    // `aether.render` runtimes produces (ADR-0160 §Decision 2): the pumped
-    // `RenderCapability` and its headless companion share
-    // `NAMESPACE = "aether.render"` and each emit the same
-    // `(namespace, id, name, reply)` rows. `HandlerEntry` holds only
-    // `'static` data, so a bare `inventory::submit!` reproduces the duplicate
-    // without standing up either cap.
+    // into the process-global inventory — the shape a binary linking two
+    // `#[actor]` blocks that share one `NAMESPACE` produces (ADR-0160
+    // §Decision 2): each emits the same `(namespace, id, name, reply)` rows.
+    // `HandlerEntry` holds only `'static` data, so a bare `inventory::submit!`
+    // reproduces the duplicate without standing up either actor.
     inventory::submit! {
         HandlerEntry {
             namespace: "aether.test.window_dedup",
@@ -582,11 +580,11 @@ mod tests {
     }
 
     /// Two field-identical link-time `HandlerEntry` rows fold to a single
-    /// served row. Guards the ADR-0160 §Decision 2 dedup: a desktop binary
-    /// links both `aether.window` runtimes (the desktop cap + the headless
-    /// companion), which submit identical `(namespace, id, name, reply)`
-    /// rows into the link-time-global inventory; without the dedup
-    /// `describe_handlers` double-reports every window handler.
+    /// served row. Guards the ADR-0160 §Decision 2 dedup: a binary linking two
+    /// actors that share one namespace submits identical
+    /// `(namespace, id, name, reply)` rows into the link-time-global
+    /// inventory; without the dedup `describe_handlers` double-reports every
+    /// shared handler.
     #[test]
     fn on_handlers_folds_field_identical_rows() {
         let fixture = InventoryFixture::boot();

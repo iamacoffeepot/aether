@@ -16,10 +16,6 @@
 //! Component record" check.
 
 #![allow(dead_code)]
-// Manifest-probe fixture's `#[handler]` / `#[fallback]` bodies are
-// stubs that exercise the const-emission path — they have to keep
-// `&mut self` to match the dispatch ABI but don't read state.
-#![allow(clippy::unused_self)]
 
 use aether_actor::__macro_internals::{WasmPlacementFacts, dependency_records_len, write_dependency_records};
 use aether_actor::{

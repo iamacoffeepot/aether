@@ -5,7 +5,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
+use aether_actor::{ActorRef, Addressable, CastTarget, ChildOf, ErasedActorRef, Instanced, ProtocolRef, Root};
 use aether_data::{ErasedActorPath, Kind, KindId, LoadName, MailId, ReplyContract, SessionToken};
 use aether_kinds::{CostTail, CostTailResult};
 use crossbeam_channel::Receiver;
@@ -236,6 +236,18 @@ impl<C: Chassis> PassiveChassis<C> {
     #[must_use]
     pub fn published_contract(&self, actor: ErasedActorRef) -> Option<(Vec<(KindId, ReplyContract)>, bool)> {
         self.booted.spawner.mailer().registry().published_contract(actor.id()).map(RouteContract::into_parts)
+    }
+
+    /// Type an erased reference `actor` as the protocol `P` (ADR-0231 §4's
+    /// guard cast), or answer `None`: the same registry cast
+    /// [`NativeCtx::cast`](crate::actor::native::NativeCtx::cast) calls. It
+    /// reads the route's `Live` published rows once, and `P::admits` applies
+    /// the exact-rows rule.
+    ///
+    /// Consumer: `SubstrateHarness::cast`.
+    #[must_use]
+    pub fn cast<P: CastTarget>(&self, actor: ErasedActorRef) -> Option<ProtocolRef<P>> {
+        self.booted.spawner.mailer().registry().cast(actor)
     }
 
     /// `actor`'s per-handler cost rows (ADR-0036), filtered by `request`: what

@@ -34,10 +34,10 @@ The capability has two backend modes:
 Desktop composes the system backend. SubstrateHarness uses the in-memory backend by
 default. If the desktop cannot create the OS clipboard during capability init,
 the chassis build fails; that case does not become a `get_text_result::Err`.
-A chassis without clipboard support can instead install
-`HeadlessClipboardCapability`, which owns the same namespace and replies with
-errors immediately. This is preferable to silently dropping requests or making
-callers special-case mailbox absence.
+A chassis without clipboard support composes no clipboard actor, so a
+component that declares `depends(ClipboardCapability)` is refused at load there,
+naming `aether.clipboard` as the dependency that is not live; callers never
+special-case mailbox absence.
 
 Verify actual installation in the chassis builder or with
 `describe_handlers`. The existence of marker types under a feature means code
@@ -63,14 +63,13 @@ boot error instead.
 
 Do not overload the text kinds with images or platform-specific flavor ids.
 Adding a new data class needs its own schema and explicit cross-platform
-fallback contract. Preserve the fast-fail headless behavior so settlement never
-waits on a request that cannot complete.
+fallback contract. A request the backend cannot complete answers its `Err` arm
+so settlement never waits on it.
 
 ## Change route
 
 - Marker and typed helpers: `crates/aether-clipboard/src/lib.rs`
 - Kinds: `crates/aether-clipboard/src/kinds.rs`
 - System/in-memory runtime: `crates/aether-clipboard/src/runtime/mod.rs`
-- Unsupported runtime: `crates/aether-clipboard/src/runtime/headless.rs`
 - Backend selection: `crates/aether-clipboard/src/config.rs`
-- Chassis installation: `crates/aether-chassis-{desktop,headless,harness}/`
+- Chassis installation: `crates/aether-chassis-{desktop,harness}/`

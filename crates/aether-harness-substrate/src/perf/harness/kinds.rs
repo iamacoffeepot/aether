@@ -1,5 +1,6 @@
 //! The sweep's own mail vocabulary: the payload the relay topology forwards,
-//! and the out-of-band counter query the run-end keep-up harvest answers with.
+//! the out-of-band counter query the run-end keep-up harvest answers with, and
+//! the protocol every harvested participant answers it under.
 
 /// Fire-and-forward payload the relay actors pass along. The `seq`
 /// field is carried for legibility when eyeballing a trace; the relay
@@ -39,4 +40,14 @@ pub struct CountReport {
     /// `Ping` mails this actor received and handled. Relays only; the source
     /// handles `Tick`, never `Ping`, so its `received` is always 0.
     pub received: u64,
+}
+
+/// A sweep participant the run-end harvests query: the tick source and every
+/// relay answer [`CountQuery`] with their [`CountReport`]. The harness holds
+/// each participant as a reference to this protocol, narrowed from its typed
+/// reference, so the harvest sends only what every participant answers.
+#[aether_actor::protocol]
+pub trait PerfParticipant {
+    /// Report this participant's `Ping` counters.
+    fn count(mail: CountQuery) -> CountReport;
 }

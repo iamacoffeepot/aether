@@ -13,10 +13,6 @@
 //! travels with the compiled component and shows up in tooling that
 //! introspects it.
 
-// `#[handler]` methods take `&mut self` to match the dispatch ABI; a handler
-// that ignores `self` keeps the signature anyway.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Ping, Pong, Tick};
 use aether_lifecycle::LifecycleCapability;

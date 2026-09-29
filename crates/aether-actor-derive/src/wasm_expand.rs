@@ -5,8 +5,8 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
-    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, fill_ctx_actor, handler_cfgs,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, attr_is_fallback,
+    attr_is_handler, classify_handler_reply, ctx_names_actor, extract_handler_kind_type, fill_ctx_actor, handler_cfgs,
     parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
     validate_addressable_consts, validate_fallback_sig,
 };
@@ -136,6 +136,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
+                    allow_abi_receiver(&mut f);
                     handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, cfgs });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -145,6 +146,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
+                    allow_abi_receiver(&mut f);
                     fallback = Some(FallbackFn { method: f, agent_doc });
                 } else if name == "init" {
                     init_method = Some(f);

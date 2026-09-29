@@ -65,14 +65,13 @@ Guest code that declares `depends(ExampleCapability)` can mail it with
 `ctx.send::<ExampleCapability>(..)` without linking native adapter state.
 
 Use `singleton` for one chassis mailbox and `instanced` for a family whose
-runtime discriminator/subname is part of identity. An unsupported chassis may
-install a separate headless/fail-fast identity claiming the same public
-namespace.
+runtime discriminator/subname is part of identity. A chassis that cannot serve
+the capability composes no actor for it; see
+[Capabilities a chassis cannot serve](#capabilities-a-chassis-cannot-serve).
 
 Runtime-placement paths let a separate identity's runtime live in a keyed
-module without forcing directory names into actor identity: a companion
-declared `#[actor(singleton, runtime::headless)]` reads
-`runtime/headless.rs`.
+module without forcing directory names into actor identity: an identity
+declared `#[actor(singleton, runtime::other)]` reads `runtime/other.rs`.
 
 When one identity has several backends, keep one identity and one runtime and
 let `Params` pick the backend at boot, compiling each backend in by its
@@ -284,29 +283,24 @@ shared CLI roots name it too, but `FsCapability` is what receives it at `init`,
 so it stays in the cap crate. Ask which crate's code receives the resolved value,
 not which crate's name appears in the knob.
 
-## Fail-fast unsupported actors
+## Capabilities a chassis cannot serve
 
-If a public mailbox exists conceptually but a chassis cannot provide the
-resource, prefer an explicit unsupported actor that replies with the ordinary
-error shape. Examples include headless render/clipboard companions and
-the substrate-harness unsupported marker.
+A chassis composes only the capabilities it serves
+([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md),
+[R-0047](contributing/design-rules.md#r-0047)). When it cannot provide a
+capability's resource, it composes no actor for that capability, and nothing
+else claims the mailbox: there is no stub that answers `Err` or absorbs mail.
+Headless composes no render, window, text, audio, clipboard, or
+substrate-harness actor; desktop and headless compose no substrate-harness
+actor. A component that declares `depends(R)` on an absent capability is
+refused where it would stand up, and the refusal names the dependency:
+`<actor> depends on aether.render, which is not live`. A mail sent over RPC to
+an absent capability's path is answered `RpcError::NotPresent`.
 
-Most companions mirror the primary cap's identity/runtime split symmetrically:
-their identity ZST lives in the crate-root `headless` module
-(`src/headless.rs`, always-on, declared with
-`#[actor(singleton, runtime::headless)]`) and their runtime half in
-`src/runtime/headless.rs`, a nested child covered by the same `mod runtime;`
-gate as the primary runtime. The module-path argument tells the struct-hosted
-`#[actor]` harvest which file to read, resolved relative to the invoking file.
-`aether-render` and `aether-clipboard` are exemplars.
-
-Window has no companion: a chassis without a window peripheral composes no
-window actor, so a component that depends on `WindowCapability` is refused at
-load rather than answered by a stub.
-
-Do not create a stub for fire-and-forget traffic unless it produces useful
-diagnostics and avoids misleading success. The goal is bounded failure, not
-pretend capability.
+A capability that depends on an absent one is absent with it: text depends on
+render, so a chassis without render composes no text. Put such a capability in
+the compose of each chassis that serves its dependencies, never in a helper
+every chassis shares.
 
 ## Tests by boundary
 

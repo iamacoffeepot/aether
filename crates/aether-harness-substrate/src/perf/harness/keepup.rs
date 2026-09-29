@@ -4,11 +4,11 @@
 
 use std::time::Duration;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
 use aether_data::Kind;
 use serde::{Deserialize, Serialize};
 
-use super::{CountQuery, CountReport, Drive};
+use super::{CountQuery, CountReport, Drive, PerfParticipant};
 use crate::{SendTarget, SubstrateHarness};
 
 /// The real tier's keep-up characterisation (iamacoffeepot/aether#1233): a
@@ -46,7 +46,7 @@ pub struct KeepUp {
 /// trace harvest's fail-closed posture.
 pub(super) fn harvest_keepup(
     tb: &mut SubstrateHarness,
-    participants: &[(String, ErasedActorRef)],
+    participants: &[(String, ProtocolRef<PerfParticipant>)],
     topo_name: &str,
     drive: Drive,
     frames: u32,
@@ -55,7 +55,7 @@ pub(super) fn harvest_keepup(
     let mut offered = 0u64;
     let mut completed = 0u64;
     for (name, participant) in participants {
-        let reply = match tb.request_prepared(&(*participant).prepare(&CountQuery::default())) {
+        let reply = match tb.request_prepared(&participant.prepare(&CountQuery::default())) {
             Ok(reply) => reply,
             Err(e) => {
                 tracing::warn!(target: "aether_perf", topo = %topo_name, %name, error = ?e, "count_query send failed");

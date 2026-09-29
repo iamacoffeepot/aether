@@ -6,10 +6,6 @@
 //! hand-computable `Mat4Apply` operand when triggered with a
 //! `Mat4SourceTrigger`.
 
-// The `#[handler]` method takes `&mut self` to match the dispatch ABI
-// even though the actor is stateless.
-#![allow(clippy::unused_self)]
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Mat4Apply;
 use aether_math::{Mat4, Vec4};

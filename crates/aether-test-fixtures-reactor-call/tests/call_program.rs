@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{ProtocolRef, Undeclared};
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, CallInput, CallProgram, Digest, EncodedArtifact, Evaluated, Event, Head, HeadMoved, JournalEntry,
     OpaqueBytes, ProgramName, Ref, Tree, Utf8Text, artifact_digest,
@@ -26,7 +26,13 @@ fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> Jour
     }
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ErasedActorRef {
+/// The reactor root's event row, as the test names a root type it cannot type.
+#[aether_actor::protocol]
+trait CallerRoot {
+    fn event(mail: Event) -> Undeclared;
+}
+
+fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ProtocolRef<CallerRoot> {
     let digest = artifact_digest(OpaqueBytes::ID, &wasm).to_string();
     let loaded = harness.load_any(&LoadComponent {
         wasm,
@@ -34,12 +40,13 @@ fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ErasedActorRef {
         config: Vec::new(),
         export: Some(BUNDLE_NAMESPACE.to_owned()),
     });
-    loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}")).0
+    let (root, path) = loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}"));
+    harness.cast::<CallerRoot>(root).unwrap_or_else(|error| panic!("cast {path}: {error}"))
 }
 
-fn evaluated(harness: &mut SubstrateHarness, root: ErasedActorRef, event: &Event) -> Evaluated {
+fn evaluated(harness: &mut SubstrateHarness, root: ProtocolRef<CallerRoot>, event: &Event) -> Evaluated {
     harness
-        .execute(vec![("event", HarnessOp::send_and_await_reply(root, event))])
+        .execute(vec![("event", HarnessOp::send_and_await_reply(&root, event))])
         .expect("event sequence")
         .reply::<Evaluated>("event")
         .expect("decode Evaluated")

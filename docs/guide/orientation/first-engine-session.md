@@ -90,9 +90,9 @@ Choose evidence suited to the engine:
 - `capture_frame` for a rendered frame when the chassis has a render surface;
 - `send_mail_traced` when you need settlement and reply evidence for one action.
 
-The current headless chassis installs a fail-fast render fallback:
-`capture_frame` returns an unsupported error rather than hanging. Use a desktop
-or otherwise render-capable chassis when the observation requires a frame;
+The headless chassis composes no render actor, so `capture_frame` is refused
+there rather than hanging. Use a desktop or otherwise render-capable chassis
+when the observation requires a frame;
 headless remains useful for mail, logs, costs, and settlement evidence.
 
 If you send mail, use the recipient lineage name and kind name returned by live
