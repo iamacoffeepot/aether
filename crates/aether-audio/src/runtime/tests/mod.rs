@@ -16,54 +16,19 @@ use super::voice::{
     MAX_VOICES, OscVoice, PartialBankVoice, STEAL_RELEASE_SECS, VoiceKernel, build_builtin_kernel, voice_seed,
 };
 use super::*;
-use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
-use aether_fs::{FsError, NamespaceAddr};
-use aether_substrate::actor::native::binding::NativeBinding;
-use aether_substrate::testing::{
-    assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-    fresh_substrate, fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, token_root,
-    unrouted_binding,
-};
-use aether_substrate::{EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
-use crossbeam_queue::ArrayQueue;
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use aether_substrate::Registry;
+use aether_substrate::mail::registry::noop_handler;
+use aether_substrate::testing::registered_ref;
+use std::sync::Arc;
 
 const TEST_RATE: f32 = 48_000.0;
 
-fn read_result_ctx<A>(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, fs_reply_source(correlation_id), None, None)
-}
-
-/// Build a cap with a live event queue but no cpal worker — the
-/// synth-side queue is exercised directly while the handler path
-/// runs as it would on a desktop substrate.
-fn live_cap() -> (AudioCapabilityState, Arc<ArrayQueue<AudioEvent>>) {
-    let (event_sender, queue) = new_event_channel();
-    let cap = AudioCapabilityState {
-        sender: Some(event_sender),
-        sample_rate: Some(TEST_RATE),
-        assemblies: HashMap::new(),
-        assembly_ids: SessionIds::new(),
-        track_loads: HashMap::new(),
-        track_load_ids: SessionIds::new(),
-        instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
-        thread: None,
-        shutdown: None,
-    };
-    (cap, queue)
-}
 /// Mono ramp samples for an in-memory WAV fixture.
 fn ramp(len: usize) -> Vec<f32> {
     #[allow(clippy::cast_precision_loss)]
     (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
 }
-fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, session_sender(), None, None)
-}
 
 mod instrument;
-mod schedule;
-mod settlement;
 mod synth_voice;
 mod track;

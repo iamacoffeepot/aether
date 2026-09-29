@@ -182,10 +182,7 @@ mod config_manifest_tests {
         let manifest = config_manifest::<HeadlessChassis>().expect("headless config manifest");
         let known = manifest.known_keys(&chassis_residual_knobs());
         assert!(!known.contains("AETHER_WINDOW_MODE"), "headless must not claim the desktop window-driver knob");
-        assert!(
-            !known.contains("AETHER_AUDIO_DISABLE"),
-            "headless must not claim the audio cap knob it never composes"
-        );
+        assert!(!known.contains("AETHER_AUDIO_OUTPUT"), "headless must not claim the audio cap knob it never composes");
         assert!(known.contains("AETHER_TICK_HZ"), "headless must claim its own timer-driver tick knob");
         assert!(known.contains("AETHER_HTTP_DISABLE"), "headless must claim a composed common-cap knob");
         // #3849 + #3850: the RPC port, the runtime knobs, and the frame-size knob

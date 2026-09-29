@@ -221,7 +221,7 @@ mod config_manifest_tests {
         let known = manifest.known_keys(&chassis_residual_knobs());
         assert!(!known.contains("AETHER_TICK_HZ"), "desktop drives from winit — must not claim the headless tick knob");
         assert!(known.contains("AETHER_WINDOW_MODE"), "desktop must claim its window-driver knob");
-        assert!(known.contains("AETHER_AUDIO_DISABLE"), "desktop must claim the composed audio cap knob");
+        assert!(known.contains("AETHER_AUDIO_OUTPUT"), "desktop must claim the composed audio cap knob");
         assert!(known.contains("AETHER_RENDER_VERTEX_BUFFER_BYTES"), "desktop must claim the composed render cap knob");
     }
 }

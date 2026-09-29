@@ -74,20 +74,22 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
-# The cap unit tests boot a chassis through the `aether_substrate::testing`
-# fixture, enabled by the substrate `test-support` feature.
+# The cap unit tests use the `aether_substrate::testing` fixtures, enabled by
+# the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
-# The fail-fast companion's integration test composes
-# `HeadlessAudioCapability` on the in-process harness and round-trips the two
-# manual-class requests against it.
+# The integration tests compose `AudioCapability` (on a `null` output) and the
+# fail-fast `HeadlessAudioCapability` on the in-process harness and assert on
+# their replies.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
+# The handler integration tests write their WAV fixtures with it.
+hound = { workspace = true }
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
-# features, so it cannot see that `clap` and `confique` are used only through
-# the `Config` derive's codegen under the optional `runtime` feature —
-# `confique` via the `#[derive(confique::Config)]` on the config layer, `clap`
-# via the `#[derive(clap::Args)]` the same derive emits on the `*Overlay`
-# struct. Both are false positives: the deps are real and runtime-gated.
+# features, so it cannot see that `confique` is used only through the `Config`
+# derive's codegen under the optional `runtime` feature, via the
+# `#[derive(confique::Config)]` on the config layer. It is a false positive:
+# the dep is real and runtime-gated. (`clap` is named in source by the
+# `AudioOutput` `ValueEnum` derive.)
 #
 # `bytemuck` is the same class through a different macro. The cast-shaped
 # real-time trigger kinds declare `#[aether_data::kind(..., pod)]`, whose
@@ -95,7 +97,7 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # reaches bytemuck only through a macro-emitted path and names it nowhere in
 # source. The dependency is real: dropping it stops the crate compiling.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique", "bytemuck"] # aether-suppression-request: bytemuck is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
+ignored = ["confique", "bytemuck"] # aether-suppression-request: bytemuck is used only through the #[aether_data::kind] expansion, invisible to a source-only scan
 
 [lints]
 workspace = true

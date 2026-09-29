@@ -55,7 +55,7 @@ use super::AudioCapability;
 // rides up to the cap root through this `pub use` (the trampoline pattern):
 // the cap-root `pub use runtime::{AudioConfig, …}` re-export sources the three
 // config names from here.
-pub use self::config::{AudioConfig, AudioConfigLayer, AudioOverlay};
+pub use self::config::{AudioConfig, AudioConfigLayer, AudioOutput, AudioOverlay};
 use self::event::AudioEventSender;
 use self::sample::BankAssembly;
 use super::kinds::{
@@ -77,8 +77,9 @@ pub use self::instrument::builtin_id_ceiling;
 pub use self::load::{AudioLoadContext, BankAssemblyKey, TrackDecodeKey, TrackLoad};
 pub use self::sample::BankAssemblyOutput;
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
+use self::synth::synth_rate;
 pub use self::track::DecodeOutput;
-use self::worker::spawn_audio_worker;
+use self::worker::{AudioWorker, NULL_SAMPLE_RATE, spawn_audio_worker, spawn_null_worker};
 pub use aether_fs::{FsCapability, Read, ReadResult};
 
 /// `aether.audio` runtime state (ADR-0039 / ADR-0103 identity/runtime split).
@@ -117,17 +118,31 @@ pub struct AudioCapabilityState {
 }
 
 impl AudioCapabilityState {
+    /// A cap with no synth: every request that needs one replies `Err`.
     pub fn nop() -> Self {
+        Self::with_worker(None)
+    }
+
+    /// A cap whose events feed `worker`'s synth. The state owns the worker
+    /// thread and its shutdown sender, so `Drop` stops and joins it.
+    pub fn running(worker: AudioWorker) -> Self {
+        Self::with_worker(Some(worker))
+    }
+
+    fn with_worker(worker: Option<AudioWorker>) -> Self {
+        let (sender, sample_rate, thread, shutdown) = worker.map_or((None, None, None, None), |w| {
+            (Some(w.sender), Some(synth_rate(w.sample_rate)), Some(w.thread), Some(w.shutdown))
+        });
         Self {
-            sender: None,
-            sample_rate: None,
+            sender,
+            sample_rate,
             assemblies: HashMap::new(),
             assembly_ids: SessionIds::new(),
             track_loads: HashMap::new(),
             track_load_ids: SessionIds::new(),
             instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
-            thread: None,
-            shutdown: None,
+            thread,
+            shutdown,
         }
     }
 }
@@ -158,28 +173,19 @@ impl NativeActor for AudioCapability {
     /// mailbox so agents on chassis without audio still get loud
     /// `Err` replies for `SetMasterGain` instead of timing out.
     fn init(config: AudioConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<AudioCapabilityState, BootError> {
-        if config.disabled {
-            tracing::info!(
-                target: "aether_substrate::audio",
-                "AETHER_AUDIO_DISABLE=1 — skipping cpal init",
-            );
-            return Ok(AudioCapabilityState::nop());
-        }
-        match spawn_audio_worker(config.requested_sample_rate) {
-            Ok((sender, sample_rate, thread, shutdown)) => Ok(AudioCapabilityState {
-                sender: Some(sender),
-                // Audio device rates are bounded well below 2^24 —
-                // exact in f32, matching the synth's own conversion.
-                #[allow(clippy::cast_precision_loss)]
-                sample_rate: Some(sample_rate as f32),
-                assemblies: HashMap::new(),
-                assembly_ids: SessionIds::new(),
-                track_loads: HashMap::new(),
-                track_load_ids: SessionIds::new(),
-                instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
-                thread: Some(thread),
-                shutdown: Some(shutdown),
-            }),
+        let worker = match config.output {
+            AudioOutput::Disabled => {
+                tracing::info!(
+                    target: "aether_substrate::audio",
+                    "AETHER_AUDIO_OUTPUT=disabled — skipping the synth",
+                );
+                return Ok(AudioCapabilityState::nop());
+            }
+            AudioOutput::Device => spawn_audio_worker(config.requested_sample_rate),
+            AudioOutput::Null => spawn_null_worker(config.requested_sample_rate.unwrap_or(NULL_SAMPLE_RATE)),
+        };
+        match worker {
+            Ok(worker) => Ok(AudioCapabilityState::running(worker)),
             Err(e) => {
                 tracing::warn!(
                     target: "aether_substrate::audio",

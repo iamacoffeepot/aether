@@ -555,58 +555,22 @@ fn set_sender_gain_ducks_a_sounding_voice() {
     );
 }
 
-/// Register a sender under `name` and return the `Source` a real envelope
-/// from it carries: the sender mails its own reference once, and its inbox
-/// hands back the dispatch the binding stamped.
-fn stamped_source(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> Source {
-    let (dispatch_tx, dispatch_rx) = mpsc::channel::<OwnedDispatch>();
-    let (binding, reference) = registered_binding(
-        registry,
-        mailer,
-        name,
-        Arc::new(move |dispatch: OwnedDispatch| {
-            // ADR-0094: terminal consumer — discharge before forwarding.
-            dispatch.discharge();
-            let _ = dispatch_tx.send(dispatch);
-        }) as Arc<dyn InboxHandler>,
-    );
-
-    NativeCtx::new(&binding, Source::NONE, None, None).send_to(reference, &SetMasterGain { gain: 1.0 });
-    dispatch_rx.recv_timeout(Duration::from_secs(2)).expect("the sender's own mail reached its inbox").sender
-}
-
-/// The handler ctx for an inbound whose envelope carried `source`, typed by
-/// the handler's actor.
-fn sender_ctx<A>(transport: &Arc<NativeBinding>, source: Source) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, source, None, None)
-}
-
 // Regression (issue 6522): two local components are two senders. A
 // `set_sender_gain` of zero from the left one silences only its own voice,
 // and the right one keeps sounding at unity — the sender key must not
 // collapse distinct components onto one entry.
 #[test]
 fn set_sender_gain_leaves_another_component_at_unity() {
-    let (mut cap, queue) = live_cap();
-    let (registry, mailer) = fresh_substrate();
-    let transport = unrouted_binding(&mailer);
-    let left = stamped_source(&registry, &mailer, "test.audio.sender.left");
-    let right = stamped_source(&registry, &mailer, "test.audio.sender.right");
+    let registry = Registry::new();
+    let left = Some(registered_ref(&registry, "test.audio.sender.left", noop_handler()));
+    let right = Some(registered_ref(&registry, "test.audio.sender.right", noop_handler()));
 
-    AudioCapability::on_note_on(
-        &mut cap,
-        &mut sender_ctx(&transport, left),
-        NoteOn { pitch: 60, velocity: 100, instrument_id: 0, pan: -128 },
-    );
-    AudioCapability::on_note_on(
-        &mut cap,
-        &mut sender_ctx(&transport, right),
-        NoteOn { pitch: 60, velocity: 100, instrument_id: 0, pan: 127 },
-    );
-    let _ =
-        AudioCapability::on_set_sender_gain(&mut cap, &mut sender_ctx(&transport, left), SetSenderGain { gain: 0.0 });
-
+    let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
+    sender.push(AudioEvent::NoteOn { sender: left, pitch: 60, velocity: 100, instrument_id: 0, pan: -128 }).unwrap();
+    sender.push(AudioEvent::NoteOn { sender: right, pitch: 60, velocity: 100, instrument_id: 0, pan: 127 }).unwrap();
+    sender.push(AudioEvent::SetSenderGain { sender: left, gain: 0.0 }).unwrap();
+
     let mut buf = vec![0.0f32; 480 * 2];
     synth.fill(&mut buf, 2);
     let energy = channel_energy(&buf, 2);
