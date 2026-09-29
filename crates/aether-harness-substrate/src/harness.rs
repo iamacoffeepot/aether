@@ -47,6 +47,7 @@ use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
 use aether_fs::NamespaceRoots;
+use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
@@ -988,21 +989,22 @@ impl SubstrateHarness {
     /// full chain — no nudge_tick-style band-aids needed for render-flush
     /// races.
     ///
-    /// ADR-0161 slice R4: this is a settlement wait that can include a
+    /// ADR-0161 §Decision 2: this is a settlement wait that can include a
     /// render-recipient chain (a `send_and_settle(DrawTriangle / DestroyTexture /
     /// …)` addressed to `aether.render`, or one whose descendants reach it),
-    /// so it must drain the pumped render slot while waiting — the chain
-    /// settles only because this pump runs (the ADR deadlock). It polls the
-    /// settlement receiver, draining the slot each round, rather than
-    /// blocking in `await_internal_signal` which never pumps; the drain is
-    /// the pumped analogue of `await_settlement_pumped`, on the harness's
-    /// existing receiver-poll wait model. Returns `SettlementTimeout` if the
-    /// chain doesn't drain within the settlement cap.
+    /// so with a render hook it must drain the pumped render slot while
+    /// waiting — the chain settles only because that drain runs. The hook's
+    /// [`FrameHook::settle`] waits in `await_settlement_pumped`, the wait the
+    /// drivers use, draining the slot on its mail wake and returning on the
+    /// root's settlement; there is no fixed drain round. Without a hook the
+    /// wait is `await_internal_signal` on the settlement receiver. Returns
+    /// `SettlementTimeout` if the chain doesn't settle within the settlement
+    /// cap.
     pub(crate) fn settle_prepared(&mut self, send: &PreparedSend, kind: KindId) -> Result<(), SubstrateHarnessError> {
-        let (_, rx) = send
+        let (root, rx) = send
             .tracked(&self.passive, None)
             .map_err(|error| SubstrateHarnessError::Decode(format!("prepare harness send: {error}")))?;
-        self.await_settlement(kind, &rx)
+        self.await_settlement(kind, root, &rx)
     }
 
     pub(crate) fn settle_bytes<K: Kind, I>(
@@ -1010,45 +1012,26 @@ impl SubstrateHarness {
         to: impl ChassisTarget<K, I>,
         mail: &K,
     ) -> Result<(), SubstrateHarnessError> {
-        let (_, rx) = self.passive.send_tracked(to, mail, None);
-        self.await_settlement(K::ID, &rx)
+        let (root, rx) = self.passive.send_tracked(to, mail, None);
+        self.await_settlement(K::ID, root, &rx)
     }
 
-    fn await_settlement(&mut self, kind: KindId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
-        use crossbeam_channel::RecvTimeoutError;
-
-        // A short drain cadence so a render chain gated on the pumped slot
-        // (a render mail that emits another render mail) advances every round;
-        // the warn cadence stays `SETTLEMENT_TIMEOUT`, the wedge cap the
-        // configured settlement backstop.
-        let drain_round = Duration::from_millis(2);
-        let start = Instant::now();
-        let mut last_warn = start;
-        loop {
-            if let Some(hook) = self.hook.as_mut() {
-                hook.pump();
-            }
-            match rx.recv_timeout(drain_round) {
-                Ok(()) => return Ok(()),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(self.settlement_timeout(self.kind_label(kind), "substrate_harness.push_and_settle"));
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if start.elapsed() >= self.settlement_cap {
-                        return Err(self.settlement_timeout(self.kind_label(kind), "substrate_harness.push_and_settle"));
-                    }
-                    if last_warn.elapsed() >= SETTLEMENT_TIMEOUT {
-                        tracing::warn!(
-                            target: "aether_substrate::settlement",
-                            gate = "substrate_harness.push_and_settle",
-                            waited_millis = start.elapsed().as_millis(),
-                            cap_millis = self.settlement_cap.as_millis(),
-                            "gate substrate_harness.push_and_settle slow: extending",
-                        );
-                        last_warn = Instant::now();
-                    }
-                }
-            }
+    fn await_settlement(&mut self, kind: KindId, root: MailId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
+        let gate = "substrate_harness.push_and_settle";
+        let outcome = match self.hook.as_mut() {
+            Some(hook) => hook.settle(self.passive.settlement_registry(), root, self.settlement_cap),
+            None => await_internal_signal(
+                rx,
+                gate,
+                SETTLEMENT_TIMEOUT,
+                self.settlement_cap,
+                TerminalDisposition::ReplyErr,
+                None,
+            ),
+        };
+        match outcome {
+            WaitOutcome::Settled => Ok(()),
+            WaitOutcome::Wedged(_) => Err(self.settlement_timeout(self.kind_label(kind), gate)),
         }
     }
 
