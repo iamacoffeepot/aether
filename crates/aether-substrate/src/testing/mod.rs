@@ -19,6 +19,9 @@
 //! which waits the way a pumped chassis driver does (ADR-0161 §Decision 2);
 //! a test that waits on a pooled actor's chain uses [`await_settled`], and
 //! one that waits on a detached effect uses [`await_signal`].
+//!
+//! A replace test that needs its guest's own code under a new content hash
+//! takes it from [`successor_wasm`].
 
 #![allow(
     clippy::must_use_candidate,
@@ -57,8 +60,10 @@ use crate::mail::registry::{DispatchParts, OwnedDispatch};
 use crate::runtime::lifecycle::FatalAborter;
 
 mod pumped;
+mod successor;
 
 pub use pumped::{PumpedDriver, await_settled, await_signal};
+pub use successor::successor_wasm;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly

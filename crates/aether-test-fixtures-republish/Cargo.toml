@@ -1,0 +1,87 @@
+[package]
+name = "aether-test-fixtures-republish"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Issue 7109: same-namespace successor modules for republish tests. Under
+# ADR-0241 §4 a republish replaces a namespace only with code for the same
+# namespace, so each behavior change a replace test makes needs a second module
+# that exports what the first one did. Each module version is one `[[example]]`
+# cdylib (built by `cargo xtask build-wasm` as `-p <pkg> --examples`); the lib
+# is an rlib holding the actors every version of a family shares, which each
+# example lists in its own `export!`. The namespaces are `test.republish.*`, so
+# the shared bundle stays as it is.
+#
+# - `republish_subject_*`: `test.republish.subject` as a base and one successor
+#   per behavior change: a dropped row, a changed reply, an added row, an added
+#   fallback, an added dependency, an inline child with a dependency, and an
+#   added boot.
+# - `republish_group_v{1,2}`: the instanced `test.republish.gate` and the root
+#   `test.republish.peer`. Only v2's gate handles `GateProbe`, and v2's peer
+#   traps in `on_rehydrate` when its config says so.
+# - `republish_carry_v{1,2}`: a correlation-carry requester, held relay and
+#   held requester beside the shared `test.republish.carry.holder`. v2 reshapes
+#   the requester's carried context and the relay's held reply kind.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+# The dependency successors declare `depends(ClipboardCapability)`. Marker face
+# only.
+aether-clipboard = { path = "../aether-clipboard", default-features = false }
+
+[[example]]
+name = "republish_subject_base"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_dropped"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_changed"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_extended"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_fallback"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_depends"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_inline_depends"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_subject_boot"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_group_v1"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_group_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_carry_v1"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_carry_v2"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
