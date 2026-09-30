@@ -14,8 +14,8 @@ use aether_bloomery_kinds::{
 use aether_bloomery_muse::{
     ContinueInput, Echo, EchoResult, Endpoint, ModelName, MuseSession, MuseTurn, OfferedTools, OpenInput, OutputBudget,
     ReasoningEffort, RecordInput, RestReason, Role, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord,
-    ToolCall, ToolInput, ToolOutput, TreeEdit, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome,
-    TurnResult, TurnSettings, offered,
+    ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
+    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -27,6 +27,7 @@ use aether_http::FetchResult;
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
 const CALLED_EDIT_WRITE: &str = include_str!("../fixtures/called_edit_write.json");
+const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_read_edit_grep.json");
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
@@ -185,6 +186,9 @@ impl Driver {
             name if name == Echo::NAME => invoke::<Echo>(invocation),
             name if name == TreeEdit::NAME => self.run_async::<TreeEdit>(invocation),
             name if name == TreeWrite::NAME => self.run_async::<TreeWrite>(invocation),
+            name if name == TreeList::NAME => self.run_async::<TreeList>(invocation),
+            name if name == TreeRead::NAME => self.run_async::<TreeRead>(invocation),
+            name if name == TreeGrep::NAME => self.run_async::<TreeGrep>(invocation),
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
@@ -732,6 +736,49 @@ fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> 
     driver.settle(resumed_turn);
     let continued: Session = driver.value(driver.head(key));
     assert_eq!(file(&driver, continued.tree(), "docs/notes.md"), b"Iron blooms.\nSlag floats.\n");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_session_lists_reads_edits_and_greps_its_tree_and_rests_with_the_edit() -> TestResult {
+    // Catches a read-only result the loop mistakes for an edit, a read-only tool the loop cannot run, and folds
+    // that diverge between warm-up and live delivery.
+    let mut driver = Driver::new(&[CALLED_LIST_READ_EDIT_GREP, COMPLETED]);
+    let (opened, opened_tree) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [list, read, edit, grep] = calls.as_slice() else {
+        panic!("expected four calls, got {calls:?}");
+    };
+    let mut trigger = first_turn;
+    for (call, name, text) in [(list, TreeList::NAME, "file\tlib.rs"), (read, TreeRead::NAME, "1\tpub fn smelt() {}")] {
+        let asked = asked(&driver, trigger);
+        assert_eq!(asked.name.as_str(), name);
+        assert_eq!(asked.input, bound(opened_tree, call), "{name} runs over the opened tree");
+        trigger = driver.follow(trigger);
+        let viewed: Viewed = driver.result(trigger);
+        assert_eq!(viewed.text(), text, "{name}");
+    }
+
+    let editing = asked(&driver, trigger);
+    assert_eq!(editing.name.as_str(), TreeEdit::NAME);
+    assert_eq!(editing.input, bound(opened_tree, edit), "a viewed result leaves the tree where it was");
+    let edited_run = driver.follow(trigger);
+    let edited: Edited = driver.result(edited_run);
+
+    let grepping = asked(&driver, edited_run);
+    assert_eq!(grepping.name.as_str(), TreeGrep::NAME);
+    assert_eq!(grepping.input, bound(edited.tree(), grep), "the grep runs over the edited tree");
+    let grepped_run = driver.follow(edited_run);
+    let grepped: Viewed = driver.result(grepped_run);
+    assert_eq!(grepped.text(), "src/lib.rs:1:pub fn smelt_iron() {}");
+
+    driver.settle(grepped_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (RestReason::Completed, edited.tree()));
 
     assert_warm_and_live_agree(&driver);
     Ok(())

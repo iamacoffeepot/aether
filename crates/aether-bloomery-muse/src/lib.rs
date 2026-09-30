@@ -52,8 +52,10 @@
 //! down as a [`Session`] (`muse.session`) through `muse.session.record`,
 //! moving the session's head to it. The bound tools are [`TreeEdit`]
 //! (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
-//! tree the loop carries to the next call, and the fixture [`Echo`]
-//! (`muse.echo`). Each open and
+//! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
+//! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
+//! the text they read as [`Viewed`] and leave the tree as it was; and the
+//! fixture [`Echo`] (`muse.echo`). Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`].
 
@@ -98,9 +100,24 @@ pub use session::{
     CallAnswer, ContinueInput, MUSE, MuseSession, OpenInput, RecordInput, RestReason, Session, SessionContinue,
     SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnLimitError, TurnSettings,
 };
-pub use tools::{Echo, EchoArgs, EchoResult, EditArgs, MAX_TEXT_BYTES, TreeEdit, TreeWrite, WriteArgs, offered};
+pub use tools::{
+    Echo, EchoArgs, EchoResult, EditArgs, GrepArgs, ListArgs, MAX_TEXT_BYTES, ReadArgs, TreeEdit, TreeGrep, TreeList,
+    TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
+};
 
 aether_actor::export!(
-    public = [MuseTurn, SessionOpen, SessionContinue, SessionRecord, Echo, TreeEdit, TreeWrite, MuseSession],
+    public = [
+        MuseTurn,
+        SessionOpen,
+        SessionContinue,
+        SessionRecord,
+        Echo,
+        TreeEdit,
+        TreeWrite,
+        TreeList,
+        TreeRead,
+        TreeGrep,
+        MuseSession,
+    ],
     generators = [aether_bloomery_program::bundle],
 );
