@@ -421,7 +421,7 @@ impl Stage {
         let caller = sink(&self.registry, &self.mailer, "test.blob_mail.caller");
         let mut driver = PumpedDriver::boot(self.chassis, (), routes);
         let me = driver.chassis().actor_ref::<Courier>();
-        driver.host_turn(|courier, _ctx| courier.me = Some(me));
+        driver.host_turn(|courier: &mut Courier, _ctx| courier.me = Some(me));
 
         Rig { driver, mailer: self.mailer, egress: self.egress, caller }
     }
