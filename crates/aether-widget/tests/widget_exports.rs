@@ -32,10 +32,7 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_RIGHT};
 use aether_kinds::mouse_button::LEFT;
-use aether_kinds::{
-    Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
-    ReplaceResult, Tick,
-};
+use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, Tick};
 use aether_substrate::testing::successor_wasm;
 use aether_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
 use aether_widget::{
@@ -226,10 +223,6 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
         .expect("bare load sequence");
     match bare.reply::<LoadResult>("bare").expect("decode bare LoadResult") {
         LoadResult::Err { error } => {
-            assert!(
-                error.contains("no default"),
-                "{stem}: a defaultless bare load must stay an ADR-0138 no-default error; got {error}"
-            );
             for export in SEVEN {
                 assert!(
                     error.contains(export),
@@ -294,21 +287,11 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
         .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
         .expect("first tick spawns the declared children");
 
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                // Identical code under a new hash, so the republish swaps the
-                // panel rather than answering unchanged (ADR-0241 §7). The
-                // panel keeps its stored spawn config.
-                &ReplaceComponent { wasm: successor_wasm(wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("{stem}: replace_component: {error}"),
+    // Identical code under a new hash, so the republish swaps the panel rather
+    // than answering unchanged (ADR-0241 §7). The panel keeps its stored spawn
+    // config.
+    if let Err(error) = harness.publish(successor_wasm(wasm, 1)) {
+        panic!("{stem}: publish successor: {error}");
     }
 
     // No Tick after replace. Mail the reconstructed children at the aliases

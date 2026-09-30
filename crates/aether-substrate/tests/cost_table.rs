@@ -24,7 +24,7 @@ use aether_component::component::Prepare;
 use aether_data::{Kind, KindId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{CostTailResult, DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult, Tick};
+use aether_kinds::{CostTailResult, DropComponent, DropResult, LoadComponent, Tick};
 use aether_test_fixtures_kinds::{GateProbe, GateQuery, UnsubscribeKeys};
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -35,7 +35,7 @@ use aether_test_fixtures_kinds as _;
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.probe".to_owned()) })
         .map_or_else(|error| panic!("load_component: {error}"), |(probe, _)| probe)
 }
 
@@ -109,18 +109,14 @@ fn replace_keeps_framework_arms_measured_and_drop_releases_guest_rows() {
         export: Some("test.republish.gate".to_owned()),
     };
     let (swappable, path) = harness.load_any(&gate).unwrap_or_else(|error| panic!("load_component(gate v1): {error}"));
-    let host = harness.actor_ref::<ComponentHostCapability>();
-
-    let replace = ReplaceComponent { wasm: fs::read(&v2_path).expect("read fixture wasm"), configs: Vec::new() };
-    let swapped =
-        harness.execute(vec![("swap", HarnessOp::send_and_await_reply(&host, &replace))]).expect("replace sequence");
-    if let ReplaceResult::Err { error } = swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        panic!("replace_component: {error}");
+    if let Err(error) = harness.publish(fs::read(&v2_path).expect("read fixture wasm")) {
+        panic!("publish(gate v2): {error}");
     }
     let replaced = cost_kinds(&harness, swappable);
     assert!(replaced.contains(&Prepare::ID), "the republish prepare arm stays measured across a replace");
     assert!(replaced.contains(&GateProbe::ID), "the replacement's new handler is measured");
 
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let dropped = harness
         .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path }))])
         .expect("drop sequence");
