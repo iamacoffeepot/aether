@@ -8,7 +8,9 @@ mod items;
 mod limits;
 mod tools;
 
-pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError};
+use crate::session::TurnSettings;
+
+pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order};
 pub use limits::{
     Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, ReasoningEffort,
 };
@@ -89,6 +91,26 @@ impl TurnInput {
     pub const fn reasoning(&self) -> ReasoningEffort {
         self.reasoning
     }
+
+    /// Every field but the conversation: what a session keeps from turn to turn.
+    #[must_use]
+    pub fn settings(&self) -> TurnSettings {
+        TurnSettings::new(
+            self.endpoint.clone(),
+            self.model.clone(),
+            self.tools.clone(),
+            self.max_output_tokens,
+            self.reasoning,
+        )
+    }
+
+    /// This input with `items` appended to its conversation and every other
+    /// field unchanged, so the conversation it sends begins with exactly the
+    /// items this one sent.
+    pub(crate) fn append(&self, items: impl IntoIterator<Item = TurnItem>) -> Result<Self, TurnItemsError> {
+        let items = TurnItems::new(self.items().iter().cloned().chain(items).collect())?;
+        Ok(self.settings().with_items(items))
+    }
 }
 
 #[cfg(test)]
@@ -97,8 +119,9 @@ pub mod tests {
     use aether_bloomery_program::ToolSchema;
 
     use super::{
-        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OutputBudget, OutputBudgetError, Role,
-        ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
+        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OfferedTools, OutputBudget,
+        OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
+        TurnItemsError,
     };
     use crate::result::TurnResult;
 
@@ -122,6 +145,32 @@ pub mod tests {
             Ref::of_text("{}"),
             ToolInput::Refused(Ref::of_text("refused")),
         )
+    }
+
+    #[test]
+    fn an_append_keeps_the_prefix_and_refuses_an_orphan_output() {
+        // Catches an append that rewrites an earlier item or a setting, which would change the prompt prefix the
+        // next turn resends, and one that skips the conversation rules.
+        let user = TurnItem::message(Role::User, Ref::of_text("hello"));
+        let tool = offered_tool(ProgramName::new("muse.echo").expect("program"));
+        let first = TurnInput::new(
+            Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
+            ModelName::new("muse-spark-1.3").expect("model"),
+            OfferedTools::new(vec![tool]).expect("tools"),
+            TurnItems::new(vec![user.clone()]).expect("items"),
+            OutputBudget::new(64).expect("budget"),
+            ReasoningEffort::Low,
+        );
+        let output = |id: &str| TurnItem::CallOutput {
+            call_id: CallId::new(id).expect("call id"),
+            output: ToolOutput::Refused(Ref::of_text("refused")),
+        };
+        let appended = [TurnItem::Call(call("a", "muse.echo")), output("a")];
+
+        let next = first.append(appended.clone()).expect("an answered call appends");
+        assert_eq!(next.settings(), first.settings());
+        assert_eq!(next.items(), [user, appended[0].clone(), appended[1].clone()]);
+        assert_eq!(first.append([output("b")]), Err(TurnItemsError::OrphanOutput));
     }
 
     #[test]

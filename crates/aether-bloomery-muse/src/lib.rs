@@ -38,6 +38,16 @@
 //! capability's `--http-secrets` knob beside `--http-allowlist` and
 //! `--secrets-dir`, and `aether.http` attaches the bound header to requests for
 //! exactly that host, over HTTPS only.
+//!
+//! A session loops over turns and the calls they ask for as a bloomery
+//! reactor, `MuseSession`, exported from this same bundle. `muse.session.open`
+//! opens one and `muse.session.continue` resumes one; the loop runs each
+//! decoded call through a bound tool (`muse.echo` for now) one at a time,
+//! sends the next turn with the calls and their outputs appended, and at each
+//! rest writes the conversation down as a [`Session`] (`muse.session`) through
+//! `muse.session.record`, moving the session's head to it. Each open and
+//! continue states its own [`TurnLimit`]; a session that reaches it rests with
+//! [`RestReason::TurnLimit`].
 
 /// Implement [`aether_data::Invariant`], `Display`, and `Error` for error
 /// enums that carry a `const fn reason(self) -> &'static str`.
@@ -66,6 +76,7 @@ mod render;
 mod request;
 mod response;
 mod result;
+mod session;
 
 pub use input::{
     CallId, CallIdError, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OfferedTools,
@@ -74,5 +85,13 @@ pub use input::{
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
+pub use session::{
+    CallAnswer, ContinueInput, Echo, EchoInput, EchoResult, MUSE, MuseSession, OpenInput, RecordInput, RestReason,
+    Session, SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnLimit,
+    TurnLimitError, TurnSettings, offered,
+};
 
-aether_actor::export!(public = [MuseTurn], generators = [aether_bloomery_program::bundle]);
+aether_actor::export!(
+    public = [MuseTurn, SessionOpen, SessionContinue, SessionRecord, Echo, MuseSession],
+    generators = [aether_bloomery_program::bundle],
+);
