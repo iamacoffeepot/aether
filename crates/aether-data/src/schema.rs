@@ -72,6 +72,13 @@ pub enum MailboxCategory {
     ChassisSentinel,
 }
 
+/// The deepest schema nesting the wire decode of [`SchemaType`],
+/// [`SchemaShape`], and [`LabelNode`] and `aether-codec`'s schema walks
+/// accept. The root is depth 0 and each nested schema adds one. Real kinds
+/// nest a handful of levels; the cap only keeps a pathological descriptor
+/// from overflowing the stack.
+pub const MAX_SCHEMA_DEPTH: usize = 128;
+
 /// ADR-0019 schema type vocabulary. Describes the structure of a mail
 /// kind's payload in enough detail for the hub to encode it from
 /// agent-supplied params and the substrate to decode it into a typed
