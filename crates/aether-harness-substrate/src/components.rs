@@ -2,8 +2,10 @@
 //! spawning guests through the component host (ADR-0241 §9).
 //!
 //! Every verb sends its kind to the component host with this harness's
-//! session as the reply target and waits for the correlated reply, so each
-//! one runs the host's real handlers and never waits on a clock. The typed
+//! session as the reply target, waits for the correlated reply, and then
+//! waits for the request's whole causal chain to settle, so each one runs
+//! the host's real handlers, returns only after a born guest's `wire` and
+//! the route publication it staged have landed, and never waits on a clock. The typed
 //! verbs read the reply's stamped sender, the actor that answered, and prove
 //! it as the requested type.
 
@@ -39,7 +41,9 @@ impl SubstrateHarness {
     /// Sets `component.export` to `R::NAMESPACE`, sends the load to the
     /// component host with this harness's session as the reply target, and
     /// types the successful reply's stamped sender — the loaded trampoline,
-    /// which answers the load itself — as `R`. Needs
+    /// which answers the load itself — as `R`. It returns once the load's
+    /// chain settles, `wire` included, so the inline children `wire` spawned
+    /// are live and [`Self::child`] finds them. Needs
     /// [`SubstrateHarnessBuilder::with_component_host`](crate::SubstrateHarnessBuilder::with_component_host).
     ///
     /// # Errors
@@ -262,9 +266,13 @@ impl SubstrateHarness {
         self.passive.adopt_load::<R>(actor).map_err(|error| SubstrateHarnessError::Spawn(error.to_string()))
     }
 
-    /// Send `request` to the component host with this harness's session as
-    /// the reply target and pump until the reply named `expected` arrives,
-    /// returning its payload and stamped sender.
+    /// Send `request` to the component host as a tracked root with this
+    /// harness's session as the reply target, pump until the reply named
+    /// `expected` arrives, then wait for the root's whole chain to settle,
+    /// returning the reply's payload and stamped sender. A born guest's
+    /// `wire` runs on that chain and the registry owner's publication of the
+    /// routes it staged holds it open, so every inline child `wire` spawned
+    /// is live when this returns.
     fn request_component_host<K, I>(
         &mut self,
         request: &K,
@@ -276,11 +284,12 @@ impl SubstrateHarness {
     {
         let host = self.passive.actor_ref::<ComponentHostCapability>();
         let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(host, request, self.session_reply(cid));
+        let (root, settled) = self.passive.send_tracked(host, request, Some(self.session_reply(cid)));
 
         let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, expected)? else {
             return Err(SubstrateHarnessError::Decode(format!("expected a session-targeted {expected}")));
         };
+        self.await_settlement(K::ID, root, &settled)?;
         Ok((payload, sender))
     }
 }

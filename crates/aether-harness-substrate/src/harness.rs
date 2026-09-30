@@ -979,7 +979,12 @@ impl SubstrateHarness {
         self.await_settlement(K::ID, root, &rx)
     }
 
-    fn await_settlement(&mut self, kind: KindId, root: MailId, rx: &Receiver<()>) -> Result<(), SubstrateHarnessError> {
+    pub(crate) fn await_settlement(
+        &mut self,
+        kind: KindId,
+        root: MailId,
+        rx: &Receiver<()>,
+    ) -> Result<(), SubstrateHarnessError> {
         let gate = "substrate_harness.push_and_settle";
         let outcome = match (self.hook.as_mut(), self.component_host.as_mut()) {
             (Some(hook), _) => {
