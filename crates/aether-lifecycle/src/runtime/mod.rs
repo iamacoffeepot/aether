@@ -32,6 +32,7 @@ use crate::kinds::{
     LifecycleUnsubscribeSelf,
 };
 use aether_actor::ErasedActorRef;
+use aether_actor::PathRefused;
 use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{LifecycleAdvance, MonitorNotice, Quit};
@@ -188,10 +189,10 @@ fn test_cap(advance_timeout: Duration) -> LifecycleCapabilityState {
 /// The refusal of a subscription request naming a stage this chassis's
 /// lifecycle graph does not declare (ADR-0082 §7).
 fn undeclared(stage: KindId) -> LifecycleSubscribeResult {
-    LifecycleSubscribeResult::Err {
-        stage: stage.0,
-        error: format!("stage {stage:?} is not declared by this chassis's lifecycle graph"),
-    }
+    LifecycleSubscribeResult::stage_error(
+        stage.0,
+        format!("stage {stage:?} is not declared by this chassis's lifecycle graph"),
+    )
 }
 
 #[runtime]
@@ -228,17 +229,18 @@ impl NativeActor for LifecycleCapability {
 
     /// Subscribe an explicitly named actor to a lifecycle stage broadcast
     /// (ADR-0082 §7). Replies with [`LifecycleSubscribeResult`] —
-    /// `Err { stage, error }` when the stage isn't declared in this
-    /// chassis's graph (fail-fast at wire time), or when the subscriber is
-    /// no longer live.
+    /// `Err(Stage { stage, error })` when the stage isn't declared in this
+    /// chassis's graph (fail-fast at wire time), or `Err(Subscriber(..))`
+    /// when the subscriber is no longer live.
     ///
     /// The subscriber's path reached this handler only because its decode
     /// proved the route there, live or closed, handles the stage silently
     /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
     /// the `ProtocolRef<Subscriber<K>>` that proof returns. A closed
-    /// subscriber is answered `Err` naming its path. A path no route has
-    /// stood at, or whose route does not handle the stage silently, is
-    /// refused at decode with a warn, and nothing is sent back.
+    /// subscriber is answered `Err(Subscriber(..))` naming its path. A path
+    /// no route has stood at, or whose route does not handle the stage
+    /// silently, is refused at decode, and the dispatch answers it the same
+    /// way.
     ///
     /// # Agent
     /// `LifecycleSubscribe { subscription }`, where `subscription` is
@@ -261,7 +263,7 @@ impl NativeActor for LifecycleCapability {
                 state.watch(ctx, subscriber);
                 LifecycleSubscribeResult::Ok
             }
-            Err(error) => LifecycleSubscribeResult::Err { stage: stage_kind.0, error: error.to_string() },
+            Err(error) => PathRefused::from(error).into(),
         }
     }
 
@@ -292,12 +294,11 @@ impl NativeActor for LifecycleCapability {
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
         let Some(sender) = ctx.sender() else {
-            return LifecycleSubscribeResult::Err {
-                stage: payload.stage,
-                error: "aether.lifecycle.subscribe_self requires a local component sender; an external session or \
-                        remote engine must use aether.lifecycle.subscribe with an explicit subscriber path"
-                    .to_string(),
-            };
+            return LifecycleSubscribeResult::stage_error(
+                payload.stage,
+                "aether.lifecycle.subscribe_self requires a local component sender; an external session or \
+                 remote engine must use aether.lifecycle.subscribe with an explicit subscriber path",
+            );
         };
         if !state.declares(stage_kind) {
             return undeclared(stage_kind);
@@ -307,13 +308,13 @@ impl NativeActor for LifecycleCapability {
             state.watch(ctx, sender);
             LifecycleSubscribeResult::Ok
         } else {
-            LifecycleSubscribeResult::Err {
-                stage: payload.stage,
-                error: format!(
+            LifecycleSubscribeResult::stage_error(
+                payload.stage,
+                format!(
                     "{} has no silent or unchecked handler for stage {stage_kind:?}, so it cannot subscribe to it",
                     ctx.actor_path(sender)
                 ),
-            }
+            )
         }
     }
 
@@ -362,12 +363,11 @@ impl NativeActor for LifecycleCapability {
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
         let Some(sender) = ctx.sender() else {
-            return LifecycleSubscribeResult::Err {
-                stage: payload.stage,
-                error: "aether.lifecycle.unsubscribe_self requires a local component sender; an external session \
-                        or remote engine must use aether.lifecycle.unsubscribe with an explicit subscriber path"
-                    .to_string(),
-            };
+            return LifecycleSubscribeResult::stage_error(
+                payload.stage,
+                "aether.lifecycle.unsubscribe_self requires a local component sender; an external session \
+                 or remote engine must use aether.lifecycle.unsubscribe with an explicit subscriber path",
+            );
         };
         if !state.declares(stage_kind) {
             return undeclared(stage_kind);
@@ -572,7 +572,7 @@ impl NativeActor for LifecycleCapability {
 mod tests {
     use std::sync::{Arc, mpsc};
 
-    use aether_actor::{ActorPath, ActorRef, HandlesKind, Publisher};
+    use aether_actor::{ActorPath, ActorRef, HandlesKind, PathRefusal, Publisher};
     use aether_data::{Kind, LoadName, MailId, SessionToken, Uuid};
     use aether_kinds::{Present, Render, Shutdown, Tick};
     use aether_substrate::mail::outbound::EgressEvent;
@@ -581,7 +581,7 @@ mod tests {
     use aether_substrate::{BootError, Registry, ReplyTarget, Subname};
 
     use super::*;
-    use crate::kinds::LifecycleSubscription;
+    use crate::kinds::{LifecycleSubscribeError, LifecycleSubscription};
 
     /// A stage a [`Listener`] heard, forwarded to the test.
     #[derive(Debug, PartialEq)]
@@ -771,11 +771,10 @@ mod tests {
 
     /// An explicit `subscribe` proves its subscriber path live (ADR-0231 §3):
     /// a live path lands its reference in the stage set, and a path whose
-    /// actor has closed still decodes, so the handler answers `Err` naming
-    /// the path and leaves the set alone rather than registering a
-    /// subscription whose broadcasts could never land. A retire that drops
-    /// the route's contract refuses the closed path at decode, and the
-    /// request gets no reply at all.
+    /// actor has closed still decodes, so the handler answers
+    /// `Err(Subscriber(..))` naming the path as not live and leaves the set
+    /// alone rather than registering a subscription whose broadcasts could
+    /// never land.
     #[test]
     fn explicit_subscribe_holds_a_live_path_and_refuses_one_that_is_gone() {
         let mut booted = boot_lifecycle(render_present_graph());
@@ -790,11 +789,14 @@ mod tests {
         booted.driver.settle(&[gone, held]);
 
         assert!(matches!(booted.reply(2), LifecycleSubscribeResult::Ok), "a live path subscribes");
-        let LifecycleSubscribeResult::Err { stage, error } = booted.reply(1) else {
+        let LifecycleSubscribeResult::Err(LifecycleSubscribeError::Subscriber(refused)) = booted.reply(1) else {
             panic!("a closed path is refused");
         };
-        assert_eq!(stage, Render::ID.0, "the refusal names the stage");
-        assert!(error.contains(listener("gone").as_erased().as_str()), "the refusal names the path: {error}");
+        assert_eq!(
+            refused,
+            PathRefused { path: listener("gone").as_erased().clone(), reason: PathRefusal::NotLive },
+            "the refusal names the path and why",
+        );
         assert_eq!(booted.subscribers_of(Render::ID), [live.erase()], "only the live subscriber is held");
     }
 
@@ -870,7 +872,7 @@ mod tests {
         let root = booted.request(&LifecycleSubscribeSelf { stage: Render::ID.0 }, 1);
         booted.driver.settle(&[root]);
 
-        assert!(matches!(booted.reply(1), LifecycleSubscribeResult::Err { .. }), "an external session is refused");
+        assert!(matches!(booted.reply(1), LifecycleSubscribeResult::Err(_)), "an external session is refused");
         assert!(booted.subscribers_of(Render::ID).is_empty(), "a non-Component source subscribes nothing");
     }
 
@@ -909,7 +911,8 @@ mod tests {
         let (kind, reply) = received.expect("the pump returned on the reply");
 
         assert_eq!(kind, <LifecycleSubscribeResult as Kind>::ID, "the closure route is answered");
-        let Some(LifecycleSubscribeResult::Err { error, .. }) = LifecycleSubscribeResult::decode_from_bytes(&reply)
+        let Some(LifecycleSubscribeResult::Err(LifecycleSubscribeError::Stage { error, .. })) =
+            LifecycleSubscribeResult::decode_from_bytes(&reply)
         else {
             panic!("a closure route has no Tick handler, so it cannot subscribe");
         };

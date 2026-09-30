@@ -18,7 +18,7 @@ pub use aether_substrate::actor::native::{
 };
 pub use aether_substrate::chassis::error::BootError;
 
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, PathRefused, ProtocolRef, runtime};
 use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
@@ -46,7 +46,7 @@ fn bind_listener(
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            held.answer(ctx, &BindListenerResult::Err { addr, error: format!("bind failed: {e}") });
+            held.answer(ctx, &BindListenerResult::failed(addr, format!("bind failed: {e}")));
             return;
         }
     };
@@ -54,7 +54,7 @@ fn bind_listener(
         Ok(local) => local.port(),
         Err(e) => {
             drop(listener);
-            held.answer(ctx, &BindListenerResult::Err { addr, error: format!("local_addr failed: {e}") });
+            held.answer(ctx, &BindListenerResult::failed(addr, format!("local_addr failed: {e}")));
             return;
         }
     };
@@ -74,7 +74,7 @@ fn bind_listener(
             state.starting_listeners.insert(listener_name, StartingListener { held, addr, local_port });
         }
         Err((error, _)) => {
-            held.answer(ctx, &BindListenerResult::Err { addr, error: format!("spawn failed: {error:?}") });
+            held.answer(ctx, &BindListenerResult::failed(addr, format!("spawn failed: {error:?}")));
         }
     }
 }
@@ -110,7 +110,7 @@ fn dial<A>(
     if let Err(error) = spawn_result {
         let PendingConnect { held, addr, .. } =
             state.pending_connects.remove(&id).expect("connect inserted before thread spawn");
-        held.answer(ctx, &ConnectResult::Err { addr, error: format!("connect thread spawn failed: {error}") });
+        held.answer(ctx, &ConnectResult::failed(addr, format!("connect thread spawn failed: {error}")));
     }
 }
 
@@ -272,13 +272,12 @@ impl NativeActor for TcpCapability {
     #[handler::single]
     fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased>, mail: Connect) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
-        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
+        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`
+        // (a refusal there is answered `Err(Consumer(..))` by the dispatch);
         // prove it is still live once, at receipt.
         match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
             Ok(consumer) => dial(state, ctx, held, mail.addr, mail.name, consumer),
-            Err(error) => {
-                held.answer(ctx, &ConnectResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") });
-            }
+            Err(error) => held.answer(ctx, &ConnectResult::from(PathRefused::from(error))),
         }
         pending
     }
@@ -300,7 +299,7 @@ impl NativeActor for TcpCapability {
         let (pending, held) = ctx.hold::<ConnectResult>();
         match cast_consumer(ctx, "connect_self") {
             Ok(consumer) => dial(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &ConnectResult::Err { addr: mail.addr, error }),
+            Err(error) => held.answer(ctx, &ConnectResult::failed(mail.addr, error)),
         }
         pending
     }
@@ -318,7 +317,7 @@ impl NativeActor for TcpCapability {
             let stream = match result {
                 Ok(stream) => stream,
                 Err(error) => {
-                    held.answer(ctx, &ConnectResult::Err { addr, error });
+                    held.answer(ctx, &ConnectResult::failed(addr, error));
                     continue;
                 }
             };
@@ -327,7 +326,7 @@ impl NativeActor for TcpCapability {
                 Ok(peer) => peer.to_string(),
                 Err(error) => {
                     drop(stream);
-                    held.answer(ctx, &ConnectResult::Err { addr, error: format!("peer_addr failed: {error}") });
+                    held.answer(ctx, &ConnectResult::failed(addr, format!("peer_addr failed: {error}")));
                     continue;
                 }
             };
@@ -349,7 +348,7 @@ impl NativeActor for TcpCapability {
                     state.starting_sessions.insert(id, StartingSession { held, addr, session_name, peer });
                 }
                 Err((error, _)) => {
-                    held.answer(ctx, &ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") });
+                    held.answer(ctx, &ConnectResult::failed(addr, format!("spawn failed: {error:?}")));
                 }
             }
         }
@@ -368,12 +367,12 @@ impl NativeActor for TcpCapability {
     #[handler::single]
     fn on_bind(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: BindListener) -> Pending<BindListenerResult> {
         let (pending, held) = ctx.hold::<BindListenerResult>();
-        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
+        // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`
+        // (a refusal there is answered `Err(Consumer(..))` by the dispatch);
         // prove it is still live once, at receipt, before binding.
         match mail.consumer.as_ref().map(|path| ctx.resolve(path)).transpose() {
             Ok(consumer) => bind_listener(state, ctx, held, mail.addr, mail.name, consumer),
-            Err(error) => held
-                .answer(ctx, &BindListenerResult::Err { addr: mail.addr, error: format!("consumer refused: {error}") }),
+            Err(error) => held.answer(ctx, &BindListenerResult::from(PathRefused::from(error))),
         }
         pending
     }
@@ -399,7 +398,7 @@ impl NativeActor for TcpCapability {
         let (pending, held) = ctx.hold::<BindListenerResult>();
         match cast_consumer(ctx, "bind_listener_self") {
             Ok(consumer) => bind_listener(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &BindListenerResult::Err { addr: mail.addr, error }),
+            Err(error) => held.answer(ctx, &BindListenerResult::failed(mail.addr, error)),
         }
         pending
     }
@@ -421,7 +420,7 @@ impl NativeActor for TcpCapability {
         };
         let reply = match done.into_output().result {
             Ok(_) => ConnectResult::Ok { session_name, peer },
-            Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
+            Err(error) => ConnectResult::failed(addr, format!("spawn failed: {error:?}")),
         };
         held.answer(ctx, &reply);
     }
@@ -443,7 +442,7 @@ impl NativeActor for TcpCapability {
         let listener = match done.into_output().result {
             Ok(listener) => listener,
             Err(spawn_error) => {
-                held.answer(ctx, &BindListenerResult::Err { addr, error: format!("spawn failed: {spawn_error:?}") });
+                held.answer(ctx, &BindListenerResult::failed(addr, format!("spawn failed: {spawn_error:?}")));
                 return;
             }
         };
@@ -451,10 +450,7 @@ impl NativeActor for TcpCapability {
             Ok(handle) => handle,
             Err(monitor_error) => {
                 ctx.send_to(listener, &Close::default());
-                held.answer(
-                    ctx,
-                    &BindListenerResult::Err { addr, error: format!("monitor failed: {monitor_error:?}") },
-                );
+                held.answer(ctx, &BindListenerResult::failed(addr, format!("monitor failed: {monitor_error:?}")));
                 return;
             }
         };

@@ -1,7 +1,9 @@
 //! A native recipient that refuses a request's payload at decode answers the
 //! reply target a `DecodeRefused` only when that target opts in with a
 //! declared handler for it; every other sender hears nothing (#7054 (d),
-//! #7076).
+//! #7076). A request whose typed path does not prove is the exception: its
+//! replying row answers it with its reply's `From<PathRefused>`, and nothing
+//! else (ADR-0231 §3).
 //!
 //! Each asker is composed on a [`SubstrateHarness`] beside the refuser and
 //! sends it a truncated payload through the production dispatcher. No typed
@@ -13,8 +15,10 @@
 
 use std::sync::mpsc::{self, Sender};
 
-use aether_actor::{Addressable, ErasedActorRef, ProtocolRef, Unchecked, Undeclared};
-use aether_data::{ErasedActorPath, Kind, KindId};
+use aether_actor::{
+    ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked, Undeclared,
+};
+use aether_data::{ErasedActorPath, Kind, KindId, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::DecodeRefused;
 use aether_substrate::actor::native::envelope::Envelope;
@@ -196,4 +200,180 @@ fn an_asker_with_only_a_fallback_hears_nothing() {
     harness.execute(vec![("ask", HarnessOp::send_and_settle(&asker, &Ask))]).expect("the request chain settles");
 
     assert!(arrivals.try_recv().is_err(), "nothing reaches an asker that did not opt in");
+}
+
+/// A silent row a never-spawned [`Absent`] covers, so a path narrowed to it
+/// is well-typed but no route has stood at it.
+#[aether_data::kind(name = "test.decode_refusal.poke", copy)]
+struct Poke;
+
+#[aether_actor::protocol]
+trait Poking {
+    fn poke(mail: Poke);
+}
+
+/// An instanced actor that is never spawned.
+struct Absent;
+
+#[aether_actor::actor(instanced)]
+impl NativeActor for Absent {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.decode_refusal.absent";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: Poke) {
+        let _ = self;
+    }
+}
+
+/// The path of an [`Absent`] no route has stood at.
+fn absent_path() -> ProtocolPath<Poking> {
+    ActorPath::<Absent>::instance(&LoadName::new("nowhere").expect("a valid key")).narrow()
+}
+
+/// A request that carries a typed path, answered with [`PathAnswer`].
+#[aether_data::kind(name = "test.decode_refusal.path_probe", no_serde)]
+struct PathProbe {
+    path: ProtocolPath<Poking>,
+}
+
+/// A tell that carries a typed path, answered with nothing.
+#[aether_data::kind(name = "test.decode_refusal.path_tell", no_serde)]
+struct PathTell {
+    path: ProtocolPath<Poking>,
+}
+
+/// [`PathProbe`]'s reply, which can name a refused path.
+#[aether_data::kind(name = "test.decode_refusal.path_answer", partial_eq)]
+enum PathAnswer {
+    Ok,
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for PathAnswer {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
+}
+
+/// A recipient of both path-carrying kinds, which never sees a decodable one.
+struct PathRefuser;
+
+#[aether_actor::actor(root)]
+impl NativeActor for PathRefuser {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.decode_refusal.path_refuser";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::request]
+    fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: PathProbe) -> PathAnswer {
+        let _ = self;
+        panic!("an unprovable path never decodes");
+    }
+
+    #[aether_actor::handler::tell]
+    fn on_tell(&mut self, _ctx: &mut NativeCtx<'_>, _tell: PathTell) {
+        let _ = self;
+        panic!("an unprovable path never decodes");
+    }
+}
+
+/// Starts a [`PathProbe`] from the [`PathAsker`].
+#[aether_data::kind(name = "test.decode_refusal.ask_probe", copy)]
+struct AskProbe;
+
+/// Starts a [`PathTell`] from the [`PathAsker`].
+#[aether_data::kind(name = "test.decode_refusal.ask_tell", copy)]
+struct AskTell;
+
+/// What the [`PathAsker`] hears back.
+#[derive(Debug, PartialEq)]
+enum Heard {
+    Answer(PathAnswer),
+    Refused(KindId),
+}
+
+/// An asker that opts into `DecodeRefused` and records every answer it hears.
+struct PathAsker {
+    heard: Sender<Heard>,
+}
+
+#[aether_actor::actor(root, depends(PathRefuser))]
+impl NativeActor for PathAsker {
+    type Config = ();
+    type Params = Sender<Heard>;
+    const NAMESPACE: &'static str = "test.decode_refusal.path_asker";
+
+    fn init((): (), heard: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { heard })
+    }
+
+    #[aether_actor::handler::single]
+    fn on_ask_probe(&mut self, ctx: &mut NativeCtx<'_>, _ask: AskProbe) {
+        let _ = self;
+        ctx.send::<PathRefuser>(&PathProbe { path: absent_path() });
+    }
+
+    #[aether_actor::handler::single]
+    fn on_ask_tell(&mut self, ctx: &mut NativeCtx<'_>, _ask: AskTell) {
+        let _ = self;
+        ctx.send::<PathRefuser>(&PathTell { path: absent_path() });
+    }
+
+    #[aether_actor::handler::single]
+    fn on_answer(&mut self, _ctx: &mut NativeCtx<'_>, answer: PathAnswer) {
+        self.heard.send(Heard::Answer(answer)).expect("heard receiver stays live");
+    }
+
+    #[aether_actor::handler::single]
+    fn on_decode_refused(&mut self, _ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
+        self.heard.send(Heard::Refused(notice.kind)).expect("heard receiver stays live");
+    }
+}
+
+fn path_harness() -> (SubstrateHarness, mpsc::Receiver<Heard>) {
+    let (heard_tx, heard) = mpsc::channel();
+    let harness = SubstrateHarness::builder()
+        .with_actor::<PathRefuser>(())
+        .with_actor::<PathAsker>(heard_tx)
+        .build()
+        .expect("the path refuser and its asker boot");
+
+    (harness, heard)
+}
+
+/// A request whose typed path no route has stood at is answered exactly once,
+/// with its reply's `Err` naming the path, even to an asker that opted into
+/// `DecodeRefused`. Fails if the refusal is dropped (the requester waits
+/// forever), answered twice (an RPC caller would get two replies), or
+/// answered with a notice rather than the request's own reply.
+#[test]
+fn a_request_whose_path_does_not_prove_is_answered_once_with_its_reply() {
+    let (mut harness, heard) = path_harness();
+    let asker = harness.actor_ref::<PathAsker>();
+
+    harness.execute(vec![("ask", HarnessOp::send_and_settle(&asker, &AskProbe))]).expect("the request chain settles");
+
+    let refused = PathRefused { path: absent_path().as_erased().clone(), reason: PathRefusal::Unpublished };
+    assert_eq!(heard.try_iter().collect::<Vec<_>>(), [Heard::Answer(PathAnswer::Err(refused))]);
+}
+
+/// A silent row of a path-carrying kind keeps the drop: the opted-in asker
+/// hears the `DecodeRefused` notice and no reply. Fails if the answer reaches
+/// a row that has no reply to give.
+#[test]
+fn a_tell_whose_path_does_not_prove_keeps_the_drop() {
+    let (mut harness, heard) = path_harness();
+    let asker = harness.actor_ref::<PathAsker>();
+
+    harness.execute(vec![("ask", HarnessOp::send_and_settle(&asker, &AskTell))]).expect("the request chain settles");
+
+    assert_eq!(heard.try_iter().collect::<Vec<_>>(), [Heard::Refused(<PathTell as Kind>::ID)]);
 }

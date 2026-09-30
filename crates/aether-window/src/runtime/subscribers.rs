@@ -691,10 +691,10 @@ mod tests {
         let mut rig = rig();
 
         rig.send(&SubscribeWindowSelf { selector: All, kind: Key::ID });
-        assert!(matches!(rig.reply(), SubscribeWindowResult::Err { .. }), "a session cannot subscribe itself");
+        assert!(matches!(rig.reply(), SubscribeWindowResult::Err(_)), "a session cannot subscribe itself");
 
         rig.send(&UnsubscribeWindowSelf { selector: All, kind: Key::ID });
-        assert!(matches!(rig.reply(), SubscribeWindowResult::Err { .. }), "a session cannot unsubscribe itself");
+        assert!(matches!(rig.reply(), SubscribeWindowResult::Err(_)), "a session cannot unsubscribe itself");
     }
 
     /// Fails if a `One` selector stores its row under every window, or under

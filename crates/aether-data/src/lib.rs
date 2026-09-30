@@ -131,6 +131,15 @@ pub trait Kind {
     const NAME: &'static str;
     const ID: KindId;
 
+    /// Whether a decode of this kind proves a `ProtocolPath` route, so it
+    /// can refuse on engine state (ADR-0231 §3): the kind's
+    /// [`wire::WireDecode::PROVES_ROUTES`]. The `Kind` derive sets it for a
+    /// structured kind; a `#[repr(C)]` kind and a hand-written impl keep
+    /// `false`. The `#[actor]` dispatch reads it to require that such a
+    /// request's reply answer the refusal. It enters no schema, so no kind
+    /// id depends on it.
+    const PROVES_ROUTES: bool = false;
+
     /// Decode one instance from `bytes` against `ctx`: the one decode body
     /// per kind (ADR-0231 §3, ADR-0238 decision 3). A tag-1 `Blob` field
     /// resolves through [`wire::DecodeCtx::resolve_blob`] and a

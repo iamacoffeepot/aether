@@ -1,0 +1,8 @@
+error[E0277]: `Registered` cannot answer a request whose typed path failed to prove
+  --> tests/ui/rejects_path_request_without_refused_reply.rs:35:86
+   |
+35 |     fn on_register(&mut self, _ctx: &mut WasmCtx<'_>, _register: Register) -> Registered {
+   |                                                                                      ^^^^^^^^^^ this reply cannot name a refused path
+   |
+   = help: the trait `From<PathRefused>` is not implemented for `Registered`
+   = note: a request carrying a ProtocolPath replies with a kind that implements `From<PathRefused>`, its `Err` arm naming the refusal (ADR-0231 §3)

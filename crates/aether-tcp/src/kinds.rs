@@ -6,7 +6,7 @@
 //! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
 //! does not change any id or alter wire compatibility.
 
-use aether_actor::{HeldReply, ProtocolPath};
+use aether_actor::{HeldReply, PathRefused, ProtocolPath};
 use serde::{Deserialize, Serialize};
 
 /// What a tcp session delivers to its consumer: every reassembled frame and
@@ -39,10 +39,10 @@ pub trait TcpConsumer {
 /// [`TcpConsumer`] (ADR-0231 §3): in code an `ActorPath<R>` narrowed with
 /// `.narrow::<TcpConsumer>()`, which compiles only when `R` handles both
 /// kinds silently; over MCP the `path` a component load returns. A short
-/// `root/:key` path, a path no route has stood at, or one whose route does
-/// not publish both silent rows, is refused at decode: the mail is logged at
-/// warn and gets no reply. A consumer that has closed decodes and gets `Err`
-/// without binding. `None` leaves the listener observer-less and drops
+/// `root/:key` path is refused at decode with a warn and gets no reply; a path
+/// no route has stood at, one whose route does not publish both silent rows,
+/// and a consumer that has closed are answered
+/// `Err(BindListenerError::Consumer(..))` without binding. `None` leaves the listener observer-less and drops
 /// inbound bytes. A consumer binding itself sends [`BindListenerSelf`].
 #[aether_data::kind(name = "aether.tcp.bind_listener", no_serde)]
 pub struct BindListener {
@@ -73,10 +73,10 @@ pub struct BindListenerSelf {
 ///
 /// Optional `consumer` is the canonical path of the actor covering
 /// [`TcpConsumer`] the dialed session delivers inbound frames and close
-/// notices to, with [`BindListener`]'s rules: a short, never-registered, or
-/// non-covering path is refused at decode without a reply, and a consumer
-/// that has closed gets `Err` without dialing. `None` leaves the session observer-less and
-/// drops inbound bytes. A consumer dialing for itself sends [`ConnectSelf`].
+/// notices to, with [`BindListener`]'s rules: a short path is refused at
+/// decode without a reply, and a never-registered, non-covering, or closed
+/// consumer is answered `Err(ConnectError::Consumer(..))` without dialing.
+/// `None` leaves the session observer-less and drops inbound bytes. A consumer dialing for itself sends [`ConnectSelf`].
 #[aether_data::kind(name = "aether.tcp.connect", no_serde)]
 pub struct Connect {
     pub addr: String,
@@ -98,9 +98,8 @@ pub struct ConnectSelf {
 }
 
 /// Reply to [`Connect`] and [`ConnectSelf`]. `Ok` carries the resolved connect-session
-/// subname and the connected peer address.
-/// `Err` carries the requested address and a human-readable dial or
-/// spawn failure.
+/// subname and the connected peer address. `Err` names why no session was
+/// dialed ([`ConnectError`]).
 ///
 /// A consumer actor writes to the session through the host-stamped sender
 /// of the [`SessionData`] it receives (`ctx.sender()`, then `ctx.send_to`).
@@ -110,33 +109,85 @@ pub struct ConnectSelf {
 #[aether_data::kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
     Ok { session_name: String, peer: String },
-    Err { addr: String, error: String },
+    Err(ConnectError),
+}
+
+/// Why a [`Connect`] or [`ConnectSelf`] dialed no session.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ConnectError {
+    /// The explicit `consumer` path did not prove (ADR-0231 §3): no route
+    /// has stood at it, its route does not cover [`TcpConsumer`], or its
+    /// actor has closed.
+    Consumer(PathRefused),
+    /// The requested address and a human-readable dial, spawn, or `_self`
+    /// consumer failure.
+    Failed { addr: String, error: String },
+}
+
+impl ConnectResult {
+    /// The dial of `addr` failed for `error`.
+    #[must_use]
+    pub fn failed(addr: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::Err(ConnectError::Failed { addr: addr.into(), error: error.into() })
+    }
+}
+
+impl From<PathRefused> for ConnectResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(ConnectError::Consumer(refused))
+    }
 }
 
 impl HeldReply for ConnectResult {
     fn unanswered() -> Self {
-        Self::Err { addr: String::new(), error: "tcp capability closed before the connect completed".into() }
+        Self::failed(String::new(), "tcp capability closed before the connect completed")
     }
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
 /// name (the deterministic subname under
 /// `aether.tcp.listener:<name>`) and the actually-bound local port
-/// (load-bearing when `addr` requested port 0). `Err` carries a
-/// human-readable reason — consumer refusals, addr parse failures,
-/// port-in-use, OS bind errors, namespace collisions.
+/// (load-bearing when `addr` requested port 0). `Err` names why nothing
+/// was bound ([`BindListenerError`]).
 ///
 /// The listener is addressed as
 /// `aether.tcp/aether.tcp.listener:<listener_name>`.
 #[aether_data::kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
     Ok { listener_name: String, local_port: u16 },
-    Err { addr: String, error: String },
+    Err(BindListenerError),
+}
+
+/// Why a [`BindListener`] or [`BindListenerSelf`] bound nothing.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum BindListenerError {
+    /// The explicit `consumer` path did not prove (ADR-0231 §3): no route
+    /// has stood at it, its route does not cover [`TcpConsumer`], or its
+    /// actor has closed.
+    Consumer(PathRefused),
+    /// The requested address and a human-readable reason: a `_self` consumer
+    /// refusal, an addr parse failure, port-in-use, an OS bind error, or a
+    /// namespace collision.
+    Failed { addr: String, error: String },
+}
+
+impl BindListenerResult {
+    /// The bind of `addr` failed for `error`.
+    #[must_use]
+    pub fn failed(addr: impl Into<String>, error: impl Into<String>) -> Self {
+        Self::Err(BindListenerError::Failed { addr: addr.into(), error: error.into() })
+    }
+}
+
+impl From<PathRefused> for BindListenerResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(BindListenerError::Consumer(refused))
+    }
 }
 
 impl HeldReply for BindListenerResult {
     fn unanswered() -> Self {
-        Self::Err { addr: String::new(), error: "tcp capability closed before the bind completed".into() }
+        Self::failed(String::new(), "tcp capability closed before the bind completed")
     }
 }
 

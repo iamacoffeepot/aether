@@ -7,7 +7,7 @@
 //! typed-path vocabulary (all three unconditional dependencies), so the
 //! `default-features = false` wasm consumers keep compiling.
 
-use aether_actor::{HeldReply, ProtocolPath};
+use aether_actor::{HeldReply, PathRefused, ProtocolPath};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -512,9 +512,9 @@ pub struct WebSocketClose {
 /// (ADR-0231 §3): in code `ActorPath::<R>::root().narrow::<HttpRouter>()`,
 /// which compiles only when `R` takes `aether.http.server.request` and
 /// replies `HttpRouterResult`; over MCP the `path` a component load returns.
-/// A path whose handler has closed decodes and gets `Err` naming it; a path
-/// no such route has stood at is refused at decode with a warn and gets no
-/// reply.
+/// A path whose handler has closed, one no such route has stood at, and one
+/// whose route does not cover [`HttpRouter`] are all answered
+/// `Err(RegisterRouteError::Handler(..))` naming the path and why.
 ///
 /// `shared` (ADR-0136) opts the registration into the key's member
 /// *set*: N handler instances that all register `shared: true` jointly serve
@@ -585,17 +585,39 @@ pub struct UnregisterRouteSelf {
 }
 
 /// Reply to the route registration / unregistration kinds (ADR-0130).
-/// Failure modes: an invalid prefix (must start with `/`), a `handler` path
-/// whose actor has closed, a `(prefix, method)` key already claimed by
-/// another handler, or a `_self` op from a sender with no local mailbox.
-/// A `handler` path no route has stood at, or whose route does not cover
-/// [`HttpRouter`], never reaches the receipt at all: the decode refuses the mail, which is logged
-/// at warn and gets no reply of any kind. A `_self` registrant that does not
-/// cover it is answered `Err`.
+/// `Err` names why the registration failed ([`RegisterRouteError`]).
 #[aether_data::kind(name = "aether.http.server.register_route_result")]
 pub enum RegisterRouteResult {
     Ok,
-    Err { error: String },
+    Err(RegisterRouteError),
+}
+
+/// Why a route registration or release failed.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RegisterRouteError {
+    /// The `handler` path of a [`RegisterRoute`] did not prove (ADR-0231 §3):
+    /// no route has stood at it, its route does not cover [`HttpRouter`], or
+    /// its handler has closed.
+    Handler(PathRefused),
+    /// The server refused the registration: an invalid prefix (must start
+    /// with `/`), a `(prefix, method)` key already claimed by another
+    /// handler, a `_self` op from a sender with no local mailbox or one that
+    /// does not cover [`HttpRouter`], or a disabled server.
+    Rejected { error: String },
+}
+
+impl RegisterRouteResult {
+    /// The server's refusal, naming why.
+    #[must_use]
+    pub fn rejected(error: impl Into<String>) -> Self {
+        Self::Err(RegisterRouteError::Rejected { error: error.into() })
+    }
+}
+
+impl From<PathRefused> for RegisterRouteResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(RegisterRouteError::Handler(refused))
+    }
 }
 
 /// `aether.http.server.inbound_ready` — accept / reader sidecar →

@@ -93,7 +93,7 @@ impl WasmActor for TcpLoadProbe {
     fn on_bind_result(&mut self, _ctx: &mut WasmCtx<'_>, result: BindListenerResult) {
         match result {
             BindListenerResult::Ok { local_port, .. } => self.local_port = Some(local_port),
-            BindListenerResult::Err { addr, error } => self.connect_failures.push(format!("bind {addr}: {error}")),
+            BindListenerResult::Err(error) => self.connect_failures.push(format!("bind: {error:?}")),
         }
     }
 
@@ -113,7 +113,7 @@ impl WasmActor for TcpLoadProbe {
                 let index = self.ensure_session(TcpLoadTopology::Outbound, &session_name);
                 self.sessions[index].snapshot.established = true;
             }
-            ConnectResult::Err { addr, error } => self.connect_failures.push(format!("{addr}: {error}")),
+            ConnectResult::Err(error) => self.connect_failures.push(format!("{error:?}")),
         }
     }
 

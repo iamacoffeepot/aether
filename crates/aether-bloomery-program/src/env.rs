@@ -272,18 +272,16 @@ impl Future for RunCall {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(refusal)) => return Poll::Ready(Err(refusal)),
             Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Ok(outcome))) => return Poll::Ready(Ok(Ok(outcome))),
-            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Refused(refusal))) => {
-                return Poll::Ready(Ok(Err(refusal)));
-            }
-            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Exhausted(
-                aether_bloomery_workspace::Resource::Time,
-            ))) => ExecutorFault::TimedOut,
-            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Exhausted(
-                aether_bloomery_workspace::Resource::Memory,
-            ))) => ExecutorFault::ResourceExhausted,
-            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Failed { detail })) => {
-                ExecutorFault::Failed { reason: detail }
-            }
+            Poll::Ready(Ok(aether_bloomery_workspace::RunResult::Err(error))) => match error {
+                aether_bloomery_workspace::RunError::Refused(refusal) => return Poll::Ready(Ok(Err(refusal))),
+                aether_bloomery_workspace::RunError::Exhausted(aether_bloomery_workspace::Resource::Time) => {
+                    ExecutorFault::TimedOut
+                }
+                aether_bloomery_workspace::RunError::Exhausted(aether_bloomery_workspace::Resource::Memory) => {
+                    ExecutorFault::ResourceExhausted
+                }
+                aether_bloomery_workspace::RunError::Failed { detail } => ExecutorFault::Failed { reason: detail },
+            },
         };
         env.end(fault);
         Poll::Pending

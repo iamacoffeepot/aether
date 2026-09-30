@@ -450,10 +450,29 @@ refuses without one.
   under its proven name, keeping the contract it last published, and names
   are never reused, so the path still proves its type; liveness is
   `resolve`'s to answer, and the handler turns `NotLive` into its typed
-  `Err`. A refused decode reaches no handler: the mail is logged at warn and
-  nothing is sent back, a request's reply included. A malformed payload
-  from an in-engine sender is a codec bug, since every in-engine send is
-  typed; reporting a refusal to an external caller is #7076.
+  `Err`. A refused decode reaches no handler. A request whose typed path
+  refused is still answered: a path-carrying request's reply kind has an
+  `Err` arm holding an error enum and implements `From<PathRefused>`, and
+  the dispatch answers the sender `O::from(refused)`, where `PathRefused`
+  names the path and why (`Unchecked`, `Unpublished`, `Uncovered { kind }`,
+  or `NotLive`). A handler turns `resolve`'s `ResolveError` into the same
+  answer through `From<ResolveError> for PathRefused`, so a path refused at
+  decode and one closed before `resolve` read alike. A silent or unchecked
+  row has no reply to give, so its refusal is logged at warn and nothing is
+  sent back. A malformed payload from an in-engine sender is a codec bug,
+  since every in-engine send is typed; reporting a refusal to an external
+  caller is #7076.
+- The compiler holds a path-carrying request to that rule. `WireDecode` and
+  `Kind` carry a provided `PROVES_ROUTES` const, `true` for
+  `ProtocolPath<P>`, forwarded by the containers and ORed by the derives
+  over every field of every variant, so it reaches a path nested in an enum
+  such as a subscription. Each replying `#[actor]` arm writes
+  `<Refusal<{ K::PROVES_ROUTES }> as RefusalAnswer<O>>::answer` with its
+  row's request kind `K` and reply `O`: `Refusal<false>` accepts any reply
+  and answers nothing, and `Refusal<true>` is implemented only for
+  `O: From<PathRefused>`, so a request carrying a path whose reply cannot
+  name the refusal fails to compile. The const enters no schema, so no kind
+  id depends on it.
 - A third operation proves a reference
   ([ADR-0242](0242-a-kinds-reach-is-its-narrowest-fields.md) §6), and lands
   with the first kind that carries a typed proof. A reference leaf is
@@ -468,17 +487,22 @@ refuses without one.
   Serde carries no context, so `ProtocolPath<P>` has no `Deserialize`, and a
   kind carrying one is declared `no_serde`.
 - Native dispatch decodes each typed arm with the inbound's attachments and
-  the registry, and logs a refusal at warn, naming the kind and the error,
-  before treating the mail as a miss. The reply target hears the refusal only
-  when it opts in: it asked under a correlation, and its published contract
-  carries a row for the engine-only `DecodeRefused`, which the refuser then
-  answers it as a reply joining the request's chain. Only the RPC server
-  declares that row, so a wire call closes naming the refusal, and an
-  in-engine sender, whose refusal is a codec bug, hears nothing. A guest's
-  context carries its blob
-  holds only, so a guest decode of a `ProtocolPath<P>` refuses until
-  [ADR-0241](0241-code-is-published-not-loaded.md) gives it a published-routes
-  answer.
+  the registry, and logs a refusal at warn, naming the kind and the error.
+  A replying row whose request carries a path answers a typed-path refusal
+  with its reply, through `OutboundReply::reply`, joining the request's
+  chain, and reports the mail handled; a `Pending<O>` row is answered the
+  same way, at once. Any other refusal is a miss. The reply target hears a
+  missed refusal only when it opts in: it asked under a correlation, and
+  its published contract carries a row for the engine-only
+  `DecodeRefused`, which the refuser then answers it as a reply joining the
+  request's chain. Only the RPC server declares that row, so a wire call
+  closes naming the refusal, and an in-engine sender, whose refusal is a
+  codec bug, hears nothing. An answered refusal sends no `DecodeRefused`,
+  so an RPC caller gets exactly one reply. A guest's context carries its
+  blob holds only, so a guest decode of a `ProtocolPath<P>` refuses
+  `Unchecked`, and a guest's replying arm answers it the same way, until
+  [ADR-0241](0241-code-is-published-not-loaded.md) gives it a
+  published-routes answer.
 
 So a `ProtocolPath<P>` that exists is valid by construction: narrowed where
 the compiler proved `P: CoveredBy<R>`, or decoded against the engine it is

@@ -6,7 +6,7 @@
 //! compiles both `desktop` (for the desktop chassis) and `synthetic` (for the
 //! harnesses) into one crate, and only the composer knows which it wants.
 
-use aether_actor::{OutboundReply, Unchecked, runtime};
+use aether_actor::{OutboundReply, PathRefused, Unchecked, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::MonitorNotice;
 use aether_substrate::actor::native::{Erased, Pending, SpawnOutcome, TaskDone};
@@ -197,13 +197,14 @@ impl NativeActor for WindowCapability {
     /// The subscriber's path reached this handler only because its decode
     /// proved the route there, live or closed, handles the kind silently
     /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
-    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path whose
-    /// actor has gone answers `Err` naming it.
+    /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path that did
+    /// not prove at decode, or whose actor has gone, answers
+    /// `Err(Subscriber(..))` naming it.
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
         match state.subscribers_mut().subscribe_path(ctx, mail.selector, &mail.subscription) {
             Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
+            Err(error) => PathRefused::from(error).into(),
         }
     }
 
@@ -216,13 +217,13 @@ impl NativeActor for WindowCapability {
     ) -> SubscribeWindowResult {
         match state.subscribers_mut().subscribe_self(ctx, mail.selector, mail.kind) {
             Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+            Err(error) => SubscribeWindowResult::rejected(error),
         }
     }
 
     /// Drop an explicitly named actor's subscription to one kind for one
     /// selector. The path is proven live at receipt and its key removed; a
-    /// path whose actor has gone answers `Err` naming it.
+    /// path whose actor has gone answers `Err(Subscriber(..))` naming it.
     #[handler::single]
     fn on_unsubscribe(
         state: &mut Self::State,
@@ -231,7 +232,7 @@ impl NativeActor for WindowCapability {
     ) -> SubscribeWindowResult {
         match state.subscribers_mut().unsubscribe_path(ctx, mail.selector, &mail.subscription) {
             Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
+            Err(error) => PathRefused::from(error).into(),
         }
     }
 
@@ -244,7 +245,7 @@ impl NativeActor for WindowCapability {
     ) -> SubscribeWindowResult {
         match state.subscribers_mut().unsubscribe_self(ctx, mail.selector, mail.kind) {
             Ok(()) => SubscribeWindowResult::Ok,
-            Err(error) => SubscribeWindowResult::Err { error },
+            Err(error) => SubscribeWindowResult::rejected(error),
         }
     }
 

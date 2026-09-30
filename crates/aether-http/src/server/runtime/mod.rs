@@ -26,7 +26,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, ReplyMode, Single, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, PathRefused, ProtocolRef, ReplyMode, Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -92,11 +92,10 @@ mod unit_tests;
 /// warn-drop at an unknown mailbox — "linked but not enabled" is a
 /// first-class, diagnosable state.
 fn disabled_route_result() -> RegisterRouteResult {
-    RegisterRouteResult::Err {
-        error: "aether.http.server is composed but disabled on this chassis (enabled = false); \
-                no socket is bound, so routes cannot be registered"
-            .to_owned(),
-    }
+    RegisterRouteResult::rejected(
+        "aether.http.server is composed but disabled on this chassis (enabled = false); \
+         no socket is bound, so routes cannot be registered",
+    )
 }
 
 #[runtime]
@@ -304,9 +303,11 @@ impl NativeActor for HttpServerCapability {
     /// The handler arrives as a `ProtocolPath<HttpRouter>`, so the contextual
     /// decode already proved that the route at the path, live or closed,
     /// takes `aether.http.server.request` and replies `HttpRouterResult`
-    /// (ADR-0231 §3); `resolve` proves it is live, answering `Err` naming the
-    /// path when its handler has closed, and the route holds that proof. Its erased twin is the identity the table, the monitors, and a
-    /// departure are keyed by. The proof is cast once, here, to each
+    /// (ADR-0231 §3), and a path that did not prove is answered
+    /// `Err(Handler(..))` by the dispatch; `resolve` proves it is live,
+    /// answering the same `Err` naming the path when its handler has closed,
+    /// and the route holds that proof. Its erased twin is the identity the
+    /// table, the monitors, and a departure are keyed by. The proof is cast once, here, to each
     /// data-phase protocol ([`RouteMember::cast`]), so the route holds the
     /// references its streams and websockets send through.
     ///
@@ -326,7 +327,7 @@ impl NativeActor for HttpServerCapability {
         }
         let handler = match ctx.resolve(&payload.handler) {
             Ok(handler) => handler,
-            Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
+            Err(error) => return PathRefused::from(error).into(),
         };
         let member = RouteMember::cast(ctx, handler);
         let result = state.register_route(&payload.prefix, payload.method, member, payload.shared);
@@ -359,21 +360,18 @@ impl NativeActor for HttpServerCapability {
             return disabled_route_result();
         }
         let Some(sender) = ctx.sender() else {
-            return RegisterRouteResult::Err {
-                error: "aether.http.server.register_route_self requires a local sender; an \
-                        external session or remote engine must use \
-                        aether.http.server.register_route with an explicit handler path"
-                    .to_string(),
-            };
+            return RegisterRouteResult::rejected(
+                "aether.http.server.register_route_self requires a local sender; an \
+                 external session or remote engine must use \
+                 aether.http.server.register_route with an explicit handler path",
+            );
         };
         let Some(handler) = ctx.cast::<HttpRouter>(sender) else {
-            return RegisterRouteResult::Err {
-                error: format!(
-                    "{} does not cover HttpRouter: a route holder takes aether.http.server.request \
-                     and replies aether.http.server.router_result",
-                    ctx.actor_path(sender),
-                ),
-            };
+            return RegisterRouteResult::rejected(format!(
+                "{} does not cover HttpRouter: a route holder takes aether.http.server.request \
+                 and replies aether.http.server.router_result",
+                ctx.actor_path(sender),
+            ));
         };
         let member = RouteMember::cast(ctx, handler);
         let result = state.register_route(&payload.prefix, payload.method, member, payload.shared);
@@ -426,12 +424,11 @@ impl NativeActor for HttpServerCapability {
         }
         match ctx.sender() {
             Some(sender) => state.unregister_route(&payload.prefix, payload.method, sender),
-            None => RegisterRouteResult::Err {
-                error: "aether.http.server.unregister_route_self requires a local sender; an \
-                        external session or remote engine must use \
-                        aether.http.server.unregister_route with an explicit handler path"
-                    .to_string(),
-            },
+            None => RegisterRouteResult::rejected(
+                "aether.http.server.unregister_route_self requires a local sender; an \
+                 external session or remote engine must use \
+                 aether.http.server.unregister_route with an explicit handler path",
+            ),
         }
     }
 

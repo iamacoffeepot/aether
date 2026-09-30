@@ -21,7 +21,7 @@ use aether_bloomery_tar::{DecodeError, Rules, decode};
 
 use super::engine::{ContainerId, Engine, EngineError};
 use super::storage::{StorageError, StorageSession};
-use crate::{ImageRef, ImportResult};
+use crate::{ImageRef, ImportError, ImportResult};
 
 /// Everything one import needs but its storage, cloned onto the worker
 /// thread per request.
@@ -42,7 +42,7 @@ impl Importer {
             }
             Err(error) => {
                 tracing::warn!(target: "aether_bloomery_workspace", image = image.as_str(), %error, "import failed");
-                ImportResult::Failed { detail: Detail::new(error.to_string()) }
+                ImportResult::Err(ImportError::Failed { detail: Detail::new(error.to_string()) })
             }
         }
     }

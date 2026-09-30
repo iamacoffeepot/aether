@@ -100,8 +100,8 @@ impl WasmActor for EnvironmentBootstrap {
                 ctx.send_to(peers.journal, &ReadHead);
                 live(peers, Phase::ReadingHead { base, toolchain: tree })
             }
-            (Phase::ImportingBase | Phase::ImportingToolchain { .. }, ImportResult::Failed { detail }) => {
-                stop("import", detail.as_str())
+            (Phase::ImportingBase | Phase::ImportingToolchain { .. }, ImportResult::Err(error)) => {
+                stop("import", &format!("{error:?}"))
             }
             (phase, _) => out_of_phase("import_result", &phase),
         };

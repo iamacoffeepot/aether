@@ -140,7 +140,7 @@ pub fn register_route(
         Ok(prefix) => {
             routes.write().expect("route table lock poisoned").claim(RouteKey { prefix, method }, holder, shared)
         }
-        Err(error) => RegisterRouteResult::Err { error },
+        Err(error) => RegisterRouteResult::rejected(error),
     }
 }
 
@@ -163,7 +163,7 @@ pub fn unregister_route(
             routes.write().expect("route table lock poisoned").release(&RouteKey { prefix, method }, holder);
             RegisterRouteResult::Ok
         }
-        Err(error) => RegisterRouteResult::Err { error },
+        Err(error) => RegisterRouteResult::rejected(error),
     }
 }
 
@@ -194,30 +194,26 @@ impl RouteTable {
                 return RegisterRouteResult::Ok;
             }
             if shared != existing.shared {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
-                         join it (ADR-0136: spreading is a joint opt-in)",
-                        if existing.shared {
-                            "a shared member set"
-                        } else {
-                            "exclusively claimed"
-                        },
-                        if shared {
-                            "shared"
-                        } else {
-                            "exclusive"
-                        },
-                    ),
-                };
+                return RegisterRouteResult::rejected(format!(
+                    "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
+                     join it (ADR-0136: spreading is a joint opt-in)",
+                    if existing.shared {
+                        "a shared member set"
+                    } else {
+                        "exclusively claimed"
+                    },
+                    if shared {
+                        "shared"
+                    } else {
+                        "exclusive"
+                    },
+                ));
             }
             if !shared {
-                return RegisterRouteResult::Err {
-                    error: format!(
-                        "route ({prefix:?}, {method:?}) already claimed by {:?}",
-                        existing.members[0].router
-                    ),
-                };
+                return RegisterRouteResult::rejected(format!(
+                    "route ({prefix:?}, {method:?}) already claimed by {:?}",
+                    existing.members[0].router
+                ));
             }
             match existing.members.iter_mut().find(|member| member.router.erase() == identity) {
                 Some(member) => *member = holder,

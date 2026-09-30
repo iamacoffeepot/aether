@@ -47,10 +47,14 @@ diagnostic. The hub relays that refusal to its caller unchanged. A reply
 
 A native recipient that refuses the payload at decode (a raw client, schema
 drift between versions, or an encoding against a stale schema) runs no handler
-for it and sends no reply. The call still closes naming the refusal: once its
-chain settles it ends with `RpcError::DecodeRefused { path, kind, error }`,
-where `path` is the refusing actor and `error` the decode error, and the hub
-relays it unchanged. A guest recipient's refusal still ends `Ok` with no reply.
+for it. A request whose typed path did not prove is answered by the recipient
+itself: its reply's `Err` names the path and why (ADR-0231 §3), and that reply
+is the call's one answer. Any other refusal sends no reply, and the call still
+closes naming it: once its chain settles it ends with
+`RpcError::DecodeRefused { path, kind, error }`, where `path` is the refusing
+actor and `error` the decode error, and the hub relays it unchanged. So
+`DecodeRefused` closes only a call its recipient does not answer. A guest
+recipient's unanswered refusal still ends `Ok` with no reply.
 
 Each `FleetProxy` registers its engine with the hub's RPC server once it is
 live (`aether.rpc.register_engine_route`), and the server forwards every

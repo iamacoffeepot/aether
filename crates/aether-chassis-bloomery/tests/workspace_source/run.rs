@@ -10,7 +10,8 @@ use aether_bloomery_workspace::testing::{
 };
 use aether_bloomery_workspace::{
     EnvVar, Environment, ImageRef, Import, ImportResult, Mounts, Network, Outcome, Platform, Provides, Refusal,
-    Resource, Run, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools, TreePath,
+    Resource, Run, RunError, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools,
+    TreePath,
 };
 use aether_data::wire::encode_to_vec;
 use aether_harness_bloomery::BloomeryHarness;
@@ -142,7 +143,7 @@ fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
 
 fn detail(answer: &RunResult) -> Result<&str, Box<dyn Error>> {
     match answer {
-        RunResult::Failed { detail } => Ok(detail.as_str()),
+        RunResult::Err(RunError::Failed { detail }) => Ok(detail.as_str()),
         other => Err(format!("expected Failed, got {other:?}").into()),
     }
 }
@@ -233,7 +234,10 @@ fn a_retry_after_an_out_of_memory_kill_gets_twice_the_memory() -> TestResult {
 
     let (answers, requests) = serving(stub, both, || [harness.run(&run), harness.run(&run)])?;
 
-    assert!(answers.iter().all(|answer| *answer == RunResult::Exhausted(Resource::Memory)), "{answers:?}");
+    assert!(
+        answers.iter().all(|answer| *answer == RunResult::Err(RunError::Exhausted(Resource::Memory))),
+        "{answers:?}"
+    );
     let memory = |request: &StubRequest| -> Result<serde_json::Value, Box<dyn Error>> {
         let spec: serde_json::Value = serde_json::from_slice(&request.body)?;
         Ok(spec["HostConfig"]["Memory"].clone())
@@ -336,7 +340,7 @@ fn a_step_past_the_deadline_is_killed_and_answers_exhausted_time() -> TestResult
 
     let (answer, requests, _) = run_against(inputs, request, replies, &flags)?;
 
-    assert_eq!(answer, RunResult::Exhausted(Resource::Time));
+    assert_eq!(answer, RunResult::Err(RunError::Exhausted(Resource::Time)));
     assert_eq!(
         lines(&requests[7..]),
         [
@@ -362,7 +366,7 @@ fn an_image_labelled_for_another_environment_is_refused_before_anything_is_creat
 
     let (answer, requests, _) = run_against(inputs, request, replies, FLAGS)?;
 
-    assert_eq!(answer, RunResult::Refused(Refusal::EnvironmentUnavailable));
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::EnvironmentUnavailable)));
     assert_eq!(requests.len(), 2, "{:?}", lines(&requests));
     Ok(())
 }
@@ -387,7 +391,10 @@ fn a_toolchain_file_asking_for_more_than_the_environment_provides_is_refused_wit
     let tree_wants = RustToolchain::new("1.97.1", vec!["clippy".to_owned(), "rustfmt".to_owned()], Vec::new())?;
     assert_eq!(
         answer,
-        RunResult::Refused(Refusal::ToolchainMismatch { tree_wants, environment_provides: Some(provided) })
+        RunResult::Err(RunError::Refused(Refusal::ToolchainMismatch {
+            tree_wants,
+            environment_provides: Some(provided)
+        }))
     );
     assert!(detail(&neighbour)?.starts_with("reading the daemon's platform:"), "{neighbour:?}");
     Ok(())
@@ -404,8 +411,8 @@ fn a_tool_that_is_not_an_executable_in_the_root_is_unknown() -> TestResult {
     let plain = harness.run(&over(&harness, plain));
     let absent = harness.run(&over(&harness, absent));
 
-    assert_eq!(plain, RunResult::Refused(Refusal::UnknownTool(ToolName::new("text")?)));
-    assert_eq!(absent, RunResult::Refused(Refusal::UnknownTool(ToolName::new("cargo")?)));
+    assert_eq!(plain, RunResult::Err(RunError::Refused(Refusal::UnknownTool(ToolName::new("text")?))));
+    assert_eq!(absent, RunResult::Err(RunError::Refused(Refusal::UnknownTool(ToolName::new("cargo")?))));
     Ok(())
 }
 
@@ -420,7 +427,7 @@ fn an_environment_the_journal_lacks_is_input_missing() -> TestResult {
 
     let answer = harness.run(&over(&harness, request));
 
-    assert_eq!(answer, RunResult::Refused(Refusal::InputMissing(absent)));
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::InputMissing(absent))));
     Ok(())
 }
 
@@ -637,7 +644,7 @@ fn an_imported_tree_written_into_a_container_imports_back_to_the_same_tree() -> 
         let imported = harness.import(&import);
         let tree = match &imported {
             ImportResult::Ok { tree } => *tree,
-            ImportResult::Failed { .. } => return (imported, None),
+            ImportResult::Err(_) => return (imported, None),
         };
         (imported, Some(harness.run(&over(&harness, RunRequest { tree, ..template }))))
     })?;

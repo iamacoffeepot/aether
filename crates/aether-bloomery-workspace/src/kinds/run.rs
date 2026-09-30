@@ -331,8 +331,8 @@ pub struct RunRequest {
 /// Every input is read from `source` and every output staged to it; the
 /// workspace holds no store of its own (ADR-0240 D7). The source is proven to
 /// cover [`ArtifactStorage`] when the mail decodes, and proven live when the
-/// workspace receives it: one that is not live is answered
-/// `Refused(SourceUnavailable)` before anything is queued.
+/// workspace receives it: one that fails either proof is answered
+/// `Err(Refused(SourceUnavailable(..)))` before anything is queued.
 #[aether_data::kind(name = "aether.workspace.run", eq, no_serde)]
 pub struct Run {
     /// Where the run's inputs are read from and its outputs staged to.

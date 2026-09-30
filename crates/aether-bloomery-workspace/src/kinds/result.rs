@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use aether_actor::HeldReply;
+use aether_actor::{HeldReply, PathRefused};
 use aether_bloomery_kinds::{Detail, Digest, OpaqueBytes, Ref, Tree};
 
 use crate::kinds::environment::{Platform, RustToolchain, ToolName};
@@ -20,6 +20,13 @@ use crate::kinds::path::TreePath;
 pub enum RunResult {
     /// The steps ran. A non-zero exit is an outcome, not a refusal.
     Ok(Outcome),
+    /// The run did not produce an outcome.
+    Err(RunError),
+}
+
+/// Why a [`crate::Run`] produced no outcome.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
+pub enum RunError {
     /// The run could not start as asked.
     Refused(Refusal),
     /// The executor's allotment ran out.
@@ -31,9 +38,15 @@ pub enum RunResult {
     },
 }
 
+impl From<PathRefused> for RunResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(RunError::Refused(Refusal::SourceUnavailable(refused)))
+    }
+}
+
 impl HeldReply for RunResult {
     fn unanswered() -> Self {
-        Self::Failed { detail: Detail::new("workspace capability closed before the run answered") }
+        Self::Err(RunError::Failed { detail: Detail::new("workspace capability closed before the run answered") })
     }
 }
 
@@ -91,6 +104,8 @@ pub enum Refusal {
     UnknownTool(ToolName),
     /// An input the request cites is not stored.
     InputMissing(Digest),
-    /// The storage the run's `source` names is not live.
-    SourceUnavailable,
+    /// The storage the run's `source` names did not prove (ADR-0231 §3): no
+    /// route has stood at it, its route does not cover `ArtifactStorage`, or
+    /// it is not live.
+    SourceUnavailable(PathRefused),
 }

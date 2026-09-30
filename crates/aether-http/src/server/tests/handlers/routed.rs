@@ -151,8 +151,8 @@ impl NativeActor for TmpRouteHandler {
         };
         let response = match result {
             RegisterRouteResult::Ok => HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() },
-            RegisterRouteResult::Err { error } => {
-                HttpServerResponse { status: 500, headers: Vec::new(), body: error.into_bytes() }
+            RegisterRouteResult::Err(error) => {
+                HttpServerResponse { status: 500, headers: Vec::new(), body: format!("{error:?}").into_bytes() }
             }
         };
         held.answer(ctx, &HttpRouterResult::Response(response));

@@ -101,10 +101,12 @@ macro_rules! typed_path_traits {
 }
 
 mod actor_path;
+mod path_refused;
 mod protocol_path;
 mod resolve_error;
 
 pub use actor_path::ActorPath;
+pub use path_refused::{PathRefusal, PathRefused};
 pub use protocol_path::ProtocolPath;
 pub use resolve_error::ResolveError;
 
@@ -287,5 +289,38 @@ mod tests {
 
         assert_eq!(decode_from_slice::<ActorPath<Member>>(&wire(EXTENDED)), Err(WireError::InvalidActorPath));
         assert!(ActorPath::<Member>::deserialize(serde_text(EXTENDED)).is_err());
+    }
+
+    /// A path held anywhere in a kind marks it as one whose decode can refuse
+    /// on engine state (ADR-0231 §3), which is what makes the `#[actor]`
+    /// dispatch answer its refusal. A container or derive that dropped the
+    /// marker would silently restore the drop for every request nesting its
+    /// path, such as the lifecycle and window subscriptions.
+    #[test]
+    fn a_path_nested_in_an_option_inside_an_enum_marks_its_kind() {
+        #[derive(aether_data::Schema, Debug, Clone)]
+        enum Nested {
+            Empty,
+            Held(Option<ProtocolPath<Poking>>),
+        }
+
+        #[derive(aether_data::Schema, Debug, Clone)]
+        enum Plain {
+            Empty,
+            Held(Option<ErasedActorPath>),
+        }
+
+        #[aether_data::kind(name = "test.path.nested", no_serde)]
+        struct NestedKind {
+            nested: Nested,
+        }
+
+        #[aether_data::kind(name = "test.path.erased", no_serde)]
+        struct ErasedKind {
+            plain: Plain,
+        }
+
+        assert!(<NestedKind as Kind>::PROVES_ROUTES, "a nested protocol path proves a route");
+        assert!(!<ErasedKind as Kind>::PROVES_ROUTES, "an erased path proves nothing");
     }
 }
