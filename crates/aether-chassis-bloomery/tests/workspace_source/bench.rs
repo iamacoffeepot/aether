@@ -26,6 +26,7 @@
 //!   be read beside the default budget.
 //! - `AETHER_BENCH_PHASE=import` stops after the import; unset runs both phases.
 
+use std::env;
 use std::error::Error;
 use std::fs;
 use std::time::{Duration, Instant};
@@ -37,7 +38,7 @@ use crate::run::{FLAGS, Inputs, built_work, outcome, over, script};
 use crate::support::{CONTAINER, IMAGE, TestResult, answering};
 
 /// The hang bound for one phase; the reply is what the harness waits on, so it never costs time on success.
-const GUARD: Duration = Duration::from_secs(600);
+const GUARD: Duration = Duration::from_mins(10);
 
 const DIRECTORIES: u64 = 200;
 const FILES_PER_DIRECTORY: u64 = 100;
@@ -92,13 +93,14 @@ fn peak_over(base: u64) -> Result<u64, Box<dyn Error>> {
 
 #[test]
 #[ignore = "measurement: run on demand, see the module doc"]
+#[allow(clippy::print_stdout)] // the BENCH lines are the output
 fn import_then_run() -> TestResult {
     let inputs = Inputs::new(Vec::new())?;
     let (hex, template) = (inputs.hex(), inputs.request("tool", "target")?);
     let stub = StubDaemon::bind()?;
 
     #[allow(clippy::disallowed_methods)] // on-demand bench knob read from the shell; the harness boots hermetically
-    let prefetch = std::env::var("AETHER_WORKSPACE_PREFETCH_BYTES").ok();
+    let prefetch = env::var("AETHER_WORKSPACE_PREFETCH_BYTES").ok();
     let mut flags: Vec<&str> = FLAGS.to_vec();
     if let Some(bytes) = prefetch.as_deref() {
         flags.extend(["--workspace-prefetch-bytes", bytes]);
@@ -124,7 +126,7 @@ fn import_then_run() -> TestResult {
     };
 
     #[allow(clippy::disallowed_methods)] // on-demand bench knob read from the shell; the harness boots hermetically
-    let import_only = std::env::var("AETHER_BENCH_PHASE").is_ok_and(|phase| phase == "import");
+    let import_only = env::var("AETHER_BENCH_PHASE").is_ok_and(|phase| phase == "import");
     if import_only {
         return Ok(());
     }

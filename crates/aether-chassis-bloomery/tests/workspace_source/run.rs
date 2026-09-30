@@ -24,7 +24,7 @@ const TOOL: &[u8] = b"#!tool\n";
 const LOGS: &[(u8, &[u8])] = &[(1, b"checked\n"), (2, b"warning: unused\n")];
 
 /// The workspace every run scenario boots: two cores, both given to each run, 1 GiB per step, and 64 processes.
-pub(crate) const FLAGS: &[&str] = &[
+pub const FLAGS: &[&str] = &[
     "--workspace-cpuset",
     "2-3",
     "--workspace-run-cores",
@@ -37,7 +37,7 @@ pub(crate) const FLAGS: &[&str] = &[
 
 /// A seed holding an environment whose root holds `usr/bin/tool` (executable) and `usr/bin/text` (not), providing
 /// Rust 1.97.1 with clippy, and a run tree of `src/main.rs` plus its extra root files.
-pub(crate) struct Inputs {
+pub struct Inputs {
     batch: Batch,
     environment: Ref<Environment>,
     tree: Ref<Tree>,
@@ -94,7 +94,7 @@ impl Inputs {
 }
 
 /// `request` over the harness's unit journal.
-pub(crate) fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
+pub fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
     Run { source: harness.source(), request }
 }
 
@@ -104,7 +104,7 @@ fn tool(name: &str, path: &str) -> Result<Tool, Box<dyn Error>> {
 
 /// `/work` as the daemon archives it after a step that wrote `out.txt`: the input, the new file, and the `target`
 /// tmpfs as an empty directory.
-pub(crate) fn built_work() -> Vec<u8> {
+pub fn built_work() -> Vec<u8> {
     TarWriter::new()
         .directory("work/")
         .file("work/out.txt", b"built\n")
@@ -114,7 +114,7 @@ pub(crate) fn built_work() -> Vec<u8> {
         .finish()
 }
 
-pub(crate) fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
+pub fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
     RunScript { environment, logs: LOGS, exit_code: 0, output }
 }
 
@@ -133,7 +133,7 @@ fn run_against(
     Ok((answer, requests, harness))
 }
 
-pub(crate) fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
+pub fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
     match answer {
         RunResult::Ok(outcome) => Ok(outcome),
         other => Err(format!("expected an outcome, got {other:?}").into()),
