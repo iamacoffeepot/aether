@@ -136,12 +136,12 @@ impl WasmActor for Hello {
         ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.send::<RenderCapability>(&TRIANGLE);   // draw every tick
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }
@@ -316,18 +316,50 @@ liveness.
 A handler declares how it answers through its class marker
 ([ADR-0112](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0112-handler-reply-classes.md),
 [ADR-0134](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0134-multi-reply-class-and-explicit-handler-classes.md)).
-The **single** class (`#[handler::single]`) answers 0-or-1 through
-its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
-**unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
+The **single** class answers 0-or-1 through its return value — `-> R` sends
+`R` back, `-> ()` sends nothing — and four words spell it, each naming why the
+handler's mail arrives:
+
+| Attribute | Its mail is | Return | Parameters |
+|---|---|---|---|
+| `#[handler::request]` | a request it must answer | `O` or `Pending<O>` | 3 |
+| `#[handler::tell]` | a command that needs no answer | none | 3 |
+| `#[handler::event]` | a publication it subscribed to | none | 3 |
+| `#[handler::response]` | the answer to this actor's own request | none | 3, or 4 with its stored context |
+
+`#[actor]` checks each signature against its word, and each refusal names the
+word that fits: a `request` that returns nothing is a `tell`, `event`, or
+`response`, and a `tell`, `event`, or `response` that returns a value is a
+`request`. The words take no arguments. `tell` and `event` expand identically:
+the macro cannot see whether a kind arrives through a subscription, so `event`
+records the author's intent. None of the four is published — the inputs
+manifest and the contract rows see only the single class and the return type.
+The older `#[handler::single]` spelling still compiles and is being retired
+(#7202).
+
+A `response` takes the context its request stored with `send_with_context` as
+an optional fourth parameter
+([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md) §10).
+The dispatch arm takes it before the call. With `context: C`, a reply that
+arrives without a `C` — an uncorrelated mail of the reply kind, a context
+stored as another kind, or none stored — does not run the handler: the arm logs
+an error in the actor's own log ring, naming the handler, the reply and context
+kinds, and the request id, and counts the mail as handled. It never panics,
+because any sender can send the reply kind. With `context: Option<C>`, the
+handler runs either way and receives the take as it is. A `response` with no
+fourth parameter may still call `ctx.take_context` itself, for example to try
+several context kinds in turn.
+
+The **unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
 ctx and issues its own replies by hand (`ctx.reply` / `ctx.reply_to`), which the
 engine does not check. It gives up the reply check, so it is only for a handler
 that replies more than once, replies from outside the actor, or relays a
 request, and its `reason` says which: the reason rides the inputs manifest and
 the native handler inventory, and `describe_component` / `describe_handlers`
 show it beside the row. It is never a default — a handler that never replies to
-its own inbound mail is `#[handler::single]` with a silent `-> ()`.
+its own inbound mail is a `tell`, `event`, or `response` with a silent `-> ()`.
 
-A single handler that answers one exact kind in a later turn returns
+A `request` that answers one exact kind in a later turn returns
 `-> Pending<R>`. The offload dispatch calls mint that receipt for work a worker
 finishes; for a reply no worker produces, `ctx.hold::<R>()` returns the
 `Pending<R>` with a move-only `Held<R>` ticket, which the actor keeps in state
@@ -491,7 +523,7 @@ fn announce<A>(sends: &mut Sends<'_, A>, renderer: ActorRef<RenderCapability>, f
     sends.send_to(renderer, frame);
 }
 
-#[handler::single]
+#[handler::event]
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
     announce(&mut ctx.sends(), self.renderer, &self.frame);        // Single
 }
@@ -527,12 +559,12 @@ pub trait WidgetDefaults {
     /// Release any half-finished interaction — an armed press, a live drag.
     fn cancel_activation(&mut self);
 
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         *self.widget_frame() = frame;
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
         self.widget_state().lose_focus();
         self.cancel_activation();
@@ -605,7 +637,7 @@ accessors are associated functions over `Self::State`:
 pub trait CounterSurface {
     fn counter(state: &mut Self::State) -> &mut Counter;
 
-    #[handler::single]
+    #[handler::request]
     fn on_reset(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ResetCounter) -> ResetCounterResult {
         Self::counter(state).reset();
         ResetCounterResult::Ok
@@ -987,7 +1019,7 @@ impl NativeActor for AudioCapability {
     fn init(config: AudioConfig, ctx: &mut NativeInitCtx<'_>)
         -> Result<Self::State, BootError> { … }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_note_on(state: &mut Self::State, ctx: &mut NativeCtx<'_>, note: NoteOn) { … }
 }
 ```

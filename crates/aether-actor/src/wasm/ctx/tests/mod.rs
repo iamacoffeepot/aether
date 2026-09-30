@@ -2,13 +2,15 @@
 //! they share. The fixtures live here so both test modules reach them
 //! through `super::`; the assertions split by subject — `spawn` for child
 //! creation and teardown, `child` for typed cluster-child resolution,
-//! `dispatch` for what a ctx reads off the dispatch it was built for, and
-//! `held` for the typed deferred reply (ADR-0243).
+//! `dispatch` for what a ctx reads off the dispatch it was built for,
+//! `held` for the typed deferred reply (ADR-0243), and `response` for the
+//! context parameter a response handler takes (ADR-0243 §10).
 
 mod actor_ref;
 mod child;
 mod dispatch;
 mod held;
+mod response;
 mod sends;
 mod spawn;
 

@@ -134,9 +134,10 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
-    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    erase_unless_ctx_names_actor, extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor,
-    handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
+    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_context_by_value, attr_is_fallback, attr_is_handler,
+    check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor, extract_handler_kind_type,
+    extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
+    reject_duplicate_handler_kinds, silent_call,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
@@ -310,10 +311,13 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             ));
         }
 
+        // #7201: read the class and intent first, so an intent word's fourth
+        // parameter reaches `check_intent_signature` below.
+        let (class, intent) = parse_handler_class(&f.attrs[idx], &args)?;
         let kind_ty = match this_transport {
-            SetTransport::Wasm => extract_handler_kind_type(&f.sig)?,
+            SetTransport::Wasm => extract_handler_kind_type(&f.sig, intent.is_some())?,
             SetTransport::Native => {
-                let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, this_split)?;
+                let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, this_split, intent.is_some())?;
                 if is_slice {
                     return Err(syn::Error::new_spanned(
                         &f.sig,
@@ -327,9 +331,10 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         };
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
-        let class = parse_handler_class(&f.attrs[idx], &args)?;
+        let response_context = intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
+        allow_context_by_value(&mut f.attrs, response_context.as_ref());
         // #6533: type the member by its adopter on the trait method itself, so
         // the default body and the dispatch arm below both see the filled ctx.
         fill_ctx_actor(&mut f.sig);
@@ -349,7 +354,16 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // from it, and all of them resolve in this crate — the three emitted
         // here directly, and the bridge markers through the gate pair
         // `build_native_marker_bridge` resolves at definition time.
-        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class, unchecked_reason: args.reason });
+        handlers.push(HandlerFn {
+            method,
+            kind_ty,
+            agent_doc,
+            cfgs,
+            reply,
+            class,
+            unchecked_reason: args.reason,
+            response_context,
+        });
     }
 
     if handlers.is_empty() {
@@ -756,6 +770,15 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
                 let __aether_pending = Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
                 __aether_ctx.__accept_pending(__aether_pending);
             },
+            // ADR-0243 §10: a response member takes its stored context before
+            // the call, and an absent `C` returns the member's handled code.
+            (HandlerClass::Single, HandlerReply::None) => {
+                silent_call(h.response_context.as_ref(), method, k, &rc, |context| {
+                    quote! {
+                        Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded #context);
+                    }
+                })
+            }
             (HandlerClass::Single, _) => quote! {
                 Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
             },
