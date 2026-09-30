@@ -75,14 +75,6 @@ pub const LABELS_SECTION: &str = "aether.kinds.labels";
 /// evolution.
 pub const NAMESPACE_SECTION: &str = "aether.namespace";
 
-/// The section name of the ADR-0138 no-default marker. A defaultless
-/// multi-actor module (`export!(public = [A, B, …])` with no `default =`) omits the
-/// [`NAMESPACE_SECTION`] and emits this section instead — a single
-/// version byte whose mere presence tells the host the module has no
-/// bare-load default, so an unselected load is a hard error naming
-/// the exports rather than an instantiation by list position.
-pub const NO_DEFAULT_SECTION: &str = "aether.no_default";
-
 /// The section name of the ADR-0147 boot slot. A module that declares a
 /// `boot = $boot` slot in its `export!` pins `$boot`'s
 /// `Addressable::NAMESPACE` bytes here — the raw UTF-8 string, no version
@@ -230,23 +222,6 @@ pub fn read_boot_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, Str
     Ok(None)
 }
 
-/// Return whether the component carries the ADR-0138 [`NO_DEFAULT_SECTION`]
-/// marker — `true` for a defaultless multi-actor module, `false`
-/// otherwise. The payload is a single version byte the host does not
-/// interpret; presence of the section is the whole signal.
-#[must_use]
-pub fn read_no_default_marker(wasm: &[u8]) -> bool {
-    for payload in Parser::new(0).parse_all(wasm) {
-        let Ok(Payload::CustomSection(reader)) = payload else {
-            continue;
-        };
-        if reader.name() == NO_DEFAULT_SECTION {
-            return true;
-        }
-    }
-    false
-}
-
 /// Return whether the module carries the ADR-0241 §3
 /// [`CONTENT_ADDRESSED_SECTION`] marker, so each namespace it exports
 /// publishes qualified by the module's hash. The payload is a single version
@@ -368,6 +343,32 @@ pub struct ActorInputs {
 /// module that declares no inputs section at all returns an empty vec.
 pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, String> {
     read_inputs_groups(wasm, INPUTS_SECTION)
+}
+
+/// The namespaces an unselected load or boot entry chooses among, the
+/// byte-level twin of the unselected-load rule in `prepare_load` (ADR-0241
+/// §9): each exported group's namespace in export order, a single-actor
+/// module's implicit group named by its [`NAMESPACE_SECTION`], and the
+/// [`BOOT_SECTION`] type left out, since a boot is never selectable
+/// (ADR-0147). Exactly one entry means the module spawns without a selector.
+///
+/// # Errors
+///
+/// A malformed inputs, namespace, or boot section, or an implicit group
+/// whose module carries no [`NAMESPACE_SECTION`] to name it.
+pub fn read_selectable_exports_from_bytes(wasm: &[u8]) -> Result<Vec<String>, String> {
+    let namespace = read_namespace_from_bytes(wasm)?;
+    let boot = read_boot_namespace_from_bytes(wasm)?;
+    let mut exports = Vec::new();
+    for group in read_actor_inputs_from_bytes(wasm)? {
+        let Some(export) = group.namespace.or_else(|| namespace.clone()) else {
+            return Err(format!("the module's single actor carries no {NAMESPACE_SECTION} section to name it"));
+        };
+        if boot.as_deref() != Some(export.as_str()) {
+            exports.push(export);
+        }
+    }
+    Ok(exports)
 }
 
 /// Decode the module's `aether.kinds.inputs.private` section (issue 6590)
@@ -880,20 +881,6 @@ mod tests {
         let wasm = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
         let descs = read_from_bytes(&wasm).unwrap();
         assert!(descs.is_empty());
-    }
-
-    #[test]
-    fn no_default_marker_read_by_section_presence() {
-        // Tripwire: pins the ADR-0138 no-default contract — the marker is
-        // section name `aether.no_default`, presence-only (the single
-        // payload byte is not interpreted). A module carrying the section
-        // reads `true`; one without reads `false`. Drifting the section
-        // name or making the reader payload-sensitive breaks this.
-        let with = wasm_with_section(NO_DEFAULT_SECTION, &[1u8]);
-        assert!(read_no_default_marker(&with));
-
-        let without = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
-        assert!(!read_no_default_marker(&without));
     }
 
     #[test]
@@ -1491,6 +1478,23 @@ mod tests {
         let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
         assert!(err.contains("dependency resolver tag"), "err: {err}");
         assert!(err.contains(INPUTS_SECTION), "err: {err}");
+    }
+
+    // Catches the boot counted as selectable (a boot-plus-one module refused
+    // where `LoadComponent` accepts it) and the single-actor implicit group
+    // left unnamed (a single-actor boot entry that cannot spawn).
+    #[test]
+    fn selectable_exports_leave_out_the_boot_and_name_the_implicit_group() {
+        let grouped = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "m.boot".into() },
+            InputsRecord::ActorBoundary { namespace: "m.only".into() },
+        ]);
+        let with_boot = wasm_with_named_sections([(INPUTS_SECTION, &grouped), (BOOT_SECTION, b"m.boot")]);
+        assert_eq!(read_selectable_exports_from_bytes(&with_boot).unwrap(), ["m.only"]);
+
+        let implicit = inputs_section(&[InputsRecord::Fallback { doc: None }]);
+        let single = wasm_with_named_sections([(INPUTS_SECTION, &implicit), (NAMESPACE_SECTION, b"m.single")]);
+        assert_eq!(read_selectable_exports_from_bytes(&single).unwrap(), ["m.single"]);
     }
 
     #[test]

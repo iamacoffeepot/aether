@@ -63,7 +63,7 @@ impl Reactor for Publisher {
 macro_rules! RequireOneRoot {
     (@aether_export_generate
         { remaining_generators: [$($next:path),*] }
-        { boot: $boot:tt, default: $default:tt, actors: [
+        { boot: $boot:tt, actors: [
             { ty: { $probe:ty } namespace: $probe_ns:tt extensions: [$($probe_ext:tt)*] }
             { ty: { $one:ty } namespace: $one_ns:tt extensions: [$($one_ext:tt)*] }
             { ty: { $publisher:ty } namespace: $publisher_ns:tt extensions: [$($publisher_ext:tt)*] }
@@ -77,7 +77,7 @@ macro_rules! RequireOneRoot {
         };
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
-            boot: $boot default: $default
+            boot: $boot
             actors: [
                 { ty: { $probe } namespace: $probe_ns extensions: [$($probe_ext)*] }
                 { ty: { $one } namespace: $one_ns extensions: [$($one_ext)*] }
@@ -93,6 +93,6 @@ macro_rules! RequireOneRoot {
     };
 }
 
-export!(default = Probe, public = [One, Publisher], generators = [aether_bloomery_bundle::bundle, RequireOneRoot]);
+export!(public = [Probe, One, Publisher], generators = [aether_bloomery_bundle::bundle, RequireOneRoot]);
 
 fn main() {}

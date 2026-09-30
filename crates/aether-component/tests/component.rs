@@ -250,8 +250,8 @@ fn multi_actor_unknown_export_errors() {
     }
 }
 
-/// ADR-0138: a defaultless multi-actor module (`export!(public = [Alpha,
-/// Beta])`, no `default =`) has no bare-load entry. A `load` with no export
+/// ADR-0241 §9: a multi-actor module (`export!(public = [Alpha, Beta])`)
+/// has no bare-load entry. A `load` with no export
 /// selector is a hard `LoadResult::Err` that names the exports — not an
 /// instantiation of whichever type sits first — while a named
 /// `export: Some("test.defaultless.alpha")` load of the same module

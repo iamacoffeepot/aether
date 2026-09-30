@@ -38,11 +38,11 @@ pub struct AutoloaderParams {
 }
 
 /// One entry's publish resolving into its spawns: the namespace it spawns
-/// from (`None` until the publish reply resolves it) and the instance keys
-/// not yet spawned, in order, plus the config every one of them spawns
-/// with.
+/// from (the entry's own, until the publish reply resolves its bound name)
+/// and the instance keys not yet spawned, in order, plus the config every one
+/// of them spawns with.
 struct CurrentEntry {
-    namespace: Option<String>,
+    namespace: String,
     config: Vec<u8>,
     keys: VecDeque<Option<String>>,
 }
@@ -83,7 +83,7 @@ impl NativeActor for Autoloader {
             PublishResult::Ok { types } => match self.resolve_namespace(&types) {
                 Ok(namespace) => {
                     self.current.as_mut().expect("a publish result answers the entry that sent it").namespace =
-                        Some(namespace);
+                        namespace;
                     self.send_next_spawn(ctx);
                 }
                 Err(error) => self.fail_current(error),
@@ -114,11 +114,16 @@ impl Autoloader {
             return;
         };
         let AutoloadComponent { wasm, config, namespace, keys } = component;
-        // An entry that names no type spawns the module's default, the type
-        // its `aether.namespace` section names. A section the read refuses is
-        // left to the publish, which parses the same section and refuses the
-        // module naming why.
-        let namespace = namespace.or_else(|| kind_manifest::read_namespace_from_bytes(&wasm).ok().flatten());
+        // ADR-0241 §9: every spawn names its namespace. An entry that names
+        // none takes its module's one selectable export, and is refused
+        // before anything publishes otherwise, as an unselected load is.
+        let namespace = match namespace.map_or_else(|| sole_export(&wasm), Ok) {
+            Ok(namespace) => namespace,
+            Err(error) => {
+                self.fail_current(error);
+                return;
+            }
+        };
         self.current = Some(CurrentEntry { namespace, config, keys: keys.into() });
         ctx.send::<ComponentHostCapability>(&Publish { code: wasm.into(), configs: Vec::new() });
     }
@@ -133,7 +138,7 @@ impl Autoloader {
             self.send_next(ctx);
             return;
         };
-        let namespace = current.namespace.clone().expect("the namespace resolves before any spawn is sent");
+        let namespace = current.namespace.clone();
         let config = current.config.clone();
         ctx.send::<ComponentHostCapability>(&Spawn { namespace, key, parent: None, config });
     }
@@ -149,25 +154,23 @@ impl Autoloader {
 
     /// Which of a `Publish`'s bound `types` the current entry spawns: the one
     /// its namespace names, bound as that name or as its `NS.<64 hex>`
-    /// content-addressed publication (ADR-0241 §3); or, when the entry names
-    /// none and the module declares no default, the sole type it binds.
+    /// content-addressed publication (ADR-0241 §3).
     fn resolve_namespace(&self, types: &[PublishedType]) -> Result<String, String> {
-        let current = self.current.as_ref().expect("a publish result answers the entry that sent it");
-        current.namespace.as_deref().map_or_else(
-            || match types {
-                [one] => Ok(one.namespace.clone()),
-                _ => Err(format!(
-                    "the entry names no export and the module declares no default, but it binds several types: {:?}",
-                    bound_names(types)
-                )),
-            },
-            |declared| {
-                published_as(types, declared).ok_or_else(|| {
-                    format!("published module does not bind {declared:?}; it binds {:?}", bound_names(types))
-                })
-            },
-        )
+        let declared = &self.current.as_ref().expect("a publish result answers the entry that sent it").namespace;
+        published_as(types, declared)
+            .ok_or_else(|| format!("published module does not bind {declared:?}; it binds {:?}", bound_names(types)))
     }
+}
+
+/// The namespace an entry that names no export spawns: its module's one
+/// selectable export, or an error naming every export when there is not
+/// exactly one, or naming why the module's sections could not be read.
+fn sole_export(wasm: &[u8]) -> Result<String, String> {
+    let exports = kind_manifest::read_selectable_exports_from_bytes(wasm)
+        .map_err(|error| format!("the entry names no export, and its module's exports cannot be read: {error}"))?;
+    <[String; 1]>::try_from(exports).map(|[export]| export).map_err(|exports| {
+        format!("the entry names no export, and its module does not export exactly one type: {exports:?}; name one")
+    })
 }
 
 /// The namespaces a `Publish` bound, for a failure to name.

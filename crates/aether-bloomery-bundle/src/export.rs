@@ -2,7 +2,7 @@
 //!
 //! `export!` collects framework-owned descriptor envelopes into `actors` and the
 //! listed types into `exports`, then invokes
-//! `$gen!(@aether_export_generate { remaining_generators } { boot, default, actors, exports, private })`.
+//! `$gen!(@aether_export_generate { remaining_generators } { boot, actors, exports, private })`.
 //! This macro is that hook. It forwards into `__bundle_export_generate`, which
 //! selects the `aether_bloomery_program` and `aether_bloomery_reactor`
 //! extensions on exported paths, emits one hidden bundle root with the state,
@@ -40,14 +40,13 @@
 /// - a module with neither a `#[program]` nor a `#[reactor]`;
 /// - a duplicate program `NAME`, or a duplicate or non-literal reactor `NAMESPACE`;
 /// - a program whose `MODE` is not `Mode::Pure`;
-/// - a `boot` or `default` that names a program or reactor.
+/// - a `boot` that names a program or reactor.
 #[macro_export]
 macro_rules! bundle {
     (@aether_export_generate
         { remaining_generators: [$($rest:path),*] }
         {
             boot: $boot:tt,
-            default: $default:tt,
             actors: [$($actors:tt)*],
             exports: [$($exports:tt)*],
             private: [$($private:tt)*]
@@ -56,7 +55,6 @@ macro_rules! bundle {
         $crate::__bundle_export_generate! {
             remaining_generators: [$($rest),*]
             boot: $boot
-            default: $default
             actors: [$($actors)*]
             exports: [$($exports)*]
             private: [$($private)*]

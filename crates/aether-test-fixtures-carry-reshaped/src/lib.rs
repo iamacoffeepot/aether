@@ -87,4 +87,4 @@ impl WasmActor for ReshapedHeldRelay {
     }
 }
 
-aether_actor::export!(default = CarryRequester, public = [ReshapedHeldRelay]);
+aether_actor::export!(public = [CarryRequester, ReshapedHeldRelay]);

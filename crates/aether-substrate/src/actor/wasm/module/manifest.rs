@@ -33,7 +33,6 @@ pub struct ModuleManifest {
     boot: Option<String>,
     lineage: Vec<ActorLineageRecord>,
     namespace: Option<String>,
-    no_default: bool,
     content_addressed: bool,
     asset_catalog: Vec<AssetInfo>,
 }
@@ -81,7 +80,6 @@ impl ModuleManifest {
             boot,
             lineage,
             namespace,
-            no_default: kind_manifest::read_no_default_marker(wasm),
             content_addressed: kind_manifest::read_content_addressed_marker(wasm),
             asset_catalog: records.into_iter().map(|record| record.info).collect(),
         };
@@ -167,16 +165,10 @@ impl ModuleManifest {
     }
 
     /// The module's `aether.namespace` section: a single-actor module's
-    /// namespace, or a multi-actor module's default.
+    /// namespace.
     #[must_use]
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
-    }
-
-    /// Whether the module carries the ADR-0138 no-default marker.
-    #[must_use]
-    pub fn no_default(&self) -> bool {
-        self.no_default
     }
 
     /// Whether the module carries the ADR-0241 §3 content-addressed marker, so

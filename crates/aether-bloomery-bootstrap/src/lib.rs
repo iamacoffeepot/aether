@@ -272,4 +272,4 @@ fn out_of_phase(reply: &str, phase: &Phase) -> Run {
     Run::Stopped
 }
 
-aether_actor::export!(default = EnvironmentBootstrap);
+aether_actor::export!(public = [EnvironmentBootstrap]);

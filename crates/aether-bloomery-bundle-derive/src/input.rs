@@ -1,7 +1,7 @@
 //! Grammar of the `bundle` generator's input: the `export!` pipeline state.
 //!
 //! `export!` hands every generator the same shape: the remaining generator
-//! paths, the optional `boot` / `default` types, one framework-owned
+//! paths, the optional `boot` type, one framework-owned
 //! descriptor envelope per listed path, the current `exports` selection, and
 //! the `private` inline-child types.
 //! Each envelope's extensions decide its [`Tag`]: an `aether_bloomery_program`
@@ -21,7 +21,6 @@ const REACTOR_EXTENSION: &str = "aether_bloomery_reactor";
 pub struct GenerateInput {
     pub remaining_generators: Vec<Path>,
     pub boot: Option<Type>,
-    pub default: Option<Type>,
     pub actors: Vec<Envelope>,
     pub exports: Vec<Type>,
     pub private: Vec<Type>,
@@ -60,7 +59,6 @@ impl Parse for GenerateInput {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut remaining_generators = Vec::new();
         let mut boot = None;
-        let mut default = None;
         let mut actors = Vec::new();
         let mut exports = Vec::new();
         let mut private = Vec::new();
@@ -70,7 +68,6 @@ impl Parse for GenerateInput {
             match key.to_string().as_str() {
                 "remaining_generators" => remaining_generators = parse_path_list(input)?,
                 "boot" => boot = parse_optional_type(input)?,
-                "default" => default = parse_optional_type(input)?,
                 "actors" => actors = parse_classified_list(input)?,
                 "exports" => exports = parse_export_types(input)?,
                 "private" => private = parse_export_types(input)?,
@@ -80,7 +77,7 @@ impl Parse for GenerateInput {
         if exports.is_empty() {
             return Err(syn::Error::new(Span::call_site(), "bundle requires at least one export type"));
         }
-        Ok(Self { remaining_generators, boot, default, actors, exports, private })
+        Ok(Self { remaining_generators, boot, actors, exports, private })
     }
 }
 
