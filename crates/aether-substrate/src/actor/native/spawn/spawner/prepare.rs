@@ -283,11 +283,11 @@ impl Spawner {
     /// publication table in place of holding `A`'s namespace. `None` is a
     /// native birth.
     ///
-    /// `wire_root` is a chainless birth's held wire root (ADR-0244), which
-    /// the activation runs `wire` under and releases once the mail `wire`
-    /// sent is flushed. Only an embedder's post-seal spawn opens one; a
-    /// handler-staged birth passes `None`, since its `wire` holds the causing
-    /// chain `chain` names instead.
+    /// `wire_root` is the birth's held wire root (ADR-0244), which the
+    /// activation runs `wire` under and releases once the mail `wire` sent is
+    /// flushed. An embedder's post-seal spawn and a handler-staged birth each
+    /// open one; a handler-staged birth's `wire` still holds the causing
+    /// chain `chain` names, and the wire root carries only its sends.
     pub(in crate::actor::native::spawn) fn prepare_commit_as<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,

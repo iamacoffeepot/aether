@@ -33,8 +33,8 @@ use crate::runtime::wire_root::WireRoot;
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
 use super::super::{SpawnError, SpawnOutcome};
+use super::Spawner;
 use super::prepare::{SpawnIdentity, StagedActor};
-use super::{InstancedSlotEntry, Spawner};
 
 /// How long a post-seal external spawn waits for the birth it submitted to be
 /// decided. It covers both legs — the owner accepting the batch and the
@@ -370,13 +370,10 @@ impl Spawner {
         // comment claiming otherwise was wrong). Slots live until the
         // Spawner itself drops at chassis teardown. Issue 685 also
         // stashes a wake clone so chassis teardown can fire one wake per
-        // slot after signaling shutdown.
+        // slot after signaling shutdown. Its `wire` ran under the boot's
+        // wire root, so it keeps no wire root of its own (ADR-0244).
         drop(slot);
-        let teardown_wake = wake.clone();
-        self.instanced_slots
-            .lock()
-            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
-            .insert(id, InstancedSlotEntry { slot: slot_dyn, wake: teardown_wake });
+        self.retain_activated_slot(id, slot_dyn, wake.clone(), None);
         // Pre-loaded `after_init` mail (lines above) was sent straight to
         // the inbox via `tx.send`, which bypasses the closure's wake
         // hook. Fire one wake now so the slot enters the ready queue and

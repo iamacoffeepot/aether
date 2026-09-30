@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-31
 - **Accepted:** 2026-07-31 — all three requirements implemented: #4200 (requirement 2), #4211 (requirement 1), #4214 (requirement 3).
-- **Last amended:** 2026-09-29 (iamacoffeepot/aether#7098) — a chainless birth's `wire` (chassis boot, embedder spawn) now runs under a fresh held wire root, so its sends settle together; see [ADR-0244](0244-chainless-births-open-a-held-wire-root.md). Earlier: 2026-09-28 (iamacoffeepot/aether#6965) — the retained-reply-debt row now names ADR-0243's held reply as the device. See "Third amendment" below. Earlier: 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
+- **Last amended:** 2026-09-30 (iamacoffeepot/aether#7120) — a handler-staged birth's `wire` also runs its sends under a fresh held wire root, while its holds and birth-completing effects stay on the causing chain; see [ADR-0244](0244-chainless-births-open-a-held-wire-root.md). Earlier: 2026-09-29 (iamacoffeepot/aether#7098) — a chainless birth's `wire` (chassis boot, embedder spawn) now runs under a fresh held wire root, so its sends settle together; see [ADR-0244](0244-chainless-births-open-a-held-wire-root.md). Earlier: 2026-09-28 (iamacoffeepot/aether#6965) — the retained-reply-debt row now names ADR-0243's held reply as the device. See "Third amendment" below. Earlier: 2026-07-31 (iamacoffeepot/aether#4199) — requirement 2's diagnostic reach corrected, the conforming table extended to the shapes the implementation actually found. See "Amendment" below.
 
 ## Context
 

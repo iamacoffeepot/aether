@@ -47,9 +47,10 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     /// (ADR-0241 §3, §6). `None` for a native birth, which holds `A`'s own
     /// namespace instead.
     guest: Option<(Arc<str>, BlobHash)>,
-    /// An embedder spawn's held wire root (ADR-0244): `wire` runs under it,
-    /// and its hold is released once the mail `wire` sent is flushed, or
-    /// with the activation if it is cancelled. `None` for every other birth.
+    /// The birth's held wire root (ADR-0244): `wire` runs under it, and its
+    /// hold is released once the mail `wire` sent is flushed, or with the
+    /// activation if it is cancelled. An embedder spawn and a handler-staged
+    /// birth open one; `None` only for the owner-path fixtures.
     wire_root: Option<WireRoot>,
 }
 
@@ -246,8 +247,8 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         self
     }
 
-    /// Run this birth's `wire` under `wire_root`, a chainless birth's fresh
-    /// held root (ADR-0244), and release its hold once `wire`'s mail is out.
+    /// Run this birth's `wire` under `wire_root`, the birth's fresh held root
+    /// (ADR-0244), and release its hold once `wire`'s mail is out.
     pub(super) fn with_wire_root(mut self, wire_root: WireRoot) -> Self {
         self.wire_root = Some(wire_root);
         self
@@ -600,6 +601,10 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         let finalizer = self.finalizer.as_ref().map(Arc::clone);
         self.slot.cancel_activation();
         self.binding.discard_outbound_after_activation();
+        // Every counted `wire` send is balanced now, so the wire root's hold
+        // goes before the rejection reaches the staging caller: its chain
+        // then settles after the wire root, as a discarded birth's does.
+        drop(self.wire_root);
         if let Some(finalizer) = finalizer {
             finalizer.reject(
                 self.failure
@@ -669,7 +674,10 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let seize = SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn));
         let wake = WakeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn), spawner.wake_sink().clone());
-        spawner.retain_activated_slot(id, slot_dyn, wake.clone());
+        // The wire root is still held here, since the catch-up below drops
+        // it, so a test build's subscription to it cannot miss its settle
+        // (ADR-0244 §7).
+        spawner.retain_activated_slot(id, slot_dyn, wake.clone(), wire_root.as_ref());
         // ADR-0231 §4: read after `wire`, so a guest host's route goes `Live`
         // with the guest `wire` recorded.
         let contract = binding.route_contract::<A>();

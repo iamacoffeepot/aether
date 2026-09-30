@@ -202,11 +202,7 @@ mod tests {
 
         let slot: Arc<dyn Drainable> = Arc::new(NeverClosingSlot { close_done: Mutex::new(None) });
         let wake = WakeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot), pool.wake_sink());
-        spawner
-            .instanced_slots
-            .lock()
-            .expect("instanced_slots mutex poisoned")
-            .insert(MailboxId(0xABCD), InstancedSlotEntry { slot, wake });
+        spawner.retain_activated_slot(MailboxId(0xABCD), slot, wake, None);
 
         spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_millis(20), &FatalAbortRecord::new());
     }

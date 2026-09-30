@@ -173,8 +173,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// ADR-0080 §5: the root [`MailId`] of the causal chain this
     /// handler is running in. Read by outbound `send` paths to inherit
-    /// `root` on child mail so descendants share the chain. A chainless
-    /// birth's `wire` ctx carries its wire root here (ADR-0244). The
+    /// `root` on child mail so descendants share the chain. A birth's
+    /// `wire` ctx carries its wire root here (ADR-0244). The
     /// chassis-root case (no inbound) leaves this `None` and
     /// `NativeBinding::push_envelope_buffered` mints a fresh root.
     #[must_use]
@@ -262,12 +262,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// [`Self::hold`] instead (ADR-0243 §3).
     ///
     /// A `wire` ctx dispatches no inbound. A handler-staged birth's holds the
-    /// chain that caused the birth instead (ADR-0168 §1), which is what puts
-    /// a birth-completing effect inside the staging caller's `Settled`. A
-    /// chainless birth's — a chassis boot's or an embedder spawn's — holds
-    /// its wire root (ADR-0244), so work `wire` starts on its own chain is
-    /// inside the root the birth's caller awaits, and must finish for that
-    /// root to settle; long-lived work opens a detached chain.
+    /// chain that caused the birth (ADR-0168 §1), though its ctx also carries
+    /// a wire root, which is what puts a birth-completing effect inside the
+    /// staging caller's `Settled`. A chainless birth's — a chassis boot's or
+    /// an embedder spawn's — holds its wire root (ADR-0244), so work `wire`
+    /// starts on its own chain is inside the root the birth's caller awaits,
+    /// and must finish for that root to settle; long-lived work opens a
+    /// detached chain.
     ///
     /// `None` when neither is present: the work has no causing chain, so
     /// there is nothing to keep open and no guard to hand back (ADR-0168 §2).
@@ -279,15 +280,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.held_chain().map(|root| self.binding.mailer().acquire_settlement_hold(root))
     }
 
-    /// The chain a hold taken from this context gates: the in-flight root
-    /// while a handler is dispatching or a chainless birth's `wire` runs
-    /// under its wire root (ADR-0244), and otherwise whatever caused this
-    /// context to exist. Exactly one of the two is ever set — a ctx with an
-    /// inbound is never a `wire` ctx, and `for_wire` refuses a wire root
-    /// beside a causing chain — so the precedence is a formality that keeps
-    /// the rule readable rather than a real disambiguation.
+    /// The chain a hold taken from this context gates: whatever caused this
+    /// context to exist when something did, and otherwise the in-flight
+    /// root — the inbound's while a handler is dispatching, or a chainless
+    /// birth's wire root while its `wire` runs (ADR-0244). Only a
+    /// handler-staged birth's `wire` ctx carries both, and the causing chain
+    /// wins there, so a birth-completing effect held from `wire` stays inside
+    /// the staging caller's `Settled` while the wire root gathers only the
+    /// actor's own startup sends (ADR-0244 §2). A ctx with an inbound never
+    /// has a causing chain.
     fn held_chain(&self) -> Option<MailId> {
-        self.in_flight_root.or(self.causing_chain)
+        self.causing_chain.or(self.in_flight_root)
     }
 }
 
