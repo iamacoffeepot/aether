@@ -1,7 +1,7 @@
 //! Scripted services driving [`ProgramCore`](aether_bloomery_driver::ProgramCore) without I/O.
 //!
 //! [`World`] holds the core plus a fake journal truth, stored artifacts,
-//! scripted closures, loads, and invocations. [`World::drive`] feeds commands
+//! scripted closures, loads (fresh or adopted), and invocations. [`World::drive`] feeds commands
 //! back through those doubles in a loop: journal reads and appends answer
 //! automatically from the scripted truth, scripted services answer from
 //! their maps, and answers and aborts are collected. Commands no double can
@@ -14,7 +14,7 @@ mod reactor;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
-use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, ProgramCore, WatchTicket};
+use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, WatchTicket};
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
     Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
@@ -48,6 +48,13 @@ pub struct World {
     pub oversized: HashSet<Digest>,
     /// Scripted load outcomes by bundle digest.
     pub loads: HashMap<Digest, Result<(), String>>,
+    /// Roots the engine already holds live, by bundle digest, each with the
+    /// status it reports: its load answers `Adopted`, and its reactor double
+    /// starts at that status. Takes precedence over [`World::loads`].
+    pub adopted: HashMap<Digest, Status>,
+    /// Adopted roots whose cursor query the core has yet to send, answered
+    /// with the status they were adopted at ahead of [`World::status`].
+    adopting: HashMap<Digest, Status>,
     /// Scripted invoke replies by request seq.
     pub invokes: HashMap<u64, Invoked>,
     /// Closure budget the core started with, echoed in `TooLarge` replies.
@@ -117,6 +124,8 @@ impl World {
             closures: HashMap::new(),
             oversized: HashSet::new(),
             loads: HashMap::new(),
+            adopted: HashMap::new(),
+            adopting: HashMap::new(),
             invokes: HashMap::new(),
             limit,
             answers: Vec::new(),
@@ -219,14 +228,7 @@ impl World {
                 next.extend(self.wake_watches(head));
                 Step::More(next)
             }
-            Command::Load { ticket, bundle, wasm } => {
-                self.loads_seen.push(bundle);
-                match self.loads.get(&bundle).cloned() {
-                    Some(Ok(())) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded)),
-                    Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
-                    None => Step::Manual(Command::Load { ticket, bundle, wasm }),
-                }
-            }
+            Command::Load { ticket, bundle, wasm } => self.load(ticket, bundle, wasm),
             Command::Invoke { ticket, bundle, request } => {
                 self.invokes_seen.push((bundle, request.clone()));
                 match self.invokes.remove(&request.seq()) {
@@ -267,7 +269,7 @@ impl World {
                     Step::Manual(Command::Evaluate { ticket, bundle, request })
                 }
             }
-            Command::QueryStatus { ticket, bundle } => match self.status {
+            Command::QueryStatus { ticket, bundle } => match self.adopting.remove(&bundle).or(self.status) {
                 Some(status) => Step::More(self.core.on_status(ticket, &status)),
                 None => Step::Manual(Command::QueryStatus { ticket, bundle }),
             },
@@ -290,6 +292,22 @@ impl World {
             command @ (Command::Fetch { .. } | Command::RunWorkspace { .. } | Command::ApiAnswered { .. }) => {
                 Step::Manual(command)
             }
+        }
+    }
+
+    /// Answer one load: `Adopted` for a root the engine already holds live,
+    /// else the scripted outcome, else hand it to the test.
+    fn load(&mut self, ticket: LoadTicket, bundle: Digest, wasm: Vec<u8>) -> Step {
+        self.loads_seen.push(bundle);
+        if let Some(status) = self.adopted.get(&bundle).copied() {
+            self.reactors.insert(bundle, Reactor::adopted(status));
+            self.adopting.insert(bundle, status);
+            return Step::More(self.core.on_loaded(ticket, LoadOutcome::Adopted));
+        }
+        match self.loads.get(&bundle).cloned() {
+            Some(Ok(())) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded)),
+            Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
+            None => Step::Manual(Command::Load { ticket, bundle, wasm }),
         }
     }
 

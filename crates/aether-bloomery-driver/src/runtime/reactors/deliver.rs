@@ -1,4 +1,7 @@
 //! Delivery: `Event` sends, live replies, and status resync (ADR-0226 decision 5).
+//!
+//! A status reply may instead answer an adopted root's cursor query, which
+//! [`adopt`](super::adopt) continues.
 
 use std::iter::once;
 
@@ -48,11 +51,18 @@ impl ProgramCore {
 
     /// Feed one status reply. Unknown tickets return no commands.
     ///
-    /// A root still at `N-1` missed `Event(N)` and gets it again; any other
-    /// answer means its fold can no longer be trusted, so it is poisoned.
+    /// An adopted root's status sets its instance's cursor, or poisons it.
+    /// A resync's root still at `N-1` missed `Event(N)` and gets it again;
+    /// any other answer means its fold can no longer be trusted, so it is
+    /// poisoned.
     pub fn on_status(&mut self, ticket: StatusTicket, status: &Status) -> Vec<Command> {
         let mut out = Vec::new();
         if self.aborted {
+            return out;
+        }
+        if let Some(digest) = self.routing.adoptions.remove(&ticket) {
+            self.continue_adoption(digest, status);
+            self.drive_routing(&mut out);
             return out;
         }
         let Some(digest) = self.routing.statuses.remove(&ticket) else {

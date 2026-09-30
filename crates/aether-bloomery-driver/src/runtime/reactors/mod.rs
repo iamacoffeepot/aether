@@ -7,6 +7,7 @@
 //! modules as `impl ProgramCore` blocks over this one field.
 
 mod activate;
+mod adopt;
 mod batch;
 mod claim;
 mod deliver;
@@ -333,7 +334,9 @@ pub struct Routing {
     pub warms: BTreeMap<WarmTicket, WarmBatch>,
     /// Outstanding status resyncs, by the digest queried.
     pub statuses: BTreeMap<StatusTicket, Digest>,
-    /// Reactor instances by digest, each live, poisoned, or untrusted.
+    /// Outstanding adopted roots' cursor queries, by the digest queried.
+    pub adoptions: BTreeMap<StatusTicket, Digest>,
+    /// Reactor instances by digest, each live, adopting, poisoned, or untrusted.
     pub instances: BTreeMap<Digest, Instance>,
     /// In-progress seq work, if any.
     pub current: Option<SeqWork>,
@@ -359,6 +362,7 @@ impl Routing {
             deliveries: BTreeMap::new(),
             warms: BTreeMap::new(),
             statuses: BTreeMap::new(),
+            adoptions: BTreeMap::new(),
             instances: BTreeMap::new(),
             current: None,
             restart: None,

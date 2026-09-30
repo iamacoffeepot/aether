@@ -29,7 +29,8 @@ impl ProgramCore {
     /// An unseen digest starts its one shared read; a digest whose read or
     /// load is in flight waits, whichever role issued it; a digest that
     /// declares no reactors is refused before any load; and a ready digest
-    /// routes only through a live instance.
+    /// routes only through a live instance, which an adopted root becomes
+    /// once its status arrives.
     pub(crate) fn claim_reactor(&mut self, digest: Digest, out: &mut Vec<Command>) -> Claim {
         let declares =
             self.bundles.state(&digest).and_then(LoadState::roles).is_some_and(DeclaredRoles::declares_reactors);
@@ -51,6 +52,7 @@ impl ProgramCore {
                 let instance = self.routing.instances.entry(digest).or_insert_with(Instance::new);
                 match &instance.health {
                     Health::Live => Claim::Ready { cursor: instance.cursor },
+                    Health::Adopting => Claim::Pending,
                     Health::Poisoned(reason) | Health::Untrusted(reason) => Claim::Refuse(reason.clone()),
                 }
             }

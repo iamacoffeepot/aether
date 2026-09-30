@@ -1,4 +1,4 @@
-//! End-to-end: the driver loads the program fixture bundle under its unit's bundle name and records caused outcomes.
+//! End-to-end: the driver publishes the program fixture bundle, spawns its root under its unit's bundle name, and records caused outcomes.
 
 use std::error::Error;
 use std::fs;
@@ -13,7 +13,7 @@ use aether_bloomery_view::Heads;
 use aether_data::Kind;
 use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{PublishResult, Spawn, SpawnResult};
 
 /// Local mirror of the fixture's `test.program.summarize.input`: same kind
 /// name, same shape, so it encodes to the same digest the guest expects.
@@ -75,9 +75,11 @@ const PROCESS: Head<OpaqueBytes> = Head::new("process");
 
 #[test]
 fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Error>> {
-    // Catches a driver that keys a bundle root by anything but its unit key:
-    // a second load of the same bytes under that key answers with the live
-    // root at `<bundle namespace>.<hash>:<unit key>` (ADR-0241 §9).
+    // Catches a driver that keys a bundle root by anything but its unit key,
+    // or stands it up anywhere but the bundle's published root namespace:
+    // the test stands nothing up itself, so a spawn of that namespace under
+    // the unit key answers `Live` only when the driver's own root holds the
+    // name, and a fresh `Spawned` means it never did.
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
         return Ok(());
     };
@@ -99,19 +101,32 @@ fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Erro
     let outcome = harness.call(&summarize);
     assert!(matches!(outcome, CallOutcome::Transition { key: 1, .. }), "the call loads the bundle: {outcome:?}");
 
-    let result = harness.load(&LoadComponent {
-        wasm,
-        name: Some(UNIT.to_owned()),
-        config: Vec::new(),
-        export: Some(BUNDLE_NAMESPACE.to_owned()),
-    });
-    let LoadResult::Ok { path, .. } = result else {
-        panic!("a load of the unit's live bundle name answers with its root: {result:?}");
+    let namespace = bundle_root(harness.publish_code(wasm));
+    let spawn = Spawn { namespace: namespace.clone(), key: Some(UNIT.to_owned()), parent: None, config: Vec::new() };
+    let spawned = harness.spawn(&spawn);
+    let SpawnResult::Live { path, .. } = spawned else {
+        panic!("the driver's root already holds the unit's bundle name: {spawned:?}");
     };
-    let (published, key) = path.as_str().split_once(':').expect("an instanced root is keyed");
-    assert_eq!(key, UNIT, "the root is keyed by the unit: {path}");
-    assert!(published.starts_with(&format!("{BUNDLE_NAMESPACE}.")), "the root is the bundle's publication: {path}");
+    assert_eq!(path.as_str(), format!("{namespace}:{UNIT}"), "the root is keyed by the unit");
+
+    let roots: Vec<String> =
+        harness.list_components().into_iter().filter(|name| name.starts_with(&format!("{namespace}:"))).collect();
+    assert_eq!(roots, vec![path.as_str().to_owned()], "the driver stood up one root, under the unit key");
     Ok(())
+}
+
+/// The bundle's root type as a code `Publish` bound it: the bundle namespace
+/// qualified by the module's hash, beside the bundle's other exports.
+fn bundle_root(published: PublishResult) -> String {
+    let PublishResult::Ok { types } = published else {
+        panic!("the bundle's code publishes: {published:?}");
+    };
+    let prefix = format!("{BUNDLE_NAMESPACE}.");
+    types
+        .into_iter()
+        .map(|published| published.namespace)
+        .find(|namespace| namespace.strip_prefix(&prefix).is_some_and(|hash| !hash.contains('.')))
+        .expect("the bundle publishes its root type")
 }
 
 #[test]

@@ -63,10 +63,17 @@ impl ProgramCore {
     }
 
     /// Continue the digest's one load, then wake its program request and drive routing.
+    ///
+    /// An adopted root that declares reactors first owes its cursor: the
+    /// reactor role asks for it before anything is routed to the root.
     pub(crate) fn continue_bundle_loaded(&mut self, bundle: Digest, outcome: LoadOutcome, out: &mut Vec<Command>) {
+        let adopted = matches!(outcome, LoadOutcome::Adopted);
         if matches!(self.bundles.finish_load(&bundle, outcome), Err(OutOfStep)) {
             self.abort(format!("load reply for {bundle} arrived with no load outstanding"), out);
             return;
+        }
+        if adopted {
+            self.adopt_reactor(bundle, out);
         }
         self.resume_program(bundle, out);
         if !self.aborted {

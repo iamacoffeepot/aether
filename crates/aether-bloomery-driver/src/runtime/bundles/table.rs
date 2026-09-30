@@ -89,12 +89,13 @@ impl BundleTable {
         }
     }
 
-    /// The one load transition: `Loading` -> `Ready` or `Unavailable(error)`.
+    /// The one load transition: `Loading` -> `Ready` (loaded or adopted) or
+    /// `Unavailable(error)`.
     pub fn finish_load(&mut self, bundle: &Digest, outcome: LoadOutcome) -> Result<(), OutOfStep> {
         match self.states.remove(bundle) {
             Some(LoadState::Loading { roles }) => {
                 let state = match outcome {
-                    LoadOutcome::Loaded => LoadState::Ready { roles },
+                    LoadOutcome::Loaded | LoadOutcome::Adopted => LoadState::Ready { roles },
                     LoadOutcome::Failed { error } => LoadState::Unavailable(Detail::new(error)),
                 };
                 self.states.insert(*bundle, state);

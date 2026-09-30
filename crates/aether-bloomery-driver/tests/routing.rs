@@ -14,7 +14,7 @@ use aether_bloomery_kinds::{
     AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord,
     EncodedArtifact, Evaluated, FaultReason, Head, HeadChange, Invoked, NativeOrigin, OpaqueBytes, Processed,
     ProgramName, ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref,
-    RequestSource, RuleName, SetHeads, Status, Utf8Text, WatchHeadResult, artifact_digest,
+    RequestSource, RuleName, Seq, SetHeads, Status, Utf8Text, WatchHeadResult, artifact_digest,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -1009,7 +1009,7 @@ fn a_call_on_a_reactor_only_digest_faults_before_any_load() {
 
 #[test]
 fn a_mixed_digest_loaded_by_its_reactor_answers_a_call_from_the_same_root() {
-    // Catches a second load of a digest the other role already loaded (`SubnameInUse` in the engine).
+    // Catches a second load of a digest the other role already loaded: the core keeps one load per digest, and a second spawn under the unit key would find the root live and adopt it again.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
@@ -1042,6 +1042,31 @@ fn a_mixed_digest_loaded_by_its_reactor_answers_a_call_from_the_same_root() {
     assert_eq!(world.invokes_seen.len(), 1);
     assert_eq!(world.invokes_seen[0].0, mixed);
     assert!(!world.warm_ranges_for(mixed).is_empty());
+}
+
+#[test]
+fn an_activation_over_an_adopted_root_delivers_from_its_reported_cursor() {
+    // Catches live routing treating an adopted root as freshly stood up:
+    // warming it from 1 re-folds seqs it already folded, so the first thing
+    // it should see is `Event(c + 1)`.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    world.adopted.insert(bundle_a, Status::new(2, false));
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    script_quiet(&mut world, 8);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none(), "unexpected abort: {:?}", world.abort);
+
+    let activated = activated_records(&world);
+    assert_eq!(activated.len(), 1);
+    assert_eq!(activated[0].1.live_from(), Seq(3));
+    assert!(world.warm_ranges_for(bundle_a).is_empty(), "the adopted root folded 1..=2 already");
+    assert_eq!(world.events_for(bundle_a).first(), Some(&3));
+    assert_eq!(world.loads_seen, vec![bundle_a]);
 }
 
 #[test]

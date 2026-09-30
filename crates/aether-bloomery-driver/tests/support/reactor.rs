@@ -8,7 +8,7 @@
 //! maps; the double only advances its cursor over replies it actually
 //! returns, plus replies tests feed by hand through its [`note_evaluated`](Reactor::note_evaluated).
 
-use aether_bloomery_kinds::{Detail, Evaluated, Warmed};
+use aether_bloomery_kinds::{Detail, Evaluated, Status, Warmed};
 
 /// One scripted reactor root behind a mailbox.
 #[derive(Debug, Default)]
@@ -24,6 +24,13 @@ pub struct Reactor {
 }
 
 impl Reactor {
+    /// A root the engine already held live, at the cursor and poison flag
+    /// `status` reports.
+    #[must_use]
+    pub fn adopted(status: Status) -> Self {
+        Self { cursor: status.cursor(), poisoned: status.poisoned(), ..Self::default() }
+    }
+
     /// Answer one `Warm` batch, enforcing `first == cursor + 1`.
     ///
     /// A poisoned root answers poisoned and a mis-sequenced batch answers

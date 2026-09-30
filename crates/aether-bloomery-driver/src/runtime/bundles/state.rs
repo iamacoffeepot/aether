@@ -16,12 +16,13 @@ pub enum LoadState {
         /// Wasm bytes, moved into the load command.
         wasm: Vec<u8>,
     },
-    /// The one `LoadComponent` is in flight.
+    /// The one load, a publish then a spawn of the root, is in flight.
     Loading {
         /// The roles the bundle declares.
         roles: DeclaredRoles,
     },
-    /// Loaded for the engine's life; the shell holds the root's reference.
+    /// Loaded or adopted for the engine's life; the shell holds the root's
+    /// reference.
     Ready {
         /// The roles the bundle declares.
         roles: DeclaredRoles,

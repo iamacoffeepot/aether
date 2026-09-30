@@ -1,5 +1,6 @@
 //! Drive: requests to the mounted journal owner, the bundle driver, the
-//! component host, and the workspace, and the replies the sink forwards back.
+//! component host (loads, code publishes, spawns, and listings), and the
+//! workspace, and the replies the sink forwards back.
 //!
 //! Every request goes out through the embedder's
 //! `BuiltChassis::send_for_reply` with the sink as its reply target and a
@@ -23,7 +24,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_workspace::{Import, ImportResult, Run, RunResult, WorkspaceCapability};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResult, Spawn, SpawnResult};
 use aether_substrate::{ChassisTarget, ReplyTarget};
 
 pub use sink::{Arrival, Reply, ReplySink};
@@ -50,6 +51,7 @@ pub struct Pending<K> {
 
 /// A reply kind the harness's sink receives: [`CallOutcome`],
 /// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`LoadResult`],
+/// [`aether_kinds::PublishResult`], [`SpawnResult`], [`ListComponentsResult`],
 /// [`WatchHeadResult`], [`ImportResult`], or [`RunResult`].
 pub trait Answer: sealed::Sealed {}
 
@@ -108,6 +110,33 @@ impl sealed::Sealed for LoadResult {
     }
 }
 
+impl sealed::Sealed for aether_kinds::PublishResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::PublishCode(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
+impl sealed::Sealed for SpawnResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Spawn(result) => Ok(*result),
+            other => Err(other),
+        }
+    }
+}
+
+impl sealed::Sealed for ListComponentsResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::List(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
 impl sealed::Sealed for WatchHeadResult {
     fn take(reply: Reply) -> Result<Self, Reply> {
         match reply {
@@ -140,6 +169,9 @@ impl Answer for MoveHeadResult {}
 impl Answer for PublishResult {}
 impl Answer for Processed {}
 impl Answer for LoadResult {}
+impl Answer for aether_kinds::PublishResult {}
+impl Answer for SpawnResult {}
+impl Answer for ListComponentsResult {}
 impl Answer for WatchHeadResult {}
 impl Answer for ImportResult {}
 impl Answer for RunResult {}
@@ -202,6 +234,43 @@ impl BloomeryHarness {
     pub fn load(&mut self, load: &LoadComponent) -> LoadResult {
         let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>(), load);
         self.wait(pending)
+    }
+
+    /// Send one module's `code` to the component host as a `Publish` and
+    /// wait for its result, which names each namespace the module is bound
+    /// to (`NS.<hash>` for a content-addressed module such as a bundle).
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn publish_code(&mut self, code: Vec<u8>) -> aether_kinds::PublishResult {
+        let publish = aether_kinds::Publish { code: code.into(), configs: Vec::new() };
+        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>(), &publish);
+        self.wait(pending)
+    }
+
+    /// Send one `Spawn` to the component host and wait for its result:
+    /// `Spawned` when the spawn stood the instance up, `Live` when the name
+    /// was already live and nothing was stood up.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no result arrives within thirty seconds.
+    pub fn spawn(&mut self, spawn: &Spawn) -> SpawnResult {
+        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>(), spawn);
+        self.wait(pending)
+    }
+
+    /// Ask the component host for every loaded component's name (`NS`,
+    /// `NS:key`, or `parent/NS:key`) and wait for the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no answer arrives within thirty seconds.
+    pub fn list_components(&mut self) -> Vec<String> {
+        let pending = self.request(self.chassis.actor_ref::<ComponentHostCapability>(), &ListComponents {});
+        let ListComponentsResult { names } = self.wait(pending);
+        names
     }
 
     /// Send one `WatchHead { after }` to the journal owner and wait for its
