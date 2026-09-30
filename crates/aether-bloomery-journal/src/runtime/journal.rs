@@ -775,14 +775,14 @@ fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
     Ok(())
 }
 
-/// The last stored sequence, `Seq(0)` when empty. Shared by [`Journal::head`]
-/// and [`crate::JournalReader::head`].
 /// The latest `recorded_at_millis` of any entry, or `0` for an empty log.
 fn last_recorded_of(conn: &Connection) -> Result<u64, JournalError> {
     let millis: Option<i64> = conn.query_row("SELECT MAX(recorded_at_millis) FROM entries", [], |row| row.get(0))?;
     millis.map_or(Ok(0), from_sqlite_i64)
 }
 
+/// The last stored sequence, `Seq(0)` when empty. Shared by [`Journal::head`]
+/// and [`crate::JournalReader::head`].
 pub fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
     let seq: Option<i64> = conn.query_row("SELECT MAX(seq) FROM entries", [], |row| row.get(0))?;
     match seq {
