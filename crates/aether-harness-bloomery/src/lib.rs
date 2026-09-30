@@ -38,6 +38,11 @@
 //! artifact: a scenario that needs fixture wasm reads it through
 //! `aether_harness_substrate::test_helpers::require_wasm` and stages the
 //! bytes itself.
+//!
+//! [`StubVendor`] is the loopback model vendor a scenario or benchmark points
+//! a turn's endpoint at: it answers each request from a reply function and
+//! records what it served, so a program that dials a vendor runs with no
+//! real model behind it.
 
 #![forbid(unsafe_code)]
 
@@ -56,10 +61,12 @@ mod boot;
 mod drive;
 mod expect;
 mod seed;
+mod vendor;
 
 pub use drive::{Answer, Pending};
 pub use expect::Record;
 pub use seed::SeededJournal;
+pub use vendor::{StubRequest, StubVendor};
 
 /// The unit key every harness boot configures: the seeded journal is this
 /// unit's root, so the journal owner answers at

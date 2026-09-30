@@ -7,6 +7,16 @@
 //! each reply method takes only its own ticket type, and a ticket the core
 //! is not waiting on yields no commands.
 
+/// A ticket's raw id, which names one step of the shell's work.
+///
+/// The id is unique across every ticket type, because
+/// [`ProgramCore::mint`](crate::ProgramCore::mint) draws every ticket from
+/// one counter, so the shell can key one table by it whatever the step.
+pub trait TicketId: Copy {
+    /// The raw id this ticket was minted from.
+    fn id(self) -> u64;
+}
+
 macro_rules! tickets {
     ($( $name:ident => $kind:literal, )*) => {
         $(
@@ -16,6 +26,12 @@ macro_rules! tickets {
             impl $name {
                 pub(crate) fn mint(id: u64) -> Self {
                     Self(id)
+                }
+            }
+
+            impl TicketId for $name {
+                fn id(self) -> u64 {
+                    self.0
                 }
             }
 
