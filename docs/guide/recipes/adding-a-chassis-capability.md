@@ -104,7 +104,7 @@ impl NativeActor for TextCapability {
 
     // Fire-and-forget: the handler returns `()`. `draw` lays the string
     // out and emits textured quads to `aether.render` the same tick.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
         // … rasterize glyphs, send the quad batch …
     }
@@ -114,7 +114,7 @@ impl NativeActor for TextCapability {
     // `on_read_result` or the parse completion. Only the font's first
     // waiter forwards the `aether.fs.read`.
     // See "text's held-reply variant" below.
-    #[handler::single]
+    #[handler::request]
     fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
         let (pending, held) = ctx.hold::<LoadFontResult>();
         if state.join_font_load(&mail.namespace, &mail.path, |waiters| waiters.load.push(held)) {
@@ -183,7 +183,7 @@ ADR-0112): the handler computes the answer this turn and the dispatcher
 sends it back. A fire-and-forget handler returns `()`.
 
 Text's `load_font` answers **later**, because it can't answer this turn —
-it must round-trip `aether.fs` first. It is still a `#[handler::single]`,
+it must round-trip `aether.fs` first. It is still a `#[handler::request]`,
 declared `-> Pending<LoadFontResult>` (ADR-0243): `ctx.hold::<LoadFontResult>()`
 returns the `Pending<LoadFontResult>` receipt the handler returns, which
 sets its row, and a `Held<LoadFontResult>` ticket that answers the one

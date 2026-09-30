@@ -1,5 +1,5 @@
 //! ADR-0227: handler signatures emit typed reply markers beside
-//! `HandlesKind`: a single handler returning `R` implements `Replies` with
+//! `HandlesKind`: a request handler returning `R` implements `Replies` with
 //! `Reply = R`.
 
 use aether_actor::{Replies, WasmCtx, actor};
@@ -28,7 +28,7 @@ impl aether_actor::WasmActor for ReplyProbe {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }

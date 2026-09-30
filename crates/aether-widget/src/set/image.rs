@@ -265,7 +265,7 @@ impl WasmActor for ImageWidget {
 
     /// Replace the borrowed texture and presentation without changing the
     /// parent-owned frame.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ImageConfig) {
         if self.apply_config(config) {
             emit_state_changed(ctx, &self.state);
@@ -273,26 +273,26 @@ impl WasmActor for ImageWidget {
     }
 
     /// Update external availability without changing image presentation.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         apply_static_control_state(ctx, &mut self.state, set.state);
     }
 
     /// Restyle disabled presentation.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_theme(&mut self, _ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
     }
 
     /// Cache the layout rect the root assigned without taking layout
     /// authority from it.
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// Reply with valid intrinsic size and at most one fitted textured item.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if let Some(parent) = ctx.parent() {
             parent.send(&self.draw_list());

@@ -37,7 +37,7 @@ impl WasmActor for Peer {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_handled(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Handled) {}
 }
 
@@ -51,7 +51,7 @@ impl WasmActor for Stranger {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_handled(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Handled) {}
 }
 
@@ -65,7 +65,7 @@ impl WasmActor for Sender {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_trigger(&mut self, ctx: &mut WasmCtx<'_, Self>, trigger: Trigger) {
         ctx.send::<Peer>(&Handled { seq: trigger.seq });
         ctx.send::<Peer>(&Unhandled { seq: trigger.seq });

@@ -158,7 +158,7 @@ impl NativeActor for Bouncer {
         Ok(Self { pokes: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: Poke) -> Poked {
         self.pokes += 1;
         Poked
@@ -206,7 +206,7 @@ impl NativeActor for HeldHost {
         Ok(Self::default())
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_park(&mut self, ctx: &mut NativeCtx<'_>, park: ParkReq) -> Pending<TestReply> {
         let (pending, held) = ctx.hold::<TestReply>();
         let id = held.dispatch_id();
@@ -215,16 +215,15 @@ impl NativeActor for HeldHost {
         pending
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldReq) -> Pending<TestReply> {
         let (pending, held) = ctx.hold::<TestReply>();
         self.held = Some(held);
         pending
     }
 
-    #[handler::single]
-    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked) {
-        let HeldContext { held, tag } = ctx.take_context::<HeldContext>().expect("the reply takes its stored context");
+    #[handler::response]
+    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked, HeldContext { held, tag }: HeldContext) {
         self.taken = Some((tag, ctx.binding.dispatch_state_of(held.dispatch_id())));
         held.answer(ctx, &TestReply { value: tag });
     }
@@ -317,7 +316,7 @@ impl NativeActor for Reader {
         Ok(Self::default())
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_knock(&mut self, ctx: &mut NativeCtx<'_>, _knock: Knock) {
         self.senders.push(ctx.sender().map(|sender| (sender, ctx.actor_path(sender))));
     }
@@ -339,12 +338,12 @@ impl NativeActor for Pinger {
         Ok(Self { reader })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, ctx: &mut NativeCtx<'_>, _ping: Ping) {
         ctx.send_to(self.reader, &Knock);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_leave(&mut self, ctx: &mut NativeCtx<'_>, _leave: Leave) {
         let _ = self;
         ctx.shutdown();

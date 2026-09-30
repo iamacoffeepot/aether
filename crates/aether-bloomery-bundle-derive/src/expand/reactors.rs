@@ -71,7 +71,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
             ctx.reply(&self.reactors.event(event));
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_status(
             &mut self,
             _ctx: &mut ::aether_actor::WasmCtx<'_>,

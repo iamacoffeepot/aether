@@ -589,7 +589,7 @@ impl WasmActor for NumericWidget {
     /// range instead, and the buffer is rewritten only when that clamp actually
     /// moved it — so re-bounding a field does not eat a half-typed number.
     /// [`SetValue`] sets the value on purpose.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: NumericConfig) {
         self.min = config.min;
         self.max = config.max;
@@ -601,7 +601,7 @@ impl WasmActor for NumericWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -609,13 +609,13 @@ impl WasmActor for NumericWidget {
     /// Push a value from the host: normalized into the current bounds, written
     /// into the buffer, and silent — no [`NumericChanged`], since the host set
     /// what it would be told about.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_value(&mut self, _ctx: &mut WasmCtx<'_>, set: SetValue) {
         self.committed_value = self.normalize(set.value).unwrap_or(self.committed_value);
         self.edit = TextEditState::new(Self::canonical(self.committed_value));
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         if self.state.can_mutate()
             && let Some(emission) = self.insert_text(&input.text)
@@ -631,7 +631,7 @@ impl WasmActor for NumericWidget {
     /// another edit, never a suppressed repeat: a held arrow keeps stepping,
     /// and the platform's key repeat is exactly a stream of presses
     /// ([`NumericWidget::key_step`]).
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
             return;
@@ -660,7 +660,7 @@ impl WasmActor for NumericWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     /// A press on a stepper button steps the value there and then and starts
     /// the press-and-hold repeat; anywhere else in the box places the caret
     /// and arms a selection drag.
@@ -683,7 +683,7 @@ impl WasmActor for NumericWidget {
         self.edit.place_caret(self.hit_byte(event_x));
     }
 
-    #[handler::single]
+    #[handler::event]
     /// Track which stepper the pointer is over (its hover overlay), and
     /// extend the selection while a text drag is live.
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
@@ -694,20 +694,20 @@ impl WasmActor for NumericWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.dragging, false, release.clone());
         release_left(&mut self.pressed_stepper, None, release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         if self.state.is_available() {
             self.modifiers = Some(modifiers);
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         if !self.state.can_mutate() {
             return;
@@ -719,7 +719,7 @@ impl WasmActor for NumericWidget {
         self.edit.set_composition(preedit.text, cursor);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_get_clipboard_text_result(&mut self, ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
         if accept_clipboard_paste(
             &mut self.paste_pending,
@@ -733,12 +733,12 @@ impl WasmActor for NumericWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
         report_clipboard_copy(&result);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -751,7 +751,7 @@ impl WasmActor for NumericWidget {
     /// The repeat is timed here because a widget never sees a tick — the
     /// root's per-frame `Collect` is the only regular pulse that reaches a
     /// child, the same clock the toast region ages its notices by.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if let Some(emission) = self.held_stepper_step() {
             Self::emit(ctx, emission);

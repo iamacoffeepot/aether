@@ -100,12 +100,12 @@ impl NativeActor for ActivationProbe {
         let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {
         let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_close(&mut self, ctx: &mut NativeCtx<'_>, _close: ActivationClose) {
         let _ = self.events.send(ActivationEvent::Dispatch(thread::current().id()));
         ctx.shutdown();

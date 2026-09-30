@@ -146,7 +146,7 @@ impl NativeActor for GuestHost {
         Ok(Self { params, born: HashMap::new() })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_publish(&mut self, ctx: &mut NativeCtx<'_>, publish: Publish) {
         let batch = RegistryBatch::publish_module(&self.params.modules[publish.module as usize]);
         ctx.stage_registry_batch(batch, PublishNote);
@@ -158,7 +158,7 @@ impl NativeActor for GuestHost {
         let _ = self.params.seen.send(Seen::Published(done.into_output()));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, hatch: Hatch) {
         let spec = self.params.births[hatch.birth as usize].clone();
         let birth = GuestBirth {
@@ -187,14 +187,14 @@ impl NativeActor for GuestHost {
         let _ = self.params.seen.send(Seen::Born { birth, outcome });
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_relay(&mut self, ctx: &mut NativeCtx<'_>, relay: Relay) -> Pending<Reply> {
         let (pending, held) = ctx.hold::<Reply>();
         held.hand_off(ctx, self.born[&relay.birth], &Ask { value: relay.value });
         pending
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_go(&mut self, ctx: &mut NativeCtx<'_>, go: Go) {
         ctx.send_to(self.born[&go.birth], &Answer);
     }
@@ -217,7 +217,7 @@ impl NativeActor for GuestHosted {
         Ok(Self { seen, parked: None })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, ask: Ask) -> Pending<Reply> {
         let (pending, held) = ctx.hold::<Reply>();
         self.parked = Some((held, ask.value));
@@ -225,7 +225,7 @@ impl NativeActor for GuestHosted {
         pending
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_answer(&mut self, ctx: &mut NativeCtx<'_>, _answer: Answer) {
         let (held, value) = self.parked.take().expect("an answer follows an ask");
         held.answer(ctx, &Reply { value });

@@ -286,7 +286,7 @@ impl WasmActor for SegmentedWidget {
     /// Replace the options / theme in place, re-clamping the selection into
     /// the new vector. `initial` seeds the control only at `init`;
     /// [`SetSelection`] moves the choice.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {
         self.options = config.options;
         self.selected = clamp_selection(self.selected, self.options.len());
@@ -298,7 +298,7 @@ impl WasmActor for SegmentedWidget {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -306,7 +306,7 @@ impl WasmActor for SegmentedWidget {
     /// Push the chosen segment from the host, clamped into the options.
     /// Silent — no [`SegmentedSelected`]. A `None` index is ignored: a
     /// segmented control always has a selection.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
         if let Some(index) = set.index {
             self.selected = clamp_option_index(index, self.options.len());
@@ -315,12 +315,12 @@ impl WasmActor for SegmentedWidget {
 
     /// Install a font-metrics reply; the next `Collect` cuts each label
     /// against its real width.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button == mouse_button::LEFT
             && let Some(selected) = self.select_at(press.x)
@@ -329,19 +329,19 @@ impl WasmActor for SegmentedWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.pressed_segment, None, release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if self.state.is_available() {
             self.hovered_segment = self.segment_at_pointer_x(moved.x);
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let direction = match key.code {
             KEY_LEFT => SegmentDirection::Previous,
@@ -353,7 +353,7 @@ impl WasmActor for SegmentedWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }

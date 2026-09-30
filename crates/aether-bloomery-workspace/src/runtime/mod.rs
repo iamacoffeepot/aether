@@ -144,7 +144,7 @@ impl NativeActor for WorkspaceCapability {
     /// once every stage is answered, or `Failed { detail }` with no container
     /// left behind; what a failed import staged is cited by nothing. The
     /// reply lands when the whole import is done.
-    #[handler::single]
+    #[handler::request]
     fn on_import(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Import) -> Pending<ImportResult> {
         let Import { image, source } = mail;
         match ctx.resolve(&source) {
@@ -192,7 +192,7 @@ impl NativeActor for WorkspaceCapability {
     /// staged to it; an `Ok` answers only once every stage is answered, and
     /// what a run that ends any other way staged is cited by nothing. The
     /// reply lands when the whole run is done.
-    #[handler::single]
+    #[handler::request]
     fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
         let Run { source, request } = mail;
         match ctx.resolve(&source) {
@@ -216,33 +216,37 @@ impl NativeActor for WorkspaceCapability {
 
     /// A worker queued storage requests: send each through its task's
     /// source.
-    #[handler::single]
+    #[handler::tell]
     fn on_storage_wake(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _wake: StorageWake) {
         state.desk.drain(ctx);
     }
 
     /// A source's answer to a worker's `ReadArtifact`, handed to the worker.
-    #[handler::single]
-    fn on_read_artifact_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadArtifactResult) {
-        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
-            state.desk.answer(ticket, StorageAnswer::Read(result));
-        }
+    #[handler::response]
+    fn on_read_artifact_result(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        result: ReadArtifactResult,
+        ticket: StorageTicket,
+    ) {
+        state.desk.answer(ticket, StorageAnswer::Read(result));
     }
 
     /// A source's answer to a worker's `ReadClosure`, handed to the worker.
-    #[handler::single]
-    fn on_read_closure_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadClosureResult) {
-        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
-            state.desk.answer(ticket, StorageAnswer::ReadClosure(result));
-        }
+    #[handler::response]
+    fn on_read_closure_result(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        result: ReadClosureResult,
+        ticket: StorageTicket,
+    ) {
+        state.desk.answer(ticket, StorageAnswer::ReadClosure(result));
     }
 
     /// A source's answer to a worker's `Stage`, handed to the worker.
-    #[handler::single]
-    fn on_stage_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: StageResult) {
-        if let Some(ticket) = ctx.take_context::<StorageTicket>() {
-            state.desk.answer(ticket, StorageAnswer::Stage(result));
-        }
+    #[handler::response]
+    fn on_stage_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, result: StageResult, ticket: StorageTicket) {
+        state.desk.answer(ticket, StorageAnswer::Stage(result));
     }
 }
 

@@ -53,7 +53,7 @@ impl WasmActor for Echo {
     }
 
     /// Echo a sequence number to the caller.
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }
@@ -72,7 +72,10 @@ The contracts are visible in the types:
 - `WasmInitCtx` cannot send startup mail before the mailbox is published. Put
   subscriptions and startup sends in `wire(&mut self, &mut WasmCtx)`.
 - The handler's third argument is the input kind.
-- `#[handler::single]` declares one reply; the return type is the reply kind.
+- `#[handler::request]` answers with its return type, the reply kind;
+  `#[handler::tell]`, `#[handler::event]`, and `#[handler::response]` answer
+  nothing and say why the mail arrives: a command, a subscription, or the
+  answer to this actor's own request.
 - Actor state is only touched through serialized `&mut self` dispatch.
 - `export!` emits FFI and actor/kind manifests; do not write host exports by hand.
 

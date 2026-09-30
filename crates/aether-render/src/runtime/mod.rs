@@ -859,7 +859,7 @@ impl NativeActor for RenderCapability {
 
     /// `DrawTriangle` accumulator, on the owned `frame_vertices` buffer.
     /// Truncates at the cap boundary, rounding to whole triangles.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         if state.warn_drop_if_unusable("draw_triangle") {
             return;
@@ -885,7 +885,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `ViewProjection` latest-value-wins, on the owned `camera_state`.
-    #[handler::single]
+    #[handler::tell]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         if state.warn_drop_if_unusable("view_projection") {
             return;
@@ -894,7 +894,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `CreateTexture` (ADR-0105), on the owned texture registry.
-    #[handler::single]
+    #[handler::request]
     fn on_create_texture(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -907,7 +907,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `UpdateTexture` (ADR-0105), on the owned texture registry.
-    #[handler::single]
+    #[handler::tell]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         if state.warn_drop_if_unusable("update_texture") {
             return;
@@ -916,7 +916,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `DestroyTexture`, on the owned texture registry.
-    #[handler::single]
+    #[handler::tell]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         if state.warn_drop_if_unusable("destroy_texture") {
             return;
@@ -927,7 +927,7 @@ impl NativeActor for RenderCapability {
     /// `CreateGeometry` (ADR-0171), on the owned geometry registry —
     /// validation and id assignment are CPU-side, so the reply needs no
     /// booted GPU; the buffers realize lazily at first GPU use.
-    #[handler::single]
+    #[handler::request]
     fn on_create_geometry(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -940,7 +940,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `UpdateGeometry` (ADR-0171), on the owned geometry registry.
-    #[handler::single]
+    #[handler::tell]
     fn on_update_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateGeometry) {
         if state.warn_drop_if_unusable("update_geometry") {
             return;
@@ -950,7 +950,7 @@ impl NativeActor for RenderCapability {
 
     /// `DestroyGeometry` (ADR-0171), on the owned geometry registry —
     /// mirrors `destroy_texture`.
-    #[handler::single]
+    #[handler::tell]
     fn on_destroy_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
         if state.warn_drop_if_unusable("destroy_geometry") {
             return;
@@ -965,7 +965,7 @@ impl NativeActor for RenderCapability {
     /// live device, so the offscreen GPU boots here if configured; on
     /// desktop a register before the first window attaches replies `Err`
     /// rather than parking.
-    #[handler::single]
+    #[handler::request]
     fn on_program_register(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -987,7 +987,7 @@ impl NativeActor for RenderCapability {
     /// frame record. One-shot — the program's output persists in its
     /// writable registry texture, so nothing replays. Runtime mismatches
     /// warn-drop at record time, naming program, pass, and binding.
-    #[handler::single]
+    #[handler::tell]
     fn on_program_dispatch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDispatch) {
         if state.warn_drop_if_unusable("program_dispatch") {
             return;
@@ -997,7 +997,7 @@ impl NativeActor for RenderCapability {
 
     /// `ProgramDestroy` (ADR-0170), on the owned program registry —
     /// mirrors `destroy_texture`.
-    #[handler::single]
+    #[handler::tell]
     fn on_program_destroy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
         if state.warn_drop_if_unusable("program_destroy") {
             return;
@@ -1010,7 +1010,7 @@ impl NativeActor for RenderCapability {
     /// already-folded state — the measurement itself resolves a frame
     /// later off the frame's critical path — so the reply costs a walk
     /// of the graph and never touches the device.
-    #[handler::single]
+    #[handler::request]
     fn on_program_timings(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -1023,7 +1023,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `overlay_frame`.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
@@ -1035,7 +1035,7 @@ impl NativeActor for RenderCapability {
     /// `overlay_frame` — arbitrary pixel-space triangles on the overlay pass,
     /// so flat 2D content keeps its proportions on a non-square window
     /// without a camera publishing a projection for it.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
         if state.warn_drop_if_unusable("draw_screen_triangles") {
             return;
@@ -1047,7 +1047,7 @@ impl NativeActor for RenderCapability {
     /// `DrawShapes` (ADR-0213), on the owned `overlay_frame` — rounded,
     /// stroked, shadowed boxes evaluated as a distance field on the overlay
     /// pass, at the same painter position as the quad batches.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_shapes(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
@@ -1056,7 +1056,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
         if state.warn_drop_if_unusable("draw_material_textured") {
             return;
@@ -1065,7 +1065,7 @@ impl NativeActor for RenderCapability {
     }
 
     /// `DrawMaterialCoverage` (ADR-0140), on the owned material stream.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
         if state.warn_drop_if_unusable("draw_material_coverage") {
             return;
@@ -1076,7 +1076,7 @@ impl NativeActor for RenderCapability {
     /// `PreSettled` (ADR-0161) — decrement the pending capture's
     /// `pre_remaining`. A stray notice with no pending capture is ignored.
     /// Engine-only mail (ADR-0233).
-    #[handler::single]
+    #[handler::event]
     fn on_pre_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: PreSettled) {
         if let Some(pending) = &mut state.pending_capture {
             pending.pre_remaining = pending.pre_remaining.saturating_sub(1);
@@ -1085,7 +1085,7 @@ impl NativeActor for RenderCapability {
 
     /// `Occluded` — update only the named target and fail only a capture
     /// selected for that target. Engine-only mail (ADR-0233).
-    #[handler::single]
+    #[handler::tell]
     fn on_occluded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Occluded) {
         #[cfg(feature = "desktop")]
         let became_occluded =
@@ -1117,7 +1117,7 @@ impl NativeActor for RenderCapability {
     /// owes every window behind it its turn. An empty target list is
     /// reserved for the explicitly surfaceless harness. Engine-only mail
     /// (ADR-0233).
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Frame) {
         let Frame { replay_cache_when_idle, windows } = mail;
         let windows = deduplicate_windows(windows);
@@ -1244,7 +1244,7 @@ impl NativeActor for RenderCapability {
     /// server's own mailbox as its reply target, so every rejected capture
     /// over the wire returned no image, no error and no timeout
     /// (iamacoffeepot/aether#4341).
-    #[handler::single]
+    #[handler::request]
     fn on_capture_frame(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

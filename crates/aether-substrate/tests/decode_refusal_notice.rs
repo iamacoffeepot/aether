@@ -75,7 +75,7 @@ impl NativeActor for Refuser {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
         panic!("a truncated probe never decodes");
@@ -103,7 +103,7 @@ impl NativeActor for NoticedAsker {
         state.me = cast_self(ctx, Self::NAMESPACE);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) {
         ctx.send_to(self.me.expect("the asker cast itself at wire"), &Forward);
     }
@@ -114,7 +114,7 @@ impl NativeActor for NoticedAsker {
         forward_truncated_probe(ctx);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_decode_refused(&mut self, ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
         self.notices.send((ctx.sender(), notice)).expect("notice receiver stays live");
     }
@@ -141,7 +141,7 @@ impl NativeActor for FallbackAsker {
         state.me = cast_self(ctx, Self::NAMESPACE);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) {
         ctx.send_to(self.me.expect("the asker cast itself at wire"), &Forward);
     }

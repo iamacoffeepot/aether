@@ -81,42 +81,42 @@ impl WasmActor for EditorRegion {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         self.relay(ctx, &press);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         self.relay(ctx, &release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         self.relay(ctx, &moved);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         self.relay(ctx, &wheel);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         self.relay(ctx, &key);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         self.relay(ctx, &release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         self.relay(ctx, &input);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         self.relay(ctx, &preedit);
     }
@@ -124,7 +124,7 @@ impl WasmActor for EditorRegion {
     /// Modifier state is relayed like any other event. The shell primes a
     /// newly focused region with the cached modifiers before the event that
     /// focused it, and one relay hop keeps that order.
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         self.relay(ctx, &modifiers);
     }

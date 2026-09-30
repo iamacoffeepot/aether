@@ -42,7 +42,7 @@ impl NativeActor for UnsplitRoot {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
 }
 
@@ -59,7 +59,7 @@ impl NativeActor for UnsplitChild {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
 }
 

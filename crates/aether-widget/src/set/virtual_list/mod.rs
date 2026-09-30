@@ -477,7 +477,7 @@ impl WasmActor for VirtualListWidget {
     /// row to preserve. So "here are the rows, start on the first" is still one
     /// mail, and a later refresh of those rows cannot undo what the reader
     /// chose.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: VirtualListConfig) {
         let previous_eligible = content_eligible(self.items.len(), self.visible_row_count);
         self.rows_vary = rows_vary(&config.items);
@@ -520,7 +520,7 @@ impl WasmActor for VirtualListWidget {
     /// Push the selected row from the host, clamped into the items and `None`
     /// for no selection at all, scrolling it into view. Silent — no
     /// [`VirtualListSelected`](crate::VirtualListSelected).
-    #[handler::single]
+    #[handler::tell]
     fn on_set_selection(&mut self, ctx: &mut WasmCtx<'_>, set: SetSelection) {
         self.selected_index = clamp_optional_index(set.index, self.items.len());
         if self.selected_index.is_some() {
@@ -531,13 +531,13 @@ impl WasmActor for VirtualListWidget {
 
     /// Install a font-metrics reply; the next `Collect` elides and measures
     /// against real advances.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
         self.forget_measurements();
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -547,7 +547,7 @@ impl WasmActor for VirtualListWidget {
     /// row under it. The bar is checked first and does not need the list to be
     /// mutable: reading where you are in a read-only list is not a change to
     /// it.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
@@ -574,7 +574,7 @@ impl WasmActor for VirtualListWidget {
     /// Carry a live thumb drag, or follow the pointer across the rows and the
     /// verbs on them. The root captures the pointer on press, so the drag keeps
     /// following even once it leaves the narrow track.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         self.refresh_row_layout();
         self.pointer_local = Some((moved.x - self.frame.x, moved.y - self.frame.y));
@@ -594,7 +594,7 @@ impl WasmActor for VirtualListWidget {
     /// looking, not choosing. Positive `delta_y` is a roll away from the
     /// reader, which moves the content down and the window up: the same
     /// negation the widget set's scroll actor applies.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if self.state.is_available() {
             self.refresh_row_layout();
@@ -606,7 +606,7 @@ impl WasmActor for VirtualListWidget {
     /// A release inside the verb it was armed on fires that verb — the
     /// button's own press-then-release-inside, so a press that slides off
     /// cancels rather than removing the row it drifted away from.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         self.refresh_row_layout();
         let armed = if release.button == mouse_button::LEFT {
@@ -624,7 +624,7 @@ impl WasmActor for VirtualListWidget {
         release_left(&mut self.thumb_grab_pixels, None, release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.can_mutate() {
             return;
@@ -648,7 +648,7 @@ impl WasmActor for VirtualListWidget {
     /// Reply the realized rows, each elided to the width it has, plus the
     /// intrinsic the widest row asks for and the height the whole vector
     /// stands at.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;

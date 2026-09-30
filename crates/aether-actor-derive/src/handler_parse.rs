@@ -171,8 +171,9 @@ pub fn parse_handler_args(attr: &Attribute) -> syn::Result<HandlerArgs> {
 }
 
 /// The reply class of a handler (ADR-0112, ADR-0134), read off the
-/// attribute path: `#[handler::single]` is [`Single`](HandlerClass::Single)
-/// and `#[handler::unchecked(reason = "…")]` is
+/// attribute path: `#[handler::request]`, `#[handler::tell]`,
+/// `#[handler::event]`, and `#[handler::response]` are
+/// [`Single`](HandlerClass::Single), and `#[handler::unchecked(reason = "…")]` is
 /// [`Unchecked`](HandlerClass::Unchecked) — every mail handler names its class
 /// explicitly. Orthogonal to [`HandlerVariant`] (the `mail` / `task` trigger),
 /// which is read from the parens.
@@ -223,8 +224,10 @@ pub struct ResponseContext {
 /// Read a handler's [`HandlerClass`] and [`HandlerIntent`] off its attribute
 /// path (ADR-0112, ADR-0134, #7201), given the already-parsed [`HandlerArgs`].
 /// The last path segment is the class word: `request` / `tell` / `event` /
-/// `response` are the single class with an intent, `single` is the single
-/// class with none (retired by #7202), and `unchecked` is the unchecked class.
+/// `response` are the single class with an intent, and `unchecked` is the
+/// unchecked class. The intent is `None` only on the unchecked class and the
+/// task exemption; the retired `single` is a pointed compile error naming the
+/// four intent words (#7202).
 /// A bare `handler` segment is the classless task exemption for
 /// [`HandlerVariant::Task`] (its reply rides `TaskDone`, not the handler
 /// class) and a pointed compile error for [`HandlerVariant::Mail`] — the class
@@ -258,7 +261,15 @@ pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<
         "tell" => (HandlerClass::Single, Some(HandlerIntent::Tell)),
         "event" => (HandlerClass::Single, Some(HandlerIntent::Event)),
         "response" => (HandlerClass::Single, Some(HandlerIntent::Response)),
-        "single" => (HandlerClass::Single, None),
+        "single" => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[handler::single]` is retired: write `#[handler::request]` (returns `O` or \
+                 `Pending<O>`), `#[handler::tell]`, `#[handler::event]` (arrives through a \
+                 subscription), or `#[handler::response]` (answers this actor's own request; \
+                 optional `context: C` / `Option<C>` fourth parameter)",
+            ));
+        }
         "unchecked" => (HandlerClass::Unchecked, None),
         "manual" => {
             return Err(syn::Error::new_spanned(

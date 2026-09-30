@@ -37,7 +37,7 @@ fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Unchecked>, m: WatchHead) {
 }
 
 // decision: row WatchHeadResult; only WatchHeadResult can answer
-#[handler::single]
+#[handler::request]
 fn on_watch_head(.., m: WatchHead) -> Pending<WatchHeadResult> {
     let (pending, held) = ctx.hold::<WatchHeadResult>();
     self.watchers.park(held);
@@ -202,7 +202,7 @@ held.answer(ctx, &WatchHeadResult { .. });
 
     ```rust
     // main: the take is written by hand, and an absent context drops the reply without a word
-    #[handler::single]
+    #[handler::response]
     fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
         let Some(context) = ctx.take_context::<MeshLoadContext>() else { return };
         context.held.answer(ctx, &MeshLoadResult::from(result));

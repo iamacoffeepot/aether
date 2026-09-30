@@ -169,13 +169,13 @@ impl NativeActor for SendProbe {
         Ok(Self { relay, turns: Vec::new(), replies: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_to(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendTo) {
         ctx.send_to(ctx.actor_ref::<StubActor>(), &CastOnly { code: 1 });
         self.turns.push(Turn::of(ctx, Vec::new(), Vec::new()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_to_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendToWithContext) {
         let bouncer = ctx.actor_ref::<Bouncer>();
         let borrowed = &bouncer;
@@ -183,7 +183,7 @@ impl NativeActor for SendProbe {
         self.turns.push(Turn::of(ctx, vec![Some(sent)], Vec::new()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_detached_to_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendDetachedToWithContext) {
         let bouncer = ctx.actor_ref::<Bouncer>();
         let sent = ctx.send_detached_to_with_context(bouncer, &Poke, NativeRequestContext { value: trigger.value });
@@ -196,7 +196,7 @@ impl NativeActor for SendProbe {
         self.turns.push(Turn::of(ctx, Vec::new(), Vec::new()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_detached_to(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendDetachedTo) {
         let inherent = ctx.send_detached_to(self.relay.narrow::<CastRelay>(), &CastOnly { code: 10 });
         MailSender::send_detached_to(ctx, self.relay.narrow::<CastRelay>(), &CastOnly { code: 11 });
@@ -204,35 +204,34 @@ impl NativeActor for SendProbe {
         self.turns.push(Turn::of(ctx, vec![Some(inherent), Some(delegated)], vec![inherent, delegated]));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_encoded_detached_to(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendEncodedDetachedTo) {
         let payload = Encoded::new(&CastOnly { code: 12 });
         let sent = ctx.send_encoded_detached_to(self.relay.narrow::<CastRelay>(), &payload);
         self.turns.push(Turn::of(ctx, vec![sent], sent.into_iter().collect()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_detached(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendDetached) {
         ctx.send_detached::<StubActor>(&CastOnly { code: 5 });
         let sent = last_sent(ctx);
         self.turns.push(Turn::of(ctx, vec![Some(sent)], vec![sent]));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send(&mut self, ctx: &mut NativeCtx<'_>, _trigger: FlatSend) {
         ctx.send::<StubActor>(&CastOnly { code: 6 });
         self.turns.push(Turn::of(ctx, Vec::new(), Vec::new()));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendWithContext) {
         let sent = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: trigger.value });
         self.turns.push(Turn::of(ctx, vec![Some(sent)], Vec::new()));
     }
 
-    #[handler::single]
-    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked) {
-        let taken = ctx.take_context::<NativeRequestContext>();
+    #[handler::response]
+    fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked, taken: Option<NativeRequestContext>) {
         self.replies.push(Reply {
             answers: ctx.in_reply_to(),
             root: ctx.in_flight_root(),

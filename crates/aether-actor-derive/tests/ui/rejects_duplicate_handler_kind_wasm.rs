@@ -32,10 +32,10 @@ impl aether_actor::WasmActor for Dup {
         Ok(Dup)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_first(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_second(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 

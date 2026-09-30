@@ -50,7 +50,7 @@ impl aether_substrate::actor::native::NativeActor for TaskCap {
         Ok(TaskCapState { seen: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(
         state: &mut Self::State,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

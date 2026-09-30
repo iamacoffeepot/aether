@@ -326,8 +326,8 @@ word that fits: a `request` that returns nothing is a `tell`, `event`, or
 the macro cannot see whether a kind arrives through a subscription, so `event`
 records the author's intent. None of the four is published — the inputs
 manifest and the contract rows see only the single class and the return type.
-The older `#[handler::single]` spelling still compiles and is being retired
-(#7202).
+`#[handler::single]`, the older spelling, is refused with an error naming the
+four words (#7202).
 
 A `response` takes the context its request stored with `send_with_context` as
 an optional fourth parameter
@@ -489,10 +489,11 @@ MCP and RPC boundary.
 
 ### Helpers that only send
 
-The class marker rides on the context type — a single handler's `WasmCtx<'_>`
+The class marker rides on the context type — a `request`, `tell`, `event`, or
+`response` handler's `WasmCtx<'_>`
 is `WasmCtx<'_, Self, Single>` and an unchecked handler holds
-`WasmCtx<'_, Self, Unchecked>` — which is what makes a stray `ctx.reply` in a
-single handler a compile error. The actor is the first parameter, the reply
+`WasmCtx<'_, Self, Unchecked>` — which is what makes a stray `ctx.reply` in
+any of the four a compile error. The actor is the first parameter, the reply
 mode the second, and a ctx that omits its actor is typed by it: `#[actor]`
 fills in `Self`, so the ctx reaches only the actors the handler's actor
 declares with `depends(R)`. Spelling `Erased` in that slot

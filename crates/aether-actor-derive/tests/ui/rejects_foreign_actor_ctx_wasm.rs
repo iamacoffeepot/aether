@@ -23,7 +23,7 @@ impl aether_actor::WasmActor for ForeignProbe {
         Ok(ForeignProbe)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, OtherActor>, _ping: Ping) {}
 }
 

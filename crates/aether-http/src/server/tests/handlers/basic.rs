@@ -36,7 +36,7 @@ impl NativeActor for EchoHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> HttpRouterResult {
         let headers = vec![
             HttpHeader { name: "x-aether-method".to_string(), value: format!("{:?}", request.method) },
@@ -72,7 +72,7 @@ impl NativeActor for FixedBodyHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Response(HttpServerResponse {
             status: 200,
@@ -107,7 +107,7 @@ impl NativeActor for ClosingHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -177,7 +177,7 @@ impl NativeActor for HeldForwardHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

@@ -33,7 +33,7 @@ impl aether_substrate::actor::native::NativeActor for NoNamespace {
         unimplemented!()
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(
         &mut self,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

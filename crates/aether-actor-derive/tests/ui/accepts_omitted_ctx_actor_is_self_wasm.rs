@@ -38,7 +38,7 @@ impl WasmActor for Peer {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Ping) {}
 }
 
@@ -46,7 +46,7 @@ impl WasmActor for Peer {
 // `send::<Peer>` holds for every adopter.
 #[handler_set]
 trait Reach: aether_actor::DependsOn<Peer> {
-    #[handler::single]
+    #[handler::response]
     fn on_pong(&mut self, ctx: &mut WasmCtx<'_>, pong: Pong) {
         ctx.send::<Peer>(&Ping { seq: pong.seq });
     }
@@ -76,7 +76,7 @@ impl WasmActor for Typed {
         ctx.send::<Peer>(&Ping { seq: 3 });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_trigger(&mut self, ctx: &mut WasmCtx<'_>, trigger: Trigger) {
         ctx.send::<Peer>(&Ping { seq: trigger.seq });
     }
@@ -95,7 +95,7 @@ impl WasmActor for CatchAll {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _trigger: Trigger) {}
 
     #[fallback]

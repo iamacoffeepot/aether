@@ -191,7 +191,7 @@ A send is fire-and-forget; `timeout_ms: None` uses the chassis default timeout.
 The result arrives later as its own mail, which you receive like any other kind:
 
 ```rust
-#[handler::single]
+#[handler::response]
 fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_>, result: FetchResult) {
     match result {
         FetchResult::Ok { request_id, status, body, .. } => { /* request_id tells you which fetch */ }

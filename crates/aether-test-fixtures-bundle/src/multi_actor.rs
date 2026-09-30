@@ -30,7 +30,7 @@ impl WasmActor for RootManager {
 
     /// Declares `Ping` so the entry type's capability group names it; the
     /// body is empty.
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 
@@ -49,7 +49,7 @@ impl WasmActor for Panel {
 
     /// Declares `Ping` so `Panel`'s capability group names it alongside the
     /// fallback; the body is empty.
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 
     #[fallback]

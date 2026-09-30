@@ -52,7 +52,7 @@ impl WasmActor for WrongReply {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, mail: Ping) -> Other {
         Other { seq: mail.seq }
     }
@@ -68,7 +68,7 @@ impl WasmActor for SilentForSingle {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Ping) {}
 }
 
@@ -82,7 +82,7 @@ impl WasmActor for SingleForSilent {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_note(&mut self, _ctx: &mut WasmCtx<'_>, mail: Note) -> Pong {
         Pong { seq: mail.seq }
     }

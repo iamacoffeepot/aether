@@ -297,7 +297,7 @@ parent it may sit beneath in one `child_of(..)` list:
 ```rust
 #[actor(root, spawns(Panel))]
 impl WasmActor for RootManager {
-    #[handler::single]
+    #[handler::tell]
     fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
         // -> Result<InlineChild<Panel>, SpawnError>: the child's `init` has run by the time this returns
         let _ = ctx.spawn_inline::<Panel>(Subname::Counter, &PanelConfig { /* … */ });

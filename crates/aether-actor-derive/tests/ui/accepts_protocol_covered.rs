@@ -68,15 +68,15 @@ impl WasmActor for LoaderActor {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_load(&mut self, _ctx: &mut WasmCtx<'_>, mail: Load) -> Loaded {
         Loaded { seq: mail.seq }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_mode(&mut self, _ctx: &mut WasmCtx<'_>, _mail: SetMode) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_extra(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Extra) {}
 
     #[handler::unchecked(reason = "test: an explicit unchecked protocol row")]
@@ -97,7 +97,7 @@ impl WasmActor for Sender {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Trigger) {}
 }
 

@@ -293,7 +293,7 @@ impl NativeActor for FleetProxy {
     /// Internal — the reply to the `RegisterEngineRoute` this proxy sent
     /// from `wire`. Releases the spawn chain's hold; an `Err` means
     /// engine-addressed calls will not reach this proxy, and is logged.
-    #[handler::single]
+    #[handler::response]
     fn on_route_registered(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteResult) {
         state.route_hold = None;
         if let RegisterEngineRouteResult::Err { error } = mail {
@@ -345,7 +345,7 @@ impl NativeActor for FleetProxy {
     /// Internal wake mail — not part of the proxy's external
     /// surface. The reader thread fires this after pushing a frame;
     /// the handler drains `conn.inbound` and routes each frame.
-    #[handler::single]
+    #[handler::tell]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: RpcInboundReady) {
         while let Ok(frame) = state.conn.inbound.try_recv() {
             match frame {
@@ -404,7 +404,7 @@ impl NativeActor for FleetProxy {
     /// outbound RPC connection closes as the actor drops. The
     /// `engine_id` field is ignored — a proxy only ever terminates
     /// its own engine.
-    #[handler::single]
+    #[handler::tell]
     fn on_terminate(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: TerminateEngine) {
         tracing::info!(
             target: "aether_substrate::fleet_proxy",
@@ -430,7 +430,7 @@ impl NativeActor for FleetProxy {
     /// unanswered it declares the engine dead: reports `EngineDied`
     /// to the engines cap and self-shuts-down (its `Drop` terminates
     /// the wedged child's group). Otherwise it sends a fresh `Ping`.
-    #[handler::single]
+    #[handler::tell]
     fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: EngineHeartbeatTick) {
         state.heartbeat_seq += 1;
         // A write failure means the socket is already broken — the

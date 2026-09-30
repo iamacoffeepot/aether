@@ -220,7 +220,7 @@ impl WasmActor for SliderWidget {
     /// A live reconfigure normalises the range the same way `init` does: it is
     /// the second path a malformed pair arrives on, and it re-clamps against
     /// the new bounds immediately.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SliderConfig) {
         let (min, max) = normalized_bounds(config.min, config.max);
         self.min = min;
@@ -231,20 +231,20 @@ impl WasmActor for SliderWidget {
         self.apply_control_state(ctx, config.state);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
 
     /// Push a value from the host, clamped and snapped like any other. Silent:
     /// the host asked for it, so it is not reported back as a change.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_value(&mut self, _ctx: &mut WasmCtx<'_>, set: SetValue) {
         self.value = self.snapped(set.value);
     }
 
     /// A left press begins a drag and sets the value from the cursor.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.can_mutate() {
             return;
@@ -255,7 +255,7 @@ impl WasmActor for SliderWidget {
     }
 
     /// A move while dragging updates the value and streams it uncommitted.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if !self.dragging || !self.state.can_mutate() {
             return;
@@ -265,7 +265,7 @@ impl WasmActor for SliderWidget {
     }
 
     /// A left release ends the drag and commits the value.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT || !self.dragging || !self.state.can_mutate() {
             return;
@@ -277,7 +277,7 @@ impl WasmActor for SliderWidget {
 
     /// Arrow keys nudge by `step` and commit at once (focused only — the root
     /// forwards keyboard mail to the focused child).
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.can_mutate() {
             return;
@@ -297,7 +297,7 @@ impl WasmActor for SliderWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;

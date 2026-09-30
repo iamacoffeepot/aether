@@ -32,13 +32,13 @@ impl WasmActor for InputLogger {
         ctx.subscribe::<WindowCapability, MouseButton>();
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, _key: Key) {}
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, _mb: MouseButton) {}
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, _m: MouseMove) {}
 }
 

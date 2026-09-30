@@ -220,7 +220,7 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// pub trait WidgetDefaults {
 ///     fn widget_frame(&mut self) -> &mut WidgetFrame;
 ///
-///     #[handler::single]
+///     #[handler::tell]
 ///     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
 ///         *self.widget_frame() = frame;
 ///     }
@@ -565,7 +565,7 @@ mod impl_doc_tests {
                     Ok(Widget)
                 }
 
-                #[handler::single]
+                #[handler::tell]
                 fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
             }
         };
@@ -588,7 +588,7 @@ mod impl_doc_tests {
                     Ok(Cap)
                 }
 
-                #[handler::single]
+                #[handler::tell]
                 fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _ping: Ping) {}
             }
         };

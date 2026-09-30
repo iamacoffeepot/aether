@@ -37,7 +37,7 @@ impl WasmActor for Courier {
         self.hops = hops;
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CourierQuery) -> CourierQueryResult {
         CourierQueryResult { outcomes: self.outcomes.clone() }
     }
@@ -56,7 +56,7 @@ impl WasmActor for Parcel {
         Ok(Parcel { queries: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         self.queries += 1;
         CountReport { count: self.queries }

@@ -247,7 +247,7 @@ impl NativeActor for ComponentHostCapability {
     /// Errors (bad wire bytes, a publish admission refuses, kind conflict,
     /// name conflict, invalid wasm, instantiation trap) come back from the
     /// host as `LoadResult::Err`.
-    #[handler::single]
+    #[handler::request]
     fn on_load_component(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -290,7 +290,7 @@ impl NativeActor for ComponentHostCapability {
     /// The registry owns publication and wake coalescing; this consumer reads
     /// one coherent snapshot, egresses it at most once per generation pair,
     /// and always acknowledges so a publication racing the clear is re-armed.
-    #[handler::single]
+    #[handler::event]
     fn on_registry_changed(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Erased>, _payload: RegistryChanged) {
         state.refresh_registry_inventory();
     }
@@ -310,7 +310,7 @@ impl NativeActor for ComponentHostCapability {
     /// path, `LoadResult.path`: `NS`, `NS:key`, or `parent/NS:key`. A drop
     /// at a module boot closes it for good: the module's later loads spawn
     /// no new one (ADR-0147, ADR-0241 §8).
-    #[handler::single]
+    #[handler::request]
     fn on_drop_component(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -338,7 +338,7 @@ impl NativeActor for ComponentHostCapability {
     /// (`NS.<hash>` for a content-addressed module) with its capabilities,
     /// the `namespace` a `Spawn` names. A republish answers once every
     /// commit's chain has settled.
-    #[handler::single]
+    #[handler::request]
     fn on_publish(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Publish) -> Pending<PublishResult> {
         let (pending, held) = ctx.hold::<PublishResult>();
         state.begin_publish(ctx, held, payload);
@@ -361,7 +361,7 @@ impl NativeActor for ComponentHostCapability {
     /// stamped sender as its reference. A namespace no module publishes is
     /// refused, and a spawn of one whose module is republishing waits until
     /// the republish answers.
-    #[handler::single]
+    #[handler::request]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Spawn) -> Pending<SpawnResult> {
         let (pending, held) = ctx.hold::<SpawnResult>();
         state.begin_spawn(ctx, held, payload);
@@ -369,19 +369,19 @@ impl NativeActor for ComponentHostCapability {
     }
 
     /// A member answered its republish prepare (ADR-0241 §7).
-    #[handler::single]
+    #[handler::response]
     fn on_prepared(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepared) {
         state.finish_prepare(ctx, payload);
     }
 
     /// A member installed its prepared candidate (ADR-0241 §7).
-    #[handler::single]
+    #[handler::response]
     fn on_committed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Committed) {
         state.finish_commit(ctx);
     }
 
     /// A member reinstated its old guest (ADR-0241 §7).
-    #[handler::single]
+    #[handler::response]
     fn on_aborted(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Aborted) {
         state.finish_abort(ctx);
     }
@@ -389,7 +389,7 @@ impl NativeActor for ComponentHostCapability {
     /// The chain a member's commit started has settled: the mail its
     /// candidate held and every chain that mail caused are done (ADR-0241
     /// §7). `Settled` notices for other roots are ignored.
-    #[handler::single]
+    #[handler::event]
     fn on_commit_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Settled) {
         state.settle_commit(ctx, payload.root);
     }
@@ -417,7 +417,7 @@ impl NativeActor for ComponentHostCapability {
     /// boot-manifest spawn (ADR-0116) to learn deterministically when a
     /// requested component is loaded, instead of inferring liveness by
     /// proxy.
-    #[handler::single]
+    #[handler::request]
     fn on_list_components(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -450,7 +450,7 @@ impl NativeActor for ComponentHostCapability {
     /// at that name.
     /// Name-addressed so a boot-manifest-loaded component (ADR-0116), whose
     /// spawner never receives a mailbox id, stays introspectable.
-    #[handler::single]
+    #[handler::request]
     fn on_describe_component(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

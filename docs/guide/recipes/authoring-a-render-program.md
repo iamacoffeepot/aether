@@ -409,7 +409,7 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     ctx.send::<RenderCapability>(&self.build_register()); // a ProgramRegister value
 }
 
-#[handler::single]
+#[handler::response]
 fn on_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResult) {
     match result {
         ProgramRegisterResult::Ok { program_id } => self.program_id = Some(program_id),

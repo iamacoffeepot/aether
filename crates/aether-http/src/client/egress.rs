@@ -329,7 +329,7 @@ mod tests {
             Ok(Self { egress: PerSenderEgress::new(params.per_sender_max, params.global_max), params })
         }
 
-        #[aether_actor::handler::single]
+        #[aether_actor::handler::request]
         fn on_fetch(&mut self, ctx: &mut NativeCtx<'_>, fetch: Fetch) -> Pending<Fetched> {
             let sender = ctx.sender();
             let ProbeParams { gates, started, .. } = self.params.clone();
@@ -340,7 +340,7 @@ mod tests {
             })
         }
 
-        #[aether_actor::handler::single]
+        #[aether_actor::handler::tell]
         fn on_census(&mut self, ctx: &mut NativeCtx<'_>, _census: Census) {
             let sender = ctx.sender();
             let _ = self.params.counts.send(Counts {

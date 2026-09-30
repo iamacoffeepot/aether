@@ -269,7 +269,7 @@ impl NativeActor for Announcer {
         ctx.send::<Witness>(&Announce { seq: 1 });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_announce(&mut self, _ctx: &mut NativeCtx<'_>, _announce: Announce) {
         let _ = self;
     }

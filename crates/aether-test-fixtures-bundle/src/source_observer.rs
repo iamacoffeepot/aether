@@ -35,7 +35,7 @@ impl WasmActor for SourceObserver {
     /// Read `sender()` from the inbound `SourceQuery` and reply whether it
     /// returned a proof. The reply goes to the origin the host stamped on the
     /// query, a component or a session alike.
-    #[handler::single]
+    #[handler::request]
     fn on_source_query(&mut self, ctx: &mut WasmCtx<'_>, _query: SourceQuery) -> SourceReport {
         SourceReport { had_sender: ctx.sender().is_some() }
     }

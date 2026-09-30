@@ -26,14 +26,14 @@ impl NativeActor for Relay {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut NativeCtx<'_>, key: Key) {
         let _ = self;
         ctx.send::<SubstrateHarnessObserver>(&key);
         drop(key);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, mouse: MouseMove) {
         let _ = self;
         ctx.send::<SubstrateHarnessObserver>(&mouse);

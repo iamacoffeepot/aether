@@ -71,7 +71,7 @@ aether-http = { path = "../aether-http", default-features = false }
 
 ## 3. Write the handler
 
-A handler is a wasm component with one `#[handler::single]` for
+A handler is a wasm component with one `#[handler::request]` for
 `aether.http.server.request` that returns `HttpRouterResult`: every route holder
 covers the `HttpRouter` protocol, whose one row replies
 `aether.http.server.router_result`. A buffered answer is its `Response` variant,
@@ -108,7 +108,7 @@ impl WasmActor for Web {
         });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
         let (status, body): (u16, &[u8]) = match req.path.as_str() {
             "/" => (200, b"hello"),
@@ -299,7 +299,7 @@ The typed surface writes that whole registration for you (ADR-0131). Put
 `#[http::router]` on the actor's impl block, above `#[actor]`, and
 `#[http::route(<Method|any>, "<prefix>")]` on a method; the macros inject the
 `register_route_self` send into `wire` and emit the router's one
-`#[handler::single]` for `aether.http.server.request`, which picks the route and
+`#[handler::request]` for `aether.http.server.request`, which picks the route and
 answers `HttpRouterResult::Response` with what the method returns. A routed method takes an
 `http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
 matched route, dereffing to the ctx so mail sends read as usual — and returns
@@ -383,8 +383,8 @@ forwards to a peer and answers when the peer replies is a hand-written
 `HttpServerRequest` handler that holds its reply (ADR-0243): it returns
 `Pending<HttpRouterResult>` from `ctx.hold::<HttpRouterResult>()`, forwards
 with `send_with_context`, carrying the `Held` in the request context, and
-answers from the peer's reply handler, where `take_context` hands the `Held`
-back. The peer is a declared dependency (`depends(.., Peer)`), and the held
+answers from the peer's `#[handler::response]`, whose context parameter hands
+the `Held` back. The peer is a declared dependency (`depends(.., Peer)`), and the held
 reply is native, so this handler is a native actor's:
 
 ```rust
@@ -393,18 +393,16 @@ struct ForwardContext {
     held: Held<HttpRouterResult>,
 }
 
-#[handler::single]
+#[handler::request]
 fn on_request(_state: &mut State, ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> Pending<HttpRouterResult> {
     let (pending, held) = ctx.hold::<HttpRouterResult>();
     let _ = ctx.send_with_context::<Peer>(&Ask { path: request.path }, ForwardContext { held });
     pending
 }
 
-#[handler::single]
-fn on_answer(_state: &mut State, ctx: &mut NativeCtx<'_>, answer: Answer) {
-    if let Some(ForwardContext { held }) = ctx.take_context::<ForwardContext>() {
-        held.answer(ctx, &HttpRouterResult::Response(answer.into_response()));
-    }
+#[handler::response]
+fn on_answer(_state: &mut State, ctx: &mut NativeCtx<'_>, answer: Answer, ForwardContext { held }: ForwardContext) {
+    held.answer(ctx, &HttpRouterResult::Response(answer.into_response()));
 }
 ```
 
@@ -481,7 +479,7 @@ mail with `ctx.sender()`, casts it once to the `ResponseSink` protocol with
 take the chunk and terminator kinds, so a misrouted stream is refused when the
 handle is armed instead of warn-dropped chunk by chunk, and every emit compiles
 only for the sink's kinds. The credit handler is an ordinary
-`#[handler::single]`:
+`#[handler::tell]`:
 
 ```rust
 use aether_actor::{WasmCtx, WasmInitCtx};
@@ -506,7 +504,7 @@ impl WasmActor for Feed {
     }
 
     // Open the stream. The body arrives later, one chunk per unit of credit.
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
         self.next = 0;
         self.done = false;
@@ -517,7 +515,7 @@ impl WasmActor for Feed {
     // The first credit mail arms the stream handle — its counterparty is
     // whoever paced the stream, cast to the sink it covers, and every chunk
     // flows back through it.
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         let stream = match self.stream {
             Some(stream) => stream,
@@ -548,7 +546,7 @@ purely opt-in per reply.
 
 ## Mixing buffered and streamed routes
 
-"Stream one route, buffer the rest" is a single handler choosing between two
+"Stream one route, buffer the rest" is one request handler choosing between two
 `HttpRouterResult` variants per request, returning whichever one the request
 calls for:
 
@@ -556,7 +554,7 @@ calls for:
 use aether_actor::WasmCtx;
 use aether_http::kinds::{HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse};
 
-#[handler::single]
+#[handler::request]
 fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
     match req.path.as_str() {
         "/download" => HttpRouterResult::Stream(HttpResponseStreamOpen {

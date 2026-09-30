@@ -99,7 +99,7 @@ impl NativeActor for ProcessCapability {
     /// child), then dispatches the blocking spawn-and-capture on a worker
     /// thread; the reply lands when the run completes, times out, or
     /// fails to spawn/reap.
-    #[handler::single]
+    #[handler::request]
     fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
         // Deny-by-default: an unlisted binary is refused before any spawn.
         let Some(path) = state.allowlist.get(&mail.binary).cloned() else {

@@ -183,7 +183,7 @@ impl WasmActor for BundleComponent {
     /// chain the `wire` `create_texture` send started. An `Err` — a
     /// headless chassis, or a rejected upload — warn-logs and leaves the
     /// actor tile-less rather than drawing a dangling id.
-    #[handler::single]
+    #[handler::response]
     fn on_create_texture_result(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateTextureResult) {
         match result {
             CreateTextureResult::Ok { texture_id } => {
@@ -208,7 +208,7 @@ impl WasmActor for BundleComponent {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         let Some(tile) = self.tile else {
             return;

@@ -21,7 +21,7 @@ impl aether_actor::WasmActor for Loader {
         Ok(Loader)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_context(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _context: LoadContext) {}
 }
 

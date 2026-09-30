@@ -70,14 +70,14 @@ impl NativeActor for DepartureWatcher {
         Ok(Self { watch: None, departed: false, waiting: None })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, watch: Watch) -> Watching {
         let proven = ctx.resolve_path(&watch.target).expect("the watched component is live");
         self.watch = Some(ctx.monitor(proven).expect("the watched component is monitorable"));
         Watching { target: watch.target }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_await_departure(&mut self, ctx: &mut NativeCtx<'_>, _await: AwaitDeparture) -> Pending<Departed> {
         let (pending, held) = ctx.hold::<Departed>();
         if self.departed {
@@ -88,7 +88,7 @@ impl NativeActor for DepartureWatcher {
         pending
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
         drop(self.watch.take());
         self.departed = true;

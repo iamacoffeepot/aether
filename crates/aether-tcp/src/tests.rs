@@ -126,12 +126,12 @@ impl NativeActor for SessionConsumer {
         Ok(Self { captures })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionData) {
         let _ = self.captures.send(CapturedSessionMail::Data(mail));
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_session_closed(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionClosed) {
         let _ = self.captures.send(CapturedSessionMail::Closed(mail));
     }
@@ -207,12 +207,12 @@ impl NativeActor for DataOnlyConsumer {
         ctx.send::<TcpCapability>(&BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_session_data(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SessionData) {
         self.data_frames += 1;
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_bind_result(&mut self, _ctx: &mut NativeCtx<'_>, result: BindListenerResult) {
         let _ = self.replies.send(result);
     }

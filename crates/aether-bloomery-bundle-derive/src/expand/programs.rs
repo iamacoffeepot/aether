@@ -100,7 +100,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, live: &Ident, program: &Tok
         /// Admit `invoke` and run it on a per-seq invocation child. The
         /// `Invoked` reply is held: a rejection answers it at once, and a
         /// started seq keeps it live until its child reports back.
-        #[handler::single]
+        #[handler::request]
         fn on_invoke(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
@@ -134,7 +134,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, live: &Ident, program: &Tok
 
         /// A child's `Invoked` report: answer the seq's held reply and
         /// retire the child.
-        #[handler::single]
+        #[handler::response]
         fn on_invoked(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
@@ -196,7 +196,7 @@ fn expand_relay_handlers(live: &Ident, program: &TokenStream2) -> TokenStream2 {
             }
         }
 
-        #[handler::single]
+        #[handler::response]
         fn on_read_artifact_result(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
@@ -243,7 +243,7 @@ fn expand_relay_handlers(live: &Ident, program: &TokenStream2) -> TokenStream2 {
             }
         }
 
-        #[handler::single]
+        #[handler::response]
         fn on_api_call_result(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
@@ -313,7 +313,7 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
                 })
             }
 
-            #[handler::single]
+            #[handler::tell]
             fn on_invoke(
                 &mut self,
                 ctx: &mut ::aether_actor::WasmCtx<'_>,
@@ -361,7 +361,7 @@ fn expand_fetch_reply(program: &TokenStream2) -> TokenStream2 {
         /// The root's relay of this invocation's fetch-on-miss answer. It
         /// arrives as a cluster-local send from the parent, which carries
         /// no correlation, so the wait is keyed by the fetched digest.
-        #[handler::single]
+        #[handler::response]
         fn on_read_artifact_result(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_>,
@@ -395,7 +395,7 @@ fn expand_api_reply(program: &TokenStream2) -> TokenStream2 {
         /// invocation's API calls. Like a fetch answer it arrives as a
         /// cluster-local send from the parent, so the wait is keyed by the
         /// call id the invocation minted.
-        #[handler::single]
+        #[handler::response]
         fn on_api_call_result(
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_>,

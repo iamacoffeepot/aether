@@ -269,7 +269,7 @@ impl NativeActor for TcpCapability {
     /// # Agent
     /// Reply: `ConnectResult`. Asynchronous — the shared cap dispatcher
     /// remains available while the OS resolves and connects `mail.addr`.
-    #[handler::single]
+    #[handler::request]
     fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased>, mail: Connect) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
         // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
@@ -295,7 +295,7 @@ impl NativeActor for TcpCapability {
     /// (a session has no inbox to deliver frames to), when the sender's
     /// published rows do not handle `SessionData` and `SessionClosed`
     /// silently, or on the errors `Connect` reports.
-    #[handler::single]
+    #[handler::request]
     fn on_connect_self(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ConnectSelf) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
         match cast_consumer(ctx, "connect_self") {
@@ -308,7 +308,7 @@ impl NativeActor for TcpCapability {
     /// Drain completed outbound dials and stage one `TcpSessionActor` per
     /// connected stream. The task completion answers each held
     /// `ConnectResult` only after authoritative activation.
-    #[handler::single]
+    #[handler::tell]
     fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ConnectReady) {
         while let Ok((id, result)) = state.connect_rx.try_recv() {
             let Some(PendingConnect { held, addr, name, consumer }) = state.pending_connects.remove(&id) else {
@@ -365,7 +365,7 @@ impl NativeActor for TcpCapability {
     /// # Agent
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
-    #[handler::single]
+    #[handler::request]
     fn on_bind(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: BindListener) -> Pending<BindListenerResult> {
         let (pending, held) = ctx.hold::<BindListenerResult>();
         // ADR-0231 §3: the decode proved the consumer covers `TcpConsumer`;
@@ -390,7 +390,7 @@ impl NativeActor for TcpCapability {
     /// sender (a session has no inbox to deliver frames to), when the
     /// sender's published rows do not handle `SessionData` and
     /// `SessionClosed` silently, or on the errors `BindListener` reports.
-    #[handler::single]
+    #[handler::request]
     fn on_bind_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -481,7 +481,7 @@ impl NativeActor for TcpCapability {
     /// Reply: `UnbindListenerResult`. Asynchronous — the response
     /// fires after the listener's accept thread joins and its
     /// `MonitorNotice` arrives at this cap.
-    #[handler::single]
+    #[handler::request]
     fn on_unbind(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Erased>,
@@ -533,7 +533,7 @@ impl NativeActor for TcpCapability {
     ///
     /// # Agent
     /// Reply: `ListListenersResult`.
-    #[handler::single]
+    #[handler::request]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListListeners) -> ListListenersResult {
         let mut listeners: Vec<ListenerInfo> = state
             .listeners
@@ -554,7 +554,7 @@ impl NativeActor for TcpCapability {
     /// spawned listener (registered by its birth's completion) fires this
     /// notice; if the close came from an unbind request, the entry's
     /// `pending_unbind` holds the originator's reply.
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased>, _notice: MonitorNotice) {
         // Drop the supervisor entry. The held MonitorHandle drops
         // here; deregister is idempotent with the close path's

@@ -21,12 +21,12 @@ impl WasmActor for ContractBase {
         Ok(ContractBase)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: 0 }
     }
@@ -42,7 +42,7 @@ impl WasmActor for ContractDropped {
         Ok(ContractDropped)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {}
 }
 
@@ -56,10 +56,10 @@ impl WasmActor for ContractChanged {
         Ok(ContractChanged)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) {}
 }
 
@@ -73,15 +73,15 @@ impl WasmActor for ContractExtended {
         Ok(ContractExtended)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {}
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: 0 }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_inline_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) {}
 }
 
@@ -95,12 +95,12 @@ impl WasmActor for ContractFallback {
         Ok(ContractFallback)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: 0 }
     }

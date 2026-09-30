@@ -105,7 +105,7 @@ impl WasmActor for Keeper {
         Ok(Keeper { held: None, tag: 0, stray: Vec::new(), kept: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         if self.held.is_none() {
@@ -118,12 +118,12 @@ impl WasmActor for Keeper {
         pending
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.kept }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, _release: ReleaseCarried) {
         if let Some(held) = self.held.take() {
             held.answer(ctx, &HeldRequestResult { tag: self.tag });
@@ -172,7 +172,7 @@ impl WasmActor for ProbeGate {
         Ok(ProbeGate { seqs: Vec::new(), wired: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, probe: GateProbe) {
         self.seqs.push(probe.seq);
     }
@@ -182,13 +182,13 @@ impl WasmActor for ProbeGate {
         self.wired += 1;
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
         GateQueryResult { seqs: self.seqs.clone() }
     }
 
     /// The number of times this instance has been wired.
-    #[handler::single]
+    #[handler::request]
     fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
         CountReport { count: self.wired }
     }

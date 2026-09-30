@@ -58,7 +58,7 @@ impl NativeActor for Keeper {
         self.pokes.push(mail.seq);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_carries(&mut self, ctx: &mut NativeCtx<'_>, mail: Carries) {
         let reference = ctx.resolve(&mail.path).expect("the decoded path remains live");
         ctx.send_to(reference, &Poke { seq: 7 });
@@ -79,7 +79,7 @@ impl NativeActor for SilentPoke {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {
         let _ = self;
     }
@@ -97,7 +97,7 @@ impl NativeActor for Bystander {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_carries(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Carries) {
         let _ = self;
     }

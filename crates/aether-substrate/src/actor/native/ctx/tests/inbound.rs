@@ -37,13 +37,13 @@ impl NativeActor for Recaller {
         Ok(Self::default())
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_recall(&mut self, ctx: &mut NativeCtx<'_>, recall: Recall) {
         let _ = self;
         let _request = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: recall.value });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_poked(&mut self, ctx: &mut NativeCtx<'_>, _poked: Poked) {
         self.taken = Some((ctx.take_context::<NativeRequestContext>(), ctx.take_context::<NativeRequestContext>()));
     }

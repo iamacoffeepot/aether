@@ -30,7 +30,7 @@ impl WasmActor for Loader {
         Ok(Loader { issued: 0, relayed: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, request: GuestLoad) -> Pending<LoadResult> {
         let (pending, held) = ctx.hold::<LoadResult>();
         let GuestLoad { wasm, name, export } = request;
@@ -40,12 +40,10 @@ impl WasmActor for Loader {
         pending
     }
 
-    #[handler::single]
-    fn on_loaded(&mut self, ctx: &mut WasmCtx<'_>, result: LoadResult) {
-        if let Some(LoaderContext { held }) = ctx.take_context::<LoaderContext>() {
-            self.relayed.push(result);
-            held.answer(ctx, self.relayed.last().expect("the answer was just kept"));
-        }
+    #[handler::response]
+    fn on_loaded(&mut self, ctx: &mut WasmCtx<'_>, result: LoadResult, LoaderContext { held }: LoaderContext) {
+        self.relayed.push(result);
+        held.answer(ctx, self.relayed.last().expect("the answer was just kept"));
     }
 }
 

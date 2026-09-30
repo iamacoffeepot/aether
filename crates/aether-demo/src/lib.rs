@@ -47,7 +47,7 @@ impl WasmActor for Demo {
     }
 
     /// The viewer's answer to the load: parsed and drawing, or why not.
-    #[handler::single]
+    #[handler::response]
     fn on_mesh_load_result(&mut self, _ctx: &mut WasmCtx<'_>, result: MeshLoadResult) {
         match result.error {
             None => tracing::info!(path = %self.subject.path, "subject loaded"),

@@ -125,7 +125,7 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     fn cancel_activation(&mut self);
 
     /// Cache the layout rect the root assigned.
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: crate::WidgetFrame) {
         *self.widget_frame() = frame;
     }
@@ -135,7 +135,7 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
     /// the theme without that request leaves the widget drawing the new font
     /// against the old one's advances until something else happens to pump
     /// the adapter.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: crate::SetTheme) {
         let font_id = set.theme.font_id;
         *self.widget_theme() = set.theme;
@@ -148,26 +148,26 @@ pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability> {
 
     /// Take focus, carrying through how it arrived so only a keyboard
     /// traversal lights a ring.
-    #[handler::single]
+    #[handler::tell]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, gained: crate::FocusGained) {
         self.widget_state().gain_focus(gained.keyboard);
     }
 
     /// Release keyboard focus, cancelling any activation it was carrying.
-    #[handler::single]
+    #[handler::tell]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: crate::FocusLost) {
         self.widget_state().lose_focus();
         self.cancel_activation();
     }
 
     /// Enter hover.
-    #[handler::single]
+    #[handler::tell]
     fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: crate::HoverGained) {
         self.widget_state().set_hovered(true);
     }
 
     /// Leave hover.
-    #[handler::single]
+    #[handler::tell]
     fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: crate::HoverLost) {
         self.widget_state().set_hovered(false);
     }

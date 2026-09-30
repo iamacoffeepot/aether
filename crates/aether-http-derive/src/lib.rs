@@ -8,7 +8,7 @@
 //! `#[runtime]`). Attribute macros expand outer first, so `router` runs first:
 //! it consumes the `#[http::route(<Method|any>, "<template>")]` attributes on
 //! the methods, groups the routes sharing a `(static-head, method)` claim,
-//! emits one `#[handler::single]` over `HttpServerRequest` for the whole
+//! emits one `#[handler::request]` over `HttpServerRequest` for the whole
 //! router (the one row of the `HttpRouter` protocol every route holder
 //! covers, replying `HttpRouterResult`), injects one `RegisterRouteSelf`
 //! registration per group into `wire`, and hands `#[actor]` an ordinary impl
@@ -600,7 +600,7 @@ fn parse_return_kind(output: &ReturnType) -> syn::Result<()> {
     }
 }
 
-/// The router's one `#[handler::single]` over `HttpServerRequest`, the row
+/// The router's one `#[handler::request]` over `HttpServerRequest`, the row
 /// of the `HttpRouter` protocol its registrations prove. It picks the group
 /// whose claim the server picked, by `route_rank` over the groups' claims,
 /// then tries that group's templates most-specific first: matching literals,
@@ -641,7 +641,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
 
     quote! {
         #(#docs)*
-        #[handler::single]
+        #[handler::request]
         fn __aether_route(
             #glue_first,
             __aether_ctx: &mut #glue_ctx,

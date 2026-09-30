@@ -83,46 +83,46 @@ impl NativeActor for ReplySink {
         Ok(Self { cells })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
         *self.cells.list.lock().expect("test setup: list cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_spawn_result(&mut self, ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
         *self.cells.spawn_correlation.lock().expect("test setup: spawn correlation cell is never poisoned") =
             Some(ctx.reply_target().correlation_id);
         *self.cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
         *self.cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_upload_binary_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: UploadBinaryResult) {
         *self.cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_upload_component_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: UploadComponentResult) {
         *self.cells.upload_component.lock().expect("test setup: upload_component cell mutex is never poisoned") =
             Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_list_engine_binaries_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEngineBinariesResult) {
         *self.cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_list_component_binaries_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListComponentBinariesResult) {
         *self.cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned") =
             Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_set_artifact_pinned_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SetArtifactPinnedResult) {
         *self.cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned") = Some(reply);
     }

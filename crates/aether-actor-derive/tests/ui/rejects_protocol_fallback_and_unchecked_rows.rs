@@ -53,7 +53,7 @@ impl WasmActor for FallbackOnly {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_note(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Note) {}
 
     #[fallback]

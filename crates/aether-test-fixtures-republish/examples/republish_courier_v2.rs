@@ -51,7 +51,7 @@ impl WasmActor for Courier {
         }
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_loaded(&mut self, _ctx: &mut WasmCtx<'_>, result: LoadResult) {
         self.outcomes.push(match result {
             LoadResult::Ok { path, .. } => format!("load ok {path}"),
@@ -59,7 +59,7 @@ impl WasmActor for Courier {
         });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_dropped(&mut self, _ctx: &mut WasmCtx<'_>, result: DropResult) {
         self.outcomes.push(match result {
             DropResult::Ok => "drop ok".to_owned(),
@@ -67,7 +67,7 @@ impl WasmActor for Courier {
         });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CourierQuery) -> CourierQueryResult {
         CourierQueryResult { outcomes: self.outcomes.clone() }
     }
@@ -86,7 +86,7 @@ impl WasmActor for Parcel {
         Ok(Parcel { queries: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         self.queries += 1;
         CountReport { count: self.queries }

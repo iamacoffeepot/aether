@@ -53,7 +53,7 @@ impl aether_actor::WasmActor for MismatchProbe {
 
     // single class but an unchecked-mode ctx — the macro passes `as_single()`,
     // which doesn't unify with `WasmCtx<'_, Erased, Unchecked>`.
-    #[handler::single]
+    #[handler::response]
     fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _pong: Pong) {}
 }
 

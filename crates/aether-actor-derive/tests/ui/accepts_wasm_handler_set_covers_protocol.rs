@@ -46,12 +46,12 @@ mod set {
     pub trait Shared {
         fn seen(&mut self) -> &mut u32;
 
-        #[handler::single]
+        #[handler::tell]
         fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: crate::Frame) {
             *self.seen() = frame.seq;
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_ask(&mut self, _ctx: &mut WasmCtx<'_>, ask: crate::Ask) -> crate::Answer {
             crate::Answer { seq: ask.seq }
         }
@@ -82,7 +82,7 @@ mod adopter {
             Ok(Adopter { seen: 0 })
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_local(&mut self, _ctx: &mut WasmCtx<'_>, local: Local) {
             self.seen = local.seq;
         }

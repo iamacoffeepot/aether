@@ -70,7 +70,7 @@ impl crate::WasmActor for Deferrer {
         Ok(Self { parked: None })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: DeferredAsk) -> crate::Pending<DeferredAnswer> {
         let (pending, held) = ctx.hold::<DeferredAnswer>();
         self.parked = Some(held);
@@ -121,7 +121,7 @@ impl crate::WasmActor for StrictProbe {
         Ok(Self { ran: false })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_poke(&mut self, _ctx: &mut WasmCtx<'_>, _poke: Poke) {
         self.ran = true;
     }

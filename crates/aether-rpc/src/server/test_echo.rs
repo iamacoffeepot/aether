@@ -59,7 +59,7 @@ impl NativeActor for TestEchoActor {
     }
 
     /// Stateless echo handler.
-    #[handler::single]
+    #[handler::request]
     fn on_echo(&mut self, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
         TestEchoReply { value: mail.value }
     }
@@ -121,7 +121,7 @@ impl NativeActor for DeferredEchoActor {
     /// (queuing its `Finished`) before the reply lands — the window the
     /// bug used to settle in. The framework-held `SettlementHold` keeps
     /// the chain open until the deferred re-reply.
-    #[handler::single]
+    #[handler::request]
     fn on_deferred_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) -> Pending<DeferredEchoReply> {
         let value = mail.value;
         self.tasks.submit(ctx, move || {

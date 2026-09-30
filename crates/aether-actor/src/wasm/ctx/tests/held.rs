@@ -83,7 +83,7 @@ impl crate::WasmActor for Holder {
         Ok(Self { parked: None })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: Ask) -> crate::Pending<Answer> {
         let (pending, held) = ctx.hold::<Answer>();
         self.parked = Some(held);
@@ -134,7 +134,7 @@ impl crate::WasmActor for DoubleHolder {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, ctx: &mut WasmCtx<'_>, _ask: Ask) -> crate::Pending<Answer> {
         let _ = self;
         let (pending, held) = ctx.hold::<Answer>();

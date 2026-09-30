@@ -245,7 +245,7 @@ impl NativeActor for LifecycleCapability {
     /// `{"<Stage>": "<canonical subscriber path>"}`. The stage must be
     /// declared as a state or terminal in the lifecycle graph, and the actor
     /// at the path must be live and handle the stage with no reply.
-    #[handler::single]
+    #[handler::request]
     fn on_subscribe(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -284,7 +284,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `LifecycleSubscribeSelf { stage }`. Stage must be a kind id
     /// registered as a state or terminal in the lifecycle graph.
-    #[handler::single]
+    #[handler::request]
     fn on_subscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -330,7 +330,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `LifecycleUnsubscribe { subscription }`, the same shape as
     /// `LifecycleSubscribe`.
-    #[handler::single]
+    #[handler::request]
     fn on_unsubscribe(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -354,7 +354,7 @@ impl NativeActor for LifecycleCapability {
     ///
     /// # Agent
     /// `LifecycleUnsubscribeSelf { stage }`.
-    #[handler::single]
+    #[handler::request]
     fn on_unsubscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -389,7 +389,7 @@ impl NativeActor for LifecycleCapability {
     /// `ctx.sender()` is the same erased key both tables are keyed by
     /// (ADR-0230) and each removal is a keyed lookup. A notice with no
     /// sender names nothing and changes nothing.
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
         let Some(departed) = ctx.sender() else {
             return;
@@ -405,7 +405,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `Quit {}`. Sent by chassis bridges from ctrlc / winit
     /// `WindowEvent::CloseRequested` / future hub-shutdown mail.
-    #[handler::single]
+    #[handler::tell]
     fn on_quit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _payload: Quit) {
         state.quit_pending = true;
     }
@@ -610,27 +610,27 @@ mod tests {
             Ok(Self { heard })
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_tick(&mut self, _ctx: &mut NativeCtx<'_>, tick: Tick) {
             let _ = self.heard.send(Heard::Tick(tick));
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_render(&mut self, _ctx: &mut NativeCtx<'_>, _render: Render) {
             let _ = self.heard.send(Heard::Render);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_present(&mut self, _ctx: &mut NativeCtx<'_>, _present: Present) {
             let _ = self.heard.send(Heard::Present);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_shutdown(&mut self, _ctx: &mut NativeCtx<'_>, _shutdown: Shutdown) {
             let _ = self.heard.send(Heard::Shutdown);
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_quit(&mut self, ctx: &mut NativeCtx<'_>, _quit: Quit) {
             let _ = self;
             ctx.shutdown();
@@ -654,7 +654,7 @@ mod tests {
             ctx.send::<LifecycleCapability>(&<LifecycleCapability as Publisher>::subscribe_request::<Tick>());
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_tick(&mut self, _ctx: &mut NativeCtx<'_>, _tick: Tick) {
             let _ = self;
         }

@@ -26,7 +26,7 @@ struct Ping {
 trait Shared {
     fn seen(&mut self) -> &mut u32;
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping) {
         *self.seen() += ping.seq;
     }
