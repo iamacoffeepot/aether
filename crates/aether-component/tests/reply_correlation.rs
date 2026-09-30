@@ -10,6 +10,10 @@
 //! handler recovers them by trying each context type in turn, A first. The
 //! reply carrying context B therefore crosses a wrong-kind take of A, so the
 //! test also guards that a wrong-kind take leaves the other context stored.
+//!
+//! Issue 7204 adds an inline child that asks its own cluster root with
+//! `send_with_context`, guarding that a tracked send to a cluster member still
+//! returns a correlated reply carrying its stored context.
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
@@ -18,13 +22,16 @@ use aether_test_fixtures_kinds as _;
 
 use std::fs;
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorRef, Addressable};
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
+use aether_test_fixtures_bundle::InlineContextHost;
 use aether_test_fixtures_fs_demux::FsDemux;
-use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux};
+use aether_test_fixtures_kinds::{
+    CarriedReplyMatched, FsContextDemuxReport, FsDemuxReport, RunCarriedRequest, RunFsContextDemux, RunFsDemux,
+};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_fs_demux";
 
@@ -107,6 +114,39 @@ fn typed_fs_replies_demux_by_trying_each_context_type() {
         harness.count_observed(FsDemuxReport::NAME) - raw_baseline,
         0,
         "typed-context trigger must not emit the raw request-id report; observed kinds: {:?}",
+        harness.observed_kinds(),
+    );
+}
+
+/// The bug this catches: a tracked send to a member of the sender's own
+/// inline cluster took the in-place route, minted no correlation, dropped the
+/// stored context, and carried no reply handle, so the host's answer never
+/// came back and the asker's response handler never ran.
+#[test]
+fn an_inline_child_request_to_its_cluster_root_gets_its_context_back() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+
+    let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture bundle wasm");
+    let host = harness
+        .load::<InlineContextHost>(LoadComponent {
+            wasm,
+            name: None,
+            config: Vec::new(),
+            export: Some(InlineContextHost::NAMESPACE.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load_component test.inline_context.host: {error}"));
+
+    harness
+        .execute(vec![("trigger", HarnessOp::send_and_settle(&host, &RunCarriedRequest { tag: 7 }))])
+        .expect("RunCarriedRequest to the inline context host");
+
+    assert_eq!(
+        harness.count_observed(CarriedReplyMatched::NAME),
+        1,
+        "the inline child's reply did not recover its stored context; observed kinds: {:?}",
         harness.observed_kinds(),
     );
 }
