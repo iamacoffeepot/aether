@@ -20,13 +20,15 @@
 //! done
 //! ```
 //!
-//! Knobs, read from the shell because the harness boots hermetically:
+//! Knobs, set in the shell at build time (`option_env!`, so cargo rebuilds the test when one changes) because the
+//! harness boots hermetically and never sees the run-time process env:
 //!
 //! - `AETHER_WORKSPACE_PREFETCH_BYTES` is forwarded as `--workspace-prefetch-bytes`, so the whole-closure case can
 //!   be read beside the default budget.
-//! - `AETHER_BENCH_PHASE=import` stops after the import; unset runs both phases.
+//! - `AETHER_BENCH_PHASE=import` stops after the import; unset runs both phases. For example
+//!   `AETHER_BENCH_PHASE=import cargo test --release -p aether-chassis-bloomery --test workspace_source -- --ignored
+//!   --exact bench::import_then_run --nocapture`.
 
-use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -99,11 +101,9 @@ fn import_then_run() -> TestResult {
     let (hex, template) = (inputs.hex(), inputs.request("tool", "target")?);
     let stub = StubDaemon::bind()?;
 
-    // On-demand bench knob read from the shell; the harness boots hermetically and never sees the process env.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: bench knob, harness env is hermetic (#7218)
-    let prefetch = env::var("AETHER_WORKSPACE_PREFETCH_BYTES").ok();
+    let prefetch = option_env!("AETHER_WORKSPACE_PREFETCH_BYTES");
     let mut flags: Vec<&str> = FLAGS.to_vec();
-    if let Some(bytes) = prefetch.as_deref() {
+    if let Some(bytes) = prefetch {
         flags.extend(["--workspace-prefetch-bytes", bytes]);
     }
     let mut harness = inputs.boot(&stub, &flags)?;
@@ -126,9 +126,7 @@ fn import_then_run() -> TestResult {
         ImportResult::Failed { detail } => return Err(format!("the import failed: {}", detail.as_str()).into()),
     };
 
-    // On-demand bench knob read from the shell; the harness boots hermetically and never sees the process env.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: bench knob, harness env is hermetic (#7218)
-    let import_only = env::var("AETHER_BENCH_PHASE").is_ok_and(|phase| phase == "import");
+    let import_only = option_env!("AETHER_BENCH_PHASE") == Some("import");
     if import_only {
         return Ok(());
     }
@@ -148,7 +146,7 @@ fn import_then_run() -> TestResult {
         io::stdout(),
         "BENCH run_millis={run_millis} run_peak_over_start_bytes={} prefetch_bytes={}",
         peak_over(base)?,
-        prefetch.as_deref().unwrap_or("default")
+        prefetch.unwrap_or("default")
     )?;
     outcome(answer)?;
     Ok(())
