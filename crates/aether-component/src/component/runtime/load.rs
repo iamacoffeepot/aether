@@ -29,7 +29,7 @@ use aether_substrate::mail::registry::Admitted;
 
 use super::LoadResult;
 use super::dependencies::dependency_refusal;
-use super::placement::{child_refusal, root_refusal};
+use super::placement::{child_refusal, leaf_namespace, root_refusal};
 use super::publish::Publisher;
 use super::republish::QueuedPublish;
 use crate::component::runtime::{ComponentHostCapabilityState, GuestControl, HostCtx, LoadedGuest};
@@ -499,10 +499,7 @@ impl ComponentHostCapabilityState {
         let refusal = match placement {
             LoadPlacement::Root => root_refusal(manifest.lineage(), namespace),
             LoadPlacement::Under { parent } => {
-                let path = ctx.actor_path(parent);
-                let leaf = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
-                let parent_namespace = leaf.split_once(':').map_or(leaf, |(parent_namespace, _)| parent_namespace);
-                child_refusal(manifest.lineage(), namespace, parent_namespace)
+                child_refusal(manifest.lineage(), namespace, leaf_namespace(&ctx.actor_path(parent)))
             }
         };
         if let Some(error) = refusal {

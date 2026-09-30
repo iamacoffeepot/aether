@@ -102,4 +102,5 @@ pub use secrets::{Secret, SecretError, SecretName, SecretRefs, Secrets, SecretsD
 // `META`; the `SettlementOverlay` rides along so the chassis CLI roots can
 // flatten `--settlement-cap-secs` into `--help` (issue 3882).
 pub use settlement::{SettlementConfig, SettlementConfigLayer, SettlementOverlay};
+pub(crate) use sources::RetainedSources;
 pub use sources::{ConfigProvenance, ConfigSources, StageArgv};

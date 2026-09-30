@@ -14,6 +14,9 @@
 //! - `guest` — [`GuestSpawnBuilder::stage_with`], the handler staging of a
 //!   published guest under its own namespace (ADR-0241 §5, §6), which shares
 //!   `staged`'s prepared birth.
+//! - `by_namespace` — [`NativeSpawnEntry`], a native type spawned by mail
+//!   from its boot-time publication (ADR-0241 §9), staged by a handler
+//!   through the same prepared birth.
 //!
 //! Both flow through the shared `spawner` engine, which is split by phase:
 //! `prepare` resolves identity and constructs the actor with no shared
@@ -31,6 +34,7 @@
 //! rather than actors.
 
 pub(crate) mod activation;
+pub(crate) mod by_namespace;
 mod eager;
 mod error;
 mod guest;
@@ -50,6 +54,9 @@ mod tests;
 /// hashed deterministically (ADR-0029) to the returned `MailboxId`.
 pub use aether_actor::Subname;
 
+#[doc(hidden)]
+pub use by_namespace::probe;
+pub use by_namespace::{NativeSpawnEntry, NativeSpawnOutcome, SpawnDelivery};
 pub use eager::SpawnBuilder;
 pub use error::SpawnError;
 pub use guest::{GuestBirth, GuestOutcome, GuestSpawnBuilder};

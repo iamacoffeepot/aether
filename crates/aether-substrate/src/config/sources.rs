@@ -134,7 +134,45 @@ pub struct ConfigSources {
     secrets_dir: Option<SecretsDir>,
 }
 
+/// The layers of a [`ConfigSources`] stack that outlive boot (ADR-0156 §5):
+/// the loaded config file, whether the stack is hermetic, and the secrets
+/// directory. A composed member's programmatic override and argv overlay are
+/// consumed as it resolves at boot, so a type born after boot resolves over
+/// these alone, below its compiled defaults, exactly as a composed member
+/// with nothing staged would.
+///
+/// The spawner keeps one, read-only, for a native type spawned by mail
+/// (ADR-0241 §9), which resolves its `Config` over a fresh stack
+/// [`Self::stack`] rebuilds per birth. Unlike the stack it came from, it
+/// holds no `dyn Any` layer, so it is `Send + Sync`.
+#[derive(Clone)]
+pub struct RetainedSources {
+    file: Option<toml::Table>,
+    hermetic: bool,
+    secrets_dir: Option<SecretsDir>,
+}
+
+impl RetainedSources {
+    /// A source stack over the retained layers, with no override or argv
+    /// overlay staged.
+    pub(crate) fn stack(&self) -> ConfigSources {
+        let mut sources = if self.hermetic {
+            ConfigSources::hermetic()
+        } else {
+            ConfigSources::new(self.file.clone())
+        };
+        sources.set_secrets_dir(self.secrets_dir.clone());
+        sources
+    }
+}
+
 impl ConfigSources {
+    /// The layers of this stack that outlive boot: its file, its hermetic
+    /// flag, and its secrets directory.
+    pub(crate) fn retain(&self) -> RetainedSources {
+        RetainedSources { file: self.file.clone(), hermetic: self.hermetic, secrets_dir: self.secrets_dir.clone() }
+    }
+
     /// A source stack over the optional loaded chassis config file, with no
     /// argv overlays or programmatic overrides staged yet. Resolution runs the
     /// full stack — programmatic > argv > env > file > default.

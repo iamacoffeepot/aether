@@ -952,6 +952,19 @@ mod control_plane {
         Err { error: String },
     }
 
+    /// `aether.actor.spawn_delivered` — the framework row every native actor
+    /// serves (ADR-0241 §9): the component host hands a native spawn's held
+    /// reply to the instance the spawn names, which answers the requester
+    /// with a [`SpawnResult`] in its own name, `Live` when `live` and
+    /// `Spawned` otherwise, carrying its own canonical path and receive
+    /// surface. The instance reads nothing else from the mail and answers
+    /// only its reply target, so a delivery from any other sender tells that
+    /// sender only what `describe_component` would.
+    #[aether_data::kind(name = "aether.actor.spawn_delivered", copy, eq)]
+    pub struct ActorSpawnDelivered {
+        pub live: bool,
+    }
+
     /// `aether.component.list` — enumerate the components an engine has
     /// actually loaded and registered, addressed to its `aether.component`
     /// mailbox (issue 2020). Fieldless: the query is a definitive snapshot

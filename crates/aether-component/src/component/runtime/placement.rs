@@ -12,7 +12,14 @@
 //! spawn beneath any actor of the same module, which a guest reaches
 //! instead.
 
-use aether_data::ActorLineageRecord;
+use aether_data::{ActorLineageRecord, ErasedActorPath};
+
+/// The type namespace of the actor `path` names: its last segment, less any
+/// `:key`. A parent's type is read this way, guest or native.
+pub(super) fn leaf_namespace(path: &ErasedActorPath) -> &str {
+    let leaf = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
+    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
+}
 
 /// The placements `lineage` declares for `actor_namespace`, as a refusal
 /// lists them.

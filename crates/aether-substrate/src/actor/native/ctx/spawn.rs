@@ -5,14 +5,23 @@
 //! disagrees with the executing binding has no spelling. Both entry points
 //! hand back a [`HandlerSpawnBuilder`] whose only
 //! terminals are staged ones — a handler cannot commit a birth itself.
+//!
+//! Beside them, the staging of a published guest and of a native type
+//! spawned by mail (ADR-0241 §9), each placed beneath a proven parent rather
+//! than beneath the staging actor.
 
 use std::sync::Arc;
 
-use aether_actor::{CoveredBy, ErasedActorRef, Instanced, Protocol, ReplyMode};
+use aether_actor::{CoveredBy, ErasedActorRef, Instanced, Protocol, ProtocolRef, ReplyMode};
+use aether_data::{Kind, RequestId};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::identity::ActorRuntimeIdentity;
-use crate::actor::native::spawn::{GuestBirth, GuestSpawnBuilder, HandlerSpawnBuilder, SpawnBuilder, Subname};
+use crate::actor::native::spawn::by_namespace::NativeBirthSite;
+use crate::actor::native::spawn::{
+    GuestBirth, GuestSpawnBuilder, HandlerSpawnBuilder, NativeSpawnEntry, SpawnBuilder, SpawnDelivery, SpawnError,
+    SpawnReceipt, Subname,
+};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::kind_manifest::Dependency;
 use crate::mail::{Source, SourceAddr};
@@ -87,7 +96,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// `parent/NS:key`, as [`GuestBirth`] says. The birth holds no native
     /// namespace; the registry owner admits it only where the publication
     /// table binds `birth.namespace` to `birth.module` (§3), and otherwise
-    /// completes it with [`SpawnError::GuestNotPublished`](crate::actor::native::SpawnError::GuestNotPublished)
+    /// completes it with [`SpawnError::GuestNotPublished`]
     /// and leaves no route.
     ///
     /// The returned [`GuestSpawnBuilder`] stages a task that owes no reply
@@ -125,6 +134,75 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
             Arc::clone(self.binding),
             self.in_flight_root,
         )
+    }
+
+    /// Stage the birth of the mail-spawnable native type `entry` names
+    /// (ADR-0241 §9), keyed by `key`, at the root or beneath the live
+    /// `parent`, with `context` stored for its completion (ADR-0243 §9). The
+    /// type's `Config` resolves over the engine's config source stack, and
+    /// its `Params` is `()`. The birth runs the ordinary owner commit and
+    /// publication-table hold: a tombstoned name completes with
+    /// [`SpawnError::SubnameRetired`], and the completion is
+    /// `TaskDone<NativeSpawnOutcome>`, whose `Ok` arm is the born actor's
+    /// [`SpawnDelivery`] proof. The caller checks the type's placement
+    /// ([`NativeSpawnEntry::declares_root`],
+    /// [`NativeSpawnEntry::declares_child_of`]) first; a parented birth's
+    /// parent-local key is held by this actor, as a guest birth's is.
+    ///
+    /// # Errors
+    ///
+    /// The [`SpawnError`] of the first synchronous step that refuses the
+    /// birth, with `context` handed back unstored: a type
+    /// [`NativeSpawnEntry::stageable`] refuses
+    /// ([`SpawnError::NotSpawnableByMail`]), a config that fails to resolve, an
+    /// invalid key, a path over the scope caps, a name this actor already
+    /// holds beneath `parent`, or a failed build.
+    ///
+    /// # Panics
+    /// Panics if the transport carries no spawner, as [`Self::spawn_child`]
+    /// does.
+    pub fn spawn_native<C: Kind>(
+        &self,
+        entry: &NativeSpawnEntry,
+        key: Subname<'_>,
+        parent: Option<ErasedActorRef>,
+        context: C,
+    ) -> Result<SpawnReceipt, (SpawnError, C)> {
+        let Some(prepare) = entry.stager() else {
+            return Err((SpawnError::NotSpawnableByMail { namespace: entry.namespace() }, context));
+        };
+        let spawner = self.binding.spawner().expect("NativeCtx::spawn_native requires a chassis-built binding");
+        let site = NativeBirthSite {
+            spawner: Arc::clone(spawner),
+            binding: Arc::clone(self.binding),
+            completion_root: self.in_flight_root,
+            parent: parent.map(|parent| self.scoped_parent(parent)),
+            key,
+        };
+        let birth = match prepare(site) {
+            Ok(birth) => birth,
+            Err(error) => return Err((error, context)),
+        };
+
+        let request = RequestId(self.binding.mint_correlation());
+        self.binding.store_request_context(request, context);
+        Ok(birth.stage_as_task(request))
+    }
+
+    /// The live instance of the mail-spawnable native type `entry` names at
+    /// the name a spawn keyed by `key` beneath `parent` would take, as its
+    /// [`SpawnDelivery`] proof (ADR-0241 §9), or `None` when no `Live` route
+    /// stands there, a tombstoned name included. A singleton is found at its
+    /// namespace, keyless and unparented; an instanced type at `NS:key` or
+    /// `parent/NS:key`.
+    #[must_use]
+    pub fn live_native(
+        &self,
+        entry: &NativeSpawnEntry,
+        key: Option<&str>,
+        parent: Option<ErasedActorRef>,
+    ) -> Option<ProtocolRef<SpawnDelivery>> {
+        entry.live(self.binding.mailer().registry(), key, parent)
     }
 
     /// The runtime identity a live `parent` proves, for a birth placed

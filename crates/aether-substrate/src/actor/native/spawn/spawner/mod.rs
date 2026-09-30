@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use aether_actor::{ActorRef, ErasedActorRef, Instanced};
 use aether_data::{ErasedActorPath, LoadName};
@@ -19,7 +19,7 @@ use crossbeam_channel::Receiver;
 
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::builder::{ReplyTarget, RootPusher};
-use crate::config::RingCapacities;
+use crate::config::{ConfigSources, RetainedSources, RingCapacities};
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{
     AddressResolutionError, AdoptRefused, BootAuthority, ChildRefused, Registry, ResolvedAddress,
@@ -118,6 +118,11 @@ pub struct Spawner {
     /// and [`Self::seal`] drops it with the authority, releasing the hold that
     /// kept it open while boot could still add sends to it.
     boot_wire: Mutex<Option<WireRoot>>,
+    /// ADR-0241 §9: the layers of the boot's config source stack that
+    /// outlive boot, set once by `boot_passives`. A native type spawned by
+    /// mail resolves its `Config` over them; a spawner no chassis boot built
+    /// resolves over a hermetic stack instead.
+    config_sources: OnceLock<RetainedSources>,
 }
 
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
@@ -148,7 +153,22 @@ impl Spawner {
             ring_capacities,
             authority: Mutex::new(Some(BootAuthority::new())),
             boot_wire: Mutex::new(None),
+            config_sources: OnceLock::new(),
         }
+    }
+
+    /// Keep the layers of the boot's config source stack that outlive boot
+    /// (ADR-0241 §9). `boot_passives` calls it once, beside opening the boot
+    /// wire; a second call keeps the first.
+    pub(crate) fn retain_config_sources(&self, sources: RetainedSources) {
+        let _ = self.config_sources.set(sources);
+    }
+
+    /// A fresh config source stack over the retained boot layers, which a
+    /// native type spawned by mail resolves its `Config` over: hermetic when
+    /// no chassis boot retained any.
+    pub(in crate::actor::native::spawn) fn config_stack(&self) -> ConfigSources {
+        self.config_sources.get().map_or_else(ConfigSources::hermetic, RetainedSources::stack)
     }
 
     /// Open the boot's wire root (ADR-0244), held until [`Self::seal`].

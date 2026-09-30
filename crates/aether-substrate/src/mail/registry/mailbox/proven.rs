@@ -1,5 +1,5 @@
 //! The registry's liveness reads, [`Registry::is_live`] over a reference and
-//! the crate-private position form beside it, and the eight mints beside
+//! the crate-private position form beside it, and the ten mints beside
 //! them.
 //!
 //! The callers of the gated mint outside the SDK itself. Two mint with no
@@ -23,6 +23,12 @@
 //! of the published view finds its route `Live` and publishing rows the
 //! protocol admits.
 //!
+//! Two more serve a native type spawned by mail (ADR-0241 §9):
+//! `Registry::spawn_delivery` narrows a native birth's reference to the
+//! framework row every native actor serves, and
+//! `Registry::live_spawn_delivery` proves the `Live` route at a native type's
+//! own fold as that row.
+//!
 //! One read beside them mints nothing: `Registry::published_rows_at` answers
 //! the rows a `Live` route published, the row source the native cast and
 //! the wasm guest's cast both read.
@@ -37,6 +43,8 @@ use aether_actor::{
 };
 use aether_data::{LoadName, MailboxCategory, ReplyContract};
 
+use crate::actor::native::NativeActor;
+use crate::actor::native::spawn::SpawnDelivery;
 use crate::mail::registry::RouteContract;
 use crate::mail::{KindId, MailboxId};
 
@@ -363,6 +371,35 @@ impl Registry {
         let position = reference.id();
 
         T::admits(&self.published_rows_at(position)?).then(|| __mint_protocol_ref(position))
+    }
+
+    /// Type a native actor's reference as [`SpawnDelivery`], the one framework
+    /// row every native actor serves (ADR-0241 §9), with no registry read.
+    ///
+    /// The claim is the actor's type, not a published row: every native
+    /// actor's dispatch answers `aether.actor.spawn_delivered` in its
+    /// framework arm, before its own table, so an `ActorRef<A>` for any
+    /// native `A` reaches that row. Its one caller is the completion of a
+    /// native type's birth by mail, which narrows the born actor's reference.
+    pub(crate) fn spawn_delivery<A: NativeActor>(actor: ActorRef<A>) -> ProtocolRef<SpawnDelivery> {
+        __mint_protocol_ref(actor.erase().id())
+    }
+
+    /// Prove the `Live` route at `position` as [`SpawnDelivery`] (ADR-0241
+    /// §9), or answer `None` when no `Live` route stands there. The caller
+    /// folded `position` from a native type's own resolver, namespace, and
+    /// key.
+    ///
+    /// The read is [`Self::live_child`]'s: a `Live` route at a position
+    /// folded from a native type's namespace and key is that type's, because
+    /// the publication table admits only a native birth of a type declaring
+    /// that namespace. Its one caller is `NativeSpawnEntry`'s live lookup,
+    /// behind the component host's check of a native spawn's name, which
+    /// answers a live name with the instance there.
+    pub(crate) fn live_spawn_delivery(&self, position: MailboxId) -> Option<ProtocolRef<SpawnDelivery>> {
+        let routes = self.routes.load();
+        matches!(resolve_route(position, |candidate| routes.entry_for(&candidate)), ResolvedRoute::Live { .. })
+            .then(|| __mint_protocol_ref(position))
     }
 }
 

@@ -56,7 +56,8 @@ use aether_data::BlobHash;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
-    Erased, GuestOutcome, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, TaskDone,
+    Erased, GuestOutcome, NativeActor, NativeCtx, NativeInitCtx, NativeSpawnOutcome, Pending, RegistryBatchResult,
+    TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
@@ -304,6 +305,18 @@ impl NativeActor for ComponentHostCapability {
         state.release_queued_publishes(ctx);
     }
 
+    /// A native spawn's staged birth settled (ADR-0241 §9): the born
+    /// instance takes over the spawn's held reply and answers `Spawned` in
+    /// its own name, or the birth's refusal is answered.
+    #[handler(task)]
+    fn on_native_born(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Single>,
+        done: TaskDone<NativeSpawnOutcome>,
+    ) {
+        ComponentHostCapabilityState::finish_native_spawn(ctx, done);
+    }
+
     /// Refresh the hub's registry projection after a coalesced publication.
     /// The registry owns publication and wake coalescing; this consumer reads
     /// one coherent snapshot, egresses it at most once per generation pair,
@@ -411,7 +424,11 @@ impl NativeActor for ComponentHostCapability {
     /// instance itself answers, so an actor requester keeps the reply's
     /// stamped sender as its reference. A namespace no module publishes is
     /// refused, and a spawn of one whose module is republishing waits until
-    /// the republish answers.
+    /// the republish answers. A native type is spawned from its boot-time
+    /// publication when its `Params` is `()` and its `Config` resolves from
+    /// the engine's config sources, with an empty `config`: a composed
+    /// singleton answers `Live`, and an instanced type is placed and keyed as
+    /// its `#[actor]` declares.
     #[handler::single]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Spawn) -> Pending<SpawnResult> {
         let (pending, held) = ctx.hold::<SpawnResult>();

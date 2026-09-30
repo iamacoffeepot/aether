@@ -625,10 +625,12 @@ where
         let payload = payload_view.bytes();
         // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128 framework-built-in
         // dispatch arms for `aether.log.tail` + `aether.trace.tail` +
-        // `aether.cost.tail`. See the helper docs in `dispatch`.
+        // `aether.cost.tail`, and ADR-0241 §9's `aether.actor.spawn_delivered`.
+        // See the helper docs in `dispatch`.
         let typed_arm_ran = if super::dispatch::dispatch_log_tail_if_matching(&mut ctx, kind, payload)
             || super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, kind, payload)
             || super::dispatch::dispatch_cost_tail_if_matching(binding, &mut ctx, kind, payload)
+            || super::dispatch::dispatch_spawn_delivered_if_matching(binding, &mut ctx, kind, payload)
         {
             false
         } else {

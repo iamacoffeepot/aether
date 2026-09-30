@@ -259,6 +259,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         )
     })?;
 
+    // ADR-0241 §9: a type whose `Params` is `()` (omitted, or written so) is
+    // spawned by mail from its boot-time publication.
+    let params_is_unit =
+        params_type.as_ref().is_none_or(|params| matches!(&params.ty, Type::Tuple(tuple) if tuple.elems.is_empty()));
+    let spawn_entry = emit_native_spawn_entry(self_ty, generics, params_is_unit);
+
     // ADR-0156 §2 (issue 3845): the factory becomes `init(config, params,
     // ctx)`. `Config` is required (declared above), so the user always spells
     // `config` — index 0. When the author omits `type Params`, synthesize
@@ -838,6 +844,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         quote! {}
     };
 
+    let spawn_entry = spawn_entry.map(|entry| quote! { #runtime_gate #entry });
+
     Ok(quote! {
         // Always-on addressing markers (`Full` only): the identity carries
         // `Addressable` (`NAMESPACE` / `Resolver`), the per-handler
@@ -914,6 +922,47 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             #fallback_method
             #(#lifecycle_methods)*
             #(#helper_methods)*
+        }
+
+        // ADR-0241 §9: the type's mail-spawn entry, when its `Params` is `()`.
+        #spawn_entry
+    })
+}
+
+/// ADR-0241 §9: the link-time `NativeSpawnEntry` of a non-generic native type
+/// whose `Params` is `()`, so the component host spawns it by mail from its
+/// boot-time publication. Emitted on the runtime side, beside the impls that
+/// name `aether_substrate`, for either cardinality: the entry reads
+/// cardinality off the type's resolver, and reads `root` off its own `Root`
+/// impl and whether its `Config` is a `ConfigMember` through the substrate's
+/// spawn probe, since a struct-hosted `#[runtime]` block does not see the
+/// struct's declaration and a type whose `Config` is spawn-time wiring is
+/// published but not stageable by mail. Skipped for a generic native actor
+/// (none exist), whose entry would not be monomorphic.
+fn emit_native_spawn_entry(self_ty: &Type, generics: &syn::Generics, params_is_unit: bool) -> Option<TokenStream2> {
+    (params_is_unit && generics.params.is_empty()).then(|| {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_substrate::actor::native::spawn::NativeSpawnEntry::of::<#self_ty>(
+                    {
+                        fn __aether_declares_root() -> bool {
+                            use ::aether_substrate::actor::native::spawn::probe::*;
+                            (&SpawnProbe::<#self_ty>::new()).declares_root()
+                        }
+                        __aether_declares_root
+                    },
+                    {
+                        fn __aether_stager() -> ::core::option::Option<
+                            ::aether_substrate::actor::native::spawn::probe::PrepareBirth,
+                        > {
+                            use ::aether_substrate::actor::native::spawn::probe::*;
+                            (&SpawnProbe::<#self_ty>::new()).stager()
+                        }
+                        __aether_stager
+                    },
+                )
+            }
         }
     })
 }

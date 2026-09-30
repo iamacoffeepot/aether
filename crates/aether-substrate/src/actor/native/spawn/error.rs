@@ -48,6 +48,11 @@ pub enum SpawnError {
     /// A guest birth asked for a placement ADR-0241 §5 does not name: a
     /// keyless child, `parent/NS`. Reported at staging, before `H::init`.
     GuestPlacement,
+    /// A birth by mail named a native type that cannot be born by mail
+    /// (ADR-0241 §9): a singleton, composed at boot, or a type whose `Config`
+    /// is spawn-time wiring rather than a member of the engine's config
+    /// source stack. Reported at staging.
+    NotSpawnableByMail { namespace: &'static str },
     /// The full name was previously live and has been retired. Names
     /// don't recycle within a substrate's lifetime (ADR-0079 §Drop /
     /// lifecycle); pick a different subname.

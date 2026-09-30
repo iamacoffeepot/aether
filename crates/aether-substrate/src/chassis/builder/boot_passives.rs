@@ -334,6 +334,9 @@ pub(super) fn boot_passives(
     // ADR-0244: every pre-seal birth's `wire` runs under one held root, opened
     // here before any birth and released by the seal.
     spawner.open_boot_wire();
+    // ADR-0241 §9: a native type spawned by mail after boot resolves its
+    // `Config` over the layers of this stack that outlive boot.
+    spawner.retain_config_sources(sources.retain());
     #[cfg(any(test, feature = "test-support"))]
     let boot_settled = spawner.subscribe_boot_wire();
     // Issue 697: multi-pass boot — claim → init → wire → spawn,

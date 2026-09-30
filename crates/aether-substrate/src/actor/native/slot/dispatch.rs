@@ -16,6 +16,9 @@
 //!   actor's stamped per-actor rings / cost table and reply inline
 //!   before the user dispatch runs (ADR-0081 §1 / ADR-0086 Phase 3 /
 //!   iamacoffeepot/aether#1128).
+//! - [`dispatch_spawn_delivered_if_matching`] — the framework arm for
+//!   `aether.actor.spawn_delivered`, which answers a native spawn's requester
+//!   in the receiving actor's own name (ADR-0241 §9).
 //! - [`fold_handler_cost`] — folds one handler-execution sample into
 //!   the per-handler EWMA (iamacoffeepot/aether#1128, measure-only).
 
@@ -30,11 +33,11 @@ use crate::mail::cost::CostCells;
 use aether_actor::trace::ActorTraceRing;
 use aether_data::Kind;
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
-use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult};
+use aether_kinds::{ActorSpawnDelivered, CostTail, CostTailResult, LogTail, LogTailResult, SpawnResult};
 
-use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::native::{Dispatch, NativeActor};
 use crate::mail::KindId;
 
 /// Kinds this actor has already warned a dispatch miss for. `Local`, so it
@@ -223,6 +226,45 @@ pub fn dispatch_cost_tail_if_matching<A>(
     // path, read lock fine) so the dump surfaces the load-time
     // neutral-seed rows even before any dispatch has folded a sample.
     let reply = binding.mailer().cost_table().tail_at(binding.self_mailbox(), &request);
+    ctx.reply(&reply);
+    true
+}
+
+/// ADR-0241 §9 framework-built-in dispatch arm for
+/// `aether.actor.spawn_delivered`, the one row of
+/// [`SpawnDelivery`](crate::actor::native::spawn::SpawnDelivery): answer the
+/// mail's reply target with a [`SpawnResult`] in this actor's own name,
+/// `Live` or `Spawned` as the mail says, carrying the actor's canonical path
+/// and the receive surface the capability registry retains for it (its own
+/// declared surface when the registry retains none). The component host hands
+/// a native spawn's held reply here, so the requester keeps the reply's
+/// stamped sender as its reference (ADR-0230 §3). Every native actor serves
+/// it, which is what lets a native birth complete with that protocol's proof.
+pub fn dispatch_spawn_delivered_if_matching<A: NativeActor>(
+    binding: &NativeBinding,
+    ctx: &mut NativeCtx<'_, A, crate::Manual>,
+    kind: KindId,
+    payload: &[u8],
+) -> bool {
+    if kind.0 != <ActorSpawnDelivered as Kind>::ID.0 {
+        return false;
+    }
+    let reply = match (
+        <ActorSpawnDelivered as Kind>::decode_from_bytes(payload),
+        binding.stamped_sender(binding.self_mailbox()),
+    ) {
+        (Some(ActorSpawnDelivered { live }), Some(me)) => {
+            let path = binding.actor_path(me);
+            let capabilities = binding.receive_surface(me).unwrap_or_else(<A as Dispatch<A::State>>::capabilities);
+            if live {
+                SpawnResult::Live { path, capabilities }
+            } else {
+                SpawnResult::Spawned { path, capabilities }
+            }
+        }
+        (None, _) => SpawnResult::Err { error: "aether.actor.spawn_delivered: payload failed to decode".to_owned() },
+        (_, None) => SpawnResult::Err { error: "aether.actor.spawn_delivered: the actor holds no route".to_owned() },
+    };
     ctx.reply(&reply);
     true
 }

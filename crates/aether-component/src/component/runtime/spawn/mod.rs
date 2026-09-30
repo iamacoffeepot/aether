@@ -9,8 +9,10 @@
 //! spent (§8). A spawn of a namespace a republish holds waits until the
 //! republish answers, then runs against the code that won (§7).
 //!
-//! Only a guest type is spawned here: a namespace no module publishes,
-//! native ones included, is refused.
+//! A native type is spawned from its boot-time publication ([`native`]); a
+//! namespace neither a module nor a linked native type publishes is refused.
+
+mod native;
 
 use std::sync::Arc;
 
@@ -30,6 +32,10 @@ impl ComponentHostCapabilityState {
         held: Held<SpawnResult>,
         payload: Spawn,
     ) {
+        if ctx.published_module(&payload.namespace).is_none() && native::is_native(&payload.namespace) {
+            Self::begin_native_spawn(ctx, held, payload);
+            return;
+        }
         if let Some(republish) = self.holding_republish(ctx, &payload.namespace) {
             republish.park_spawn(held, payload);
             return;
@@ -44,9 +50,9 @@ impl ComponentHostCapabilityState {
     /// its namespace, placed beneath its proven parent when it names one.
     fn prepare_spawn<M: ReplyMode>(ctx: &HostCtx<'_, M>, payload: Spawn) -> Result<Arc<PreparedLoad>, String> {
         let Spawn { namespace, key, parent, config } = payload;
-        let module = ctx.published_module(&namespace).ok_or_else(|| {
-            format!("no module publishes {namespace}: publish its code first (a native type is not spawned by mail)")
-        })?;
+        let module = ctx
+            .published_module(&namespace)
+            .ok_or_else(|| format!("no module publishes {namespace}: publish its code first"))?;
         let declared = declared_name(&module, &namespace).expect("a module publishes only the types it exports");
         let placement = match parent {
             None => LoadPlacement::Root,
