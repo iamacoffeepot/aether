@@ -592,42 +592,10 @@ mod engine {
 
 mod control_plane {
     use alloc::collections::BTreeMap;
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
 
     use serde::{Deserialize, Serialize};
-
-    /// The [`LoadComponent`] `name` that instance `index` of a
-    /// `replicas: N` fan-out claims (issue 2626).
-    ///
-    /// Replica 0 claims the bare `base`; every later replica claims
-    /// `{base}-{index}`. The bare instance is what makes a replicated
-    /// component reachable by bare-type peer addressing at all
-    /// (iamacoffeepot/aether#5727): `ctx.actor_ref::<R>()`, which every flat
-    /// `ctx.send::<R>` routes through, folds `R::NAMESPACE` beneath the
-    /// caller's host, so a fan-out that suffixed *every*
-    /// instance registered nothing at the name the compile-time resolver
-    /// computes and every bare-type send to it silently missed. Suffixing
-    /// from 1 also makes `replicas: 1` load exactly what an omitted field
-    /// loads, and leaves each later replica reached through the reference
-    /// its load proves.
-    ///
-    /// The rule lives here, beside the kind whose `name` field carries it,
-    /// because two independent producers must agree on it byte for byte:
-    /// `aether-chassis`'s boot-manifest / package fan-out registers these
-    /// names, and `aether-mcp` predicts them both to name each
-    /// `load_component` replica and to poll `spawn_substrate` boot
-    /// readiness. A divergence between the two is a boot wait that never
-    /// finds the name it is waiting for.
-    #[must_use]
-    pub fn replica_load_name(base: &str, index: u32) -> String {
-        if index == 0 {
-            String::from(base)
-        } else {
-            format!("{base}-{index}")
-        }
-    }
 
     /// `aether.component.load` — publish a module and spawn one of its types
     /// in one call (ADR-0241 §9): a [`Publish`] of `wasm`, then a [`Spawn`]
@@ -657,35 +625,16 @@ mod control_plane {
         #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
         /// ADR-0096 / ADR-0138: which exported actor type to instantiate
-        /// from a multi-actor module, named by its `Addressable::NAMESPACE`.
-        /// `None` loads the module's **default** type — the single type a
-        /// single-actor module has, or the `export!(default = A, …)` opt-in
-        /// on a multi-actor module. A defaultless multi-actor module (a
-        /// `export!(public = [A, B, …])`) has no default, so `None` against it is a
-        /// clean `LoadResult::Err` that names the exports (ADR-0138). An
-        /// export that the module doesn't declare is likewise a clean
+        /// from the module, named by its `Addressable::NAMESPACE`. `None`
+        /// selects the module's only exported (non-boot) type — a
+        /// single-actor module's sole export, or a multi-actor module's
+        /// unique one. A multi-actor module that exports more than one
+        /// non-boot type has no such type, so `None` against it is a clean
+        /// `LoadResult::Err` that names the exports (ADR-0138), whether or
+        /// not the module opts into an `export!(default = A, …)`. An export
+        /// that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
         pub export: Option<String>,
-    }
-
-    /// `aether.component.load_under` — test-harness composition request for
-    /// loading a component beneath an already-live logical parent, at
-    /// `parent/NS:key`. The component host resolves `parent` to its
-    /// registry-canonical address, admits the load only when the selected
-    /// type declares `child_of` the parent's type (ADR-0241 §5), then runs
-    /// its `load` through the ordinary component loader and replies with
-    /// [`LoadResult`].
-    ///
-    /// This is additive harness infrastructure rather than a replacement for
-    /// [`LoadComponent`]: production load callers keep the established
-    /// `aether.component.load` root placement, while `SubstrateHarness`
-    /// scenarios use this request to construct nested component topologies.
-    /// It is the same publish and spawn as a load, with [`Spawn::parent`], and
-    /// an adapter over them until its callers move to [`Spawn`] (#7163).
-    #[aether_data::kind(name = "aether.component.load_under")]
-    pub struct LoadComponentUnder {
-        pub parent: String,
-        pub load: LoadComponent,
     }
 
     /// Reply to `LoadComponent`. `Ok` is sent by the newly loaded actor
@@ -819,56 +768,6 @@ mod control_plane {
     pub enum DropResult {
         Ok,
         Err { error: String },
-    }
-
-    /// `aether.component.replace` — republish a module: `wasm` succeeds the
-    /// module that publishes its namespaces, and every live instance of every
-    /// namespace it republishes moves to it as one group, or none does
-    /// (ADR-0241 §7, §9). There is no target: the module's namespaces are the
-    /// group. Identical bytes answer `Ok` with no swap. Pre-checks refuse the
-    /// whole replace before any instance prepares; a refusal while preparing
-    /// or a publish failure leaves every instance on its old code. Kind
-    /// vocabulary rides in the wasm's `aether.kinds` custom section
-    /// (ADR-0028). It is a [`Publish`] of a successor, answered as a replace,
-    /// and an adapter over it until its callers move to [`Publish`] (#7163).
-    /// Reply: `ReplaceResult`.
-    #[aether_data::kind(name = "aether.component.replace")]
-    pub struct ReplaceComponent {
-        #[serde(with = "aether_data::bytes")]
-        pub wasm: Vec<u8>,
-        /// A new init config for a live instance, by its canonical or short
-        /// actor path (ADR-0090 §5, ADR-0241 §4). An instance whose type's
-        /// config kind changed needs one; an unlisted instance whose config
-        /// kind is unchanged keeps its stored spawn config. Each supplied
-        /// config is decoded strictly against the successor's config kind.
-        pub configs: Vec<ReplaceConfig>,
-    }
-
-    /// One instance's config in a [`ReplaceComponent`]: the instance's actor
-    /// path and the config bytes its successor type is built with.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct ReplaceConfig {
-        pub path: aether_data::ErasedActorPath,
-        #[serde(with = "aether_data::bytes")]
-        pub config: Vec<u8>,
-    }
-
-    /// Reply to `ReplaceComponent`. `Ok` carries each type the successor
-    /// module publishes with its advertised capabilities, once every
-    /// instance has committed and every chain its commit released has
-    /// settled; `Err` carries a free-form reason, and no instance moved.
-    #[aether_data::kind(name = "aether.component.replace_result")]
-    pub enum ReplaceResult {
-        Ok { types: Vec<ReplacedType> },
-        Err { error: String },
-    }
-
-    /// One type a republished module publishes, as [`ReplaceResult::Ok`]
-    /// reports it: its published namespace and its receive surface.
-    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct ReplacedType {
-        pub namespace: String,
-        pub capabilities: ComponentCapabilities,
     }
 
     /// `aether.component.publish` — bind every namespace a module exports to
@@ -1639,23 +1538,5 @@ mod control_plane {
         pub output_tokens: u32,
         pub wall_clock_millis: u32,
         pub cost_micros: Option<u64>,
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::replica_load_name;
-
-        /// Replica 0 claims the bare base name and later replicas claim the
-        /// `-{index}` suffix. The bug this catches is a fan-out that suffixes
-        /// index 0 again: the load then registers nothing at the name
-        /// `ctx.actor_ref::<R>()` folds from `R::NAMESPACE`, and every bare-type
-        /// send to the replicated component silently misses
-        /// (iamacoffeepot/aether#5727).
-        #[test]
-        fn replica_zero_claims_the_bare_base_name() {
-            assert_eq!(replica_load_name("handler", 0), "handler");
-            assert_eq!(replica_load_name("handler", 1), "handler-1");
-            assert_eq!(replica_load_name("handler", 2), "handler-2");
-        }
     }
 }

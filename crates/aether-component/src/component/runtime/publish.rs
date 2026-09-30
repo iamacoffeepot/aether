@@ -1,22 +1,18 @@
 //! A publish binds a module's namespaces to it (ADR-0241 §3, §9), and it is
-//! the one path every door that brings code takes: `Publish`, a load, and a
-//! replace.
+//! the one path every door that brings code takes: `Publish` and a load.
 //!
 //! The pre-checks decide what a publish does ([`super::republish`]): a module
 //! that already publishes every namespace it exports changes nothing, a
 //! first publish binds it in one registry-owner batch, and a successor
 //! republishes every live instance of its namespaces as one group (§7). What
 //! waits on the publish is its [`Publisher`]: a `Publish` answers with the
-//! bound namespaces, a replace answers as a replace, and a load spawns its
-//! guest. A first publish by `Publish` also spawns the module's boot once
-//! (ADR-0147).
+//! bound namespaces, and a load spawns its guest. A first publish by
+//! `Publish` also spawns the module's boot once (ADR-0147).
 
 use std::sync::Arc;
 
 use aether_actor::ReplyMode;
-use aether_kinds::{
-    ComponentCapabilities, LoadResult, Publish, PublishResult, PublishedType, ReplaceResult, ReplacedType,
-};
+use aether_kinds::{ComponentCapabilities, LoadResult, Publish, PublishResult, PublishedType};
 use aether_substrate::actor::native::{Held, RegistryBatch, RegistryBatchResult};
 use aether_substrate::actor::wasm::module::Module;
 
@@ -27,9 +23,6 @@ use crate::kinds::ModulePublished;
 
 /// What waits on a publish, and how it hears the outcome.
 pub(super) enum Publisher {
-    /// A `ReplaceComponent`, an adapter over the publish of a successor
-    /// until its callers move to `Publish` (#7163).
-    Replace(Held<ReplaceResult>),
     Publish(Held<PublishResult>),
     /// A load, which spawns its prepared guest once the module is bound.
     Load {
@@ -40,11 +33,9 @@ pub(super) enum Publisher {
 
 impl Publisher {
     /// Answer that the publish was refused with `error`, and nothing was
-    /// bound or moved. A replace's answer is prefixed `replace refused:`, as
-    /// a replace's refusal always was.
+    /// bound or moved.
     pub(super) fn refuse<M: ReplyMode>(self, ctx: &mut HostCtx<'_, M>, error: &str) {
         match self {
-            Self::Replace(held) => held.answer(ctx, &ReplaceResult::Err { error: format!("replace refused: {error}") }),
             Self::Publish(held) => held.answer(ctx, &PublishResult::Err { error: error.to_owned() }),
             Self::Load { held, .. } => held.answer(ctx, &LoadResult::Err { error: error.to_owned() }),
         }
@@ -96,9 +87,8 @@ impl ComponentHostCapabilityState {
     }
 
     /// Bind `module` for the first time: no predecessor holds any of its
-    /// namespaces. A `Publish` stages the owner batch, a load publishes and
-    /// then spawns, and a replace is refused, since it has nothing to
-    /// replace.
+    /// namespaces. A `Publish` stages the owner batch, and a load publishes
+    /// and then spawns.
     pub(super) fn first_publish<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
@@ -106,21 +96,6 @@ impl ComponentHostCapabilityState {
         module: Module,
     ) {
         match publisher {
-            Publisher::Replace(_) if module.manifest().content_addressed() => publisher.refuse(
-                ctx,
-                "the module is content-addressed: each build publishes its namespaces as its own, so it succeeds no \
-                 module and cannot replace one (ADR-0241 §3)",
-            ),
-            Publisher::Replace(_) => {
-                let namespaces: Vec<String> = published_surfaces(&module).map(|(namespace, _)| namespace).collect();
-                publisher.refuse(
-                    ctx,
-                    &format!(
-                        "none of the module's namespaces {namespaces:?} is published, so it has no predecessor to \
-                         replace: load it instead"
-                    ),
-                );
-            }
             Publisher::Load { held, load } => self.publish_load(ctx, held, load),
             Publisher::Publish(held) => {
                 let id = self.next_publish;
@@ -154,8 +129,8 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    /// `module` is bound, unchanged or committed: a `Publish` and a replace
-    /// answer with its namespaces, and a load spawns its guest.
+    /// `module` is bound, unchanged or committed: a `Publish` answers with
+    /// its namespaces, and a load spawns its guest.
     pub(super) fn conclude_publish<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,
@@ -163,12 +138,6 @@ impl ComponentHostCapabilityState {
         module: &Module,
     ) {
         match publisher {
-            Publisher::Replace(held) => {
-                let types = published_surfaces(module)
-                    .map(|(namespace, capabilities)| ReplacedType { namespace, capabilities })
-                    .collect();
-                held.answer(ctx, &ReplaceResult::Ok { types });
-            }
             Publisher::Publish(held) => {
                 let types = published_surfaces(module)
                     .map(|(namespace, capabilities)| PublishedType { namespace, capabilities })

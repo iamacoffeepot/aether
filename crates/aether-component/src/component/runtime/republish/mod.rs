@@ -1,7 +1,7 @@
 //! A publish routed by its pre-checks, and a successor's publish as one
 //! group republish (ADR-0241 §7).
 //!
-//! Every publish, a `Publish`'s, a load's, or a replace's, runs the
+//! Every publish, a `Publish`'s or a load's, runs the
 //! pre-checks ([`precheck`]), which decide whether the module is unchanged,
 //! published for the first time ([`super::publish`]), or republished. A
 //! republish's pre-checks refuse before any member is touched. Then
@@ -20,9 +20,9 @@
 //! One exception keeps the hold from deadlocking its own republish: a load,
 //! spawn, or drop that arrives on one of the republish's commit chains runs at
 //! once. A committing candidate flushes the mail its `on_rehydrate` held on
-//! its commit's chain, and the replace answers only once that chain
+//! its commit's chain, and the republish answers only once that chain
 //! settles; parked, such a request's held reply would keep the chain open,
-//! and the replace would never answer. Running it is sound because commits
+//! and the republish would never answer. Running it is sound because commits
 //! go out only after the successor published: a load is admitted against
 //! the winning code, and a drop handed to a member lands behind that
 //! member's `Commit`, so the member commits, answers `Committed`, and then
@@ -36,10 +36,7 @@ use std::sync::Arc;
 use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode};
 use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::trace::Settled;
-use aether_kinds::{
-    DropComponent, DropResult, InstanceConfig, LoadResult, ReplaceComponent, ReplaceConfig, ReplaceResult, Spawn,
-    SpawnResult,
-};
+use aether_kinds::{DropComponent, DropResult, InstanceConfig, LoadResult, Spawn, SpawnResult};
 use aether_substrate::actor::native::{Held, NativeCtx, RegistryBatch, RegistryBatchResult};
 use aether_substrate::actor::wasm::module::Module;
 
@@ -158,27 +155,6 @@ impl QueuedPublish {
 }
 
 impl ComponentHostCapabilityState {
-    /// Check a replace's bytes in, then publish them as a successor: an
-    /// adapter over the publish that answers as a replace, until its callers
-    /// move to `Publish` (#7163).
-    pub(super) fn begin_replace<M: ReplyMode>(
-        &mut self,
-        ctx: &mut HostCtx<'_, M>,
-        held: Held<ReplaceResult>,
-        payload: ReplaceComponent,
-    ) {
-        let ReplaceComponent { wasm, configs } = payload;
-        let configs =
-            configs.into_iter().map(|ReplaceConfig { path, config }| InstanceConfig { path, config }).collect();
-        let code = ctx.check_in(wasm.into_boxed_slice());
-        match self.modules.check_in(&ctx.blob_check_in(), &code) {
-            Ok(module) => {
-                self.publish_or_queue(ctx, QueuedPublish::new(Publisher::Replace(held), code, module, configs));
-            }
-            Err(error) => held.answer(ctx, &ReplaceResult::Err { error }),
-        }
-    }
-
     /// Run every queued publish whose namespaces nothing in flight holds any
     /// more, in arrival order.
     pub(super) fn release_queued_publishes<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>) {
@@ -420,7 +396,7 @@ impl ComponentHostCapabilityState {
 
     /// Drop the guest a `DropComponent` names: hand the drop to it, and it
     /// answers and closes (ADR-0241 §8). A drop of a member of a republish
-    /// in flight waits until the replace answers.
+    /// in flight waits until the republish answers.
     pub(super) fn begin_drop<M: ReplyMode>(
         &mut self,
         ctx: &mut HostCtx<'_, M>,

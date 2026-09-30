@@ -15,8 +15,7 @@
 
 use aether_data::ActorMail;
 use aether_kinds::{
-    CaptureFrameResult, DropResult, LoadResult, MeshLoadResult, PublishResult, ReplaceResult, SpawnEngineResult,
-    SpawnResult,
+    CaptureFrameResult, DropResult, LoadResult, MeshLoadResult, PublishResult, SpawnEngineResult, SpawnResult,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -38,12 +37,6 @@ impl HeldReply for LoadResult {
 /// A drop the component host holds while the instance's module republishes
 /// (ADR-0241 §7).
 impl HeldReply for DropResult {
-    fn unanswered() -> Self {
-        Self::Err { error: "component host closed before answering".into() }
-    }
-}
-
-impl HeldReply for ReplaceResult {
     fn unanswered() -> Self {
         Self::Err { error: "component host closed before answering".into() }
     }

@@ -23,8 +23,6 @@
 //! drives each through the trampoline's prepare, then publishes the module
 //! and commits every instance, or aborts every one. A load spawns only once
 //! its module is bound; a refusal answers the caller with the reason.
-//! [`ReplaceComponent`](aether_kinds::ReplaceComponent) is a publish of a
-//! successor answered as a replace.
 //!
 //! Pre-Phase-4 the cap also owned the wasm dispatcher infrastructure
 //! (the retired `ComponentEntry`, `dispatcher_loop`, `kill_actor`,
