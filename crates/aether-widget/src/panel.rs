@@ -50,7 +50,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, ModuleChild, ReplyMode, Sends,
+    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Instanced, ReplyMode, Sends,
     Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
@@ -937,7 +937,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 /// failure.
 fn spawn<C, A, M: ReplyMode>(ctx: &mut WasmCtx<'_, A, M>, subname: &str, config: &C::Config) -> Option<WidgetLanes>
 where
-    C: ModuleChild + ErasedWasmActor + WidgetLaneSet,
+    C: Instanced + WasmActor + ErasedWasmActor + WidgetLaneSet,
     <C as WasmActor>::State: ErasedWasmActor,
     A: Spawns<C>,
 {

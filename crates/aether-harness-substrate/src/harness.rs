@@ -511,6 +511,7 @@ impl SubstrateHarnessBuilder {
     /// impl aether_actor::Declared for ChildOnly {
     ///     type Depends = ();
     ///     type Spawns = ();
+    ///     type Parents = ();
     /// }
     /// impl NativeActor for ChildOnly {
     ///     type State = Self;
@@ -2066,6 +2067,7 @@ mod tests {
         impl aether_actor::Declared for Child {
             type Depends = ();
             type Spawns = ();
+            type Parents = ();
         }
         impl NativeActor for Child {
             type State = Self;

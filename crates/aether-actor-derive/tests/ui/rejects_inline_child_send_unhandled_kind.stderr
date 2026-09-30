@@ -15,8 +15,8 @@ help: the trait `HandlesKind<Unhandled>` is not implemented for `Child`
 help: `Child` implements trait `HandlesKind<K>`
   --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:45:1
    |
-45 | #[actor(instanced, composable)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+45 | #[actor(instanced, child_of(Parent))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    | |
    | `HandlesKind<AlsoHandled>`
    | `HandlesKind<Handled>`

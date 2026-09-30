@@ -22,8 +22,8 @@ use crate::set::{ActivationArms, disc, push_control_outlines, reply_draw, stadiu
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, SetToggle, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, ScrollWidget, SetToggle, SetWidgetState, ToggleChanged, ToggleConfig, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// A boolean switch with a track, knob, and optional label.
@@ -180,7 +180,7 @@ impl WidgetDefaults for ToggleWidget {
 
 /// A toggle widget. Spawned inline by a panel root with a [`ToggleConfig`];
 /// reports [`ToggleChanged`] after each completed activation.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToggleWidget {
     type Config = ToggleConfig;
     const NAMESPACE: &'static str = "aether.widget.toggle";

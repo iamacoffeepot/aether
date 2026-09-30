@@ -175,12 +175,12 @@ fn a_hole_beneath_a_guest_parent_expands_to_its_spawned_child() {
 }
 
 /// Pins the ADR-0166 liveness tie-break over guest lineage: the bundle's
-/// composable `test.inline.stateful_child` may sit beneath every actor its
-/// module declares, so a hole beneath `test.inline.parent` names two child
-/// types. The one holding the key live wins; a key neither holds is refused
+/// `test.inline.stateful_child` lists `InlineParent` in its `child_of(..)`
+/// beside `test.inline.child`, so a hole beneath `test.inline.parent` names
+/// two child types. The one holding the key live wins; a key neither holds is refused
 /// naming both.
 #[test]
-fn a_composable_sibling_defers_to_the_live_child_under_a_guest_parents_hole() {
+fn a_sibling_child_type_defers_to_the_live_child_under_a_guest_parents_hole() {
     let Some(mut harness) = fixture() else {
         return;
     };

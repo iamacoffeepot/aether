@@ -133,6 +133,7 @@ impl Dispatch<Self> for HandWrittenDependent {
 impl Declared for HandWrittenDependent {
     type Depends = (AudioDep, ());
     type Spawns = ();
+    type Parents = ();
 }
 
 impl NativeActor for HandWrittenDependent {

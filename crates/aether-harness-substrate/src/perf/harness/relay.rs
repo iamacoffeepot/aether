@@ -94,6 +94,7 @@ impl aether_actor::Lifecycle<Self> for Relay {
 impl aether_actor::Declared for Relay {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for Relay {
     type State = Self;

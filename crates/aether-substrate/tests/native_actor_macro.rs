@@ -862,7 +862,7 @@ impl NativeActor for ReplyMacroCap {
 /// inventory independent from the singleton root that owns the reply handler.
 struct InstancedChildCap;
 
-#[aether_actor::actor(instanced, child_of(ReplyParentA), child_of(ReplyParentB))]
+#[aether_actor::actor(instanced, child_of(ReplyParentA, ReplyParentB))]
 impl NativeActor for InstancedChildCap {
     type Config = ();
     const NAMESPACE: &'static str = "test.macro_native_actor.instanced_child";

@@ -172,18 +172,16 @@ Actor identities declare where they may legally appear with `root` and
 #[actor(singleton, root)]
 pub struct ComponentManager;
 
-#[actor(
-    instanced,
-    child_of(ComponentManager),
-    child_of(TestComponentManager),
-)]
+#[actor(instanced, child_of(ComponentManager, TestComponentManager))]
 pub struct ComponentWorker;
 ```
 
 `root` implements the `Root` marker: the actor may be placed without an actor
-parent. Each `child_of(Parent)` implements `ChildOf<Parent>` and records one
-permitted direct parent edge. The argument may be repeated for distinct parent
-types, and an actor may be both a root and a permitted child.
+parent. `child_of(A, B, ..)` is one list, written once, as `depends(..)` is: it
+becomes the actor's `Declared::Parents`, and each entry implements
+`ChildOf<Parent>` at its position in that list and records one permitted direct
+parent edge. A hand-written `ChildOf` impl does not compile, so the list is the
+actor's whole placement set. An actor may be both a root and a permitted child.
 
 Parentless native entry points consume that permission as a compile-time bound.
 Chassis composition (`Builder::with_actor` and `with_actor_configured`),
@@ -203,7 +201,7 @@ cardinality, and it is the permission the component host checks when it loads
 the type at itself, boots it as its module's boot type, or publishes a module
 whose boot type it is: each is refused with the operation's `Err`, naming the
 type and the placements it does declare, before the module publishes or
-anything is staged. A `child_of(P)` or `composable` record never satisfies it.
+anything is staged. A `child_of(P)` record never satisfies it.
 A spawn naming a `parent` is checked the same way against a `child_of(P)`
 record naming the proven parent's type. A loaded guest is named as a native
 actor is — `NS`, `NS:key`, or `parent/NS:key` — so a wasm `root` emits the same
@@ -226,11 +224,7 @@ pub struct TcpCapability;
 #[actor(instanced, child_of(TcpCapability))]
 pub struct TcpListenerActor;
 
-#[actor(
-    instanced,
-    child_of(TcpCapability),
-    child_of(TcpListenerActor),
-)]
+#[actor(instanced, child_of(TcpCapability, TcpListenerActor))]
 pub struct TcpSessionActor;
 ```
 
@@ -265,9 +259,8 @@ aether.window/aether.window.instance:main
 ```
 
 The same expansion reads every published module's lineage (ADR-0241 §5): its
-`#[actor(root)]` exports, each exported and private type's cardinality, its
-`child_of(..)` edges, and a `composable` type as a child of every type the
-module declares. The index is rebuilt in the registry-owner apply that
+`#[actor(root)]` exports, each exported and private type's cardinality, and its
+`child_of(..)` edges. The index is rebuilt in the registry-owner apply that
 publishes a module, and a module's facts about a native namespace are ignored,
 so a module never changes a native short path.
 
@@ -276,10 +269,9 @@ namespace, so its canonical address is already short (`aether.kit.camera`, or
 `aether.widget:panel` for an instanced one). Its children are reached by a hole
 beneath it: `game.world/:north/:gate` for an inline child and its own inline
 child, or `game.world/:k` for a guest a `Spawn` with `parent` placed at
-`game.world/NS:k`. A `composable` type is a candidate beneath every parent in
-its module, so a parent that declares another instanced child as well has
-several candidates for a hole, and the hole fills with whichever of them holds
-its key live.
+`game.world/NS:k`. A parent that several instanced child types list in their
+`child_of(..)` has several candidates for a hole, and the hole fills with
+whichever of them holds its key live.
 
 A path is `/`-separated steps. After the root, a bare step always names a
 singleton child, `namespace:discriminator` names an instance of that instanced
@@ -581,7 +573,7 @@ impl WidgetDefaults for ToggleWidget {
     fn cancel_activation(&mut self) { self.arms.clear(); }
 }
 
-#[actor(instanced, root, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults))]
 impl WasmActor for ToggleWidget {
     // only toggle-specific handlers here
 }
@@ -945,15 +937,18 @@ for the component host's boot waiters until #7008 removes it.
 Wasm enforces the same `ChildOf` permission when a component creates a child
 inline ([ADR-0114](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0114-inline-child-actors.md)): the child is an `Instanced` actor its module also
 exports (or lists under `private = [..]`), co-located in the parent's wasm
-instance, and the spawn compiles only when the child declares the exact
-`child_of(Parent)` relationship or is an instanced `composable` module child.
+instance, and the spawn compiles only when the spawner declares the child in
+its `spawns(..)`, whose emitted `Spawns<Child>` impl in turn compiles only when
+the child lists the spawner in its `child_of(..)`. So `spawns(..)` is the
+rebuild manifest every `export!` checks, and the child's `child_of(..)` is its
+placement set; the one bound `A: Spawns<C>` proves both.
 One wasm crate can export several actor types
 (`export!(public = [RootManager, Panel, …])`), and a running instance stands up a
 child just as the listener stands up a session:
 `ctx.spawn_inline::<Panel>(Subname::Named("body"), &config)` names only the child
 type and reads the parent from the ctx as the native side does. Its two-type
 counterpart `ctx.spawn_inline_child::<RootManager, Panel>(Subname::Counter, &config)`
-stays for the per-parent `child_of(Parent)` edge: `WasmCtx` is addressed by tag
+stays for an erased or wire ctx, which does not know its actor: `WasmCtx` is addressed by tag
 rather than by Rust type, so the parent is named at the call and the SDK checks it
 against the ctx's registry-backed actor tag before allocating the child's alias;
 writing a different parent type earns an error rather than bypassing the declared

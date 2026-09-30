@@ -71,9 +71,10 @@
 //! *runtime tag* — `ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<
 //! InlineStatefulChild>(), …)` — rather than the compile-time-typed verb,
 //! exercising the real `export!`-generated resolver. It records all four
-//! outcomes surfaced on a `TagSpawnQuery`: the composable instanced child
-//! spawns successfully, while an exact child of another parent, an exported
-//! non-instanced actor, and an unknown tag are rejected. Because the accepted
+//! outcomes surfaced on a `TagSpawnQuery`: the instanced child that lists
+//! `InlineTagParent` in its `child_of(..)` spawns successfully, while an exact
+//! child of another parent, an exported non-instanced actor, and an unknown
+//! tag are rejected. Because the accepted
 //! child is `InlineStatefulChild`, its state reconstructs across a
 //! `replace_component` swap through the same reconstruct arm the tag came
 //! from.
@@ -183,13 +184,15 @@ impl WasmActor for InlineStatefulParent {
 
 /// Inline child for the stateful fixture, co-located in the parent's wasm
 /// instance, carrying a counter that survives a `replace_component` swap.
-/// It is composable because both `InlineStatefulParent` and `InlineTagParent`
-/// spawn this exported identity from the same resident module.
+/// It lists `InlineStatefulParent` and `InlineTagParent`, which spawn it, and
+/// `InlineParent`, so a guest parent's short-path hole beneath
+/// `test.inline.parent` has two candidate child types (ADR-0166's liveness
+/// tie-break).
 pub struct InlineStatefulChild {
     count: u32,
 }
 
-#[actor(instanced, composable)]
+#[actor(instanced, child_of(InlineParent, InlineStatefulParent, InlineTagParent))]
 impl WasmActor for InlineStatefulChild {
     const NAMESPACE: &'static str = "test.inline.stateful_child";
 
@@ -515,7 +518,7 @@ impl WasmActor for InlineTagParent {
         })
     }
 
-    /// Spawn the composable `InlineStatefulChild` by tag, then exercise the
+    /// Spawn `InlineStatefulChild` by tag, then exercise the
     /// generated resolver's three rejection guards: an exact child of another
     /// parent, an exported non-instanced actor, and an unknown tag.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
@@ -543,12 +546,12 @@ impl WasmActor for InlineTagParent {
         );
     }
 
-    /// Report the accepted composable spawn and all three rejected selections
+    /// Report the accepted tag spawn and all three rejected selections
     /// over the wire.
     #[handler::single]
     fn on_tag_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: TagSpawnQuery) -> TagSpawnReport {
         TagSpawnReport {
-            composable_spawned: self.child.is_some(),
+            tag_spawned: self.child.is_some(),
             wrong_parent_rejected: self.wrong_parent_rejected,
             non_instanced_rejected: self.non_instanced_rejected,
             unknown_tag_rejected: self.unknown_tag_rejected,

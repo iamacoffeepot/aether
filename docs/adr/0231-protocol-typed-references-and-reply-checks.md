@@ -877,11 +877,12 @@ consumer is the component host's load reply. All run from unchecked handlers.
 
 ### 10. Markers exist only at a declared position
 
-Four per-actor markers stand for facts only a macro expansion establishes:
+Five per-actor markers stand for facts only a macro expansion establishes:
 `Contract<K>` (a handler for `K` exists, §1, §2), `DependsOn<R>` (the birth
 checked that `R` was `Live`, ADR-0230 §3), `Spawns<C>` (the spawner declared
-`C`, ADR-0114 §5), and `Rebuildable<M>` (the module's `export!` lists the
-type). Sealing cannot close them, because `#[actor]` and `export!` expand in
+`C`, ADR-0114 §5), `ChildOf<P>` (the actor declared `P` as a parent, ADR-0166),
+and `Rebuildable<M>` (the module's `export!` lists the type). Sealing cannot
+close them, because `#[actor]` and `export!` expand in
 the author's crate and any path they name the author can name too, and
 `unsafe` marks undefined behaviour, not a logic rule. They are closed by
 coherence instead: a trait has one impl per type, and a hand-written impl
@@ -901,6 +902,7 @@ pub trait Contracts {
 pub trait Declared {
     type Depends: DependencyList; // (R1, (R2, ())) from depends(..)
     type Spawns;                  // (C1, (C2, ())) from spawns(..); () on native
+    type Parents;                 // (P1, (P2, ())) from child_of(..); () for a root-only actor
 }
 
 /// Sealed; `()`, and `(R, Tail)` when `R: Singleton + CallerAddressable`,
@@ -924,9 +926,17 @@ where
     type Index: ListIndex<<Self as Declared>::Depends, R>;
 }
 
-pub trait Spawns<C>: Declared {
+pub trait Spawns<C: Declared>: Declared {
     #[doc(hidden)]
     type Index: ListIndex<<Self as Declared>::Spawns, C>;
+    /// This spawner's position in `C`'s parent list.
+    #[doc(hidden)]
+    type Placement: ListIndex<<C as Declared>::Parents, Self>;
+}
+
+pub trait ChildOf<P: Addressable>: Addressable + Declared {
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Parents, P>;
 }
 
 pub trait Rebuildable<M: ListedModule> {
@@ -944,10 +954,20 @@ expansion knows each entry's position and writes it (`type Index =
 There<Here>;`). A hand-written marker either repeats an impl the expansion
 emitted (`E0119`) or names a position that holds a different kind,
 dependency, or type, or no entry at all (`E0277` on the `Index` bound). A
-marker that type-checks is backed by a declaration, and none of the four
+marker that type-checks is backed by a declaration, and none of the five
 traits is `unsafe`. Consumers keep their bounds (`T: Contract<K, Reply = O>`,
-`A: DependsOn<R>`, `P: Spawns<C>`, `C: Rebuildable<M>`), and no turbofish
-names an index.
+`A: DependsOn<R>`, `P: Spawns<C>`, `C: ChildOf<P>`, `C: Rebuildable<M>`), and
+no turbofish names an index.
+
+- **`spawns(C)` agrees with `child_of(..)`.** `#[actor]` writes each
+  `Spawns<C>` impl's `Placement` as `<C as ChildOf<Self>>::Index`, the
+  spawner's position in `C`'s `Parents`, so it never needs to know the order
+  of `C`'s list, and a `spawns(C)` whose `C` does not list the spawner fails at
+  the declaration (`E0277`). The one bound `A: Spawns<C>` then carries both
+  proofs an inline spawn needs: `C` may sit beneath `A`, and every `export!`
+  that lists `A` lists `C`. The two lists read in opposite directions:
+  the child's `child_of(..)` is its whole placement set, and the spawner's
+  `spawns(..)` is the rebuild manifest `export!` checks.
 
 - **Gated handlers.** A `#[cfg]`-gated handler keeps its slot: a pair of
   `#[cfg]`-ed type aliases beside the `Contracts` impl picks its `Row<K, O>`
@@ -973,7 +993,7 @@ names an index.
   collides (`E0119`). `__AetherModule` is private: `Listed` may name a bundle
   generator's private type, and only the invoking crate names the module
   type.
-- **Declared entries are `pub`.** `Rows`, `Depends`, and `Spawns` are
+- **Declared entries are `pub`.** `Rows`, `Depends`, `Spawns`, and `Parents` are
   associated types of public-trait impls for an actor, so for a public actor
   each type they name must be nominally `pub`, or rustc refuses the impl
   with `E0446` (private type in public interface). A handled kind, a declared
@@ -1004,7 +1024,7 @@ names an index.
 
 The boundary is the declaration impl. A type that no `#[actor]` expansion
 built writes its own `Contracts` / `Declared` impl, as it writes its own
-`Dispatch` or `WasmDispatch`. Its dependencies and inline children are closed:
+`Dispatch` or `WasmDispatch`. Its dependencies, inline children, and parents are closed:
 what its `Declared` impl lists is exactly what the birth check and the
 coverage check read. Its rows are not yet: a hand-written `Contracts::Rows`,
 `HandlesKind<K>`, or `Replies<K>` can claim a kind its hand-written dispatch

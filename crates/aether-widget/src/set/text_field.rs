@@ -43,7 +43,10 @@ use crate::set::{
 use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{Theme, ThemeState};
-use crate::{Collect, SetText, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame};
+use crate::{
+    Collect, ScrollWidget, SetText, SetWidgetState, TextCommitted, TextFieldConfig, WidgetControlState, WidgetFrame,
+    WidgetPanel,
+};
 
 /// A single-line editable string. Holds the reusable editing state, the
 /// character cap, the latest modifiers, whether a pointer drag is live, and the
@@ -128,7 +131,13 @@ impl WidgetDefaults for TextFieldWidget {
 /// its `TextFieldConfig` again to re-cap or restyle it in place — that holds
 /// the buffer, the caret, and the selection. Send it [`SetText`] to replace
 /// what it holds.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
+#[actor(
+    instanced,
+    root,
+    child_of(WidgetPanel, ScrollWidget),
+    handler_set(WidgetDefaults),
+    depends(TextCapability, ClipboardCapability)
+)]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
     const NAMESPACE: &'static str = "aether.widget.text_field";

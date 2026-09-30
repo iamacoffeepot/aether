@@ -16,8 +16,8 @@ use crate::manifest::{
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
-    ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl, declared_impl,
-    position, reply_marker_impl, rows_list,
+    DeclaredLists, ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl,
+    declared_impl, position, reply_marker_impl, rows_list,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -29,12 +29,6 @@ use crate::reply_markers::{
 #[allow(clippy::too_many_lines)] // emits the full wasm-actor surface in one go
 pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
-    if opts.composable && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "`composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`",
-        ));
-    }
     if !opts.child_of.is_empty() && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         return Err(syn::Error::new_spanned(
             self_ty,
@@ -419,20 +413,21 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
         }
     });
-    let module_child_impl = opts.composable.then(|| {
+    // ADR-0166 (issue 7210): one `ChildOf<P>` impl per `child_of(..)` entry,
+    // each naming `P`'s position in the `Declared::Parents` list, so the list
+    // is the actor's whole placement set.
+    let child_impls = opts.child_of.iter().enumerate().map(|(index, parent)| {
+        let index = position(index);
         quote! {
-            impl #impl_generics ::aether_actor::ModuleChild for #self_ty #where_clause {}
+            impl #impl_generics ::aether_actor::ChildOf<#parent> for #self_ty #where_clause {
+                type Index = #index;
+            }
         }
     });
-    let child_impls = opts.child_of.iter().map(|parent| {
-        quote! {
-            impl #impl_generics ::aether_actor::ChildOf<#parent>
-                for #self_ty #where_clause {}
-        }
-    });
-    // ADR-0231 §10: the actor's one `Declared` impl lists its `depends(..)` and
-    // `spawns(..)` entries, and each `DependsOn` / `Spawns` impl below names
-    // its entry's position there, so none compiles without its declaration.
+    // ADR-0231 §10: the actor's one `Declared` impl lists its `depends(..)`,
+    // `spawns(..)`, and `child_of(..)` entries, and each `DependsOn` /
+    // `Spawns` / `ChildOf` impl names its entry's position there, so none
+    // compiles without its declaration.
     let impl_generics_ts = quote! { #impl_generics };
     let self_ty_ts = quote! { #self_ty };
     let where_clause_ts = quote! { #where_clause };
@@ -443,8 +438,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             where_clause: &where_clause_ts,
             cfgs: &[],
         },
-        &opts.depends,
-        &opts.spawns,
+        DeclaredLists { depends: &opts.depends, spawns: &opts.spawns, parents: &opts.child_of },
     );
     // ADR-0230: each `DependsOn<R>` impl names `R`'s position in the
     // `Declared::Depends` list, from which `export!` writes the
@@ -461,12 +455,15 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // which the typed spawn verbs require, each naming `C`'s position in the
     // `Declared::Spawns` list. Every `export!` that lists this actor requires
     // that list to be listed in its own module (`ListedIn`), so that `export!`
-    // must list every declared child.
+    // must list every declared child. `Placement` projects through the
+    // child's `ChildOf<Self>`, so a `spawns(C)` whose `C` does not list this
+    // actor in its `child_of(..)` fails here, at the declaration.
     let spawns_impls = opts.spawns.iter().enumerate().map(|(index, child)| {
         let index = position(index);
         quote! {
             impl #impl_generics ::aether_actor::Spawns<#child> for #self_ty #where_clause {
                 type Index = #index;
+                type Placement = <#child as ::aether_actor::ChildOf<#self_ty>>::Index;
             }
         }
     });
@@ -708,7 +705,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     Ok(quote! {
         #actor_impl
         #root_impl
-        #module_child_impl
         #(#child_impls)*
         #declared
         #(#depends_impls)*

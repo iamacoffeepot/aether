@@ -50,6 +50,7 @@ impl WasmActor for Other {
 
 impl Spawns<Other> for Parent {
     type Index = Here;
+    type Placement = Here;
 }
 
 fn main() {}

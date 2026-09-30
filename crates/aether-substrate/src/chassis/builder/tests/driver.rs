@@ -105,6 +105,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     impl aether_actor::Declared for InitTripwireCap {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for InitTripwireCap {
         type State = Self;

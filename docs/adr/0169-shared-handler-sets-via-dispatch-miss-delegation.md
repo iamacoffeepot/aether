@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-01
+- **Amended:** 2026-09-29 — §2's adoption example predates the retirement of `composable`; the stock widgets now declare `child_of(WidgetPanel, ScrollWidget)` in its place ([ADR-0166](0166-typed-actor-lineage-and-abbreviated-external-addresses.md), #7210).
 
 Adds a composition axis to the `#[actor]` / `#[runtime]` authoring surface of **ADR-0033** (handler-driven inputs manifest) and **ADR-0074** (unified actor model), leaving the reply classes of **ADR-0112** / **ADR-0134** and the addressing of **ADR-0119** / **ADR-0166** untouched.
 

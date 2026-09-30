@@ -105,7 +105,9 @@ impl aether_actor::Addressable for CommitChild {
     const NAMESPACE: &'static str = "perf.registry.child";
     type Resolver = aether_actor::Many;
 }
-impl aether_actor::ChildOf<CommitParent> for CommitChild {}
+impl aether_actor::ChildOf<CommitParent> for CommitChild {
+    type Index = aether_actor::Here;
+}
 impl aether_actor::HandlesKind<CloseChild> for CommitChild {}
 impl aether_actor::Lifecycle<Self> for CommitChild {
     type Config = ();
@@ -120,6 +122,7 @@ impl aether_actor::Lifecycle<Self> for CommitChild {
 impl aether_actor::Declared for CommitChild {
     type Depends = ();
     type Spawns = ();
+    type Parents = (CommitParent, ());
 }
 impl NativeActor for CommitChild {
     type State = Self;
@@ -194,6 +197,7 @@ impl aether_actor::Lifecycle<Self> for CommitParent {
 impl aether_actor::Declared for CommitParent {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for CommitParent {
     type State = Self;

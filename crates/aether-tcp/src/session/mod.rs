@@ -36,7 +36,7 @@ use super::{TcpCapability, TcpListenerActor};
 /// `TcpStream` write half + the read thread) lives behind the one
 /// `feature = "runtime"` gate, so a transport-only build never names
 /// `TcpSessionState` nor pulls `aether_substrate` through this actor.
-#[actor(instanced, child_of(TcpCapability), child_of(TcpListenerActor))]
+#[actor(instanced, child_of(TcpCapability, TcpListenerActor))]
 pub struct TcpSessionActor;
 
 // The `#[actor]` attribute path stays always-on (the macro divides what it

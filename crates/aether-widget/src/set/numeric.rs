@@ -39,8 +39,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, TextEditState, TextSpan};
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, SetValue, SetWidgetState, WidgetControlState,
-    WidgetDrawItem, WidgetFrame,
+    Collect, FocusLost, HoverLost, NumericChanged, NumericConfig, ScrollWidget, SetValue, SetWidgetState,
+    WidgetControlState, WidgetDrawItem, WidgetFrame, WidgetPanel,
 };
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
@@ -565,7 +565,13 @@ impl WidgetDefaults for NumericWidget {
 
 /// A numeric editor. Spawned inline by a panel root with a [`NumericConfig`];
 /// reports preview and committed [`NumericChanged`] events.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
+#[actor(
+    instanced,
+    root,
+    child_of(WidgetPanel, ScrollWidget),
+    handler_set(WidgetDefaults),
+    depends(TextCapability, ClipboardCapability)
+)]
 impl WasmActor for NumericWidget {
     type Config = NumericConfig;
     const NAMESPACE: &'static str = "aether.widget.numeric";

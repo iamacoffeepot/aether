@@ -28,7 +28,7 @@ use crate::set::{
 use crate::theme::SetTheme;
 use crate::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
@@ -331,7 +331,7 @@ impl ScrollWidget {
 #[actor(
     instanced,
     root,
-    composable,
+    child_of(WidgetPanel, ScrollWidget),
     spawns(
         LabelWidget,
         ImageWidget,

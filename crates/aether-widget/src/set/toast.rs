@@ -61,8 +61,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{TextRole, Theme};
 use crate::{
-    Collect, SetWidgetState, ToastConfig, ToastNotice, ToastSeverity, WidgetDrawItem, WidgetDrawList, WidgetFrame,
-    WidgetPlaced,
+    Collect, ScrollWidget, SetWidgetState, ToastConfig, ToastNotice, ToastSeverity, WidgetDrawItem, WidgetDrawList,
+    WidgetFrame, WidgetPanel, WidgetPlaced,
 };
 
 impl ToastSeverity {
@@ -325,7 +325,7 @@ impl WidgetDefaults for ToastWidget {
 /// Not loaded directly — the root spawns it as an inline child. Its lineage
 /// address takes a `ToastNotice` from any actor, so raising a notice by hand
 /// over MCP is one `send_mail`.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToastWidget {
     type Config = ToastConfig;
     const NAMESPACE: &'static str = "aether.widget.toast";

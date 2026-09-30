@@ -1,13 +1,15 @@
 //! Declaration lists and their positions (ADR-0231 §10): the one place an
-//! actor's contract rows, declared dependencies, and declared inline children
-//! are stated, and the sealed index each per-entry marker names into them.
+//! actor's contract rows, declared dependencies, declared inline children,
+//! and declared parents are stated, and the sealed index each per-entry
+//! marker names into them.
 //!
 //! Coherence allows one impl of a trait for a type. `#[actor]` emits exactly
 //! one [`Contracts`](crate::Contracts) impl and one [`Declared`] impl per
 //! actor, and `export!` one `ListedModule` impl per module, each carrying its
 //! entries as a type-level list `(E1, (E2, (…, ())))`. Every per-entry marker
 //! ([`Contract<K>`](crate::Contract), [`DependsOn<R>`](crate::DependsOn),
-//! [`Spawns<C>`](crate::Spawns), [`Rebuildable<M>`](crate::Rebuildable))
+//! [`Spawns<C>`](crate::Spawns), [`ChildOf<P>`](crate::ChildOf),
+//! [`Rebuildable<M>`](crate::Rebuildable))
 //! names the position of its entry in that list as `type Index`, and the
 //! marker's `Index` bound holds only when that position holds that entry. A
 //! hand-written marker either repeats an impl the expansion emitted (`E0119`)
@@ -73,8 +75,9 @@ mod sealed {
 #[diagnostic::on_unimplemented(
     message = "the position `{Self}` does not hold `{T}` in the declared list `{L}`",
     label = "no declaration backs this entry",
-    note = "a dependency is declared in `depends(..)` and an inline child in `spawns(..)` on the actor's \
-            `#[actor(..)]`, and a module's listing in its `export!`; only those expansions write these markers"
+    note = "a dependency is declared in `depends(..)`, an inline child in `spawns(..)`, and a parent in \
+            `child_of(..)` on the actor's `#[actor(..)]`, and a module's listing in its `export!`; only those \
+            expansions write these markers"
 )]
 pub trait ListIndex<L, T: ?Sized>: sealed::ListSealed<L, T> {}
 
@@ -113,29 +116,35 @@ impl<H, Tail, K, I: RowIndex<Tail, K>> RowIndex<(H, Tail), K> for There<I> {
 }
 
 /// An actor's declaration lists (ADR-0231 §10): the dependencies it declares
-/// in `#[actor(depends(..))]` and the inline children it declares in
-/// `#[actor(spawns(..))]`, each as a type-level list `(E1, (E2, (…, ())))` in
-/// declaration order.
+/// in `#[actor(depends(..))]`, the inline children it declares in
+/// `#[actor(spawns(..))]`, and the parents it declares in
+/// `#[actor(child_of(..))]`, each as a type-level list `(E1, (E2, (…, ())))`
+/// in declaration order.
 ///
 /// These lists are what the checks read. The native birth check reads
 /// [`Depends`](Declared::Depends) through [`declared_dependencies`], and
 /// `export!` writes a guest's dependency records from it, so the pre-`init`
 /// check on both transports refuses the birth while a listed dependency is
 /// not `Live`. `export!`'s inline-child coverage check reads
-/// [`Spawns`](Declared::Spawns). Whatever an impl lists is exactly what is
+/// [`Spawns`](Declared::Spawns), and each spawner's
+/// [`Spawns<C>`](crate::Spawns) impl names its own position in `C`'s
+/// [`Parents`](Declared::Parents). Whatever an impl lists is exactly what is
 /// checked.
 ///
 /// `#[actor]` emits the one impl per actor. Each
-/// [`DependsOn<R>`](crate::DependsOn) and [`Spawns<C>`](crate::Spawns) impl
-/// names its entry's position in these lists, so none compiles without its
-/// entry here. A type that no `#[actor]` expansion built writes this impl
-/// itself, as it writes its own dispatch; `NativeActor` and
+/// [`DependsOn<R>`](crate::DependsOn), [`Spawns<C>`](crate::Spawns), and
+/// [`ChildOf<P>`](crate::ChildOf) impl names its entry's position in these
+/// lists, so none compiles without its entry here. A type that no `#[actor]`
+/// expansion built writes this impl itself, as it writes its own dispatch; `NativeActor` and
 /// [`WasmActor`](crate::WasmActor) both require it.
 pub trait Declared {
     /// The declared dependencies, in `depends(..)` order.
     type Depends: DependencyList;
     /// The declared inline children, in `spawns(..)` order; `()` on native.
     type Spawns;
+    /// The declared parents, in `child_of(..)` order; `()` for a root-only
+    /// actor.
+    type Parents;
 }
 
 /// A declared dependency list `(R1, (R2, (…, ())))` (ADR-0231 §10): each

@@ -22,7 +22,7 @@ impl WasmActor for A {
 
 struct B;
 
-#[actor(instanced, composable)]
+#[actor(instanced, child_of(A))]
 impl WasmActor for B {
     const NAMESPACE: &'static str = "test.hand_written_rebuildable.b";
 

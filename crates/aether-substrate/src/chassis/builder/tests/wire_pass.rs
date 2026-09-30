@@ -41,6 +41,7 @@ impl aether_actor::Lifecycle<Self> for Ponger {
 impl aether_actor::Declared for Ponger {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for Ponger {
     type State = Self;
@@ -139,6 +140,7 @@ fn spawn_actor_runs_wire_once_after_init() {
     impl aether_actor::Declared for WireSpawnProbe {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for WireSpawnProbe {
         type State = Self;
@@ -223,6 +225,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     impl aether_actor::Declared for WireProbe {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for WireProbe {
         type State = Self;

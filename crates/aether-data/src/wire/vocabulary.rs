@@ -555,11 +555,6 @@ impl WireEncode for ActorLineageRecord {
                 parent_namespace.encode(out)?;
                 child_namespace.encode(out)
             }
-            Self::ModuleChild { child, child_namespace } => {
-                2u32.encode(out)?;
-                child.encode(out)?;
-                child_namespace.encode(out)
-            }
         }
     }
 }
@@ -574,7 +569,6 @@ impl<'de> WireDecode<'de> for ActorLineageRecord {
                 parent_namespace: Cow::decode(cursor)?,
                 child_namespace: Cow::decode(cursor)?,
             }),
-            2 => Ok(Self::ModuleChild { child: u64::decode(cursor)?, child_namespace: Cow::decode(cursor)? }),
             other => Err(Error::InvalidEnum(other)),
         }
     }

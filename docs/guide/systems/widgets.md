@@ -5,7 +5,7 @@ multiline text area, a radio group, a fixed-row virtual list, a button, a label,
 an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
 a numeric editor, a tooltip, a toast region, a dialog plate, and a splitter —
 as ordinary
-`#[actor(instanced, composable)]` types.
+`#[actor(instanced, child_of(WidgetPanel, ScrollWidget))]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -226,12 +226,13 @@ One rule per axis, so a name can be guessed rather than looked up.
   boolean, a number, an index, an `Option<u32>`. `SplitterConfig::position_pixels`
   is deliberately not spelled that way because it is not a seed.
 
-Every stock widget is `#[actor(instanced, composable)]`, so it satisfies
-`ChildOf<P>` for any Wasm actor parent in the same resident module. A custom
-widget intended for one panel can instead declare
-`#[actor(instanced, child_of(MyPanel))]`. Typed inline spawn names both types
-and verifies the ctx is actually running `MyPanel` before allocating the child
-alias; data-driven by-tag composition enforces the same cardinality and
+Every stock widget lists its parents in one `child_of(..)`: the panel root
+`WidgetPanel` and the scroll viewport `ScrollWidget`, both of which declare it in
+their `spawns(..)`, and the compositing `Widget` also lists itself. A custom
+widget declares the panel it is written for, as
+`#[actor(instanced, child_of(MyPanel))]`, and `MyPanel` declares it in
+`spawns(..)`; a `spawns(W)` whose `W` does not list the spawner does not
+compile. Data-driven by-tag composition enforces the same cardinality and
 placement facts at runtime.
 
 ## Buttons, emphasis, and tone

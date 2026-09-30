@@ -54,8 +54,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::Theme;
 use crate::{
-    ButtonActivated, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, SetWidgetState, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    ButtonActivated, ButtonConfig, ButtonEmphasis, ButtonTone, Collect, ScrollWidget, SetWidgetState,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
@@ -131,7 +131,7 @@ impl WidgetDefaults for ButtonWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ButtonConfig` again to relabel or restyle it in place.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ButtonWidget {
     type Config = ButtonConfig;
     const NAMESPACE: &'static str = "aether.widget.button";

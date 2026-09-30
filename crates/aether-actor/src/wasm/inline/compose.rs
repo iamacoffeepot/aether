@@ -743,6 +743,7 @@ mod tests {
     impl crate::Declared for TypedConfigChild {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl WasmActor for TypedConfigChild {
         type State = Self;

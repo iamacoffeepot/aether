@@ -60,6 +60,7 @@ impl aether_actor::Lifecycle<Self> for AliasWatcher {
 impl aether_actor::Declared for AliasWatcher {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for AliasWatcher {
     type State = Self;
@@ -196,6 +197,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     impl aether_actor::Declared for Host {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for Host {
         type State = Self;

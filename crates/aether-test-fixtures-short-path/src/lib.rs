@@ -1,7 +1,7 @@
 //! ADR-0241 §5 fixture: guest children a short path reaches.
 //!
-//! No type here is composable, so each parent declares exactly one instanced
-//! child type and a hole beneath it names that child:
+//! Each parent here is named in exactly one instanced child type's
+//! `child_of(..)`, so a hole beneath it names that child:
 //!
 //! - `Trunk` (exported root) spawns the private inline `Branch` as `branch`
 //!   when bumped, and `Branch` spawns the private inline `Leaf` as `leaf` in

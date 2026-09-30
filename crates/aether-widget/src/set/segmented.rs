@@ -26,8 +26,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetSelection, SetWidgetState, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, HoverLost, ScrollWidget, SegmentedConfig, SegmentedSelected, SetSelection, SetWidgetState,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -257,7 +257,7 @@ impl WidgetDefaults for SegmentedWidget {
 
 /// A segmented widget. Spawned inline by a panel root with a
 /// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SegmentedWidget {
     type Config = SegmentedConfig;
     const NAMESPACE: &'static str = "aether.widget.segmented";

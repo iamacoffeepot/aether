@@ -4,7 +4,7 @@ error[E0277]: the position `Here` does not hold `Peer` in the declared list `()`
 47 |     type Index = aether_actor::Here;
    |                  ^^^^^^^^^^^^^^^^^^ no declaration backs this entry
    |
-   = note: a dependency is declared in `depends(..)` and an inline child in `spawns(..)` on the actor's `#[actor(..)]`, and a module's listing in its `export!`; only those expansions write these markers
+   = note: a dependency is declared in `depends(..)`, an inline child in `spawns(..)`, and a parent in `child_of(..)` on the actor's `#[actor(..)]`, and a module's listing in its `export!`; only those expansions write these markers
 help: the trait `ListIndex<(), Peer>` is not implemented for `Here`
       but trait `ListIndex<(Peer, _), Peer>` is implemented for it
   --> $WORKSPACE/crates/aether-actor/src/model/declared.rs

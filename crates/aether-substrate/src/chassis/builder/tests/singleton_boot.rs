@@ -54,6 +54,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     impl aether_actor::Declared for ProbeCap {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for ProbeCap {
         type State = Self;
@@ -155,6 +156,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     impl aether_actor::Declared for LocalProbe {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for LocalProbe {
         type State = Self;
@@ -230,6 +232,7 @@ macro_rules! counting_cap {
         impl aether_actor::Declared for $type {
             type Depends = ();
             type Spawns = ();
+            type Parents = ();
         }
         impl NativeActor for $type {
             type State = Self;

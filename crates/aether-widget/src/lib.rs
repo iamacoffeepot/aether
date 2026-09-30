@@ -7,7 +7,7 @@
 
 //! The widget-compositing actor (ADR-0117).
 //!
-//! One `#[actor(instanced, composable)]` type realizes every role in a widget tree —
+//! One `#[actor(instanced, child_of(..))]` type realizes every role in a widget tree —
 //! root, interior, and leaf — selected by its [`WidgetConfig`]. It is
 //! loaded (the root) or spawned as an inline child (everything below), and
 //! the same protocol handlers drive it whichever it is:
@@ -76,7 +76,7 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // selector (`aether_widget@aether.widget.*` /
 // `aether_widget@aether.widget.editor`), never by list position. ADR-0114
 // §5 reconstructs inline children from this same list, so every instanced
-// composable widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
+// child widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
 // Dialog, and Splitter — must appear here; omitting one drops that type from
 // named load and from replace_component reconstruct.
 //
@@ -1419,7 +1419,13 @@ mod tests {
 /// render sender: the root emits every widget's solid/textured draws in
 /// structural depth-first order, grouping only adjacent compatible items, so
 /// a background drawn as root chrome sits under the children by construction.
-#[actor(instanced, root, composable, depends(LifecycleCapability, RenderCapability, TextCapability), spawns(Widget))]
+#[actor(
+    instanced,
+    root,
+    child_of(WidgetPanel, ScrollWidget, Widget),
+    depends(LifecycleCapability, RenderCapability, TextCapability),
+    spawns(Widget)
+)]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
     const NAMESPACE: &'static str = "aether.widget";

@@ -379,37 +379,12 @@ pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> 
         ));
     }
 
-    if opts.composable {
-        len_terms.push(quote! {
-            1 + ::aether_actor::__macro_internals::actor_lineage_module_child_len(
-                #actor_tag,
-                #actor_namespace,
-            )
-        });
-        copy_blocks.push(emit_record_copy_block(
-            &section_version,
-            &quote! {
-                ::aether_actor::__macro_internals::actor_lineage_module_child_len(
-                    #actor_tag,
-                    #actor_namespace,
-                )
-            },
-            &quote! {
-                ::aether_actor::__macro_internals::write_actor_lineage_module_child::<RECORD_LEN>(
-                    #actor_tag,
-                    #actor_namespace,
-                )
-            },
-        ));
-    }
-
     let len_expr = if len_terms.is_empty() {
         quote! { 0usize }
     } else {
         quote! { #(#len_terms)+* }
     };
     let is_instanced = matches!(opts.cardinality, Some(ActorCardinality::Instanced));
-    let module_child = opts.composable;
     let exact_parent_tags = opts.child_of.iter().map(|parent| {
         quote! {
             ::aether_actor::__macro_internals::ActorTypeTag::of::<#parent>()
@@ -421,7 +396,6 @@ pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> 
         pub const __AETHER_PLACEMENT: ::aether_actor::__macro_internals::WasmPlacementFacts =
             ::aether_actor::__macro_internals::WasmPlacementFacts {
                 is_instanced: #is_instanced,
-                module_child: #module_child,
                 exact_parent_tags: &[#(#exact_parent_tags),*],
             };
 

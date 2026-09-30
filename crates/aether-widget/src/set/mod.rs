@@ -1,4 +1,4 @@
-//! The concrete widget set: module-composable `#[actor(instanced, composable)]`
+//! The concrete widget set: `#[actor(instanced, child_of(WidgetPanel, ScrollWidget))]`
 //! child actors a panel root spawns as inline children and drives by mail in four
 //! lanes — config / style / layout-frame data-down, value events-up — over the
 //! ADR-0117 draw-compositing protocol.

@@ -40,8 +40,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuItem, SetWidgetState, WidgetDismiss,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
+    Collect, FocusLost, HoverLost, Menu, MenuBarActivated, MenuBarConfig, MenuItem, ScrollWidget, SetWidgetState,
+    WidgetDismiss, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged, WidgetPanel,
 };
 
 /// Thickness, in pixels, of the plate's outline ring and of an item divider.
@@ -487,7 +487,7 @@ impl WidgetDefaults for MenuBarWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `MenuBarConfig` again to replace the menus in place.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for MenuBarWidget {
     type Config = MenuBarConfig;
     const NAMESPACE: &'static str = "aether.widget.menu_bar";

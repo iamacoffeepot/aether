@@ -89,6 +89,7 @@ impl aether_actor::Lifecycle<Self> for TickSource {
 impl aether_actor::Declared for TickSource {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for TickSource {
     type State = Self;

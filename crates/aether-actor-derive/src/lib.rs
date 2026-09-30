@@ -171,8 +171,7 @@ fn parse_runtime_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         || opts.root
         || !opts.child_of.is_empty()
         || !opts.depends.is_empty()
-        || !opts.spawns.is_empty()
-        || opts.composable;
+        || !opts.spawns.is_empty();
     if identity_declared {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),

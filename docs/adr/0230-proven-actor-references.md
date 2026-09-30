@@ -301,7 +301,7 @@ reach.** The first row checked dependencies only at component load and
 boot-plan load (wasm) and at each native birth site. Migrating call sites to
 ADR-0232's flat verbs exposed two gaps:
 
-- **Inline-spawnable actors.** A composable actor that a guest spawns inline
+- **Inline-spawnable actors.** An instanced actor that a guest spawns inline
   through `spawn_inline_child_by_tag` (the kit-widget types, the behavior
   host's children) runs in the guest, and the host sees it only when the guest
   asks for its alias. A `depends(R)` on such an actor compiled a `DependsOn`

@@ -38,6 +38,7 @@ impl Addressable for WasmTrampoline {
 impl Declared for WasmTrampoline {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 
 impl HandlesKind<DropComponent> for WasmTrampoline {}

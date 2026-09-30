@@ -4,6 +4,7 @@
 - **Date:** 2026-07-24
 - **Accepted:** 2026-07-24
 - **Last amended:** 2026-09-29
+- **Amended:** 2026-09-29 — `composable`, `ModuleChild`, and the `ModuleChild` lineage record are retired: every child names its parents in one `child_of(A, B, ..)` list, written once like `depends(..)`, which becomes `Declared::Parents`; each `ChildOf<P>` impl names `P`'s position there, so the list is the actor's whole placement set. `ACTOR_LINEAGE_SECTION_VERSION` is `0x03`, and a module built before it is refused until rebuilt (#7210).
 
 ## Context
 
