@@ -1,9 +1,9 @@
 //! `aether.component` capability: publishing, spawning, loading, dropping,
-//! and replacing wasm components.
+//! and republishing wasm components.
 //!
 //! Two modules, one capability. [`component`] is the `aether.component`
 //! mailbox itself, the [`ComponentHostCapability`] singleton that receives
-//! `aether.component.{publish,spawn,load,drop,replace}`. [`trampoline`] is the
+//! `aether.component.{publish,spawn,load,drop}`. [`trampoline`] is the
 //! [`WasmTrampoline`] native actor that every loaded wasm component runs in,
 //! one instance per component, named by the guest's own published namespace:
 //! `NS`, `NS:key`, or `parent/NS:key` (ADR-0241 §5).
@@ -17,15 +17,14 @@
 //! caller as its reply target, so the trampoline answers the caller
 //! directly. The trampoline manages its own lifecycle and dispatch rides the
 //! framework's `NativeActor` loop. A drop closes the trampoline, so its name
-//! tombstones and is never loaded again (ADR-0241 §8). `ReplaceComponent`
+//! tombstones and is never loaded again (ADR-0241 §8). A successor `Publish`
 //! republishes a module as one group (ADR-0241 §7): the host drives every
 //! live instance of the module's namespaces through a prepare, commit or
 //! abort, and each trampoline swaps its `Component` behind a stable mailbox
 //! handle, so a mailbox id or route cache taken before the swap stays valid
-//! (ADR-0022); a `Publish` or a load of a successor module republishes the
-//! same way. [`kinds`] holds the
-//! capability's own internal mail, such as the contexts its staged loads
-//! carry.
+//! (ADR-0022); a load of a successor module republishes the same way.
+//! [`kinds`] holds the capability's own internal mail, such as the contexts
+//! its staged loads carry.
 //!
 //! The `runtime` feature carries the wasmtime half:
 //! `ComponentHostCapabilityState`, `WasmTrampolineState`, and the

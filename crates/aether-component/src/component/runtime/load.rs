@@ -7,7 +7,7 @@
 //! module already published is not published again, a first publish binds
 //! it, and a successor republishes every live instance of its namespaces as
 //! one group (§7) before the load's guest is spawned. A load of a namespace
-//! a republish holds waits in that republish until the replace answers.
+//! a republish holds waits in that republish until the republish answers.
 //!
 //! The spawn half answers a name that is already live with the instance
 //! there, which is not re-initialised, and otherwise stages the guest's
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode};
 use aether_data::{Blob, BlobHash, ErasedActorPath};
-use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, SpawnResult};
+use aether_kinds::{ComponentCapabilities, LoadComponent, SpawnResult};
 
 use aether_substrate::actor::native::{
     GuestBirth, GuestOutcome, Held, RegistryBatch, RegistryBatchResult, TaskDone, spawn::Subname,
@@ -272,26 +272,6 @@ impl ComponentHostCapabilityState {
         self.begin_load_at(ctx, held, payload, LoadPlacement::Root);
     }
 
-    /// A load beneath a live parent: an adapter over the load, with the
-    /// parent proven first, until its callers move to `Spawn` (#7163).
-    pub fn begin_load_under<M: ReplyMode>(
-        &mut self,
-        ctx: &mut HostCtx<'_, M>,
-        held: Held<LoadResult>,
-        payload: LoadComponentUnder,
-    ) {
-        let placement = ErasedActorPath::new(&payload.parent)
-            .map_err(|error| error.to_string())
-            .and_then(|parent| Self::placement_under(ctx, &parent));
-        match placement {
-            Ok(placement) => self.begin_load_at(ctx, held, payload.load, placement),
-            Err(error) => held.answer(
-                ctx,
-                &LoadResult::Err { error: format!("component parent {:?} did not resolve: {error}", payload.parent) },
-            ),
-        }
-    }
-
     /// The placement beneath the live actor `parent` names. ADR-0230 §1: the
     /// parent must be `Live`. A `Starting` parent resolves as an address but
     /// does not prove, so a child is never staged beneath an unborn parent;
@@ -440,22 +420,24 @@ impl ComponentHostCapabilityState {
             };
             let tag = aether_data::ActorId::singleton(requested).0;
             (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
-        } else if manifest.no_default() {
-            let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
-            return Err(format!(
-                "module has no default (ADR-0138): load one of its exports by name via the export selector; exported types: {available:?}"
-            ));
         } else {
-            let default_actor = manifest.boot().map_or_else(
-                || actors.first(),
-                |boot_ns| actors.iter().find(|actor| actor.namespace.as_deref() != Some(boot_ns)),
-            );
-            (
-                default_actor.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
-                default_actor.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
-                None,
-                default_actor.and_then(|actor| actor.namespace.clone()),
-            )
+            // ADR-0241 §9: every spawn names its namespace, so an unselected
+            // load takes the module's one non-boot export and is refused,
+            // naming every export, when there is not exactly one; an
+            // `export!(default = …)` opt-in selects nothing here.
+            let boot_ns = manifest.boot();
+            let selectable: Vec<_> = actors
+                .iter()
+                .filter(|actor| boot_ns.is_none_or(|boot_ns| actor.namespace.as_deref() != Some(boot_ns)))
+                .collect();
+            let [sole] = selectable.as_slice() else {
+                let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
+                return Err(format!(
+                    "load selects no export (ADR-0138): load one of the module's exports by name via the export \
+                     selector; exported types: {available:?}"
+                ));
+            };
+            (sole.capabilities.clone(), sole.dependencies.clone(), None, sole.namespace.clone())
         };
 
         let Some(namespace) = selected_namespace.or_else(|| manifest.namespace().map(str::to_owned)) else {
