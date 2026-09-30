@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Portable guest SDK for bloomery WASM programs: Program, Env, and invoke mail."
+description = "Portable guest SDK for bloomery authoring: programs, views, reactors, and the bundle export generator."
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
+aether-bloomery-derive = { path = "../aether-bloomery-derive" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-aether-bloomery-program-derive = { path = "../aether-bloomery-program-derive" }
-aether-data = { path = "../aether-data" }
+aether-data = { path = "../aether-data", features = ["derive"] }
 aether-http = { path = "../aether-http", default-features = false }
 aether-process = { path = "../aether-process", default-features = false }
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
@@ -19,11 +19,17 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 aether-component = { path = "../aether-component" }
-aether-data = { path = "../aether-data", features = ["derive"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-http = { path = "../aether-http", features = ["runtime"] }
 aether-kinds = { path = "../aether-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+aether-test-fixtures-reactor = { path = "../aether-test-fixtures-reactor" }
 wasmparser = "0.246"
+
+# The reactor tests load this fixture's built wasm by stem, so the cargo edge
+# exists solely for determinator and dist pre-build visibility.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-reactor"] # aether-suppression-request: the fixture edge exists for determinator/dist visibility (its wasm is loaded by stem, never imported)
 
 [lints]
 workspace = true

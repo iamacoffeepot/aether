@@ -38,7 +38,7 @@ tracing = { workspace = true, default-features = false }
 # composition, its workspace dialing the stub Engine API daemon.
 [dev-dependencies]
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
-aether-bloomery-view = { path = "../aether-bloomery-view" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-chassis-bloomery = { path = "../aether-chassis-bloomery" }
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }

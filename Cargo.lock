@@ -97,7 +97,7 @@ dependencies = [
  "aether-bloomery-driver",
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
- "aether-bloomery-view",
+ "aether-bloomery-program",
  "aether-bloomery-workspace",
  "aether-bloomery-workspace-programs",
  "aether-chassis-bloomery",
@@ -110,25 +110,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-bloomery-bundle"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-bloomery-bundle-derive",
- "aether-bloomery-kinds",
- "aether-bloomery-program",
- "aether-bloomery-reactor",
-]
-
-[[package]]
-name = "aether-bloomery-bundle-derive"
+name = "aether-bloomery-derive"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
- "aether-bloomery-reactor",
  "aether-data",
+ "aether-http",
  "proc-macro2",
  "quote",
  "serde",
@@ -144,7 +133,6 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
- "aether-bloomery-view",
  "aether-bloomery-workspace",
  "aether-component",
  "aether-data",
@@ -187,7 +175,6 @@ name = "aether-bloomery-muse"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-codec",
@@ -202,8 +189,8 @@ name = "aether-bloomery-program"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-derive",
  "aether-bloomery-kinds",
- "aether-bloomery-program-derive",
  "aether-bloomery-workspace",
  "aether-codec",
  "aether-component",
@@ -212,56 +199,10 @@ dependencies = [
  "aether-http",
  "aether-kinds",
  "aether-process",
- "serde_json",
- "wasmparser 0.246.2",
-]
-
-[[package]]
-name = "aether-bloomery-program-derive"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-bloomery-kinds",
- "aether-bloomery-program",
- "aether-data",
- "aether-http",
- "proc-macro2",
- "quote",
- "syn",
- "trybuild",
-]
-
-[[package]]
-name = "aether-bloomery-reactor"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-bloomery-kinds",
- "aether-bloomery-program",
- "aether-bloomery-reactor-derive",
- "aether-bloomery-view",
- "aether-data",
- "aether-harness-substrate",
- "aether-kinds",
  "aether-test-fixtures-kinds",
  "aether-test-fixtures-reactor",
- "serde",
+ "serde_json",
  "wasmparser 0.246.2",
-]
-
-[[package]]
-name = "aether-bloomery-reactor-derive"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-bloomery-kinds",
- "aether-bloomery-reactor",
- "aether-bloomery-view",
- "aether-data",
- "proc-macro2",
- "quote",
- "serde",
- "syn",
- "trybuild",
 ]
 
 [[package]]
@@ -269,28 +210,6 @@ name = "aether-bloomery-tar"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery-kinds",
-]
-
-[[package]]
-name = "aether-bloomery-view"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-bloomery-kinds",
- "aether-bloomery-view-derive",
- "aether-data",
-]
-
-[[package]]
-name = "aether-bloomery-view-derive"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-bloomery-kinds",
- "aether-bloomery-view",
- "aether-data",
- "proc-macro2",
- "quote",
- "syn",
- "trybuild",
 ]
 
 [[package]]
@@ -321,7 +240,6 @@ name = "aether-bloomery-workspace-programs"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-workspace",
@@ -366,7 +284,7 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-muse",
- "aether-bloomery-view",
+ "aether-bloomery-program",
  "aether-bloomery-workspace",
  "aether-bloomery-workspace-programs",
  "aether-chassis",
@@ -624,7 +542,7 @@ dependencies = [
  "aether-actor",
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
- "aether-bloomery-view",
+ "aether-bloomery-program",
  "aether-bloomery-workspace",
  "aether-chassis",
  "aether-chassis-bloomery",
@@ -1073,7 +991,7 @@ name = "aether-test-fixtures-kinds"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-reactor",
+ "aether-bloomery-kinds",
  "aether-data",
  "bytemuck",
  "serde",
@@ -1084,11 +1002,8 @@ name = "aether-test-fixtures-mixed-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
- "aether-bloomery-reactor",
- "aether-bloomery-view",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
@@ -1101,7 +1016,6 @@ name = "aether-test-fixtures-program"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
@@ -1113,7 +1027,6 @@ name = "aether-test-fixtures-program-process"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
@@ -1125,7 +1038,6 @@ name = "aether-test-fixtures-program-workspace"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-workspace",
@@ -1137,10 +1049,8 @@ name = "aether-test-fixtures-reactor"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
- "aether-bloomery-reactor",
- "aether-bloomery-view",
+ "aether-bloomery-program",
  "aether-data",
  "aether-test-fixtures-kinds",
  "serde",
@@ -1151,10 +1061,8 @@ name = "aether-test-fixtures-reactor-call"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-bloomery-bundle",
  "aether-bloomery-kinds",
- "aether-bloomery-reactor",
- "aether-bloomery-view",
+ "aether-bloomery-program",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",

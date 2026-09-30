@@ -95,10 +95,8 @@ the bundle driver on the `aether-bloomery` binary.
 |---|---|
 | `aether-bloomery-kinds` | the shared `no_std` vocabulary: digests, typed citations, the tree, programs, heads, driver and reactor records and mail |
 | `aether-bloomery-journal` | the append-only, single-writer journal root: a `SQLite` log of typed events plus one digest-named blob file per content-addressed artifact, held under an exclusive lock (ADR-0220) |
-| `aether-bloomery-view` | folds over a journal prefix: the typed `Heads` last-move fold and the ADR-0226 request and activation folds |
-| `aether-bloomery-program`, `aether-bloomery-program-derive` | the guest SDK for stateless wasm programs (`Program`, `Env`, invoke mail) and its `#[program]` macro |
-| `aether-bloomery-reactor`, `aether-bloomery-reactor-derive` | reactor preparation and pure evaluation of typed stored-event arms, and the `#[reactor]` / `#[rule]` macros (ADR-0222) |
-| `aether-bloomery-bundle`, `aether-bloomery-bundle-derive` | the `bundle` export generator: one root for a module's programs and reactors |
+| `aether-bloomery-program` | the guest SDK for bloomery authoring: stateless wasm programs (`Program`, `Env`, invoke mail); the `view` module's folds over a journal prefix (the typed `Heads` last-move fold and the ADR-0226 request and activation folds); the `reactor` module's preparation and pure evaluation of typed stored-event arms (ADR-0222); and the `bundle` export generator, one root for a module's programs and reactors |
+| `aether-bloomery-derive` | the authoring macros: `#[program]`, `#[view]` / `#[fold]`, `#[reactor]` / `#[rule]`, and the `bundle` generator's codegen |
 | `aether-bloomery-driver` | the sans-io driver core: journal folds in, driver commands out, for both programs and reactors (ADR-0226) |
 | `aether-bloomery-muse` | the `muse.turn` Sampled program: one stateless responses-API turn per run (ADR-0234) |
 | `aether-bloomery-workspace-programs` | the bundle of workspace programs: `environment.merge`, the Pure program that places the imported toolchain directory in the imported base userland and declares the `Environment` it makes; `proof.clippy`, the Sampled program that runs clippy over a source tree in that environment through the workspace and cites the step's stderr in its `Passed` or `Failed` result; and `vendor.cargo`, the Sampled program that runs `cargo vendor --locked` over a source tree with the network on and cites the vendor tree `proof.clippy` mounts (ADR-0237) |

@@ -9,7 +9,7 @@ use aether_bloomery_kinds::{
     ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Transition, Utf8Text,
     artifact_digest,
 };
-use aether_bloomery_view::Heads;
+use aether_bloomery_program::Heads;
 use aether_data::Kind;
 use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;

@@ -10,7 +10,7 @@
 use std::fmt::{Debug, Write};
 
 use aether_bloomery_journal::{Digest, Entry, Journal, JournalReader, Seq};
-use aether_bloomery_view::View;
+use aether_bloomery_program::View;
 use aether_data::{KindId, Storage};
 
 use crate::SeededJournal;

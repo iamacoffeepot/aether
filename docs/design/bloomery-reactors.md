@@ -155,7 +155,7 @@ impl Reactor for SceneCompilation {
 
 aether_actor::export!(
     public = [SceneCompilation],
-    generators = [aether_bloomery_reactor::bundle_reactors],
+    generators = [aether_bloomery_program::bundle_reactors],
 );
 ```
 
@@ -476,7 +476,7 @@ The native view implementation needs a dependency split by responsibility:
 | Crate | Responsibility |
 | --- | --- |
 | `aether-bloomery-kinds` | Shared `no_std + alloc` data contracts, entries, and decoding |
-| `aether-bloomery-view` | Portable folds and view behavior |
+| `aether-bloomery-program` | Portable folds and view behavior (its `view` module) |
 | `aether-bloomery-journal` | Native persistence |
 
 The former native journal-owning `ViewRegistry` has no remaining production

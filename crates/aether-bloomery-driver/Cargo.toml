@@ -18,7 +18,6 @@ runtime = [
   "dep:aether-substrate",
   "dep:aether-bloomery-journal",
   "dep:aether-bloomery-program",
-  "dep:aether-bloomery-view",
   "dep:wasmparser",
 ]
 
@@ -42,7 +41,6 @@ aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
 aether-bloomery-program = { path = "../aether-bloomery-program", optional = true }
-aether-bloomery-view = { path = "../aether-bloomery-view", optional = true }
 wasmparser = { version = "0.246", optional = true }
 
 [dev-dependencies]

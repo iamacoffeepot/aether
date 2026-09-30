@@ -1,0 +1,13 @@
+error: #[rule] methods are synchronous; remove `async`
+  --> tests/ui/reactor/fail_async.rs:13:5
+   |
+13 |     async fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> SetHeads {
+   |     ^^^^^
+
+warning: unused import: `SetHeads`
+ --> tests/ui/reactor/fail_async.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Head, SetHeads, Tree};
+  |                                   ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

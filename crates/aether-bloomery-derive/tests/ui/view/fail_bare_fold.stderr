@@ -1,0 +1,5 @@
+error: #[fold] may only appear inside a #[view] impl block
+ --> tests/ui/view/fail_bare_fold.rs:7:5
+  |
+7 |     fn event(&mut self, _event: ()) {}
+  |     ^^

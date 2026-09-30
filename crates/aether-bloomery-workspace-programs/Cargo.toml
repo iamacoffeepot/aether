@@ -22,7 +22,6 @@ library = []
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
-aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }

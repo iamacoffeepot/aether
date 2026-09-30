@@ -1,8 +1,0 @@
-error[E0599]: no associated function or constant named `OK` found for struct `aether_bloomery_program::__macro_internals::RejectSampledOnPure<true>` in the current scope
-  --> tests/ui/fail_http_on_pure.rs:20:1
-   |
-20 | #[program]
-   | ^^^^^^^^^^ associated function or constant not found in `aether_bloomery_program::__macro_internals::RejectSampledOnPure<true>`
-   |
-   = note: the associated function or constant was found for `aether_bloomery_program::__macro_internals::RejectSampledOnPure<false>`
-   = note: this error originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)

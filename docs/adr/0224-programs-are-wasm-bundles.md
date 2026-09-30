@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-18
 - **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
-- **Amended:** 2026-09-24 — `export!` takes keyed entries only; a bundle is spelled `export!(public = [..], generators = [aether_bloomery_bundle::bundle])` (issue 6584).
+- **Amended:** 2026-09-24 — `export!` takes keyed entries only; a bundle is spelled `export!(public = [..], generators = [aether_bloomery_program::bundle])` (issue 6584).
 
 ## Context
 
@@ -38,7 +38,7 @@ Bloomery rewrite has not been deployed.
 1. **A program is part of a WASM bundle.** A bundle is one WASM artifact
    that carries one or more programs, written as
    `#[program] impl Program for X` and exported with
-   `export!(…, generators = [aether_bloomery_bundle::bundle])`, the one
+   `export!(…, generators = [aether_bloomery_program::bundle])`, the one
    generator for programs and reactors (ADR-0225 decision 8).
    The bundle's digest is its identity. A program is identified by
    `ProgramRef { bundle: Digest, name: ProgramName }`, and `ProgramName`
@@ -126,8 +126,8 @@ Bloomery rewrite has not been deployed.
 - Programs and reactors share one model: authored as functions, shipped
   as bundles, selected by head, loaded by digest, fed injected data, and
   recorded by native code.
-- `aether-bloomery-program` becomes a portable `no_std` guest SDK. A new
-  `aether-bloomery-program-derive` crate carries `#[program]` and the
+- `aether-bloomery-program` becomes a portable `no_std` guest SDK. The
+  `aether-bloomery-derive` proc-macro crate carries `#[program]` and the
   generator. Work orders: #6179 (SDK and mail) and #6180 (macro and
   bundle root).
 - Every invocation of one bundle shares a single WASM instance, which

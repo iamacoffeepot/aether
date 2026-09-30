@@ -16,16 +16,16 @@ that activation runs through the `core.cluster.activate` and
 `core.cluster.retire` programs.
 
 The code on main follows that shape. `bundle_reactors`
-(`crates/aether-bloomery-reactor-derive/src/bundle.rs`) generates a
+(then the reactor derive crate's `bundle.rs`) generated a
 coordinator at `aether.bloomery.reactor`. It takes a `ClusterConfig { output, ack }`
 of runtime mailbox names and spawns one persistent inline peer per reactor,
 named `r_<fnv64(NAMESPACE)>`. The coordinator binds a caller-supplied
 stream token (`Cluster::check_admit`, `StreamMismatch`). On a live `Event`
-it folds the views, encodes snapshots with `aether_bloomery_view::Publish`
+it folds the views, encodes snapshots with `aether_bloomery_program::Publish`
 into a `PreparedPrefix`, and mails that prefix to every peer. Peers send
 outputs with `send_to_named(output)` and report `PeerEvaluated` to their
 parent, and the coordinator acks with `send_to_named(ack)`. `EventBatch` is
-fold-only warmup. `Intent` (`crates/aether-bloomery-reactor/src/evaluate.rs`)
+fold-only warmup. `Intent` (`crates/aether-bloomery-program/src/reactor/evaluate.rs`)
 carries a kind name and bytes, but no reactor or rule.
 
 [ADR-0224](0224-programs-are-wasm-bundles.md) settled programs: one
@@ -123,7 +123,7 @@ bundle side of that boundary.
 8. **One generator, one root, programs and reactors together.** A bundle
    provides programs, reactors, or both. `#[program]` and `#[reactor]`
    still validate and tag their types, and one export generator,
-   `aether_bloomery_bundle::bundle`, replaces `bundle_programs` and
+   `aether_bloomery_program::bundle`, replaces `bundle_programs` and
    `bundle_reactors`. It reads both tags from the `export!` set and
    generates the single root at `aether.bloomery.bundle`, with the
    program handlers (`Invoke`, `Invoked`) when the bundle has programs
@@ -132,7 +132,7 @@ bundle side of that boundary.
    neither is a compile error. The handled kinds don't overlap, so each
    handler answers its own caller and nothing routes between roles. The
    program root's state moves into a library type beside
-   `aether_bloomery_reactor::Root`, so the generated root stays a thin
+   `aether_bloomery_program::reactor::Root`, so the generated root stays a thin
    shell. Each role keeps its own state inside the root, so a poisoned
    reactor stays poisoned in the reactor state and the bundle's programs
    keep answering. The root is declared at `aether.bloomery.bundle`, which
@@ -155,8 +155,8 @@ bundle side of that boundary.
 - In a bundle that provides both roles, program invocations and reactor
   evaluation run in one instance, so each waits behind the other. A
   bundle that provides one role is unaffected.
-- A program-only bundle links the reactor runtime through the
-  `aether-bloomery-bundle` facade. The unused code is stripped from the
+- A program-only bundle links the reactor runtime, which shares the
+  `aether-bloomery-program` crate. The unused code is stripped from the
   WASM, so the cost is compile time.
 - A WASM trap in a reactor root calls `fatal_abort` and kills the whole
   substrate ([ADR-0063](0063-fail-fast-on-abnormal-component-lifecycle.md);
@@ -174,7 +174,7 @@ bundle side of that boundary.
   digest, and seqs are unique only within one journal.
 - The snapshot path is retired: `PreparedPrefix`, `PublishedView`, the
   `Publish`-encoded view snapshots, and the peer and ack machinery.
-  `aether_bloomery_view::Publish` itself stays.
+  `aether_bloomery_program::Publish` itself stays.
 - `ClusterConfig`, the stream token, `EventBatch`, `PeerEvaluated`,
   `PreparedResult`, and `EvaluatedResult` are removed. The new kinds have
   to replace the old reactor event kind in one change, because the

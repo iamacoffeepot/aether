@@ -524,7 +524,7 @@ pub mod guest_alloc;
 /// | `public = [A, B, …]` | one or more actor types | exported: loadable by an export selector and spawnable by runtime tag (ADR-0096) |
 /// | `boot = B` | one actor type | exported, and instantiated once on every load of the module, whatever selector the caller names; never selectable (ADR-0147) |
 /// | `private = [C, …]` | one or more actor types | inline children the module rebuilds on a replace but does not export (ADR-0114 §5) |
-/// | `generators = [g, …]` | one or more generator macro paths | export generators, such as `aether_bloomery_bundle::bundle` (ADR-0224) |
+/// | `generators = [g, …]` | one or more generator macro paths | export generators, such as `aether_bloomery_program::bundle` (ADR-0224) |
 ///
 /// A `boot` type is not listed again under `public`. The exported set is
 /// `boot`, then `public`, whatever the source order. A module that exports
@@ -551,7 +551,7 @@ pub mod guest_alloc;
 ///
 /// # Generators
 ///
-/// `generators = [aether_bloomery_bundle::bundle]` names export-generator
+/// `generators = [aether_bloomery_program::bundle]` names export-generator
 /// macros (paths, not trait objects). This crate collects a framework-owned
 /// descriptor envelope per exported type — actor namespace plus optional
 /// namespaced extensions — by invoking each type's same-name companion macro
@@ -568,7 +568,7 @@ pub mod guest_alloc;
 /// ```ignore
 /// aether_actor::export!(
 ///     public = [Probe, ProbeWithConfig, SourcePublisher, SourceWitness, ReactorOutputSink],
-///     generators = [aether_bloomery_bundle::bundle],
+///     generators = [aether_bloomery_program::bundle],
 /// );
 /// ```
 ///

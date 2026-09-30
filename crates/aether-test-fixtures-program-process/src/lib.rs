@@ -47,6 +47,6 @@ impl Program for Exec {
     }
 }
 
-export!(public = [Exec], generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Exec], generators = [aether_bloomery_program::bundle]);
 
 const _: Exec = Exec;

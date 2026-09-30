@@ -15,7 +15,7 @@ use aether_bloomery_kinds::{
     Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove,
     RequestSource, Requested, Transition, Tree, UnitKey, WatchHeadResult,
 };
-use aether_bloomery_view::Heads;
+use aether_bloomery_program::Heads;
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
 use aether_bloomery_workspace::{Environment, ImageRef};
 use aether_chassis_bloomery::BloomeryCli;

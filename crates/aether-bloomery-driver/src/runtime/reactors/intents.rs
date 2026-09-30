@@ -7,7 +7,7 @@ use aether_bloomery_kinds::{
     ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifact, ReadArtifactResult, RequestSource, Requested,
     RuleName, SetHeads, decode_call_program, decode_set_heads,
 };
-use aether_bloomery_view::Heads;
+use aether_bloomery_program::Heads;
 use aether_data::{Kind, KindId};
 
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};

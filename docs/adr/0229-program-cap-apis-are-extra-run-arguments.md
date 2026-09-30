@@ -17,7 +17,7 @@ rejected because `R` can be Bloomery internals). Depends on
 `#[program]` still accepts only `(input, env)`. ADR-0228's sanctioned
 await is `Env<Async>::read` / `read_text`. `Mode::Sampled` still fails
 to compile (`require_pure_mode` in
-`crates/aether-bloomery-program-derive/src/parse.rs`). A Sampled program
+`crates/aether-bloomery-derive/src/program/parse.rs`). A Sampled program
 has no typed way to await `Fetch` / `FetchResult` after `env`.
 
 HTTP must not become a method on every `Env<Async>` (every async program
@@ -50,7 +50,7 @@ without editing the invocation child.
    name `Http`. Each trailing parameter is `InjectedApi`; the target is
    `A: Addressable`, whose reply contract types the binding's calls. The
    generated invocation child
-   (`crates/aether-bloomery-bundle-derive/src/expand/programs.rs`) sends to
+   (`crates/aether-bloomery-derive/src/bundle/expand/programs.rs`) sends to
    no target of its own: it sends only to its bundle root, which relays
    both the journal read `Env<Async>` already uses and each API call. The
    driver maps each API to a provider it holds and refuses any other.

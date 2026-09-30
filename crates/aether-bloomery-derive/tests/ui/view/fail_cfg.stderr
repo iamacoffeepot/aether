@@ -1,0 +1,13 @@
+error: #[fold] methods do not support cfg or cfg_attr; gate the complete #[view] impl instead
+  --> tests/ui/view/fail_cfg.rs:15:5
+   |
+15 |     #[cfg(any())]
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `View`
+ --> tests/ui/view/fail_cfg.rs:1:31
+  |
+1 | use aether_bloomery_program::{View, ViewCursor, view};
+  |                               ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
