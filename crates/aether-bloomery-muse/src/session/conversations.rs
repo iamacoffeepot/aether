@@ -6,15 +6,17 @@
 //! linked to its session's key; the `Requested` entry the loop's intent
 //! records is caused by that entry and takes the link over, and the run it
 //! requested is caused by the `Requested` entry and takes it over in turn.
-//! Each link is removed when it is used, so only live hops are kept.
+//! Each link is removed when it is used, so only live hops are kept. A wait
+//! before a retried turn is one more hop: the clock's run is caused by the
+//! `Requested` entry of the wait and takes the link over like a tool's run.
 
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
     CallInput, CallProgram, EncodedArtifact, ErasedRef, Fault, HeadChange, HeadMoved, ProgramName, ReactionFailed, Ref,
-    RequestSource, Requested, Seq, SetHeads, Transition, Tree, Utf8Text,
+    RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until, Utf8Text,
 };
-use aether_bloomery_program::{At, Cited, CitedError, Edited, Ran, Reactor, ViewCursor, tooled, view};
+use aether_bloomery_program::{At, Cited, CitedError, ClockUntil, Edited, Ran, Reactor, ViewCursor, tooled, view};
 
 use crate::input::{ToolCalls, ToolInput, ToolOutput, TurnInput};
 use crate::program::MuseTurn;
@@ -24,6 +26,7 @@ use crate::session::continue_::SessionContinue;
 use crate::session::open::SessionOpen;
 use crate::session::record::{CallAnswer, RecordInput, SessionRecord};
 use crate::session::replay::replay;
+use crate::session::retry::{MAX_RETRIES, retry_wait, wait_call};
 use crate::session::state::{Session, SessionKey, TurnLimit};
 use crate::session::tools::{MUSE, call};
 
@@ -46,8 +49,11 @@ pub struct Conversations {
 struct Conversation {
     /// The most turns this activation may make.
     limit: TurnLimit,
-    /// The turns it has made.
+    /// The turns it has made. A retried turn counts once.
     turns: u32,
+    /// The retries made of the turn now waiting to be retried, reset by any
+    /// turn the vendor did not refuse as transient.
+    retries: u32,
     /// The tree every call works on: the one the activation started from, or
     /// the one the last `Edited` result left.
     tree: Ref<Tree>,
@@ -80,11 +86,16 @@ enum Next {
     Limit(RecordInput),
     /// The record of a session whose turn rested it.
     Rest(RecordInput),
+    /// The wait before `turn` is sent again, after the vendor refused it as
+    /// transient.
+    Wait { turn: Ref<TurnInput>, until: Until },
+    /// `turn` sent again, once its wait fired.
+    Retry(Ref<TurnInput>),
 }
 
 impl Conversation {
     const fn new(limit: TurnLimit, tree: Ref<Tree>) -> Self {
-        Self { limit, turns: 0, tree, waiting: None, answered: None, next: None }
+        Self { limit, turns: 0, retries: 0, tree, waiting: None, answered: None, next: None }
     }
 
     /// Answer every refused call up to the next decoded one, and set what runs
@@ -144,6 +155,8 @@ impl Conversations {
             }
             Next::Turn(turn) => Some(call::<MuseTurn>(CallInput::Value(EncodedArtifact::new(turn).ok()?))),
             Next::Limit(record) => Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?))),
+            Next::Wait { until, .. } => wait_call(*until),
+            Next::Retry(turn) => Some(call::<MuseTurn>(CallInput::Stored(turn.digest()))),
             Next::Rest(_) => None,
         }
     }
@@ -159,7 +172,7 @@ impl Conversations {
     pub fn rest(&self, at: At) -> Option<CallProgram> {
         match self.next(at)? {
             Next::Rest(record) => Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?))),
-            Next::Call { .. } | Next::Turn(_) | Next::Limit(_) => None,
+            Next::Call { .. } | Next::Turn(_) | Next::Limit(_) | Next::Wait { .. } | Next::Retry(_) => None,
         }
     }
 
@@ -235,14 +248,23 @@ impl View for Conversations {
             return Ok(());
         };
         let (input, outcome) = (cited.get(run.input())?, cited.get(run.result())?.outcome().clone());
-        conversation.turns += 1;
         match outcome {
+            TurnOutcome::Transient { retry_after_secs } if conversation.retries < MAX_RETRIES => {
+                let until = retry_wait(at, retry_after_secs, conversation.retries);
+                conversation.retries += 1;
+                conversation.next = Some(Next::Wait { turn: run.input(), until });
+                self.keep(key, conversation, at.seq);
+            }
             TurnOutcome::Called { calls, text, .. } => {
+                conversation.turns += 1;
+                conversation.retries = 0;
                 let (turn, result) = (run.input(), run.result());
                 conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new() });
                 self.advance(key, conversation, at.seq);
             }
             TurnOutcome::Completed { .. } | TurnOutcome::Declined { .. } | TurnOutcome::Incomplete { .. } => {
+                conversation.turns += 1;
+                conversation.retries = 0;
                 let record = RecordInput::new(run.input(), run.result(), Vec::new(), conversation.tree);
                 conversation.next = Some(Next::Rest(record));
                 self.keep(key, conversation, at.seq);
@@ -272,6 +294,22 @@ impl View for Conversations {
             self.advance(key, conversation, at.seq);
         }
         Ok(())
+    }
+
+    /// The clock's run: the wait before a retried turn fired, when the run
+    /// answers the `Requested` the loop recorded for that wait.
+    #[fold]
+    fn fired(&mut self, _run: Ran<ClockUntil>, at: At) {
+        let linked = at.cause.and_then(|cause| self.sessions.get(self.links.get(&cause)?));
+        if !linked.is_some_and(|conversation| matches!(conversation.next, Some(Next::Wait { .. }))) {
+            return;
+        }
+        if let Some((key, mut conversation)) = self.take(at.cause)
+            && let Some(Next::Wait { turn, .. }) = conversation.next.take()
+        {
+            conversation.next = Some(Next::Retry(turn));
+            self.keep(key, conversation, at.seq);
+        }
     }
 
     #[fold]

@@ -56,6 +56,8 @@
 //! (`muse.echo`). Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`].
+//! A turn the vendor refuses as transient is sent again, byte-identical,
+//! after a wait on the driver's clock (ADR-0245), a few times at most.
 
 /// Implement [`aether_data::Invariant`], `Display`, and `Error` for error
 /// enums that carry a `const fn reason(self) -> &'static str`.
