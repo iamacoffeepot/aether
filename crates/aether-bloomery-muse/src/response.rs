@@ -7,17 +7,25 @@
 use std::collections::BTreeSet;
 
 use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
-use aether_bloomery_program::{Async, Env, program_name};
+use aether_bloomery_program::{Async, Env, ToolSchema, program_name};
 use aether_http::{FetchResult, HttpHeader};
 use serde::Deserialize;
 
-use crate::input::{CallId, OfferedTool, ToolCall, ToolCalls};
+use crate::arguments;
+use crate::input::{CallId, OfferedTool, ToolCall, ToolCalls, ToolInput};
 use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
 
 /// Stage the reply body and whatever text and call arguments it carries, and build the result that cites them.
 ///
-/// `offered` is the turn's offered tools: a call to any other program leaves the reply `Unreadable`.
-pub fn record(env: &mut Env<Async>, offered: &[OfferedTool], reply: FetchResult) -> Result<TurnResult, Refusal> {
+/// `offered` is the turn's offered tools: a call to any other program leaves the reply `Unreadable`. `inputs[i]` is
+/// the read input schema of `offered[i]`; each call's arguments decode against its tool's, and the call cites the
+/// staged input or the staged refusal.
+pub fn record(
+    env: &mut Env<Async>,
+    offered: &[OfferedTool],
+    inputs: &[ToolSchema],
+    reply: FetchResult,
+) -> Result<TurnResult, Refusal> {
     let (status, headers, body) = match reply {
         FetchResult::Ok { status, headers, body, .. } => (status, headers, body),
         FetchResult::Err { error, .. } => return Err(Refusal::Refused { reason: Detail::new(format!("{error:?}")) }),
@@ -32,7 +40,19 @@ pub fn record(env: &mut Env<Async>, offered: &[OfferedTool], reply: FetchResult)
         Classified::Called { calls, text, usage } => {
             let calls = calls
                 .into_iter()
-                .map(|(call_id, program, arguments)| ToolCall::new(call_id, program, env.stage_text(&arguments)))
+                .map(|(call_id, program, arguments)| {
+                    let (_, schema) = offered
+                        .iter()
+                        .zip(inputs)
+                        .find(|(tool, _)| *tool.program() == program)
+                        .expect("classify admits only calls to offered programs");
+                    let verbatim = env.stage_text(&arguments);
+                    let input = match arguments::decode(&arguments, schema) {
+                        Ok(payload) => ToolInput::Decoded(env.stage_payload(schema.kind_id(), &payload)),
+                        Err(reason) => ToolInput::Refused(env.stage_text(&reason)),
+                    };
+                    ToolCall::new(call_id, program, verbatim, input)
+                })
                 .collect();
             let calls = ToolCalls::new(calls).expect("classify checked the call list's rules");
             TurnOutcome::Called { calls, text: env.stage_text(&text), usage }
@@ -105,8 +125,8 @@ enum Classified {
 ///
 /// A `Transient` outcome carries `retry_after_secs` as read. The text is every
 /// `output_text` part of every `message` output item, concatenated in order.
-/// Reasoning items never contribute. A call's arguments are kept verbatim and
-/// never decoded.
+/// Reasoning items never contribute. A call's arguments are kept verbatim;
+/// [`record`] decodes them after.
 fn classify(
     status: u16,
     verdict: Option<bool>,
@@ -303,9 +323,10 @@ impl Usage {
 mod tests {
     use aether_http::HttpHeader;
 
-    use aether_bloomery_kinds::{ProgramName, Ref};
+    use aether_bloomery_kinds::ProgramName;
 
     use super::{Classified, classify, retry_after_secs, vendor_verdict};
+    use crate::input::tests::offered_tool;
     use crate::input::{CallId, OfferedTool};
     use crate::result::TurnUsage;
 
@@ -322,7 +343,7 @@ mod tests {
     }
 
     fn offer(names: &[&str]) -> Vec<OfferedTool> {
-        names.iter().map(|name| OfferedTool::new(program(name), Ref::of_text(name))).collect()
+        names.iter().map(|name| offered_tool(program(name))).collect()
     }
 
     fn one_header(name: &str, value: &str) -> Vec<HttpHeader> {

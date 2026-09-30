@@ -1,7 +1,7 @@
 //! The one `Fetch` a turn sends: the offered tools and the whole
 //! conversation, stateless.
 //!
-//! Pure over the input and its read texts, so the request the recorded
+//! Pure over the input and its read and rendered texts, so the request the recorded
 //! closure describes is testable without the invocation machinery. The
 //! program sets exactly one header and no credential.
 
@@ -64,7 +64,7 @@ struct Part<'a> {
 }
 
 impl<'a> Item<'a> {
-    /// The request item for `item`, whose cited text reads as `text`.
+    /// The request item for `item`, which sends `text`.
     fn new(item: &'a TurnItem, text: &'a str) -> Result<Self, Refusal> {
         Ok(match item {
             TurnItem::Message { role, .. } => {
@@ -120,8 +120,9 @@ fn definition(tool: &OfferedTool, text: &str) -> Result<Value, Refusal> {
     Ok(definition)
 }
 
-/// Build the turn's request. `texts[i]` is the read text of `input.items()[i]`
-/// and `definitions[j]` the read definition of `input.tools()[j]`.
+/// Build the turn's request. `texts[i]` is the text `input.items()[i]` sends
+/// (see [`crate::render`]) and `definitions[j]` the read definition of
+/// `input.tools()[j]`.
 ///
 /// # Errors
 ///
@@ -160,9 +161,10 @@ mod tests {
     use serde_json::json;
 
     use super::{TURN_TIMEOUT_MILLIS, fetch};
+    use crate::input::tests::offered_tool;
     use crate::input::{
-        CallId, Endpoint, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall,
-        TurnInput, TurnItem, TurnItems,
+        CallId, Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput,
+        ToolOutput, TurnInput, TurnItem, TurnItems,
     };
 
     fn input(tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
@@ -180,10 +182,8 @@ mod tests {
         ProgramName::new(name).expect("program name")
     }
 
-    fn offered(names: &[&str], definitions: &[String]) -> OfferedTools {
-        let tools =
-            names.iter().zip(definitions).map(|(name, text)| OfferedTool::new(program(name), Ref::of_text(text)));
-        OfferedTools::new(tools.collect()).expect("tools")
+    fn offered(names: &[&str]) -> OfferedTools {
+        OfferedTools::new(names.iter().map(|name| offered_tool(program(name))).collect()).expect("tools")
     }
 
     #[test]
@@ -233,14 +233,22 @@ mod tests {
         ];
         let definition_texts = definitions.iter().map(ToString::to_string).collect::<Vec<_>>();
         let texts = ["Read the notes.", r#"{"path":"notes.md"}"#, "a bloom"].map(String::from);
-        let call =
-            ToolCall::new(CallId::new("call_1").expect("call id"), program("workspace.read"), Ref::of_text(&texts[1]));
+        let refused = ToolInput::Refused(Ref::of_text(&texts[2]));
+        let call = ToolCall::new(
+            CallId::new("call_1").expect("call id"),
+            program("workspace.read"),
+            Ref::of_text(&texts[1]),
+            refused,
+        );
         let items = vec![
             TurnItem::message(Role::User, Ref::of_text(&texts[0])),
             TurnItem::Call(call),
-            TurnItem::CallOutput { call_id: CallId::new("call_1").expect("call id"), output: Ref::of_text(&texts[2]) },
+            TurnItem::CallOutput {
+                call_id: CallId::new("call_1").expect("call id"),
+                output: ToolOutput::Refused(Ref::of_text(&texts[2])),
+            },
         ];
-        let input = input(offered(&["workspace.read", "muse.turn"], &definition_texts), items);
+        let input = input(offered(&["workspace.read", "muse.turn"]), items);
 
         let request = fetch(&input, &texts, &definition_texts).expect("a well-offered turn builds");
 
@@ -282,7 +290,7 @@ mod tests {
         ];
         for (label, text) in cases {
             let definitions = [text];
-            let input = input(offered(&["workspace.read"], &definitions), items.clone());
+            let input = input(offered(&["workspace.read"]), items.clone());
             assert!(matches!(fetch(&input, &texts, &definitions), Err(Refusal::Refused { .. })), "{label} refuses");
         }
     }

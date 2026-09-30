@@ -1,8 +1,10 @@
-//! The conversation a turn resends: a flat, ordered list of role-tagged texts.
+//! The conversation a turn resends: a flat, ordered list of role-tagged
+//! texts, and the calls and outputs replayed from earlier turns.
 
 use std::collections::BTreeSet;
 
-use aether_bloomery_kinds::{Ref, Utf8Text};
+use aether_bloomery_kinds::{Digest, ErasedRef, Ref, Utf8Text};
+use aether_bloomery_program::ToolSchema;
 
 use super::tools::{CallId, ToolCall};
 
@@ -36,9 +38,8 @@ pub enum TurnItem {
     CallOutput {
         /// The id of the earlier call this is the output of.
         call_id: CallId,
-        /// The cited output text: the program's result, or the reason its
-        /// arguments did not decode.
-        output: Ref<Utf8Text>,
+        /// The program's result, or the reason its arguments did not decode.
+        output: ToolOutput,
     },
 }
 
@@ -48,16 +49,29 @@ impl TurnItem {
     pub const fn message(role: Role, text: Ref<Utf8Text>) -> Self {
         Self::Message { role, text }
     }
+}
 
-    /// The cited text the item carries: a message's text, a call's
-    /// arguments, or a call's output.
+/// What a replayed call produced.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub enum ToolOutput {
+    /// The program's stored result, sent rendered to JSON with its schema.
+    Result {
+        /// The cited schema of the program's result. The output cites its
+        /// own, since a later turn may no longer offer the program.
+        schema: Ref<ToolSchema>,
+        /// The cited result, stored under the schema's kind.
+        result: ErasedRef,
+    },
+    /// Why the call's arguments did not decode, sent as its stored text.
+    Refused(Ref<Utf8Text>),
+}
+
+impl ToolOutput {
+    /// The result stored at `digest`, cited under the kind of `tool_schema`,
+    /// the value `schema` cites.
     #[must_use]
-    pub const fn text(&self) -> Ref<Utf8Text> {
-        match self {
-            Self::Message { text, .. } => *text,
-            Self::Call(call) => call.arguments(),
-            Self::CallOutput { output, .. } => *output,
-        }
+    pub fn result(schema: Ref<ToolSchema>, tool_schema: &ToolSchema, digest: Digest) -> Self {
+        Self::Result { schema, result: ErasedRef::new(tool_schema.kind_id(), digest) }
     }
 }
 
@@ -152,8 +166,9 @@ mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref, Utf8Text};
     use aether_data::{Storage, StorageData};
 
-    use super::{Role, TurnItem, TurnItems};
-    use crate::input::tools::{CallId, OfferedTool, OfferedTools};
+    use super::{Role, ToolOutput, TurnItem, TurnItems};
+    use crate::input::tests::offered_tool;
+    use crate::input::tools::{CallId, OfferedTools};
     use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, TurnInput};
 
     #[test]
@@ -171,7 +186,7 @@ mod tests {
         let decoded = |bytes: &[u8]| TurnInput::decode_storage(bytes).map(|data| data.value);
 
         let user = TurnItem::message(Role::User, Ref::<Utf8Text>::of_text("hello"));
-        let tool = OfferedTool::new(ProgramName::new("muse.turn").expect("program"), Ref::of_text("{}"));
+        let tool = offered_tool(ProgramName::new("muse.turn").expect("program"));
         let tools = OfferedTools::new(vec![tool]).expect("one tool");
         let valid = input(tools, TurnItems::new(vec![user.clone()]).expect("one user item"));
         assert_eq!(decoded(&stored(valid.clone())).ok(), Some(valid), "a valid input decodes");
@@ -182,7 +197,7 @@ mod tests {
         assert!(decoded(&stored(input(no_tools(), assistant_last))).is_err(), "an assistant-last list refuses");
         let orphan = TurnItems(vec![TurnItem::CallOutput {
             call_id: CallId::new("call_1").expect("call id"),
-            output: Ref::of_text("done"),
+            output: ToolOutput::Refused(Ref::of_text("done")),
         }]);
         assert!(decoded(&stored(input(no_tools(), orphan))).is_err(), "an orphan call output refuses");
     }

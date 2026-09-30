@@ -3,15 +3,22 @@
 //! A tool is a program to run. The caller names every offered program and
 //! cites the definition it rendered with
 //! `aether_bloomery_program::tool_definition`, so the recorded input holds
-//! exactly what was sent; nothing defaults to every declared program. A call
-//! carries its arguments verbatim as cited text: `muse.turn` never decodes
-//! them.
+//! exactly what was sent; nothing defaults to every declared program. The
+//! caller also cites the program's input and result schemas
+//! ([`ToolSchema::of`]), so `muse.turn` links no tool's types.
+//!
+//! A call cites its arguments exactly as the model wrote them, to replay
+//! them unchanged, and cites what `muse.turn` made of them against the
+//! offered input schema: the decoded input, stored under the input's kind,
+//! or the text of the refused decode.
 
 use std::collections::BTreeSet;
 
-use aether_bloomery_kinds::{ProgramName, Ref, Utf8Text};
+use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Utf8Text};
+use aether_bloomery_program::ToolSchema;
 
-/// One program offered to the model, with the definition sent for it.
+/// One program offered to the model, with the definition sent for it and
+/// the schemas of its input and result.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct OfferedTool {
     /// The program the model may ask to run.
@@ -19,13 +26,25 @@ pub struct OfferedTool {
     /// The cited responses-API function definition sent for the program: a
     /// JSON object whose `name` is the program's function name.
     definition: Ref<Utf8Text>,
+    /// The cited schema of the program's input, which a call's arguments
+    /// decode against.
+    input: Ref<ToolSchema>,
+    /// The cited schema of the program's result, which the call's output
+    /// renders with.
+    result: Ref<ToolSchema>,
 }
 
 impl OfferedTool {
-    /// Offer `program`, sending the cited `definition` for it.
+    /// Offer `program`, sending the cited `definition` for it, with the cited
+    /// schemas of its `input` and `result`.
     #[must_use]
-    pub const fn new(program: ProgramName, definition: Ref<Utf8Text>) -> Self {
-        Self { program, definition }
+    pub const fn new(
+        program: ProgramName,
+        definition: Ref<Utf8Text>,
+        input: Ref<ToolSchema>,
+        result: Ref<ToolSchema>,
+    ) -> Self {
+        Self { program, definition, input, result }
     }
 
     /// The program the model may ask to run.
@@ -38,6 +57,18 @@ impl OfferedTool {
     #[must_use]
     pub const fn definition(&self) -> Ref<Utf8Text> {
         self.definition
+    }
+
+    /// The cited schema of the program's input.
+    #[must_use]
+    pub const fn input(&self) -> Ref<ToolSchema> {
+        self.input
+    }
+
+    /// The cited schema of the program's result.
+    #[must_use]
+    pub const fn result(&self) -> Ref<ToolSchema> {
+        self.result
     }
 }
 
@@ -159,8 +190,19 @@ impl CallId {
     }
 }
 
-/// One call the model asked for: its id, the program, and the arguments as
-/// the model wrote them.
+/// What a call's arguments decoded to against the offered input schema.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub enum ToolInput {
+    /// The program's input, stored under the input's kind: the input to run
+    /// the program with.
+    Decoded(ErasedRef),
+    /// Why the arguments did not decode: the text to replay as the call's
+    /// output.
+    Refused(Ref<Utf8Text>),
+}
+
+/// One call the model asked for: its id, the program, the arguments as the
+/// model wrote them, and the input they decoded to.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct ToolCall {
     /// The vendor's id for the call, which its output names.
@@ -170,13 +212,16 @@ pub struct ToolCall {
     /// The cited arguments, verbatim: JSON the program's input may or may
     /// not decode from.
     arguments: Ref<Utf8Text>,
+    /// The decoded input, or the refused decode's text.
+    input: ToolInput,
 }
 
 impl ToolCall {
-    /// One call `call_id` to `program` with the cited `arguments`.
+    /// One call `call_id` to `program` with the cited `arguments`, which
+    /// decoded to `input`.
     #[must_use]
-    pub const fn new(call_id: CallId, program: ProgramName, arguments: Ref<Utf8Text>) -> Self {
-        Self { call_id, program, arguments }
+    pub const fn new(call_id: CallId, program: ProgramName, arguments: Ref<Utf8Text>, input: ToolInput) -> Self {
+        Self { call_id, program, arguments, input }
     }
 
     /// The vendor's id for the call.
@@ -195,6 +240,12 @@ impl ToolCall {
     #[must_use]
     pub const fn arguments(&self) -> Ref<Utf8Text> {
         self.arguments
+    }
+
+    /// The decoded input, or the refused decode's text.
+    #[must_use]
+    pub const fn input(&self) -> &ToolInput {
+        &self.input
     }
 }
 
@@ -271,9 +322,8 @@ mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref};
     use aether_data::{Storage, StorageData};
 
-    use super::{
-        CallId, CallIdError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall, ToolCalls, ToolCallsError,
-    };
+    use super::{CallId, CallIdError, OfferedTools, OfferedToolsError, ToolCalls, ToolCallsError};
+    use crate::input::tests::{call, offered_tool};
     use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems};
 
     #[test]
@@ -293,7 +343,7 @@ mod tests {
         }
 
         let program = |name: &str| ProgramName::new(name).expect("program name");
-        let tool = |name: &str| OfferedTool::new(program(name), Ref::of_text(name));
+        let tool = |name: &str| offered_tool(program(name));
         let distinct = |count: usize| (0..count).map(|index| tool(&format!("tool.t{index}"))).collect::<Vec<_>>();
         let tools = [
             (vec![tool("muse.turn"), tool("muse.turn")], OfferedToolsError::DuplicateProgram, distinct(2)),
@@ -304,8 +354,7 @@ mod tests {
             assert_eq!(OfferedTools::new(accept.clone()).expect("accepted neighbour").as_slice(), accept.as_slice());
         }
 
-        let call =
-            |id: &str| ToolCall::new(CallId::new(id).expect("call id"), program("muse.turn"), Ref::of_text("{}"));
+        let call = |id: &str| call(id, "muse.turn");
         let calls = [
             (Vec::new(), ToolCallsError::Empty, vec![call("a")]),
             (vec![call("a"), call("a")], ToolCallsError::DuplicateCall, vec![call("a"), call("b")]),
@@ -320,7 +369,7 @@ mod tests {
     fn a_stored_input_offering_a_program_twice_refuses_on_decode() {
         // Catches a dropped `#[storage(validate)]` on the tool list, which would let a doubled offer in through
         // the journal.
-        let tool = OfferedTool::new(ProgramName::new("muse.turn").expect("program"), Ref::of_text("{}"));
+        let tool = offered_tool(ProgramName::new("muse.turn").expect("program"));
         let input = TurnInput {
             endpoint: Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
             model: ModelName::new("muse-spark-1.3").expect("model"),
