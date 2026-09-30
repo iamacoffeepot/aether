@@ -29,6 +29,7 @@
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, TarWriter};
@@ -92,14 +93,14 @@ fn peak_over(base: u64) -> Result<u64, Box<dyn Error>> {
 }
 
 #[test]
-#[ignore = "measurement: run on demand, see the module doc"]
-#[allow(clippy::print_stdout)] // the BENCH lines are the output
+#[ignore = "measurement: run on demand, see the module doc"] // aether-suppression-request: a ~1 GiB on-demand measurement must cost CI nothing (#7218)
 fn import_then_run() -> TestResult {
     let inputs = Inputs::new(Vec::new())?;
     let (hex, template) = (inputs.hex(), inputs.request("tool", "target")?);
     let stub = StubDaemon::bind()?;
 
-    #[allow(clippy::disallowed_methods)] // on-demand bench knob read from the shell; the harness boots hermetically
+    #[allow(clippy::disallowed_methods)]
+    // on-demand bench knob read from the shell; the harness boots hermetically // aether-suppression-request: the hermetic harness never sees the process env, so the bench forwards its own knob (#7218)
     let prefetch = env::var("AETHER_WORKSPACE_PREFETCH_BYTES").ok();
     let mut flags: Vec<&str> = FLAGS.to_vec();
     if let Some(bytes) = prefetch.as_deref() {
@@ -119,13 +120,14 @@ fn import_then_run() -> TestResult {
         harness.wait_within(pending, GUARD)
     })?;
     let import_millis = started.elapsed().as_millis();
-    println!("BENCH import_millis={import_millis} import_peak_over_start_bytes={}", peak_over(base)?);
+    writeln!(io::stdout(), "BENCH import_millis={import_millis} import_peak_over_start_bytes={}", peak_over(base)?)?;
     let tree = match answer {
         ImportResult::Ok { tree } => tree,
         ImportResult::Failed { detail } => return Err(format!("the import failed: {}", detail.as_str()).into()),
     };
 
-    #[allow(clippy::disallowed_methods)] // on-demand bench knob read from the shell; the harness boots hermetically
+    #[allow(clippy::disallowed_methods)]
+    // on-demand bench knob read from the shell; the harness boots hermetically // aether-suppression-request: the hermetic harness never sees the process env, so the bench forwards its own knob (#7218)
     let import_only = env::var("AETHER_BENCH_PHASE").is_ok_and(|phase| phase == "import");
     if import_only {
         return Ok(());
@@ -142,11 +144,12 @@ fn import_then_run() -> TestResult {
         harness.wait_within(pending, GUARD)
     })?;
     let run_millis = started.elapsed().as_millis();
-    println!(
+    writeln!(
+        io::stdout(),
         "BENCH run_millis={run_millis} run_peak_over_start_bytes={} prefetch_bytes={}",
         peak_over(base)?,
         prefetch.as_deref().unwrap_or("default")
-    );
+    )?;
     outcome(answer)?;
     Ok(())
 }
