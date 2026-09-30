@@ -57,8 +57,9 @@ pub enum MailboxCategory {
     /// `aether.component`, etc.). Renders as
     /// `actor:NAME`.
     Actor,
-    /// A wasm-component trampoline. Full name has the form
-    /// `aether.embedded:NAME`. Renders as
+    /// A wasm-component trampoline. A guest is born under its own published
+    /// name, so it is categorised from the publication table, not from its
+    /// name's form. Renders as
     /// `actor:NAME` too — the agent thinks of trampolines as just
     /// another actor; the variant survives so the hub can tell them
     /// apart for filtering / coloring if needed.

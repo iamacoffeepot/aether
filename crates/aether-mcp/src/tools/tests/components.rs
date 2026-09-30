@@ -378,9 +378,9 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
             "00000000-0000-0000-0000-000000000001",
             &caps,
             &[
-                serde_json::json!({ "address": "aether.component/aether.embedded:svc" }),
-                serde_json::json!({ "address": "aether.component/aether.embedded:svc-1" }),
-                serde_json::json!({ "address": "aether.component/aether.embedded:svc-2" }),
+                serde_json::json!({ "address": "test.svc:0" }),
+                serde_json::json!({ "address": "test.svc:1" }),
+                serde_json::json!({ "address": "test.svc:2" }),
             ],
             false,
         )

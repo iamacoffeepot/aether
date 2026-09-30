@@ -28,7 +28,7 @@ fn handler(schema: SchemaType) -> HandlerContract {
 
 fn snapshot() -> ContractSnapshot {
     ContractSnapshot {
-        identity: identity("00000000-0000-0000-0000-000000000001", "aether.component/aether.embedded:baseline"),
+        identity: identity("00000000-0000-0000-0000-000000000001", "test.baseline"),
         handlers: BTreeMap::from([("aether.test.keep".to_owned(), handler(SchemaType::String))]),
         config: None,
         fallback: false,
@@ -39,7 +39,7 @@ fn snapshot() -> ContractSnapshot {
 fn equal_contracts_are_compatible_and_serialization_is_stable() {
     let baseline = snapshot();
     let candidate = ContractSnapshot {
-        identity: identity("00000000-0000-0000-0000-000000000002", "aether.component/aether.embedded:candidate"),
+        identity: identity("00000000-0000-0000-0000-000000000002", "test.candidate"),
         ..baseline.clone()
     };
     let first = serde_json::to_vec(&diff_contracts(baseline.clone(), candidate.clone())).expect("response serializes");
@@ -76,7 +76,7 @@ fn additions_are_additive_but_all_declared_breaking_categories_are_incompatible(
     baseline.fallback = true;
 
     let mut candidate = snapshot();
-    candidate.identity = identity("00000000-0000-0000-0000-000000000002", "aether.component/aether.embedded:candidate");
+    candidate.identity = identity("00000000-0000-0000-0000-000000000002", "test.candidate");
     candidate.handlers.insert("aether.test.keep".to_owned(), handler(SchemaType::Bool));
     candidate.handlers.insert(
         "aether.test.reply".to_owned(),
@@ -191,8 +191,8 @@ async fn strict_refresh_rejects_a_wire_id_that_disagrees_with_its_name_and_schem
 
 #[tokio::test]
 async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_identities() {
-    let baseline = "aether.component/aether.embedded:baseline";
-    let candidate = "aether.component/aether.embedded:candidate";
+    let baseline = "test.baseline";
+    let candidate = "test.candidate";
     let first_engine = EngineId(Uuid::from_u128(0x0047_5502));
     let second_engine = EngineId(Uuid::from_u128(0x0047_5503));
     let calls = Arc::new(Mutex::new(Vec::new()));

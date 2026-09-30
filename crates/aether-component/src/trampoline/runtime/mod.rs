@@ -3,9 +3,9 @@
 //! in the parent carries the gate), so a transport-only build of the
 //! [`WasmTrampoline`] identity never names
 //! these `aether_substrate` / `wasmtime`-typed types. The substrate-typed
-//! imports are gated once by this module rather than line-by-line; the
-//! `#[actor] impl` in the parent reaches the state, ctx, config, and republish
-//! helpers through the single `use runtime::*` glob.
+//! imports are gated once by this module rather than line-by-line, beside the
+//! `#[runtime] impl` that reaches the state, ctx, config, and republish
+//! helpers.
 //!
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
 //! single-file `runtime.rs` the runtime half is a directory module:
@@ -72,12 +72,11 @@ impl NativeActor for WasmTrampoline {
 
     type Config = WasmTrampolineConfig;
 
-    /// The trampoline's own namespace, **forward-fed** from
-    /// [`EMBEDDED_SCOPE`] — `aether-actor`'s sole owner of the
-    /// `"aether.embedded"` literal — until #6869 retires it. No guest is
-    /// named by it: a guest is born under its own published name (ADR-0241
-    /// §5), so its id depends on what the code is, not how it is hosted.
-    const NAMESPACE: &'static str = EMBEDDED_SCOPE;
+    /// The trampoline's diagnostics label, consumed by `#[runtime]`, which
+    /// validates it and drops it; the hand-written `Addressable` in
+    /// `identity.rs` carries the same label. It names no
+    /// address: a guest is born under its own published name (ADR-0241 §5).
+    const NAMESPACE: &'static str = super::identity::TRAMPOLINE_LABEL;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
@@ -296,5 +295,28 @@ impl NativeActor for WasmTrampoline {
             ),
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_actor::Contracts;
+
+    use super::*;
+
+    /// Drift guard: the hand-written contract rows in `identity.rs` must match
+    /// the handler rows the `#[runtime]` impl dispatches, row for row and in
+    /// order. A handler added to the runtime impl without its hand-written row
+    /// would otherwise surface only as a refused typed send or hand-off.
+    #[test]
+    fn the_hand_written_contracts_match_the_dispatch_table() {
+        let dispatched: Vec<(KindId, aether_data::ReplyContract)> =
+            <WasmTrampoline as Dispatch<WasmTrampolineState>>::capabilities()
+                .handlers
+                .iter()
+                .map(|handler| (handler.id, handler.reply))
+                .collect();
+
+        assert_eq!(<WasmTrampoline as Contracts>::CONTRACTS, dispatched.as_slice());
     }
 }

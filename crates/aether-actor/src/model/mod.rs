@@ -102,13 +102,6 @@ impl Resolve for Many {
     }
 }
 
-/// The namespace of the component host's trampoline, the native actor a
-/// wasm guest runs in (ADR-0099 §5/§6, ADR-0119). The sole owner of the
-/// `"aether.embedded"` literal; the trampoline forward-feeds this const
-/// rather than re-declaring it. A guest is named by its own published
-/// namespace (ADR-0241 §5), never by this one.
-pub const EMBEDDED_SCOPE: &str = "aether.embedded";
-
 /// Which caller-relative lineage seed a resolver consumes.
 ///
 /// Each scope can use the relevant actor's routable [`MailboxId`]; it does not

@@ -1,7 +1,7 @@
-//! ADR-0241 §5: a loaded guest is named by its own published namespace, so
-//! the component host's short-path hole (`aether.component/:NAME`, ADR-0166
-//! §5/§6) no longer reaches it. The host still declares the trampoline as
-//! its one instanced child, so the hole expands, but no guest is born there.
+//! ADR-0241 §5: a loaded guest is named by its own published namespace, and
+//! the component host is no address parent. It declares no instanced child,
+//! so `aether.component/:NAME` (ADR-0166 §5/§6) is refused as an illegal
+//! segment rather than expanded to a position nothing is born at.
 //!
 //! Driven through a real load and the host's own address resolution, the
 //! `DescribeComponent` read.
@@ -27,8 +27,10 @@ fn describe(harness: &mut SubstrateHarness, name: &str) -> DescribeComponentResu
     described.reply::<DescribeComponentResult>("describe").expect("decode DescribeComponentResult")
 }
 
-/// Catches a guest still born beneath the component host: its short path
-/// would resolve to it, and its published name would not.
+/// Catches a guest still born beneath the component host (its short path
+/// would resolve to it, and its published name would not), and a host
+/// placement re-added by hand: the hole would expand and the refusal would
+/// be a no-live-mailbox one, not the illegal segment.
 #[test]
 fn a_guest_is_reached_by_its_published_name_not_the_host_short_path() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
@@ -42,5 +44,9 @@ fn a_guest_is_reached_by_its_published_name_not_the_host_short_path() {
 
     assert!(matches!(describe(&mut harness, PROBE_EXPORT), DescribeComponentResult::Ok { .. }));
     let short = format!("{}/:{PROBE_EXPORT}", ComponentHostCapability::NAMESPACE);
-    assert!(matches!(describe(&mut harness, &short), DescribeComponentResult::Err { .. }), "{short} reaches no guest");
+    let DescribeComponentResult::Err { error } = describe(&mut harness, &short) else {
+        panic!("{short} reaches no guest");
+    };
+    let illegal = format!("segment `:{PROBE_EXPORT}` is not legal beneath `{}`", ComponentHostCapability::NAMESPACE);
+    assert!(error.contains(&illegal), "{short} is refused as an illegal segment: {error}");
 }

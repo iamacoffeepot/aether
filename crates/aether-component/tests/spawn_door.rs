@@ -14,7 +14,7 @@
 use std::fs;
 
 use aether_actor::{Addressable, HandlesKind, HeldReply, actor};
-use aether_component::ComponentHostCapability;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Blob, ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -239,6 +239,22 @@ fn a_spawn_of_a_native_namespace_is_refused_as_composed() {
     };
     assert!(error.contains(DepartureWatcher::NAMESPACE), "the refusal names the namespace: {error}");
     assert!(error.contains("composed"), "the refusal says native types are composed: {error}");
+}
+
+#[test]
+fn a_spawn_of_the_trampoline_label_is_refused_as_unpublished() {
+    // Catches: the trampoline's diagnostics label re-entering the native
+    // publication table, which would answer it as a composed native type.
+    let mut harness = harness();
+
+    let spawn = Spawn { namespace: WasmTrampoline::NAMESPACE.to_owned(), key: None, parent: None, config: Vec::new() };
+    let refused: SpawnResult = host_call(&mut harness, &spawn);
+
+    let SpawnResult::Err { error } = refused else {
+        panic!("the trampoline label is refused: {refused:?}");
+    };
+    assert!(error.contains("no module publishes"), "the label is refused as unpublished: {error}");
+    assert!(!error.contains("composed"), "the label is no native type: {error}");
 }
 
 #[test]

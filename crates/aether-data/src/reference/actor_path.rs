@@ -27,8 +27,8 @@ use crate::{CastEligible, CrossesActors, CrossesWire, Schema};
 const RETIRED_SHORT_FORM: &str = "://";
 
 /// A fully qualified actor address, canonical
-/// (`aether.component/aether.embedded:probe`) or short
-/// (`aether.component/:probe`), valid by construction on every path in:
+/// (`test.trunk/test.leaf:probe`) or short
+/// (`test.trunk/:probe`), valid by construction on every path in:
 /// [`new`](Self::new), wire decode, and `Deserialize` all run the same check.
 ///
 /// Equality and order are textual. A short path and its canonical expansion
@@ -145,11 +145,11 @@ impl fmt::Display for ActorPathError {
             }
             Self::RetiredShortForm => f.write_str(
                 "invalid actor path: `://` was removed; name the one instanced child with a hole, \
-                 e.g. `aether.component/:camera`",
+                 e.g. `test.trunk/:leaf`",
             ),
             Self::ShortPathFromInstance => f.write_str(
                 "invalid actor path: a short path must start at a root namespace, not an instance; start it at \
-                 the root (e.g. `aether.component/:camera`) or spell every step canonically",
+                 the root (e.g. `test.trunk/:leaf`) or spell every step canonically",
             ),
         }
     }
