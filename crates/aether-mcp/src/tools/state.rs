@@ -7,7 +7,7 @@ use super::{
     MailNodeWire, MailSpec, Manifest, ManifestResult, Mcp, McpError, NamedMail, Recipient, ReplyEnvelope, Resolve,
     ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
-    max_frame_size, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
+    max_frame_size, reject_key_with_replicas, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
 };
 use aether_data::ErasedActorPath;
 use aether_data::canonical::kind_id_from_parts;
@@ -197,8 +197,8 @@ impl Mcp {
     /// which matches the selector to a single component and replies with the
     /// wasm bytes from its store; aether-mcp then forwards those bytes to
     /// the target substrate's `aether.component` mailbox. Shared by
-    /// `load_component`, `replace_component`, and the boot-manifest
-    /// pre-resolution, so the load seam stays path-free. An `Err` reply (no
+    /// `publish`, `load_component`, and the boot-manifest pre-resolution, so
+    /// the load seam stays path-free. An `Err` reply (no
     /// match, or an attribute query matching more than one component) is a
     /// clean tool error.
     pub(super) async fn resolve_component(&self, selector: &str) -> Result<ResolvedComponent, McpError> {
@@ -218,14 +218,20 @@ impl Mcp {
             .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
         match ResolveComponentResult::decode_from_bytes(&reply.payload) {
             Some(ResolveComponentResult::Ok { wasm, export, manifest, config_kind, .. }) => {
-                // ADR-0138: the bare-load default is the manifest's opted-in
-                // `default_entry` (the single-actor namespace or the
-                // `export!(default = …)` designation), NOT "the first actor
-                // by list position". A defaultless multi-actor module
-                // reports `None`, so replica-name derivation falls through
-                // to `name` / `export`.
-                let default_namespace = manifest.default_entry;
-                Ok(ResolvedComponent { wasm, export, default_namespace, config_kind })
+                let config_kind = config_kind
+                    .map(|kind| {
+                        wire::from_bytes::<SchemaType>(&kind.schema_wire)
+                            .map(|schema| KindDescriptor { name: kind.name.clone(), schema })
+                            .map_err(|e| {
+                                internal_msg(&format!(
+                                    "resolve_component {selector:?}: decoding config schema for {}: {e}",
+                                    kind.name
+                                ))
+                            })
+                    })
+                    .transpose()?;
+                let exports = manifest.actors.into_iter().map(|actor| actor.namespace).collect();
+                Ok(ResolvedComponent { wasm, export, exports, config_kind })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable ResolveComponentResult")),
@@ -239,8 +245,10 @@ impl Mcp {
     /// the bytes to a per-process-unique temp `.wasm`, and points the
     /// manifest entry's `wasm` at that staged path — so the substrate boot
     /// autoload path stays path-based, now fed by the registry rather than
-    /// host build paths. A `module@actor` selector's `@actor` half
-    /// populates the entry's `export` unless the spec set one explicitly.
+    /// host build paths. The spec's `namespace` (or a `module@actor`
+    /// selector's `@actor` half) is written as the entry's `export`, and its
+    /// `key` as the entry's `name`: the boot-manifest file keeps its own
+    /// spelling.
     /// Returns the staged paths so the caller cleans them all up once the
     /// substrate has read them at boot; a staging failure removes whatever
     /// it already wrote before surfacing the error.
@@ -281,7 +289,8 @@ impl Mcp {
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         for spec in components {
             reject_zero_replicas(spec.replicas, &spec.selector)?;
-            let resolve_selector = selector_with_explicit_export(&spec.selector, spec.export.as_deref());
+            reject_key_with_replicas(spec.key.as_deref(), spec.replicas, &spec.selector)?;
+            let resolve_selector = selector_with_explicit_export(&spec.selector, spec.namespace.as_deref());
             let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let wasm_path = env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
@@ -290,8 +299,8 @@ impl Mcp {
                 .await
                 .map_err(|e| internal_msg(&format!("staging boot wasm for selector {resolve_selector:?}: {e}")))?;
             let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
-            if let Some(name) = &spec.name {
-                entry["name"] = serde_json::json!(name);
+            if let Some(key) = &spec.key {
+                entry["name"] = serde_json::json!(key);
             }
             if let Some(config) = component_config_bytes(
                 resolved.config_kind.as_ref(),
@@ -309,8 +318,8 @@ impl Mcp {
                 })?;
                 entry["config"] = serde_json::json!(config_path.to_string_lossy());
             }
-            // An explicit `export` wins over the selector's `@actor` half.
-            let export = spec.export.clone().or_else(|| resolved.export.clone());
+            // An explicit `namespace` wins over the selector's `@actor` half.
+            let export = spec.namespace.clone().or_else(|| resolved.export.clone());
             if let Some(ref e) = export {
                 entry["export"] = serde_json::json!(e);
             }

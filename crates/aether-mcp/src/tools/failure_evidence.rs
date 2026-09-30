@@ -96,7 +96,12 @@ impl FailureEvidenceSource for McpFailureEvidenceSource<'_> {
                 FailureEvidenceQuery::Component { engine_id, address } => {
                     let body = super::describe::describe_component(
                         self.mcp,
-                        DescribeComponentArgs { engine_id: Some(engine_id), address, full: true },
+                        DescribeComponentArgs {
+                            engine_id: Some(engine_id),
+                            address: Some(address),
+                            namespace: None,
+                            full: true,
+                        },
                     )
                     .await
                     .map_err(mcp_error_message)?;

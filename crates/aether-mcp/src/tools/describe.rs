@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use aether_data::{Kind, KindDescriptor, ReplyContract, tagged_id};
+use aether_data::{EngineId, Kind, KindDescriptor, ReplyContract, tagged_id};
 use aether_inventory::kinds::{HandlersResult, ListHandlers};
-use aether_kinds::{DescribeComponent, DescribeComponentResult};
+use aether_kinds::{ComponentCapabilities, DescribeComponent, DescribeComponentResult};
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
@@ -91,40 +91,67 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
 
 pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
-    // Every address is resolved by the selected engine, which returns the
-    // canonical path used as the cache key. The component host still
-    // receives the operator's original spelling so its own engine-atomic
-    // name handling remains the forwarding contract.
-    let canonical = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
-
-    // Cache fast-path: populated by load_component / replace_component or
-    // a prior describe.
-    let cached = mcp
-        .components
-        .lock()
-        .expect("component cache mutex is never poisoned")
-        .get(&(engine, canonical.clone()))
-        .cloned();
-    if let Some(caps) = cached {
-        return component_reply(&engine_id, &args.address, &caps, args.full);
+    match (args.address, args.namespace) {
+        (Some(address), None) => {
+            let capabilities = instance_capabilities(mcp, engine, &address).await?;
+            component_reply(&engine_id, &address, &capabilities, args.full)
+        }
+        (None, Some(namespace)) => {
+            let capabilities = published_type_capabilities(mcp, engine, &namespace).await?;
+            json(&serde_json::json!({
+                "engine_id": engine_id,
+                "namespace": namespace,
+                "capabilities": project_capabilities(&capabilities, args.full),
+            }))
+        }
+        _ => Err(McpError::invalid_params(
+            "describe_component takes exactly one of `address` (a live instance) or `namespace` (a published type)",
+            None,
+        )),
     }
+}
 
-    // Cache miss: ask the substrate live — the cache is empty for a
-    // boot-loaded component, but the substrate always holds the live
-    // loaded set.
+/// The surface of the live instance at `address`. Every address is resolved
+/// by the selected engine, which returns the canonical path used as the
+/// cache key; a miss asks the component host live, which still receives the
+/// operator's original spelling so its own engine-atomic name handling
+/// remains the forwarding contract. The cache is empty for a boot-loaded
+/// component, but the substrate always holds the live loaded set.
+async fn instance_capabilities(mcp: &Mcp, engine: EngineId, address: &str) -> Result<ComponentCapabilities, McpError> {
+    let canonical = mcp.resolve_engine_path(engine, address).await.map_err(internal)?;
+    if let Some(capabilities) = mcp.components.instance(engine, &canonical) {
+        return Ok(capabilities);
+    }
+    let capabilities = forward_describe(mcp, engine, address).await?;
+    mcp.components.record_instance(engine, canonical, capabilities.clone());
+    Ok(capabilities)
+}
+
+/// The surface of the type published as `namespace`, from the cache a
+/// publish or spawn filled, else from the component host, which answers a
+/// published namespace from its published module whether or not an
+/// instance of it is live (ADR-0241 §3).
+pub(super) async fn published_type_capabilities(
+    mcp: &Mcp,
+    engine: EngineId,
+    namespace: &str,
+) -> Result<ComponentCapabilities, McpError> {
+    if let Some(capabilities) = mcp.components.published_type(engine, namespace) {
+        return Ok(capabilities);
+    }
+    let capabilities = forward_describe(mcp, engine, namespace).await?;
+    mcp.components.record_type(engine, namespace, capabilities.clone());
+    Ok(capabilities)
+}
+
+async fn forward_describe(mcp: &Mcp, engine: EngineId, name: &str) -> Result<ComponentCapabilities, McpError> {
     let reply = mcp
         .session
-        .call_one(engine_envelope(engine, COMPONENT_CAP, &DescribeComponent { name: args.address.clone() }))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &DescribeComponent { name: name.to_owned() }))
         .await
         .map_err(internal)?;
     match DescribeComponentResult::decode_from_bytes(&reply.payload) {
-        Some(DescribeComponentResult::Ok { capabilities }) => {
-            mcp.components
-                .lock()
-                .expect("component cache mutex is never poisoned")
-                .insert((engine, canonical), capabilities.clone());
-            component_reply(&engine_id, &args.address, &capabilities, args.full)
-        }
+        Some(DescribeComponentResult::Ok { capabilities }) => Ok(capabilities),
         Some(DescribeComponentResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable DescribeComponentResult")),
     }
@@ -133,10 +160,10 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
 /// Name the engine that answered alongside the capabilities. `engine_id` may
 /// have been auto-resolved rather than named by the caller, so the reply says
 /// which engine — and which address on it — the description came from.
-pub(super) fn component_reply(
+fn component_reply(
     engine_id: &str,
     address: &str,
-    capabilities: &super::ComponentCapabilities,
+    capabilities: &ComponentCapabilities,
     full: bool,
 ) -> Result<String, McpError> {
     json(&serde_json::json!({

@@ -104,10 +104,10 @@ async fn spawn_substrate_unresolvable_component_selector_is_tool_error() {
             args: vec![],
             components: vec![ComponentSpec {
                 selector: "no-such-component".to_owned(),
-                name: None,
+                namespace: None,
+                key: None,
                 config: None,
                 config_path: None,
-                export: None,
                 replicas: None,
             }],
             mails: vec![],
@@ -133,16 +133,46 @@ async fn spawn_substrate_replicas_zero_is_tool_error() {
             args: vec![],
             components: vec![ComponentSpec {
                 selector: "irrelevant".to_owned(),
-                name: None,
+                namespace: None,
+                key: None,
                 config: None,
                 config_path: None,
-                export: None,
                 replicas: Some(0),
             }],
             mails: vec![],
         }))
         .await;
     assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
+}
+
+/// A boot-list entry naming both `key` and `replicas` is refused before any
+/// selector resolution or fork: each replica takes a counter key, so one
+/// caller key cannot name them all. The bug this catches is a boot spec
+/// whose key silently lands on one replica, or on none.
+#[tokio::test]
+async fn spawn_substrate_key_with_replicas_is_tool_error() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let error = mcp
+        .spawn_substrate(Parameters(SpawnSubstrateArgs {
+            selector: None,
+            chassis: None,
+            caps: vec![],
+            target: None,
+            args: vec![],
+            components: vec![ComponentSpec {
+                selector: "irrelevant".to_owned(),
+                namespace: None,
+                key: Some("main".to_owned()),
+                config: None,
+                config_path: None,
+                replicas: Some(2),
+            }],
+            mails: vec![],
+        }))
+        .await
+        .expect_err("key with replicas must be refused");
+    assert!(error.message.contains("cannot be combined with `replicas`"), "got {error}");
 }
 
 /// `terminate_substrate` with a malformed `engine_id` surfaces the

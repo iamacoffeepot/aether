@@ -40,8 +40,8 @@ in [Inspect and debug](inspect-and-debug.md).
 | engine disappears | recently-dead reason/detail | branch on terminated/crashed/evicted/spawn_failed |
 | “unknown kind” or param encode error | explicit-engine `describe_kinds` for the exact name | correct schema, engine, or component load state |
 | component name cannot be described | use full lineage returned by load | confirm engine/component still live; do not guess a short name |
-| replica load fails partway | read failed index/count and derive the occupied name prefix | terminate an owned engine; stop and report if shared |
-| `replace_component` errors | name-addressed `describe_component` plus a safe probe | observe current state, then roll forward by exact hash if needed |
+| replica spawn fails partway | read failed index/count; the instances spawned before it stay live | terminate an owned engine; stop and report if shared |
+| a republishing `publish` errors | name-addressed `describe_component` plus a safe probe | observe current state, then roll forward by exact hash if needed |
 | plain mail times out | live fleet, actor logs, externally visible state | do not resend until idempotence is established |
 | traced mail times out | actor logs and host stderr | fix/reproduce only with a safe operation; timeout carries no trace handle |
 | actor logs are unexpectedly empty | was the event inside a handler and admitted by filter? | inspect process stderr and logging configuration |
@@ -174,7 +174,7 @@ After an error:
 - prefer a known-good exact content hash for a roll-forward attempt.
 
 If the component is no longer serviceable and the engine is shared, republish
-its module with `replace_component` while it is still live (every live instance
+its module with `publish` while it is still live (every live instance
 of the module's namespaces moves with it), or drop that exact
 instance and load a differently named one after checking downstream address
 ownership. A drop retires the name, so a reload under it is refused. If the

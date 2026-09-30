@@ -14,7 +14,7 @@ This page sharpens the upload boundary introduced in
 | Operation | Upload-time behavior | Execution boundary |
 |---|---|---|
 | `upload_binary` | reads bytes and runs the supplied path with `--describe` | immediately, during upload |
-| `upload_component` | reads wasm and parses embedded custom sections | later, during `load_component` or `replace_component` |
+| `upload_component` | reads wasm and parses embedded custom sections | later, during `publish` or `load_component` |
 
 Native upload is therefore already code execution. Component upload is
 structural inspection, but loading or replacing with the stored wasm executes

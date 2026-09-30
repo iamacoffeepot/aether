@@ -485,18 +485,32 @@ pub(super) fn try_boot_hub_with_scripted_route_loopback(
         .build_passive()?;
 
     for engine in engines {
-        let params = ScriptedRouteLoopbackParams {
-            engine: *engine,
-            inventory: inventory.clone(),
-            calls: Arc::clone(calls),
-            replies: Arc::clone(replies),
-        };
-        chassis
-            .spawn_actor_for_test::<ScriptedRouteSink>(Subname::Named(&engine.0.simple().to_string()), (), params)
-            .finish()
-            .expect("scripted route sink spawns and registers its engine");
+        add_scripted_route(&chassis, *engine, inventory, calls, replies);
     }
 
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     Ok((chassis, port))
+}
+
+/// Spawn a [`ScriptedRouteSink`] for `engine` on an already-booted hub-shape
+/// chassis that composes `RpcServerCapability`, so `engine = Some(engine)`
+/// Calls reach it: it answers the inventory reads itself and every other
+/// request from `replies`, recording each in `calls`.
+pub(super) fn add_scripted_route(
+    chassis: &PassiveChassis<TestChassis>,
+    engine: EngineId,
+    inventory: &ListKindsResult,
+    calls: &Arc<Mutex<Vec<ForwardEnvelope>>>,
+    replies: &Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
+) {
+    let params = ScriptedRouteLoopbackParams {
+        engine,
+        inventory: inventory.clone(),
+        calls: Arc::clone(calls),
+        replies: Arc::clone(replies),
+    };
+    chassis
+        .spawn_actor_for_test::<ScriptedRouteSink>(Subname::Named(&engine.0.simple().to_string()), (), params)
+        .finish()
+        .expect("scripted route sink spawns and registers its engine");
 }

@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Process-wide component-capability cache, shared into every
-    // per-session `Mcp` — `load_component` / `replace_component`
+    // per-session `Mcp` — `publish` / `spawn` / `load_component`
     // populate it, `describe_component` reads it.
     let components: Arc<ComponentCache> = Arc::new(ComponentCache::default());
 
