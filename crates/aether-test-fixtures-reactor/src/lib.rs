@@ -12,7 +12,7 @@ use core::fmt;
 
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHeads, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
-use aether_bloomery_view::{Heads, Publish, PublishError, View, ViewCursor, view};
+use aether_bloomery_view::{At, Heads, Publish, PublishError, View, ViewCursor, view};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 
@@ -108,6 +108,7 @@ impl Guard<HeadMoved<Tree>> for CurrentCompilation {
 
     fn resolve(
         trigger: &HeadMoved<Tree>,
+        _at: At,
         (heads, (_tally, moves)): (&Heads, (&FoldTally, &AuthoredMoves)),
     ) -> Option<Self> {
         heads.get(&CURRENT)?;
@@ -121,7 +122,7 @@ struct FoldAdvanced;
 impl Guard<HeadMoved<Tree>> for FoldAdvanced {
     type Views = And<FoldTally, AuthoredMoves>;
 
-    fn resolve(trigger: &HeadMoved<Tree>, (tally, moves): (&FoldTally, &AuthoredMoves)) -> Option<Self> {
+    fn resolve(trigger: &HeadMoved<Tree>, _at: At, (tally, moves): (&FoldTally, &AuthoredMoves)) -> Option<Self> {
         (tally.cursor.0 > 0 && moves.count(trigger.head()) > 0).then_some(Self)
     }
 }

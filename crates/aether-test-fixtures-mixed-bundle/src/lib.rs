@@ -5,6 +5,7 @@ use aether_actor::export;
 use aether_bloomery_kinds::{CallInput, CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_reactor::{Guard, NoViews, reactor};
+use aether_bloomery_view::At;
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -35,7 +36,7 @@ struct SummarizeName(ProgramName);
 impl Guard<HeadMoved<SummarizeInput>> for SummarizeName {
     type Views = NoViews;
 
-    fn resolve(_trigger: &HeadMoved<SummarizeInput>, (): ()) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<SummarizeInput>, _at: At, (): ()) -> Option<Self> {
         ProgramName::new(SUMMARIZE_PROGRAM).ok().map(Self)
     }
 }

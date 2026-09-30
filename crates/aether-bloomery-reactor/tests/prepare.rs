@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
 use aether_bloomery_reactor::{And, Arg, Guard, GuardArg, Owner, PrepareError, ViewArg, prepare};
-use aether_bloomery_view::{Heads, View};
+use aether_bloomery_view::{At, Heads, View};
 use aether_data::{Kind, Storage, StorageData};
 
 const CURRENT: Head<Program> = Head::new("current");
@@ -21,7 +21,7 @@ struct CurrentCompilation {
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     type Views = Heads;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, heads: &Heads) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, heads: &Heads) -> Option<Self> {
         Some(Self { program: heads.get(&CURRENT)? })
     }
 }
@@ -31,7 +31,7 @@ struct SameHeads;
 impl Guard<HeadMoved<Tree>> for SameHeads {
     type Views = And<Heads, Heads>;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, (left, right): (&Heads, &Heads)) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, (left, right): (&Heads, &Heads)) -> Option<Self> {
         assert!(ptr::eq(left, right), "shared Heads must fold once");
         Some(Self)
     }
@@ -71,7 +71,7 @@ struct ProbeCursor(Seq);
 impl Guard<HeadMoved<Tree>> for ProbeCursor {
     type Views = And<Probe, Probe>;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, (left, right): (&Probe, &Probe)) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, (left, right): (&Probe, &Probe)) -> Option<Self> {
         assert!(ptr::eq(left, right), "shared Probe must fold once");
         Some(Self(left.cursor()))
     }
@@ -103,7 +103,7 @@ struct NeedsStuck;
 impl Guard<HeadMoved<Tree>> for NeedsStuck {
     type Views = Stuck;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, _stuck: &Stuck) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, _stuck: &Stuck) -> Option<Self> {
         Some(Self)
     }
 }
@@ -132,7 +132,7 @@ struct NeedsNonzero;
 impl Guard<HeadMoved<Tree>> for NeedsNonzero {
     type Views = NonzeroEmpty;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, _view: &NonzeroEmpty) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, _view: &NonzeroEmpty) -> Option<Self> {
         Some(Self)
     }
 }
@@ -178,7 +178,7 @@ struct NeedsBoom;
 impl Guard<HeadMoved<Tree>> for NeedsBoom {
     type Views = Exploding;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, _view: &Exploding) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, _view: &Exploding) -> Option<Self> {
         Some(Self)
     }
 }

@@ -1087,6 +1087,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-reactor",
+ "aether-bloomery-view",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",

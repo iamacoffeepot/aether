@@ -4,7 +4,7 @@ use std::error::Error;
 
 use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, SetHeads, Tree};
 use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Owner, Params, PrepareError, Reactor, Trigger, reactor};
-use aether_bloomery_view::Heads;
+use aether_bloomery_view::{At, Heads};
 use aether_data::{Kind, Storage, StorageData};
 
 const CURRENT: Head<Program> = Head::new("current");
@@ -18,7 +18,7 @@ struct CurrentCompilation {
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     type Views = Heads;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, heads: &Heads) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, heads: &Heads) -> Option<Self> {
         Some(Self { program: heads.get(&CURRENT)? })
     }
 }
@@ -28,7 +28,7 @@ struct CurrentSource;
 impl Guard<Compilation> for CurrentSource {
     type Views = Heads;
 
-    fn resolve(trigger: &Compilation, heads: &Heads) -> Option<Self> {
+    fn resolve(trigger: &Compilation, _at: At, heads: &Heads) -> Option<Self> {
         let current = heads.get(&SOURCE)?;
         let source = match trigger {
             Compilation::Succeeded { source, .. } | Compilation::Failed { source } => *source,

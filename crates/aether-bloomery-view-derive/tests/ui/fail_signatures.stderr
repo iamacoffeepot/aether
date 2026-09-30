@@ -34,29 +34,35 @@ error: #[fold] event parameters are owned values
 55 |     fn event(&mut self, _event: &Event) {}
    |                                 ^^^^^^
 
-error: a #[fold] method's third parameter is `cited: &Cited`
+error: a #[fold] method's parameters after the event are `cited: &Cited` and `at: At`
   --> tests/ui/fail_signatures.rs:62:40
    |
-62 |     fn event(&mut self, _event: Event, _cited: aether_bloomery_view::Cited) {}
-   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+62 |     fn event(&mut self, _event: Event, _cited: &mut aether_bloomery_view::Cited) {}
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: a #[fold] method takes `cited: &Cited` and `at: At` at most once each
+  --> tests/ui/fail_signatures.rs:69:78
+   |
+69 |     fn event(&mut self, _event: Event, _cited: &aether_bloomery_view::Cited, _again: &aether_bloomery_view::Cited) {}
+   |                                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: #[fold] methods return `()` or `Result<(), E>`
-  --> tests/ui/fail_signatures.rs:69:40
+  --> tests/ui/fail_signatures.rs:76:40
    |
-69 |     fn event(&mut self, _event: Event) -> bool {
+76 |     fn event(&mut self, _event: Event) -> bool {
    |                                        ^^^^^^^
 
 error: #[fold] methods cannot have an extern ABI
-  --> tests/ui/fail_signatures.rs:78:5
+  --> tests/ui/fail_signatures.rs:85:5
    |
-78 |     extern "C" fn event(&mut self, _event: Event) {}
+85 |     extern "C" fn event(&mut self, _event: Event) {}
    |     ^^^^^^^^^^
 
-error: #[fold] methods take exactly `&mut self`, one owned typed event, and optionally `cited: &Cited`
-  --> tests/ui/fail_signatures.rs:85:14
+error: #[fold] methods take exactly `&mut self`, one owned typed event, and optionally `cited: &Cited` and `at: At` in either order
+  --> tests/ui/fail_signatures.rs:92:14
    |
-85 |     fn event(&mut self, _event: Event, _cited: &aether_bloomery_view::Cited, _other: Event) {}
-   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+92 |     fn event(&mut self, _event: Event, _cited: &aether_bloomery_view::Cited, _at: aether_bloomery_view::At, _other: Event) {}
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `View`
  --> tests/ui/fail_signatures.rs:1:28

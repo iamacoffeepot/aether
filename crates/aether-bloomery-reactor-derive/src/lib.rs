@@ -4,8 +4,8 @@
 //! It emits inherent rule methods plus a `Reactor` impl whose `evaluate` /
 //! `visit_arms` plus a framework descriptor extension so `aether_bloomery_bundle::bundle` can
 //! wrap authored reactors without a second export macro. Parameter roles are
-//! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify view
-//! versus guard by type name.
+//! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify a
+//! view, guard, `cited: Cited`, or `at: At` parameter by type name.
 //! An authored reactor must be a unit struct: the expansion checks that the
 //! declared type can be constructed as a unit value, with no stored fields.
 

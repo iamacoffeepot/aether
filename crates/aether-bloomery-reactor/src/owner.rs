@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
 
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_bloomery_view::Cited;
+use aether_bloomery_view::{At, Cited};
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
@@ -133,7 +133,8 @@ impl Owner {
     }
 
     /// Decode the last retained entry as `T` and resolve an inferred parameter
-    /// list at the current prefix, handing it that entry's citations.
+    /// list at the current prefix, handing it that entry's own [`At`] and its
+    /// citations.
     /// Already-constructed views advance only the new suffix. [`None`] means a
     /// named guard declined.
     ///
@@ -141,12 +142,14 @@ impl Owner {
     ///
     /// [`PrepareError`] when the trigger, catch-up, or a poisoned view fails.
     pub fn prepare<T: Trigger, L: Params<T>>(&mut self) -> Result<Option<(T, L::Value)>, PrepareError> {
-        let trigger = T::from_entry(self.prefix.last().ok_or(PrepareError::Empty)?).map_err(PrepareError::Trigger)?;
+        let entry = self.prefix.last().ok_or(PrepareError::Empty)?;
+        let at = At::from(entry);
+        let trigger = T::from_entry(entry).map_err(PrepareError::Trigger)?;
         self.catch_up::<L::Views>()?;
         let refs = L::Views::refs(|id| self.slot_ref(id))
             .ok_or(PrepareError::Poisoned { view: type_name::<L::Views>(), last_trusted_cursor: self.cursor() })?;
         let cited = self.cited.last().ok_or(PrepareError::Empty)?;
-        Ok(L::resolve(&trigger, cited, refs).map(|value| (trigger, value)))
+        Ok(L::resolve(&trigger, at, cited, refs).map(|value| (trigger, value)))
     }
 
     fn catch_up<S: ViewSet>(&mut self) -> Result<(), PrepareError> {

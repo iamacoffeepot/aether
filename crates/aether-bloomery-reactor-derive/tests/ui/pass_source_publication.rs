@@ -3,7 +3,7 @@
 
 use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, SetHeads, Tree};
 use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Params, Reactor, Trigger, reactor};
-use aether_bloomery_view::Heads;
+use aether_bloomery_view::{At, Heads};
 
 const CURRENT: Head<Program> = Head::new("current");
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -15,7 +15,7 @@ struct CurrentCompilation {
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     type Views = Heads;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, heads: &Heads) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, heads: &Heads) -> Option<Self> {
         Some(Self { program: heads.get(&CURRENT)? })
     }
 }
