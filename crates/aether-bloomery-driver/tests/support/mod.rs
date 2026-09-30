@@ -487,14 +487,15 @@ pub fn wasm_module(sections: &[(&str, &[u8])]) -> Vec<u8> {
     wasm
 }
 
-/// Concatenated program declaration records: name, input kind, result kind, intent.
+/// Concatenated program declaration records: name, input kind, result kind, intent, with an empty doc and
+/// input doc tree.
 #[must_use]
 pub fn program_records(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
     let mut data = Vec::new();
     for (name, input, result, intent) in records {
         let name = name.as_bytes();
         let intent = intent.as_bytes();
-        data.push(2u8);
+        data.push(3u8);
         data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
         data.extend_from_slice(name);
         data.extend_from_slice(&input.0.to_le_bytes());
@@ -503,6 +504,9 @@ pub fn program_records(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
         data.push(0u8);
         data.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
         data.extend_from_slice(intent);
+        // An empty doc, then a leaf doc tree: its wire variant index, 0.
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
     }
     data
 }

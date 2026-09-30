@@ -5,6 +5,7 @@ use aether_bloomery_program::{Env, Program, Sync, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.invalid.name.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -16,6 +17,7 @@ struct Out {
 
 struct InvalidNameProg;
 
+/// A test program.
 #[program]
 impl Program for InvalidNameProg {
     const NAME: &'static str = "Test.Program";

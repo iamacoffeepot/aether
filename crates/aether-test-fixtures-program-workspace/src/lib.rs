@@ -14,7 +14,9 @@ use aether_bloomery_workspace::{Environment, Mounts, Network, RunRequest, Scratc
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.workspace.run.input")]
 struct RunInput {
+    /// The source tree to run over.
     tree: Ref<Tree>,
+    /// The environment whose tool runs.
     environment: Ref<Environment>,
 }
 
@@ -29,6 +31,7 @@ struct RunOutput {
 
 struct RunTool;
 
+/// Run the environment's tool over a tree and cite what it produced.
 #[program]
 impl Program for RunTool {
     const NAME: &'static str = "test.program.workspace.run";

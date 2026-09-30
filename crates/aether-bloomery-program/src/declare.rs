@@ -10,7 +10,8 @@ use crate::env::{Async, Env, Sync};
 /// Typed mirror of a stored [`crate::kinds::Program`].
 ///
 /// `#[program]` proves the stored form at compile time: the section record
-/// carries the declared `NAME`, `INTENT`, input and result. Programs are
+/// carries the declared `NAME`, `INTENT`, `DOC`, input and result, and the
+/// input's field docs. Programs are
 /// stateless by signature. `run` lives on a private sync or async supertrait
 /// because Rust cannot overload the two forms.
 pub trait Program {
@@ -18,6 +19,9 @@ pub trait Program {
     const NAME: &'static str;
     const MODE: Mode;
     const INTENT: &'static str;
+    /// The program's tool description: the `///` doc on its `#[program]`
+    /// impl, which `#[program]` requires and writes here.
+    const DOC: &'static str;
     type Input: Storage + Clone + Cites + Send + 'static;
     type Result: Storage + Clone + Cites + Send + 'static;
 }

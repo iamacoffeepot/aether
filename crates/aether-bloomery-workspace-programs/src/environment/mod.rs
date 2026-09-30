@@ -21,13 +21,14 @@ use aether_bloomery_workspace::{Environment, Provides};
 
 pub use input::MergeInput;
 
+/// The `environment.merge` program.
+pub struct EnvironmentMerge;
+
 /// Places the toolchain directory in the base userland and declares the
 /// environment it makes.
 ///
 /// Pure: the result depends only on the two cited trees. Every refusal names
 /// the in-tree path it refuses.
-pub struct EnvironmentMerge;
-
 #[program]
 impl Program for EnvironmentMerge {
     const NAME: &'static str = "environment.merge";

@@ -72,7 +72,7 @@ mod tests {
     }
 
     fn record(name: &[u8], input: u64, result: u64, intent: &[u8]) -> Vec<u8> {
-        let mut out = vec![2];
+        let mut out = vec![3];
         out.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
         out.extend_from_slice(name);
         out.extend_from_slice(&input.to_le_bytes());
@@ -81,6 +81,9 @@ mod tests {
         out.push(0);
         out.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
         out.extend_from_slice(intent);
+        // An empty doc, then a leaf doc tree: its wire variant index, 0.
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
         out
     }
 

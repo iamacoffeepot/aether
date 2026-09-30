@@ -5,6 +5,7 @@ use aether_bloomery_program::{Env, Program, Sync, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.reserved.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -30,6 +31,7 @@ impl WasmActor for Probe {
 
 struct Listed;
 
+/// A test program.
 #[program]
 impl Program for Listed {
     const NAME: &'static str = "test.program.reserved";

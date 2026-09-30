@@ -4,6 +4,7 @@ use aether_bloomery_program::{Async, Env, Program, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.unknown.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -17,6 +18,7 @@ struct Other;
 
 struct UnknownApi;
 
+/// A test program.
 #[program]
 impl Program for UnknownApi {
     const NAME: &'static str = "test.program.unknown";

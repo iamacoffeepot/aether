@@ -11,6 +11,7 @@ use aether_http::{Fetch, FetchResult, HttpMethod};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.summarize.input")]
 struct SummarizeInput {
+    /// The text to summarize.
     text: Ref<Utf8Text>,
 }
 
@@ -22,6 +23,7 @@ struct SummarizeResult {
 
 struct Summarize;
 
+/// Read cited text and stage a summary derived from it.
 #[program]
 impl Program for Summarize {
     const NAME: &'static str = "test.program.summarize";
@@ -39,6 +41,7 @@ impl Program for Summarize {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.refuse.input")]
 struct RefuseInput {
+    /// Any number; the program refuses whatever it is.
     marker: u32,
 }
 
@@ -50,6 +53,7 @@ struct RefuseResult {
 
 struct Refuse;
 
+/// Refuse every invocation.
 #[program]
 impl Program for Refuse {
     const NAME: &'static str = "test.program.refuse";
@@ -66,6 +70,7 @@ impl Program for Refuse {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.fetch_body.input")]
 struct FetchBodyInput {
+    /// The URL to fetch.
     url: Ref<Utf8Text>,
 }
 
@@ -77,6 +82,7 @@ struct FetchBodyResult {
 
 struct FetchBody;
 
+/// Fetch a URL over HTTP and stage the response body.
 #[program]
 impl Program for FetchBody {
     const NAME: &'static str = "test.program.fetch_body";
@@ -107,6 +113,7 @@ impl Program for FetchBody {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.stall.input")]
 struct StallInput {
+    /// Any number; the program never reads it.
     marker: u32,
 }
 
@@ -118,6 +125,7 @@ struct StallResult {
 
 struct Stall;
 
+/// Never finish.
 #[program]
 impl Program for Stall {
     const NAME: &'static str = "test.program.stall";
@@ -134,6 +142,7 @@ impl Program for Stall {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.read_uncited.input")]
 struct ReadUncitedInput {
+    /// The digest of text the closure does not carry.
     text: Digest,
 }
 
@@ -145,6 +154,7 @@ struct ReadUncitedResult {
 
 struct ReadUncited;
 
+/// Read text named by a bare digest the closure does not carry.
 #[program]
 impl Program for ReadUncited {
     const NAME: &'static str = "test.program.read_uncited";
@@ -162,6 +172,7 @@ impl Program for ReadUncited {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.read_large.input")]
 struct ReadLargeInput {
+    /// The large text to read whole.
     text: Ref<Utf8Text>,
 }
 
@@ -177,6 +188,7 @@ const TAIL_BYTES: usize = 16;
 
 struct ReadLarge;
 
+/// Read a large text whole and stage its length and its last sixteen bytes.
 #[program]
 impl Program for ReadLarge {
     const NAME: &'static str = "test.program.read_large";

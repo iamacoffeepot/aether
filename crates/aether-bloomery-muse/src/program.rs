@@ -7,13 +7,14 @@ use crate::input::TurnInput;
 use crate::result::TurnResult;
 use crate::{request, response};
 
+/// The `muse.turn` program.
+pub struct MuseTurn;
+
 /// Sends one stateless turn over the responses API and stages the reply.
 ///
 /// Reads every cited item text (the driver's closure walk has injected them,
 /// so no read fetches), sends exactly one `Fetch`, and records the reply.
 /// It never retries: a retry is a new request the graph decides on.
-pub struct MuseTurn;
-
 #[program]
 impl Program for MuseTurn {
     const NAME: &'static str = "muse.turn";

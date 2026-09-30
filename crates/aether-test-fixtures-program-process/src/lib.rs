@@ -12,6 +12,7 @@ use aether_process::{Run, RunResult};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.exec.input")]
 struct ExecInput {
+    /// The path of the binary to run.
     binary: Ref<Utf8Text>,
 }
 
@@ -23,6 +24,7 @@ struct ExecResult {
 
 struct Exec;
 
+/// Run a binary and stage its stdout.
 #[program]
 impl Program for Exec {
     const NAME: &'static str = "test.program.exec";

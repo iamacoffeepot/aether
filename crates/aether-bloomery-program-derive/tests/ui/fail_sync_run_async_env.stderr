@@ -1,7 +1,7 @@
 error: #[program] fn run requires Env<Sync>
-  --> tests/ui/fail_sync_run_async_env.rs:26:38
+  --> tests/ui/fail_sync_run_async_env.rs:28:38
    |
-26 |     fn run(input: Self::Input, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+28 |     fn run(input: Self::Input, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
    |                                      ^^^^^^^^^^^^^^^
 
 warning: unused imports: `Mode` and `Refusal`

@@ -4,6 +4,7 @@ use aether_bloomery_program::{Async, Env, Program, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.sync.asyncenv.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -15,6 +16,7 @@ struct Out {
 
 struct SyncProg;
 
+/// A test program.
 #[program]
 impl Program for SyncProg {
     const NAME: &'static str = "test.program.sync.asyncenv";

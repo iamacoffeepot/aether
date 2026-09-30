@@ -15,6 +15,7 @@ struct MixedSummary {
 
 struct Summarize;
 
+/// Read cited text and stage a summary derived from it.
 #[program]
 impl Program for Summarize {
     const NAME: &'static str = "test.program.summarize";

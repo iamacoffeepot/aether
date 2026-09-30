@@ -83,6 +83,7 @@ use syn::{
     PathArguments, ReturnType, Token, Type, parse_macro_input, token,
 };
 
+mod docs;
 mod kind_attr;
 mod storage;
 
@@ -438,17 +439,23 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
     reject_skipped_wire_fields(&input.data)?;
     let name = &input.ident;
     let name_str = name.to_string();
-    let (body, label_node_body, cast_eligible_expr) = match &input.data {
+    let (body, label_node_body, doc_node_body, cast_eligible_expr) = match &input.data {
         Data::Struct(_) => {
             let fields = struct_fields(input)?;
             let has_repr_c = struct_has_repr_c(&input.attrs);
             (
                 expand_schema_struct(&fields)?,
                 expand_label_node_struct(&name_str, &fields),
+                docs::doc_node_struct(&name_str, &fields),
                 cast_eligible_expr_for_struct(has_repr_c, &fields),
             )
         }
-        Data::Enum(e) => (expand_schema_enum(e)?, expand_label_node_enum(&name_str, e), quote! { false }),
+        Data::Enum(e) => (
+            expand_schema_enum(e)?,
+            expand_label_node_enum(&name_str, e),
+            docs::doc_node_enum(&name_str, e),
+            quote! { false },
+        ),
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(u.union_token, "Schema derive does not support unions"));
         }
@@ -462,6 +469,7 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
                 ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
             );
             const LABEL_NODE: ::aether_data::__derive_runtime::LabelNode = #label_node_body;
+            const DOC_NODE: ::aether_data::__derive_runtime::DocNode = #doc_node_body;
         }
 
         impl ::aether_data::CastEligible for #name {
@@ -1223,12 +1231,16 @@ pub(crate) fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> 
         return Err(syn::Error::new_spanned(&input.ident, "expected struct"));
     };
     Ok(match fields {
-        Fields::Named(named) => {
-            named.named.iter().map(|f| FieldInfo { ident: f.ident.clone(), ty: f.ty.clone() }).collect()
-        }
-        Fields::Unnamed(unnamed) => {
-            unnamed.unnamed.iter().map(|f| FieldInfo { ident: None, ty: f.ty.clone() }).collect()
-        }
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .map(|f| FieldInfo { ident: f.ident.clone(), ty: f.ty.clone(), attrs: f.attrs.clone() })
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .map(|f| FieldInfo { ident: None, ty: f.ty.clone(), attrs: f.attrs.clone() })
+            .collect(),
         Fields::Unit => Vec::new(),
     })
 }
@@ -1236,6 +1248,7 @@ pub(crate) fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> 
 pub(crate) struct FieldInfo {
     pub(crate) ident: Option<syn::Ident>,
     pub(crate) ty: Type,
+    pub(crate) attrs: Vec<Attribute>,
 }
 
 pub(crate) fn to_screaming_snake_case(s: &str) -> String {

@@ -5,6 +5,7 @@ use aether_bloomery_program::{Async, Env, Http, Process, Program, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.shared.fetch_one.input")]
 struct FetchOneIn {
+    /// A test value.
     n: u32,
 }
 
@@ -17,6 +18,7 @@ struct FetchOneOut {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.shared.fetch_two.input")]
 struct FetchTwoIn {
+    /// A test value.
     n: u32,
 }
 
@@ -29,6 +31,7 @@ struct FetchTwoOut {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.shared.exec.input")]
 struct ExecIn {
+    /// A test value.
     n: u32,
 }
 
@@ -40,6 +43,7 @@ struct ExecOut {
 
 struct FetchOne;
 
+/// A test program.
 #[program]
 impl Program for FetchOne {
     const NAME: &'static str = "test.program.fetch_one";
@@ -55,6 +59,7 @@ impl Program for FetchOne {
 
 struct FetchTwo;
 
+/// A test program.
 #[program]
 impl Program for FetchTwo {
     const NAME: &'static str = "test.program.fetch_two";
@@ -70,6 +75,7 @@ impl Program for FetchTwo {
 
 struct Exec;
 
+/// A test program.
 #[program]
 impl Program for Exec {
     const NAME: &'static str = "test.program.exec";

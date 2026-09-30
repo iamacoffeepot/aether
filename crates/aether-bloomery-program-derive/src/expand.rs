@@ -2,7 +2,7 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, ImplItem, Pat, ReturnType, Type};
+use syn::{FnArg, ImplItem, Pat, ReturnType, Type, parse_quote};
 
 use crate::check::ApiBinding;
 use crate::export_desc::emit_program_export_desc;
@@ -10,7 +10,7 @@ use crate::parse::ProgramDef;
 
 pub fn expand(def: ProgramDef) -> TokenStream2 {
     let export_desc = emit_program_export_desc(&def);
-    let ProgramDef { mut item, self_ty, name: _, intent: _, async_run, sampled, apis } = def;
+    let ProgramDef { mut item, self_ty, name, intent: _, doc, input, async_run, sampled, apis } = def;
     let run = item
         .items
         .iter()
@@ -20,6 +20,8 @@ pub fn expand(def: ProgramDef) -> TokenStream2 {
         })
         .expect("parse requires fn run");
     item.items.retain(|item| !matches!(item, ImplItem::Fn(method) if method.sig.ident == "run"));
+    item.items.push(parse_quote! { const DOC: &'static str = #doc; });
+    let documented = expand_documented(&name.value(), &input);
     let supertrait = if async_run {
         expand_async(&self_ty, &run, sampled, &apis)
     } else {
@@ -28,9 +30,27 @@ pub fn expand(def: ProgramDef) -> TokenStream2 {
     quote! {
         #item
 
+        #documented
+
         #supertrait
 
         #export_desc
+    }
+}
+
+/// The compile-time check that the input describes a tool: a struct whose
+/// every reachable field and variant carries a `///` doc. The error names the
+/// first gap.
+fn expand_documented(name: &str, input: &Type) -> TokenStream2 {
+    let root = format!(
+        "program `{name}`: its `type Input` must be a struct deriving `Storage`, with a `///` doc on every field and variant it exposes"
+    );
+    quote! {
+        const _: () = ::aether_bloomery_program::__macro_internals::require_documented(
+            ::aether_bloomery_program::__macro_internals::StaticSchema::<#input>::SCHEMA,
+            ::aether_bloomery_program::__macro_internals::StaticSchema::<#input>::DOC_NODE,
+            #root,
+        );
     }
 }
 

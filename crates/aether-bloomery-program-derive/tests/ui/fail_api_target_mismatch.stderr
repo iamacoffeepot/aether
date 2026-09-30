@@ -1,7 +1,7 @@
 error[E0271]: type mismatch resolving `<Http as InjectedApi>::Target == ProcessCapability`
-  --> tests/ui/fail_api_target_mismatch.rs:27:71
+  --> tests/ui/fail_api_target_mismatch.rs:29:71
    |
-27 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _process: Process) -> Result<Self::Result, Refusal> {
+29 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _process: Process) -> Result<Self::Result, Refusal> {
    |                                                                       ^^^^^^^ expected `ProcessCapability`, found `HttpCapability`
    |
 note: required by a bound in `aether_bloomery_program::__macro_internals::check_target`

@@ -18,6 +18,9 @@
 //! [`Workspace`] run that exhausts its allotment or fails in the executor
 //! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
 //!
+//! [`tool_definition`] renders a declared program as a responses-API function
+//! tool: its `///` doc, and its input's JSON Schema with every field's doc.
+//!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
 #![no_std]
@@ -30,6 +33,7 @@ mod env;
 mod invoke;
 mod root;
 mod section;
+mod tool;
 
 pub use aether_bloomery_kinds as kinds;
 pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
@@ -41,10 +45,11 @@ pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCa
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{Declaration, DeclarationsError, declarations};
+pub use tool::{MAX_FUNCTION_NAME_BYTES, ToolDefinitionError, function_name, program_name, tool_definition};
 
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::{Kind, KindId, MailboxId, RequestId};
+    pub use aether_data::{Kind, KindId, MailboxId, RequestId, Schema, StaticSchema, require_documented};
     pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
@@ -53,7 +58,9 @@ pub mod __macro_internals {
     pub use crate::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
     pub use crate::invoke::{PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
-    pub use crate::section::{MODE_PURE, MODE_SAMPLED, api_mask, program_record_len, write_program_record};
+    pub use crate::section::{
+        MODE_PURE, MODE_SAMPLED, ProgramRecord, api_mask, program_record_len, write_program_record,
+    };
 
     /// The provider the driver maps each program API to, by the name
     /// `#[program]` accepts. Each row's `Replies` impls type the calls the

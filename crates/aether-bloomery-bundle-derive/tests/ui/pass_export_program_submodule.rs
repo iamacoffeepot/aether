@@ -15,6 +15,7 @@ mod turns {
     #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
     #[kind(name = "test.program.ui.submodule.turn.input")]
     pub(crate) struct In {
+        /// A test value.
         n: u32,
     }
 
@@ -26,6 +27,7 @@ mod turns {
 
     pub(crate) struct Turn;
 
+    /// A test program.
     #[program]
     impl Program for Turn {
         const NAME: &'static str = "test.program.submodule.turn";

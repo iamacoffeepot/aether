@@ -5,15 +5,20 @@ use aether_bloomery_kinds::{Ref, Utf8Text};
 /// Who spoke an item. System-style instructions are a leading `Developer` item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 pub enum Role {
+    /// Instructions to the model, above the conversation.
     Developer,
+    /// The person the model answers.
     User,
+    /// The model's own earlier reply.
     Assistant,
 }
 
 /// One item of the conversation: its speaker and the cited text it said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 pub struct TurnItem {
+    /// Who spoke the item.
     role: Role,
+    /// The cited text the item said.
     text: Ref<Utf8Text>,
 }
 
