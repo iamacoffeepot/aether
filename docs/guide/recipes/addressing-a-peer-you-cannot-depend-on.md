@@ -154,8 +154,9 @@ a `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
 two ways: by casting the envelope sender at receipt
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
 §4), or by proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`)
-that the announcement carries. The cast is not built for a guest on `main`,
-but the `ActorPath<R>` door now does: `WasmCtx::resolve` (#7205).
+that the announcement carries. A guest has the cast, `WasmCtx::cast`, and the
+`ActorPath<R>` door, `WasmCtx::resolve` (#7205); its `ProtocolPath<P>` decode
+lands with ADR-0241.
 
 A reply to the announcing mail itself needs no stored reference. The handler
 replies, as any handler does.

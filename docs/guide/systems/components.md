@@ -542,10 +542,9 @@ the dependency is checked at the type's next spawn.
 
 A declared dependency reaches only an actor whose type the guest can compile
 and name. A native actor in a native-only crate, such as a Bloomery engine's
-journal owner or bundle driver, has no type a guest can write from `main` —
-but its identity half publishes a marker type the guest can name instead
-(`JournalActor`, `BundleDriver`), and an `Instanced` actor cannot be declared
-at all. A guest reaches such an actor by its path instead: the operator names
+journal owner or bundle driver, is named to a guest only by the marker type
+its identity half publishes (`JournalActor`, `BundleDriver`), and an
+`Instanced` actor cannot be declared at all. A guest reaches such an actor by its path instead: the operator names
 it in the component's config as an `ActorPath<R>`, whose leaf must name `R` to
 decode, and the guest proves it once with `ctx.resolve(&path)`
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
