@@ -12,8 +12,8 @@ note: inside `require_documented`
 note: inside `schema_docs::check_node`
   --> $WORKSPACE/crates/aether-data/src/schema_docs.rs
    |
-   |             check_named_fields(named_fields(fields), doc_fields(field_docs), opaque, depth);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             check_named_fields(cow_named_fields(fields), cow_field_docs(field_docs), opaque, depth);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: inside `schema_docs::check_named_fields`
   --> $WORKSPACE/crates/aether-data/src/schema_docs.rs
    |
