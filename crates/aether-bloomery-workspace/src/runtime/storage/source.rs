@@ -29,8 +29,8 @@
 //! the same with the node it decodes. A closure answers its members as views
 //! of one shared allocation, so a node kept after its listing was decoded
 //! would hold its whole window resident. [`SourceReader::open`] and
-//! [`SourceReader::load`], for a caller that is not writing an archive, keep
-//! what they read.
+//! [`SourceReader::load`], for a caller that is not writing an archive, take
+//! nothing out of the map and keep nothing they read into it.
 //!
 //! The blobs directly inside an oversized directory are read as the archive
 //! reaches them, a batch at a time. The reader remembers each directory
@@ -366,7 +366,9 @@ impl<'a> SourceReader<'a> {
     }
 
     /// Load and decode the artifact `artifact` names, verified against its
-    /// digest, keeping it in the map.
+    /// digest: from the map, or read with one `ReadArtifact` and not kept, so
+    /// a root resolution checks is still read with its closure when the
+    /// archive reaches it.
     ///
     /// # Errors
     ///
@@ -374,7 +376,7 @@ impl<'a> SourceReader<'a> {
     /// read, verify, or decode.
     pub fn load<K: Storage>(&mut self, artifact: &Ref<K>) -> Result<K, StorageError> {
         let digest = artifact.digest();
-        let member = self.member(digest, true)?;
+        let member = self.member(digest, false)?;
         if member.kind() != K::ID {
             return Err(StorageError::OtherKind(digest));
         }
