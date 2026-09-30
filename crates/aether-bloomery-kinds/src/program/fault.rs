@@ -98,25 +98,46 @@ pub enum FaultReason {
     /// The input blob had the declared kind but did not decode.
     InputDecode,
     /// The program declined to attempt. Bounded reason.
-    Refused { reason: Detail },
+    Refused {
+        /// Why the program declined.
+        reason: Detail,
+    },
     /// The program panicked. Caught by the driver.
-    Panicked { message: Detail },
+    Panicked {
+        /// The panic's message.
+        message: Detail,
+    },
     /// An executor's time allotment ran out. The deadline is the executor's and is not recorded.
     TimedOut,
     /// Reserved: no out-of-process program exists in this brick.
-    Crashed { stderr_tail: Detail },
+    Crashed {
+        /// The last of what the crashed process wrote to stderr.
+        stderr_tail: Detail,
+    },
     /// The input's transitive closure exceeded the driver's byte cap. Nothing was loaded.
-    ClosureTooLarge { limit_bytes: u64 },
+    ClosureTooLarge {
+        /// The driver's cap on the closure, in bytes.
+        limit_bytes: u64,
+    },
     /// A failure before `Invoke`: a load error, an unreadable section, an unknown program name, or the wrong input kind.
-    BundleUnavailable { reason: Detail },
+    BundleUnavailable {
+        /// What failed before `Invoke`.
+        reason: Detail,
+    },
     /// A failure after `Invoke`: `Invoked::Rejected`, or a result whose prefix doesn't match the declaration.
-    ProtocolViolation { reason: Detail },
+    ProtocolViolation {
+        /// What broke the protocol after `Invoke`.
+        reason: Detail,
+    },
     /// The request was outstanding when the engine stopped.
     Interrupted,
     /// An executor's memory allotment ran out.
     ResourceExhausted,
     /// An executor failed during the attempt for a reason outside the request.
-    ExecutorFailed { reason: Detail },
+    ExecutorFailed {
+        /// How the executor failed.
+        reason: Detail,
+    },
 }
 
 #[cfg(test)]
