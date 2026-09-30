@@ -12,7 +12,7 @@ nothing enforces them mechanically:
 
 | Workflow | Check | Covers |
 | --- | --- | --- |
-| `ci.yml` | `CI pass` | fmt, clippy, the component wasm warning gate, rustdoc lints, workspace tests, duplicate-code (jscpd), unused-deps (cargo-machete), Cargo.lock freshness; on pull requests also the new-suppression scan, the reference-mint allowlist, the raw-mailbox ratchet, and those three scanners' regression tests |
+| `ci.yml` | `CI pass` | fmt, clippy, the component wasm warning gate, rustdoc lints, workspace tests, duplicate-code (jscpd), unused-deps (cargo-machete), Cargo.lock freshness; on pull requests also the new-suppression scan, the reference-mint allowlist, and those two scanners' regression tests |
 | `lint-title.yml` | `Lint title` | Conventional Commit titles (main squash-merges with the title as the commit subject) |
 
 **Advisory checks** — run on pull requests but never block a merge:
