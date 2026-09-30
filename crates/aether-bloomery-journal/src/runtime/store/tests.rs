@@ -71,6 +71,7 @@ fn a_blob_streamed_in_chunks_is_the_file_and_digest_a_staged_blob_would_be() -> 
     let mut batch = journal.artifact_store().batch()?;
 
     let blob = stream(&mut batch, &[b"first ", b"second ", b"third"])?;
+    batch.commit()?;
 
     let payload = b"first second third";
     assert_eq!(blob.digest(), artifact_digest(OpaqueBytes::ID, payload));
@@ -110,6 +111,44 @@ fn dropping_an_unfinished_blob_file_deletes_its_temp_file() -> TestResult {
     drop(blob);
 
     assert_eq!(tmp_entries(&root)?, 0);
+    Ok(())
+}
+
+#[test]
+fn the_same_bytes_streamed_twice_in_one_batch_commit_one_row_and_one_file() -> TestResult {
+    // Catches the in-batch duplicate mishandled: a second placement of a
+    // pending digest that kept its temp file would leak it in `blobs/tmp/`,
+    // and one that replaced the first would sync and rename it twice.
+    let (_temp, root, journal) = open_root()?;
+    let mut batch = journal.artifact_store().batch()?;
+
+    let first = stream(&mut batch, &[b"twice"])?;
+    assert_eq!(stream(&mut batch, &[b"tw", b"ice"])?, first);
+    assert_eq!(tmp_entries(&root)?, 1, "the duplicate's temp file is deleted at once");
+    batch.commit()?;
+
+    assert_eq!(artifact_rows(&root)?, SEEDED_ROWS + 1);
+    assert_eq!(fs::read(blob_path(&root, &first.digest()))?, artifact_blob(OpaqueBytes::ID, b"twice"));
+    assert_eq!(tmp_entries(&root)?, 0);
+    Ok(())
+}
+
+#[test]
+fn dropping_an_uncommitted_batch_deletes_its_staged_files() -> TestResult {
+    // Catches an abandoned batch leaving files behind: placements recorded
+    // but never flushed must go with the batch, neither kept in `blobs/tmp/`
+    // nor renamed to a digest name no row will cite.
+    let (_temp, root, journal) = open_root()?;
+    let mut batch = journal.artifact_store().batch()?;
+    let blob = stream(&mut batch, &[b"abandoned file"])?;
+    let tree = batch.stage_encoded(&tree_citing(blob)?)?;
+    assert_eq!(tmp_entries(&root)?, 2, "both files wait in `blobs/tmp/` until commit");
+
+    drop(batch);
+
+    assert_eq!(tmp_entries(&root)?, 0);
+    assert!(!blob_path(&root, &blob.digest()).exists());
+    assert!(!blob_path(&root, &tree.digest()).exists());
     Ok(())
 }
 

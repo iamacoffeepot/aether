@@ -4,19 +4,33 @@
 //! hashes. Only a rename creates that name, so a digest-named file is complete
 //! and is never rewritten. A write goes through `blobs/tmp/`, which the
 //! journal sweeps at open while it holds the root's lock.
+//!
+//! A batch writes each blob to a temp file as it streams and only records
+//! it. [`BlobDir::flush`] then runs ADR-0220's order over the whole batch:
+//! every file durable, every file renamed to its digest name, every touched
+//! directory durable, all before the caller commits the rows that name them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use aether_data::KindId;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 
 use crate::Digest;
 use crate::runtime::artifact::split_artifact;
 use crate::runtime::journal::JournalError;
+
+/// The most threads [`BlobDir::flush`] fsyncs a batch's files on. The
+/// filesystem journal group-commits concurrent fsyncs: on the Linux gate
+/// host, fsyncing 4,104 freshly written 4 KiB files took 11.8 s serially,
+/// 1.43 s 16 wide, and 0.81 s 32 wide, so 32 takes most of the gain while
+/// bounding the threads 48 concurrent imports spawn.
+const SYNC_WIDTH: usize = 32;
 
 /// The `blobs` directory of one journal root.
 #[derive(Clone)]
@@ -54,11 +68,14 @@ impl BlobDir {
         Ok(())
     }
 
-    /// Store `bytes` under `digest` unless its file already exists, as
-    /// [`BlobDir::place`] does, recording the directories to fsync in
-    /// `pending`. The caller flushes `pending` with
-    /// [`BlobDir::sync_pending`] before it commits the artifact row.
+    /// Write `bytes` to a temp file and record it in `pending` under
+    /// `digest`, unless its file already exists or is already pending, as
+    /// [`BlobDir::place`] does. The caller flushes `pending` with
+    /// [`BlobDir::flush`] before it commits the artifact row.
     pub fn store(&self, digest: &Digest, bytes: &[u8], pending: &mut PendingSyncs) -> Result<(), JournalError> {
+        if pending.files.contains_key(digest) {
+            return Ok(());
+        }
         let (shard, path) = self.locate(digest);
         if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
             pending.shards.insert(shard);
@@ -70,12 +87,13 @@ impl BlobDir {
         self.place(digest, staged, pending)
     }
 
-    /// [`BlobDir::store`] for a blob that stands alone: its directories are
-    /// fsynced before this returns, so the caller may commit its row at once.
+    /// [`BlobDir::store`] for a blob that stands alone: its file is durable,
+    /// renamed, and its directories durable before this returns, so the
+    /// caller may commit its row at once.
     pub fn store_synced(&self, digest: &Digest, bytes: &[u8]) -> Result<(), JournalError> {
         let mut pending = PendingSyncs::default();
         self.store(digest, bytes, &mut pending)?;
-        self.sync_pending(&mut pending)
+        self.flush(&mut pending)
     }
 
     /// A new temp file in `blobs/tmp/`, deleted when it drops unplaced.
@@ -84,40 +102,50 @@ impl BlobDir {
         NamedTempFile::new_in(&tmp).map_err(|error| JournalError::io(&tmp, error))
     }
 
-    /// Make `staged`, a temp file holding exactly the bytes `digest` hashes,
-    /// the file stored under `digest`: fsync it, create its shard directory
-    /// when missing, rename it to the digest name, and record `blobs/` and
-    /// the shard in `pending`. When the digest name already exists the temp
-    /// file is deleted instead and only the shard is recorded, since the file
-    /// may be one an interrupted earlier placement renamed but never made
-    /// durable. The file's name is durable once `pending` is flushed with
-    /// [`BlobDir::sync_pending`], which the caller does before it commits
-    /// the artifact row.
+    /// Record `staged`, a temp file holding exactly the bytes `digest`
+    /// hashes, in `pending` as the file to store under `digest`. The file is
+    /// closed, not synced or renamed; [`BlobDir::flush`] does both for the
+    /// whole batch before the caller commits the artifact row. When the
+    /// digest name already exists the temp file is deleted instead and only
+    /// the shard is recorded, since the file may be one an interrupted
+    /// earlier placement renamed but never made durable. When the digest is
+    /// already pending in this batch the temp file is deleted too.
     pub fn place(
         &self,
         digest: &Digest,
         staged: NamedTempFile,
         pending: &mut PendingSyncs,
     ) -> Result<(), JournalError> {
+        if pending.files.contains_key(digest) {
+            return Ok(());
+        }
         let (shard, path) = self.locate(digest);
         if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
             pending.shards.insert(shard);
             return Ok(());
         }
-        staged.as_file().sync_all().map_err(|error| JournalError::io(staged.path(), error))?;
-
-        create_unsynced(&shard)?;
-        pending.blobs_dir = true;
-        staged.persist(&path).map_err(|error| JournalError::io(&path, error.error))?;
-        pending.shards.insert(shard);
+        pending.files.insert(*digest, staged.into_temp_path());
         Ok(())
     }
 
-    /// Flush every directory `pending` recorded, then clear it: `blobs/`
-    /// once, so every shard created since is durable, then each recorded
-    /// shard once, so every file renamed into it is. Every placement
-    /// recorded in `pending` is durable once this returns.
-    pub fn sync_pending(&self, pending: &mut PendingSyncs) -> Result<(), JournalError> {
+    /// Make every placement `pending` recorded durable under its digest
+    /// name, in ADR-0220's order, then clear it: fsync every pending file,
+    /// at most [`SYNC_WIDTH`] at a time; rename each to its digest name,
+    /// creating its shard when missing; then fsync `blobs/` once, so every
+    /// shard created since is durable, and each touched shard once, so every
+    /// file renamed into it is. The caller commits the rows after this
+    /// returns. On an error the files not yet renamed are deleted.
+    pub fn flush(&self, pending: &mut PendingSyncs) -> Result<(), JournalError> {
+        let files = mem::take(&mut pending.files);
+        sync_files(files.values(), SYNC_WIDTH)?;
+        for (digest, staged) in files {
+            let (shard, path) = self.locate(&digest);
+            create_unsynced(&shard)?;
+            pending.blobs_dir = true;
+            staged.persist(&path).map_err(|error| JournalError::io(&path, error.error))?;
+            pending.shards.insert(shard);
+        }
+
         if pending.blobs_dir {
             sync_dir(&self.dir)?;
             pending.blobs_dir = false;
@@ -216,16 +244,45 @@ impl BlobDir {
     }
 }
 
-/// The directories a run of placements renamed into or relied on, not yet
-/// fsynced. A batch of placements records into one, and
-/// [`BlobDir::sync_pending`] fsyncs each directory once before the batch's
-/// rows commit, so a batch of n new blobs costs n file fsyncs plus one per
-/// touched shard plus one for `blobs/`, never three per blob (ADR-0220).
+/// A batch's placements not yet durable: the temp files to sync and rename,
+/// and the directories to fsync after. [`BlobDir::flush`] runs them before
+/// the batch's rows commit, so a batch of n new blobs costs n file fsyncs,
+/// run side by side, plus one per touched shard plus one for `blobs/`
+/// (ADR-0220). Dropping it unflushed deletes every pending temp file.
 #[derive(Default)]
 pub struct PendingSyncs {
+    /// Each new blob's closed temp file, by the digest it is stored under.
+    files: HashMap<Digest, TempPath>,
     /// `blobs/` gained or may have gained a shard entry.
     blobs_dir: bool,
     shards: HashSet<PathBuf>,
+}
+
+/// Fsync every file in `paths`, striding them across at most `width` scoped
+/// threads. Each file is reopened by path: an fsync flushes the inode, so it
+/// makes durable the bytes written through the handle already closed.
+/// Returns the first failure once every thread has finished.
+fn sync_files<'a>(paths: impl Iterator<Item = &'a TempPath>, width: usize) -> Result<(), JournalError> {
+    let paths: Vec<&Path> = paths.map(|path| &**path).collect();
+    let threads = width.min(paths.len());
+    if threads <= 1 {
+        return paths.iter().try_for_each(|path| sync_file(path));
+    }
+    thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(threads);
+        for first in 0..threads {
+            let paths = &paths;
+            workers.push(
+                scope.spawn(move || paths.iter().skip(first).step_by(threads).try_for_each(|path| sync_file(path))),
+            );
+        }
+        workers.into_iter().try_for_each(|worker| worker.join().unwrap_or_else(|panic| panic::resume_unwind(panic)))
+    })
+}
+
+/// Reopen the file at `path` and fsync it.
+fn sync_file(path: &Path) -> Result<(), JournalError> {
+    File::open(path).and_then(|file| file.sync_all()).map_err(|error| JournalError::io(path, error))
 }
 
 /// The payload length of a stored artifact `size_bytes` long: everything
