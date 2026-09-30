@@ -293,6 +293,25 @@ back as `since` to page forward without re-reading. Only in-actor `tracing::*` e
 (mean and MAD in nanoseconds, plus a sample count); pass a `kind_id` to filter to
 one handler.
 
+**Inspecting a bloomery engine.** A bloomery engine answers
+`aether.bloomery.inspect.artifact` and `aether.bloomery.inspect.events` at
+`aether.bloomery.inspect:<unit>` (`aether.bloomery.inspect:primary` for the
+default unit), so its journal reads with `send_mail` and no Rust. `artifact`
+takes `{digest, depth}`, with the digest as `{"$hex": "<64 hex digits>"}`, and
+answers `Found {kind_id, kind, json, truncated}`, `Missing`, or `Err`; `depth`
+(at most 4) resolves cited digests inline as `{digest, kind, value}`, that
+many levels deep. `events` takes `{after, limit, kinds}` (`limit` at most 128,
+`kinds` a list of kind names, empty for all) and answers `Ok {head, next_after,
+events}`, each event `{seq, cause, kind_id, kind, recorded_at_millis, value}`;
+pass `next_after` back as `after` to page on. Every value comes back as JSON
+text in a string, with each 32-byte digest as lowercase hex. A kind is named
+from the engine's native storage kinds or the loaded bundles' program
+declarations; one neither knows comes back as `{kind_id, length, hex}`, never
+an error. Bounds keep a reply small: at most 256 resolved artifacts, 65,536
+JSON values, 4,096 bytes per hex rendering, and 4,096 entries scanned per
+`events` request. An artifact cut short says `truncated`; an `events` reply cut
+short simply stops, and `next_after` pages on from there.
+
 ## Conventions that bite
 
 - **Mailbox vs kind.** `address` is the mailbox; `kind_name` is the payload.

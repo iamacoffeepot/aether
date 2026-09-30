@@ -293,6 +293,7 @@ dependencies = [
  "aether-bloomery-workspace",
  "aether-bloomery-workspace-programs",
  "aether-chassis",
+ "aether-codec",
  "aether-component",
  "aether-data",
  "aether-fleet",
@@ -304,6 +305,7 @@ dependencies = [
  "aether-substrate",
  "clap",
  "confique",
+ "serde",
  "serde_json",
  "tracing",
 ]

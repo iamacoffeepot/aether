@@ -42,6 +42,13 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 # request names the journal it reads and stages through.
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace" }
 clap = { workspace = true }
+# The inspect actor: its wire kinds (`#[kind]`, `#[derive(Schema)]`, serde),
+# the native storage-kind inventory it resolves schemas from, the storage
+# codec that decodes a value by its schema, and the JSON it answers with.
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
 # `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a
 # `#[derive(confique::Config)]` layer struct reached only through
 # macro-emitted paths the source-only unused-deps scan can't see (ignored
@@ -59,16 +66,12 @@ aether-bloomery-muse = { path = "../aether-bloomery-muse" }
 aether-bloomery-workspace-programs = { path = "../aether-bloomery-workspace-programs" }
 # `Heads`, the fold the environment scenario reads the published head back through.
 aether-bloomery-program = { path = "../aether-bloomery-program" }
-# The Muse scenario reads the request body its loopback stub server received.
-serde_json = { workspace = true }
 # The crash scenario forks the `aether-bloomery` binary through the hub, SIGKILLs it, and reads the restarted engine over the wire.
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 # `require_wasm`, which locates the program fixture bundle the crash scenario seeds.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # `RestartPolicy`, the supervision the crash scenario arms on the hub.
 aether-fleet = { path = "../aether-fleet" }
-# `derive` for the crash scenario's local mirrors of the fixture's program inputs.
-aether-data = { path = "../aether-data", features = ["derive"] }
 # The workspace scenario's scripted Engine API daemon and the kinds its seed stages.
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", features = ["test-support"] }
 

@@ -1,9 +1,9 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
 //! engine. Boots the shared base stratum plus the component host and a held
-//! RPC server, then the mount seam spawns the journal owner and the bundle
-//! driver over the one configured unit's journal root, and only then does the
-//! RPC listener bind (issue #6399), so an engine a caller can reach can
-//! already take driver calls.
+//! RPC server, then the mount seam spawns the journal owner, the bundle
+//! driver, and the inspect actor over the one configured unit's journal root,
+//! and only then does the RPC listener bind (issue #6399), so an engine a
+//! caller can reach can already take driver calls and inspect reads.
 //!
 //! The composition is deliberately narrow. Its integrations are HTTP egress
 //! for Sampled programs (ADR-0234 decision 7), composed with the capability's
@@ -75,10 +75,11 @@ impl BloomeryChassis {
     /// substrate, re-apply the resolved log filter, lift the base out of the
     /// env, compose the shared stratum plus the component host, HTTP egress,
     /// the workspace actor, and the held RPC server, sweep for unknown env
-    /// keys, install the signal-blocking driver, mount the journal owner and
-    /// the bundle driver, and only then open the RPC server's bind gate. The
-    /// order is build, mount, bind: until the gate opens a dial is refused, so
-    /// a caller that reaches the engine can address both mounted actors
+    /// keys, install the signal-blocking driver, mount the journal owner, the
+    /// bundle driver, and the inspect actor, and only then open the RPC
+    /// server's bind gate. The order is build, mount, bind: until the gate
+    /// opens a dial is refused, so a caller that reaches the engine can
+    /// address every mounted actor
     /// (issue #6399). A chassis composed with no RPC port publishes no gate
     /// and binds nothing. The [`Mounted`] references come back beside the
     /// chassis for an embedder that drives it in process.
@@ -87,7 +88,7 @@ impl BloomeryChassis {
     ///
     /// Returns [`BootError`] when the bloomery knobs do not lower, the
     /// journal root does not open (another engine holds it, among others),
-    /// the substrate or the composed chain fails to boot, either mount spawn
+    /// the substrate or the composed chain fails to boot, a mount spawn
     /// fails, or the RPC port cannot be bound.
     pub fn build_mounted(mut env: BloomeryEnv) -> Result<(BuiltChassis<Self>, Mounted), BootError> {
         // Lower the bloomery knobs first, before anything with a side effect:
@@ -133,7 +134,8 @@ impl BloomeryChassis {
             journal_root = %unit.root.display(),
             journal = ?mounted.journal,
             driver = ?mounted.driver,
-            "bloomery chassis mounted the journal owner and the bundle driver",
+            inspect = ?mounted.inspect,
+            "bloomery chassis mounted the journal owner, the bundle driver, and the inspect actor",
         );
         if let Some(gate) = built.handle::<RpcBindGate>() {
             gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
