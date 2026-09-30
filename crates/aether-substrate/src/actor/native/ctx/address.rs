@@ -155,7 +155,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// arrived untyped, as [`Self::sender`](super::NativeCtx::sender) does, and
     /// the cast is how a handler that must send through it later gets a typed
     /// proof to keep. `T` is sealed to two arms:
-    /// [`Subscriber<K>`](aether_actor::Subscriber) admits a silent or manual
+    /// [`Subscriber<K>`](aether_actor::Subscriber) admits a silent or unchecked
     /// row for `K`, and a `#[protocol]` type admits a route that publishes
     /// every one of its rows with the exact reply (ADR-0231 §4's protocol
     /// arm).

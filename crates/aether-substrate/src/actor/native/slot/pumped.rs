@@ -261,7 +261,7 @@ mod tests {
     use aether_actor::local::ActorSlots;
     use aether_actor::log::ActorLogRing;
     use aether_actor::trace::ActorTraceRing;
-    use aether_actor::{Addressable, HandlesKind, HeldReply, Local as _, Manual, One};
+    use aether_actor::{Addressable, HandlesKind, HeldReply, Local as _, One, Unchecked};
     use aether_data::{ErasedActorPath, Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
@@ -389,8 +389,8 @@ mod tests {
             Pong { seq: req.seq }
         }
 
-        #[handler::manual]
-        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, _d: Defer) {
+        #[handler::unchecked(reason = "test: replies from a worker thread")]
+        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Erased, Unchecked>, _d: Defer) {
             if let Some(tx) = &self.deferred_tx {
                 // Retain the inbound past this handler's return; the reply is
                 // sent from a worker thread and the guard settles the chain
@@ -832,7 +832,7 @@ mod tests {
 
         // The handler deferred: it retained the inbound and shipped the guard
         // out. The retained guard holds the chain open (no premature settle).
-        let guard = guard_rx.recv_timeout(Duration::from_secs(2)).expect("the manual handler deferred the inbound");
+        let guard = guard_rx.recv_timeout(Duration::from_secs(2)).expect("the unchecked handler deferred the inbound");
         assert!(settle.try_recv().is_err(), "the retained guard holds the chain open — no premature settle");
 
         // Reply + settle the inbound from a worker thread (the deferred-reply

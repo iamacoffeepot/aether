@@ -7,7 +7,7 @@
 //! trigger kinds each run one verb and record the lineage the turn ran under.
 //! The plain sends land in finishing sinks, one standing at [`StubActor`]'s
 //! namespace, where the sender's declared dependency folds, and one standing
-//! in for a [`ManualCastRelay`]. The context sends go to the pooled
+//! in for a [`UncheckedCastRelay`]. The context sends go to the pooled
 //! [`Bouncer`], whose answer runs a real reply turn on the probe that takes
 //! the stored context back.
 
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use aether_actor::{
-    ActorRef, Addressable, ErasedActorRef, HandlesKind, MailSender, Manual, OutboundReply, ReplyMode, Single,
+    ActorRef, Addressable, ErasedActorRef, HandlesKind, MailSender, OutboundReply, ReplyMode, Single, Unchecked,
     Undeclared,
 };
 use aether_data::{Encoded, Kind, MailId, RequestId};
@@ -36,21 +36,21 @@ trait CastRelay {
     fn cast(mail: CastOnly) -> Undeclared;
 }
 
-struct ManualCastRelay {
+struct UncheckedCastRelay {
     received: u32,
 }
 
 #[aether_actor::actor(instanced, root)]
-impl NativeActor for ManualCastRelay {
-    const NAMESPACE: &'static str = "test.manual_cast_relay";
+impl NativeActor for UncheckedCastRelay {
+    const NAMESPACE: &'static str = "test.unchecked_cast_relay";
     type Config = ();
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { received: 0 })
     }
 
-    #[handler::manual]
-    fn on_cast(&mut self, _ctx: &mut NativeCtx<'_, Self, Manual>, _mail: CastOnly) {
+    #[handler::unchecked(reason = "test: a cast-only receiver exercising the unchecked row")]
+    fn on_cast(&mut self, _ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: CastOnly) {
         self.received += 1;
     }
 }
@@ -155,10 +155,10 @@ struct Reply {
 }
 
 /// A pumped root that declares [`StubActor`] and [`Bouncer`], holds a
-/// [`ManualCastRelay`] proof, runs one send verb per trigger, and takes the
+/// [`UncheckedCastRelay`] proof, runs one send verb per trigger, and takes the
 /// context back on each [`Poked`] reply.
 struct SendProbe {
-    relay: ActorRef<ManualCastRelay>,
+    relay: ActorRef<UncheckedCastRelay>,
     turns: Vec<Turn>,
     replies: Vec<Reply>,
 }
@@ -167,9 +167,9 @@ struct SendProbe {
 impl NativeActor for SendProbe {
     const NAMESPACE: &'static str = "test.native_send.sender";
     type Config = ();
-    type Params = ActorRef<ManualCastRelay>;
+    type Params = ActorRef<UncheckedCastRelay>;
 
-    fn init((): (), relay: ActorRef<ManualCastRelay>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), relay: ActorRef<UncheckedCastRelay>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { relay, turns: Vec::new(), replies: Vec::new() })
     }
 
@@ -194,8 +194,8 @@ impl NativeActor for SendProbe {
         self.turns.push(Turn::of(ctx, vec![Some(sent)], vec![sent]));
     }
 
-    #[handler::manual]
-    fn on_forward_to(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _trigger: ForwardTo) {
+    #[handler::unchecked(reason = "test: forwards the request, reply pinned to the requester")]
+    fn on_forward_to(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: ForwardTo) {
         ctx.forward_to(self.relay.narrow::<CastRelay>(), &CastOnly { code: 9 });
         self.turns.push(Turn::of(ctx, Vec::new(), Vec::new()));
     }
@@ -259,7 +259,7 @@ impl NativeActor for SendProbe {
 }
 
 /// A booted [`SendProbe`] beside its pooled [`Bouncer`], the sink at
-/// [`StubActor`]'s namespace, and the sink its [`ManualCastRelay`] proof
+/// [`StubActor`]'s namespace, and the sink its [`UncheckedCastRelay`] proof
 /// points at.
 struct Rig {
     driver: PumpedDriver<SendProbe>,
@@ -280,7 +280,7 @@ impl Rig {
         let driver = PumpedDriver::boot(
             boot_test_chassis_with::<Bouncer>(&registry, &mailer, (), ()),
             (),
-            Registry::declared_dependency::<ManualCastRelay>(relay.id()),
+            Registry::declared_dependency::<UncheckedCastRelay>(relay.id()),
         );
         let bouncer = driver.chassis().actor_ref::<Bouncer>().erase();
 
@@ -357,10 +357,10 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
 
 /// ADR-0231 §9: a relay accepts the forwarded kind only through the target's
 /// typed row, while preserving the original requester's reply destination and
-/// the inbound parent/root. The protocol row is manual, so this also catches
+/// the inbound parent/root. The protocol row is unchecked, so this also catches
 /// an implementation that accidentally rejects `Undeclared` relay targets.
 #[test]
-fn forward_to_typed_manual_protocol_preserves_reply_target_and_lineage() {
+fn forward_to_typed_unchecked_protocol_preserves_reply_target_and_lineage() {
     let mut rig = Rig::boot();
     let (requester, _replies) = sink(&rig.registry, &rig.mailer, "test.native_send.requester");
 
@@ -411,12 +411,12 @@ fn typed_detached_send_returns_emitted_id_and_mail_sender_delegates() {
     assert_eq!(delegated.root, delegated.mail_id, "compatibility delegation roots the emitted mail");
 }
 
-/// A payload encoded off the sending thread reaches a manual protocol row as
+/// A payload encoded off the sending thread reaches an unchecked protocol row as
 /// the kind its `Encoded<K>` names, byte for byte, on a fresh chain. Catches
 /// the verb stamping a kind other than `K`, sending bytes other than the
 /// encode, or inheriting the handler's chain the way `send_to` does.
 #[test]
-fn encoded_detached_send_delivers_the_encoded_kind_through_a_manual_protocol_row() {
+fn encoded_detached_send_delivers_the_encoded_kind_through_a_unchecked_protocol_row() {
     let mut rig = Rig::boot();
 
     let (_root, turn) = rig.run(&SendEncodedDetachedTo, None);
@@ -518,7 +518,7 @@ type CastOnlyTaskDones =
 /// `TaskDone::resolve*`) alike.
 #[allow(dead_code)]
 fn _assert_cast_kind_repliable(
-    ctx: &mut NativeCtx<'_, Erased, Manual>,
+    ctx: &mut NativeCtx<'_, Erased, Unchecked>,
     sender: Source,
     deferred: DeferredReply,
     task_dones: CastOnlyTaskDones,

@@ -23,7 +23,7 @@ pub mod reply_mode;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
-pub use reply_mode::{Manual, ReplyMode, Single};
+pub use reply_mode::{ReplyMode, Single, Unchecked};
 
 /// The actor marker of a ctx that names no actor.
 ///
@@ -37,7 +37,7 @@ pub use reply_mode::{Manual, ReplyMode, Single};
 /// `Erased`; a ctx that omits its actor there is typed by it (ADR-0231 §7).
 /// The erased form loses only a call it could not have made correctly.
 ///
-/// A type-position marker like [`Single`] / [`Manual`], never a value: it is
+/// A type-position marker like [`Single`] / [`Unchecked`], never a value: it is
 /// only ever the `A` of a [`WasmCtx`](crate::WasmCtx) / `NativeCtx`, so it
 /// carries no impls of its own.
 pub struct Erased;

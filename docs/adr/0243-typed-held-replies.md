@@ -9,7 +9,7 @@ ADR-0109 made a handler's return type its reply contract: `-> R` replies on retu
 
 > **Deferral outside ADR-0093 isn't covered.** A handler that defers via the manual correlation FSM (stash correlation, reply on a later inbound handler) has no `Pending<R>` to return, so its contract stays uncaptured.
 
-That gap is most of the manual surface. A census at `164e9625d` found 150 `#[handler::manual]` handlers. About 33 native handlers are manual only because they answer one exact reply kind later, from somewhere other than a task completion:
+That gap is most of the unchecked surface. A census at `164e9625d` found 150 unchecked handlers, then spelled `#[handler::manual]`. About 33 native handlers are unchecked only because they answer one exact reply kind later, from somewhere other than a task completion:
 
 - **a peer's reply:** audio and text loads and window commands;
 - **a monitor notice:** tcp `on_unbind`;
@@ -20,18 +20,18 @@ That gap is most of the manual surface. A census at `164e9625d` found 150 `#[han
 
 Two single handlers declare a `Silent` row but reply later: `aether-component`'s `on_replace_component` and `aether-rpc`'s `on_deferred_echo`.
 
-The obligation these handlers carry is already a value. `DeferredReply` (`offload/blocking.rs`), minted by `NativeCtx::defer_reply_to`, holds the caller's `SettlementHold` and reply target. It is `#[must_use]`, and its `Drop` fails fast when it is dropped unanswered. `abandon_for_actor_close` is its one silent discharge, and `IntoDeferredReply` hands it to a successor (`HandlerSpawnBuilder::continue_from`, `TaskDone`). What it lacks is a reply type: `DeferredReply::reply` takes any `R: ActorMail`, so the handler's row cannot name what it will send, and the handler is manual (`Undeclared`, ADR-0231 §6).
+The obligation these handlers carry is already a value. `DeferredReply` (`offload/blocking.rs`), minted by `NativeCtx::defer_reply_to`, holds the caller's `SettlementHold` and reply target. It is `#[must_use]`, and its `Drop` fails fast when it is dropped unanswered. `abandon_for_actor_close` is its one silent discharge, and `IntoDeferredReply` hands it to a successor (`HandlerSpawnBuilder::continue_from`, `TaskDone`). What it lacks is a reply type: `DeferredReply::reply` takes any `R: ActorMail`, so the handler's row cannot name what it will send, and the handler is unchecked (`Undeclared`, ADR-0231 §6).
 
-Protocols already accept a deferred answer. A target's `-> Pending<O>` handler covers the protocol row `-> O` (`aether-actor-derive/src/protocol.rs`), so now versus later is invisible to the sender. The HTTP router shows the cost of the gap. Its glue replies only `HttpServerResponse`, and it is manual only because a route may answer later, from the handler that receives a peer's reply. That keeps `HttpRouter` at `-> Undeclared` and forces every hand-written HTTP handler to be manual too (#6935, #6957).
+Protocols already accept a deferred answer. A target's `-> Pending<O>` handler covers the protocol row `-> O` (`aether-actor-derive/src/protocol.rs`), so now versus later is invisible to the sender. The HTTP router shows the cost of the gap. Its glue replies only `HttpServerResponse`, and it is unchecked only because a route may answer later, from the handler that receives a peer's reply. That keeps `HttpRouter` at `-> Undeclared` and forces every hand-written HTTP handler to be unchecked too (#6935, #6957).
 
 ## Decision
 
 A deferred reply is a typed pair. The handler returns the receipt, and the obligation is a separate move-only value that answers exactly one `R`.
 
 ```rust
-// main: untyped debt, manual handler, Undeclared row
-#[handler::manual]
-fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Manual>, m: WatchHead) {
+// main: untyped debt, unchecked handler, Undeclared row
+#[handler::unchecked(reason = "…")]
+fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Unchecked>, m: WatchHead) {
     let reply: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
     self.watchers.park(reply);
 }
@@ -109,7 +109,7 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **Dropping the context drops the debt.** An untaken context whose `Held` is live fails fast like any unanswered `Held`. When the actor closes, the ledger's teardown answers its entries with `R::unanswered()` (§1). Requests of different reply kinds that wait on the same work are waiters in actor state, keyed by that work (§9), not an enum of `Held`s in one context.
    - **The ledger never evicts.** An entry leaves only when it is answered, when it is handed off (§9), or when actor close answers it with `R::unanswered()`. This replaces the hand-built pairs of `send_with_context` and a stored `Source` or `InboundMail`: `aether-http`'s `DeferredSource` and `aether-window`'s `instance.rs` `pending` map.
 
-5. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays manual. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
+5. **A `Held<R>` answers on its actor.** `answer` takes the actor's `NativeCtx`. Work on another thread posts a wake mail, and the woken handler answers from state; this is tcp's `ConnectReady` shape. A reply that must be sent from a thread outside the actor stays unchecked. `aether-substrate-harness-cap`'s `on_advance`, which hands its `InboundMail` to the embedder loop, is the one such site.
 
 6. **Wasm guests get the same pair.** `WasmCtx::hold::<R>()` returns `(Pending<R>, Held<R>)`. The guest `Held<R>` wraps a `ReplyHandle`, travels in a request context as in §4, and traps when it is dropped unanswered.
 
@@ -160,12 +160,12 @@ held.answer(ctx, &WatchHeadResult { .. });
    Native capabilities are not replaced at run time (ADR-0231 §5), so a native ticket lives only within one process. The host keeps its `ReplyTable` entry alive after the handler returns, and holds settlement open, until the handle answers. Today a single handler's return frees the handle (`component/dispatch.rs`), and a `ReplyEntry` carries no settlement hold. #6960 implements this.
 
 7. **Misuse fails fast.** The runtime checks what the types cannot:
-   - **Unreturned receipt.** A `Pending<R>` has a fail-fast `Drop`, and the `Manual` dispatch view accepts the one its handler returns, through a doc-hidden `__accept_pending` the `#[actor]` / `#[handler_set]` arms call once the handler's own `as_single` reborrow has ended — the dispatch view a single handler never holds, so a handler cannot disarm its own receipt and declare a false `Silent` row. A manual handler already holds the `Manual` view directly and gains nothing by accepting: it has no receipt to return, because it answers through `Held` itself. A handler that holds and discards the receipt, which would lie with a `Silent` row, panics.
+   - **Unreturned receipt.** A `Pending<R>` has a fail-fast `Drop`, and the `Unchecked` dispatch view accepts the one its handler returns, through a doc-hidden `__accept_pending` the `#[actor]` / `#[handler_set]` arms call once the handler's own `as_single` reborrow has ended — the dispatch view a single handler never holds, so a handler cannot disarm its own receipt and declare a false `Silent` row. An unchecked handler already holds the `Unchecked` view directly and gains nothing by accepting: it has no receipt to return, because it answers through `Held` itself. A handler that holds and discards the receipt, which would lie with a `Silent` row, panics.
    - **Second hold.** A second `hold` in one dispatch panics. Two debts on one request would send two replies.
    - **Untaken reply.** When a handler runs on a reply whose context holds a live `Held` and does not take that context, the framework fails fast after the handler returns. The failure names the stored context kind.
    - **Forward with no reply.** An inherited forward cannot settle while its `Held` keeps the root open. Only a native detached forward (`send_detached_to_with_context`) could settle with its `Held` unclaimed, and a warning for that case is follow-on work. A guest gets no settlement notice for its own sends, so the guest side has no warning. The requester's timeout still ends the chain.
 
-8. **Manual keeps what it is for.** A handler stays `#[handler::manual]` when it:
+8. **Unchecked keeps what it is for.** A handler stays `#[handler::unchecked(reason = "…")]` when it:
    - forwards or relays its obligation (`forward_to`, the fleet proxy, bundle relays);
    - replies zero or many times;
    - chooses its reply kind at run time with no enum kind to name the choice;
@@ -196,13 +196,13 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **Staged work owes no reply.** Its ledger entry has no reply target. `TaskDone<O>` carries only the output.
    - **A task takes its chain when it is staged.** Staging holds the chain of the turn that stages it, if that turn had one, until the completion is handled, so a completion that stages the next step stays in the causal tree. Staging is separate from starting: a bounded queue stages a request's work in that request's turn and starts it when a slot frees, from whichever turn frees it, so each task holds the chain of the request it serves and never the chain of the turn that happens to start it.
    - **`hand_off` is the one way a debt leaves its actor.** `held.hand_off(ctx, target, &payload)` sends `payload` to an actor the holder staged, with the requester as its reply target, and ends the entry, so that actor answers in its own name and the requester keeps its stamped sender as its reference (ADR-0230 §3). The target is a proven reference whose row for the payload's kind replies `R`: an `ActorRef<T>` whose handler for that kind returns `R`, or a `ProtocolRef<P>` whose row for it is `Row<K, R>`, so the requester is answered with the kind it waits for. An `ErasedActorRef` proves no row and does not compile (#6895). The component host's load hand-off to the guest it staged, through the guest's control reference, is the one consumer.
-   - **Removed:** `HandlerSpawnBuilder::continue_from`, `NativeCtx::stage_registry_batch_from`, `IntoDeferredReply`, `dispatch_blocking_held_with`, the `dispatch_blocking` variants that arm a reply, and `TaskDone`'s `resolve`, `resolve_with`, `resolve_value`, `resolve_err`, `release_no_reply`, `hand_off`, and `forward_tracked`. `stage_with` and `stage_registry_batch` take the context alone, and a failed stage hands the context back. `DeferredReply` and `defer_reply_to` remain for manual handlers only.
+   - **Removed:** `HandlerSpawnBuilder::continue_from`, `NativeCtx::stage_registry_batch_from`, `IntoDeferredReply`, `dispatch_blocking_held_with`, the `dispatch_blocking` variants that arm a reply, and `TaskDone`'s `resolve`, `resolve_with`, `resolve_value`, `resolve_err`, `release_no_reply`, `hand_off`, and `forward_tracked`. `stage_with` and `stage_registry_batch` take the context alone, and a failed stage hands the context back. `DeferredReply` and `defer_reply_to` remain for unchecked handlers only.
 
 ## Consequences
 
 ### Positive
 
-- A deferred handler's row names its reply. The about 33 native manual sites, the two false `Silent` rows, and the three guest sites (#6960) cover protocol rows `-> R`, and `describe_component` / `describe_handlers` report their reply kind.
+- A deferred handler's row names its reply. The about 33 native unchecked sites, the two false `Silent` rows, and the three guest sites (#6960) cover protocol rows `-> R`, and `describe_component` / `describe_handlers` report their reply kind.
 - Answering with the wrong kind is a compile error, and answering twice cannot compile, because `answer` consumes the `Held<R>`. The existing runtime guarantees carry over: a lost reply fails fast, and a parked reply holds its chain open.
 - The HTTP router glue returns `-> HttpRouterResult`, and a handler that forwards to a peer holds its reply and returns `-> Pending<HttpRouterResult>` (§4). With the #6957 enum, `HttpRouter` becomes `fn request(mail: HttpServerRequest) -> HttpRouterResult`, and every HTTP handler is single.
 
@@ -218,13 +218,13 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 ### Neutral / forward
 
-- This extends ADR-0109 and closes its "deferral outside ADR-0093" limit. ADR-0139 request contexts take their context by value, may carry an actor-reach `Held`, and now also key an actor's staged work (§9). ADR-0093's completion changes shape: `TaskDone<O>` carries the output alone, and its reply surface moves to the `Held` the actor keeps. The ADR-0231 §6 manual rows are unchanged.
-- Native work is #6959, wasm work is #6960, and #6961 moves the handlers that are manual for no deferral reason. #6955's remaining half, renaming the handler classes and giving a missing return type a meaning, is independent of this ADR.
+- This extends ADR-0109 and closes its "deferral outside ADR-0093" limit. ADR-0139 request contexts take their context by value, may carry an actor-reach `Held`, and now also key an actor's staged work (§9). ADR-0093's completion changes shape: `TaskDone<O>` carries the output alone, and its reply surface moves to the `Held` the actor keeps. The ADR-0231 §6 unchecked rows are unchanged.
+- Native work is #6959, wasm work is #6960, and #6961 moves the handlers that are unchecked for no deferral reason. #6955's remaining half, renaming the handler classes and giving a missing return type a meaning, is independent of this ADR.
 
 ## Alternatives considered
 
 - **Inject the debt as a handler parameter** (`fn on_x(.., m: X, reply: Held<R>)`). This gives one value and no mint call, but the row would come from a parameter, against ADR-0109's rule that the return type is the contract.
-- **A typed manual ctx** (`NativeCtx<'_, Self, Manual<R>>`). Rejected: manual means the handler answers by hand. Typing its ctx blurs the one class kept for untyped replies, and the deferred sites are not manual in kind; they answer exactly once, later.
+- **A typed unchecked ctx** (`NativeCtx<'_, Self, Unchecked<R>>`). Rejected: unchecked means the handler answers by hand. Typing its ctx blurs the one class kept for untyped replies, and the deferred sites are not unchecked in kind; they answer exactly once, later.
 - **Mint `Pending<R>` from `send_with_context` and answer by the peer-reply handler's return.** This covers only the peer-reply sites. Notices, long-polls, sans-io cores, and frame loops answer from handlers that do not handle the peer's reply.
 - **A separate held table with its own verbs** (`send_holding` / `take_held`, with or without a `with_context` modifier). This splits one request's state across two tables and two takes, so a handler could claim one half and strand the other. The debt belongs in the context that already carries the request's state.
 - **Convert the debt into the staged work** (`continue_from`, `IntoDeferredReply`). This was the first design. The conversion drops `R`, so a staged debt cannot be answered with `unanswered()` at close, and a completion that answers several kinds re-selects the kind by hand.

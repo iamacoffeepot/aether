@@ -20,7 +20,7 @@
 use aether_actor::__macro_internals::{WasmPlacementFacts, dependency_records_len, write_dependency_records};
 use aether_actor::{
     ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, Declared, DependencyLink, DependencyList,
-    DependencyResolver, DependsOn, Erased, Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx,
+    DependencyResolver, DependsOn, Erased, One, ReplyShape, Silent, Unchecked, Undeclared, WasmActor, WasmCtx,
     WasmInitCtx, actor, handler_set,
 };
 use aether_data::Kind;
@@ -103,11 +103,11 @@ impl WasmActor for ManifestProbe {
         Pong { seq: ping.seq }
     }
 
-    // ADR-0112: a manual-class handler — it receives the `Manual` ctx and
-    // issues its own replies, so the manifest reports `ReplyContract::Manual`
+    // ADR-0112: an unchecked-class handler — it receives the `Unchecked` ctx and
+    // issues its own replies, so the manifest reports `ReplyContract::Unchecked`
     // (no single static reply kind).
-    #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _poke: Poke) {}
+    #[handler::unchecked(reason = "test: the manifest carries an unchecked row's reason")]
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _poke: Poke) {}
 
     /// # Agent
     /// Catch-all for anything else.
@@ -133,7 +133,7 @@ impl WasmActor for ComposableProbe {
 
 /// ADR-0231: the contract-row probe. A test build sets `cfg(test)`, so
 /// `on_present` and its kind survive while `on_stripped` and its kind are gone;
-/// the adopted set adds one silent and one manual handler.
+/// the adopted set adds one silent and one unchecked handler.
 #[repr(C)]
 #[aether_data::kind(name = "test.contract.present", pod)]
 struct Present {
@@ -154,8 +154,8 @@ struct SetSilent {
 }
 
 #[repr(C)]
-#[aether_data::kind(name = "test.contract.set_manual", pod)]
-struct SetManual {
+#[aether_data::kind(name = "test.contract.set_unchecked", pod)]
+struct SetUnchecked {
     seq: u32,
 }
 
@@ -164,8 +164,8 @@ trait ContractSet {
     #[handler::single]
     fn on_set_silent(&mut self, _ctx: &mut WasmCtx<'_>, _mail: SetSilent) {}
 
-    #[handler::manual]
-    fn on_set_manual(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: SetManual) {}
+    #[handler::unchecked(reason = "test: a handler set carries an unchecked row's reason")]
+    fn on_set_unchecked(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _mail: SetUnchecked) {}
 }
 
 struct ContractProbe;
@@ -314,7 +314,7 @@ fn manifest_const_round_trips_to_expected_records() {
 
     for rec in &records {
         match rec {
-            InputsRecord::Handler { id, name, doc, reply } => {
+            InputsRecord::Handler { id, name, doc, reply, reason } => {
                 handler_count += 1;
                 match name.as_ref() {
                     "test.tick" => {
@@ -322,6 +322,7 @@ fn manifest_const_round_trips_to_expected_records() {
                         tick_doc = doc.as_ref().map(ToString::to_string);
                         // ADR-0112: a single `-> ()` handler is `None`.
                         assert_eq!(*reply, ReplyContract::None, "on_tick returns () — no reply kind");
+                        assert_eq!(*reason, None, "a single handler carries no reason");
                     }
                     "test.ping" => {
                         assert_eq!(*id, <Ping as Kind>::ID);
@@ -331,14 +332,21 @@ fn manifest_const_round_trips_to_expected_records() {
                             ReplyContract::One(<Pong as Kind>::ID),
                             "on_ping returns Pong — its reply kind rides the manifest"
                         );
+                        assert_eq!(*reason, None, "a single handler carries no reason");
                     }
                     "test.poke" => {
                         assert_eq!(*id, <Poke as Kind>::ID);
-                        // ADR-0112: a `#[handler::manual]` handler is `Manual`.
+                        // ADR-0112: a `#[handler::unchecked(..)]` handler is `Unchecked`.
                         assert_eq!(
                             *reply,
-                            ReplyContract::Manual,
-                            "on_poke is manual-class — the manifest reports Manual"
+                            ReplyContract::Unchecked,
+                            "on_poke is unchecked-class — the manifest reports Unchecked"
+                        );
+                        // #7193: the stated reason rides beside the reply.
+                        assert_eq!(
+                            reason.as_deref(),
+                            Some("test: the manifest carries an unchecked row's reason"),
+                            "on_poke's reason rides its handler record"
                         );
                     }
                     other => panic!("unexpected handler name: {other}"),

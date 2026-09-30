@@ -1,15 +1,15 @@
-//! ADR-0112: a `#[handler::manual]` FFI handler receives the `Manual`
+//! ADR-0112: a `#[handler::unchecked(..)]` FFI handler receives the `Unchecked`
 //! ctx and issues its own reply via `OutboundReply::reply` — the
-//! manual-class path compiles cleanly on the wasm expansion.
+//! unchecked-class path compiles cleanly on the wasm expansion.
 //!
-//! The native manual-class behavior is covered by the
-//! `manual_handler_replies_through_ctx` integration test in
+//! The native unchecked-class behavior is covered by the
+//! `unchecked_handler_replies_through_ctx` integration test in
 //! `aether-substrate` (this proc-macro crate has no `aether-substrate`
 //! dev-dep, so a native *pass* / type-error fixture can't link the
 //! substrate types — the existing native fixtures here are all
 //! macro-level diagnostics that fire before path resolution).
 
-use aether_actor::{Erased, Manual, OutboundReply, WasmCtx, actor};
+use aether_actor::{Erased, OutboundReply, Unchecked, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -25,18 +25,18 @@ struct Ack {
     seq: u32,
 }
 
-struct ManualProbe;
+struct UncheckedProbe;
 
 #[actor]
-impl aether_actor::WasmActor for ManualProbe {
-    const NAMESPACE: &'static str = "manual_probe";
+impl aether_actor::WasmActor for UncheckedProbe {
+    const NAMESPACE: &'static str = "unchecked_probe";
 
     fn init(_ctx: &mut aether_actor::WasmInitCtx<'_>) -> Result<Self, aether_actor::ActorInitError> {
-        Ok(ManualProbe)
+        Ok(UncheckedProbe)
     }
 
-    #[handler::manual]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: Ping) {
+    #[handler::unchecked(reason = "test: replies by hand")]
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Unchecked>, ping: Ping) {
         ctx.reply(&Ack { seq: ping.seq });
     }
 }

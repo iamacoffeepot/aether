@@ -181,8 +181,8 @@ macro_rules! window_subscribers {
             /// # Errors
             ///
             /// The sender is not a local actor; `kind` is not published here;
-            /// or the sender's published rows do not handle `kind` silently
-            /// or manually, so its events could never be handled.
+            /// or the sender's published rows do not handle `kind` with a
+            /// silent or unchecked handler, so its events could never be handled.
             pub fn subscribe_self<A, M: ReplyMode>(
                 &mut self,
                 ctx: &mut NativeCtx<'_, A, M>,
@@ -197,7 +197,7 @@ macro_rules! window_subscribers {
                 $(if kind == <$kind as Kind>::ID {
                     let subscriber = ctx.cast::<Subscriber<$kind>>(sender).ok_or_else(|| {
                         format!(
-                            "{} has no silent or manual handler for {}, so it cannot subscribe to it",
+                            "{} has no silent or unchecked handler for {}, so it cannot subscribe to it",
                             ctx.actor_path(sender),
                             <$kind as Kind>::NAME,
                         )

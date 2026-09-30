@@ -37,8 +37,8 @@ use aether_kinds::trace::Settled;
 use aether_kinds::{LifecycleAdvance, MonitorNotice, Quit};
 use aether_substrate::actor::monitor::MonitorHandle;
 
-pub use aether_actor::Manual;
 pub use aether_actor::OutboundReply;
+pub use aether_actor::Unchecked;
 pub use aether_data::KindId;
 pub use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::Erased;
@@ -278,7 +278,7 @@ impl NativeActor for LifecycleCapability {
     ///
     /// The sender is then typed as a `Subscriber<K>` for the stage by the
     /// guard cast (ADR-0231 §4), which admits a route whose published rows
-    /// handle the stage silently or manually. A sender with no such row is
+    /// handle the stage with a silent or unchecked handler. A sender with no such row is
     /// refused and subscribes nothing: its broadcasts could never be handled.
     ///
     /// # Agent
@@ -310,7 +310,7 @@ impl NativeActor for LifecycleCapability {
             LifecycleSubscribeResult::Err {
                 stage: payload.stage,
                 error: format!(
-                    "{} has no silent or manual handler for stage {stage_kind:?}, so it cannot subscribe to it",
+                    "{} has no silent or unchecked handler for stage {stage_kind:?}, so it cannot subscribe to it",
                     ctx.actor_path(sender)
                 ),
             }
@@ -423,8 +423,8 @@ impl NativeActor for LifecycleCapability {
     /// `LifecycleAdvance { delta_micros }`. Sent by the chassis main loop each
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
-    #[handler::manual]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: LifecycleAdvance) {
+    #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, payload: LifecycleAdvance) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -538,8 +538,8 @@ impl NativeActor for LifecycleCapability {
     /// `Settled { root }`. Synthesised by the settlement registry
     /// when the in-flight count for `root` reaches zero; not a public
     /// API for user code.
-    #[handler::manual]
-    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: Settled) {
+    #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
+    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, payload: Settled) {
         let Some(pending) = state.pending.as_ref() else {
             return;
         };

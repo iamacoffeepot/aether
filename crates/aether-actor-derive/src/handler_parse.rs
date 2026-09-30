@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
 
@@ -29,10 +30,14 @@ pub struct HandlerFn {
     /// return type. Drives the auto-emitted `ctx.reply` and the reply
     /// kind id on the inputs manifest record.
     pub reply: HandlerReply,
-    /// ADR-0112 / ADR-0134: the declared reply class (single / manual).
+    /// ADR-0112 / ADR-0134: the declared reply class (single / unchecked).
     /// Selects the ctx view the macro passes (`as_single()` for single, the
-    /// full `Manual` ctx for manual) and the manifest `ReplyContract` tag.
+    /// full `Unchecked` ctx for unchecked) and the manifest `ReplyContract` tag.
     pub class: HandlerClass,
+    /// The stated reason of an unchecked handler (#7193): `Some` exactly when
+    /// `class` is [`HandlerClass::Unchecked`]. It rides the manifest record and
+    /// the native capability / inventory rows beside the reply.
+    pub unchecked_reason: Option<syn::LitStr>,
 }
 
 pub struct FallbackFn {
@@ -45,7 +50,7 @@ pub struct FallbackFn {
 /// resolve too) or a class-marked `#[handler::<class>]` (ADR-0112 /
 /// ADR-0134), any path whose second-last segment is `handler`. The class
 /// word itself is not checked here: [`parse_handler_class`] accepts
-/// `single` / `manual` and gives any other word a pointed error, so a
+/// `single` / `unchecked` and gives any other word a pointed error, so a
 /// misspelled or retired class never falls through to rustc's
 /// unresolved-attribute error. The class path never reaches attribute
 /// resolution — `#[actor]` parses and strips it.
@@ -74,70 +79,115 @@ pub enum HandlerVariant {
     Task,
 }
 
-/// Parse the parenthesized argument of a `#[handler(...)]` attribute into
-/// a [`HandlerVariant`]. Bare `#[handler]` (no parens) is `Mail`. The
-/// only accepted parenthesized spellings are `mail` and `task`; anything
-/// else is a pointed compile error spanned at the attribute.
-pub fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
-    match &attr.meta {
+/// The parenthesized arguments of a `#[handler(...)]` /
+/// `#[handler::<class>(...)]` attribute: the [`HandlerVariant`] trigger and,
+/// for `#[handler::unchecked(..)]`, the stated `reason` (ADR-0134, #7193).
+pub struct HandlerArgs {
+    pub variant: HandlerVariant,
+    pub reason: Option<syn::LitStr>,
+}
+
+/// Parse the parenthesized arguments of a `#[handler(...)]` attribute into
+/// [`HandlerArgs`]. Bare `#[handler]` (no parens) is `Mail` with no reason.
+/// The parens take a comma list of at most one `mail` / `task` word and at
+/// most one `reason = "<string literal>"`; anything else is a pointed compile
+/// error spanned at the offending argument. Whether a `reason` belongs on the
+/// attribute's class is decided by [`parse_handler_class`].
+pub fn parse_handler_args(attr: &Attribute) -> syn::Result<HandlerArgs> {
+    let list = match &attr.meta {
         // Bare `#[handler]` — the default inbound-mail handler.
-        Meta::Path(_) => Ok(HandlerVariant::Mail),
-        // `#[handler(mail)]` / `#[handler(task)]` — parse the single
-        // ident argument.
-        Meta::List(_) => {
-            let ident: syn::Ident = attr.parse_args().map_err(|_| {
-                syn::Error::new_spanned(
-                    attr,
-                    "#[handler(...)] accepts exactly `mail` or `task` — \
-                     `mail` (bare `#[handler::<class>]` or `#[handler::<class>(mail)]`) \
-                     selects the inbound-mail variant, `task` (`#[handler(task)]`) is a \
-                     dispatch completion (ADR-0093 §3)",
-                )
-            })?;
-            if ident == "mail" {
-                Ok(HandlerVariant::Mail)
-            } else if ident == "task" {
-                Ok(HandlerVariant::Task)
-            } else {
-                Err(syn::Error::new_spanned(
-                    &ident,
-                    "unknown #[handler] variant — accepts exactly `mail` or `task` \
+        Meta::Path(_) => return Ok(HandlerArgs { variant: HandlerVariant::Mail, reason: None }),
+        Meta::List(list) => list,
+        Meta::NameValue(nv) => {
+            return Err(syn::Error::new_spanned(
+                nv,
+                "#[handler] takes no `= value` — write `#[handler::single]`, \
+                 `#[handler::unchecked(reason = \"…\")]`, or `#[handler(task)]`",
+            ));
+        }
+    };
+    let args = list.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated).map_err(|_| {
+        syn::Error::new_spanned(
+            attr,
+            "#[handler(...)] accepts a `mail` or `task` word and, on \
+                 `#[handler::unchecked(..)]`, `reason = \"…\"` — `mail` (bare \
+                 `#[handler::<class>]` or `#[handler::<class>(mail)]`) selects the \
+                 inbound-mail variant, `task` (`#[handler(task)]`) is a dispatch \
+                 completion (ADR-0093 §3)",
+        )
+    })?;
+    let mut variant = None;
+    let mut reason = None;
+    for arg in args {
+        match arg {
+            Meta::Path(path) if path.is_ident("mail") || path.is_ident("task") => {
+                if variant.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        path,
+                        "#[handler(...)] takes at most one `mail` / `task` word",
+                    ));
+                }
+                variant = Some(if path.is_ident("mail") {
+                    HandlerVariant::Mail
+                } else {
+                    HandlerVariant::Task
+                });
+            }
+            Meta::NameValue(nv) if nv.path.is_ident("reason") => {
+                if reason.is_some() {
+                    return Err(syn::Error::new_spanned(nv, "#[handler::unchecked(..)] takes `reason` once"));
+                }
+                let Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. }) = &nv.value else {
+                    return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        "`reason` takes a string literal: `#[handler::unchecked(reason = \"…\")]`",
+                    ));
+                };
+                reason = Some(text.clone());
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "unknown #[handler] argument — accepts a `mail` or `task` word \
                      (`#[handler::<class>]` / `#[handler::<class>(mail)]` = inbound mail, \
-                     `#[handler(task)]` = a dispatch completion, ADR-0093 §3)",
-                ))
+                     `#[handler(task)]` = a dispatch completion, ADR-0093 §3) and, on \
+                     `#[handler::unchecked(..)]`, `reason = \"…\"`",
+                ));
             }
         }
-        Meta::NameValue(nv) => Err(syn::Error::new_spanned(
-            nv,
-            "#[handler] takes no `= value` — write `#[handler::single]`, \
-             `#[handler::manual]`, or `#[handler(task)]`",
-        )),
     }
+    Ok(HandlerArgs { variant: variant.unwrap_or(HandlerVariant::Mail), reason })
 }
 
 /// The reply class of a handler (ADR-0112, ADR-0134), read off the
 /// attribute path: `#[handler::single]` is [`Single`](HandlerClass::Single)
-/// and `#[handler::manual]` is [`Manual`](HandlerClass::Manual) — every mail
-/// handler names its class explicitly. Orthogonal to [`HandlerVariant`]
-/// (the `mail` / `task` trigger), which is read from the parens.
+/// and `#[handler::unchecked(reason = "…")]` is
+/// [`Unchecked`](HandlerClass::Unchecked) — every mail handler names its class
+/// explicitly. Orthogonal to [`HandlerVariant`] (the `mail` / `task` trigger),
+/// which is read from the parens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HandlerClass {
     Single,
-    Manual,
+    Unchecked,
 }
 
 /// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112,
-/// ADR-0134), given the already-parsed [`HandlerVariant`]. The last path
-/// segment is the class (`single` / `manual`); a bare `handler`
+/// ADR-0134), given the already-parsed [`HandlerArgs`]. The last path
+/// segment is the class (`single` / `unchecked`); a bare `handler`
 /// segment is classless task exemption for [`HandlerVariant::Task`] (its
 /// reply rides `TaskDone`, not the handler class) and a pointed compile
 /// error for [`HandlerVariant::Mail`] — the class is no longer defaulted.
 /// `attr_is_handler` is the gate, so the path ends in `handler` or follows
-/// it; any other class word is a pointed compile error.
-pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Result<HandlerClass> {
+/// it; any other class word is a pointed compile error, and the retired
+/// `manual` names its replacement (#7193).
+///
+/// The unchecked class gives up the reply check, so it must say why: a
+/// `reason` that is non-empty after trimming is required on `unchecked` and
+/// refused on every other class.
+pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<HandlerClass> {
     let last = attr.path().segments.last().expect("attr_is_handler guarantees a non-empty path");
     let class = match last.ident.to_string().as_str() {
-        "handler" => match variant {
+        "handler" => match args.variant {
             // The task variant has no reply class — its reply rides
             // `TaskDone`, not the handler class — so it stays classless.
             HandlerVariant::Task => HandlerClass::Single,
@@ -146,28 +196,54 @@ pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Re
                     attr,
                     "#[handler] requires an explicit reply class (ADR-0134): write \
                      `#[handler::single]` (the return value is the reply) or \
-                     `#[handler::manual]` (the handler issues replies)",
+                     `#[handler::unchecked(reason = \"…\")]` (the handler issues replies \
+                     the engine does not check)",
                 ));
             }
         },
         "single" => HandlerClass::Single,
-        "manual" => HandlerClass::Manual,
+        "unchecked" => HandlerClass::Unchecked,
+        "manual" => {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[handler::manual]` is renamed: write `#[handler::unchecked(reason = \"…\")]` \
+                 and state why this handler gives up the reply check (#7193)",
+            ));
+        }
         other => {
             return Err(syn::Error::new_spanned(
                 attr,
                 format!(
-                    "unknown #[handler::<class>] — accepts `single` or `manual` \
+                    "unknown #[handler::<class>] — accepts `single` or `unchecked(reason = \"…\")` \
                      (ADR-0112 / ADR-0134); got `{other}`"
                 ),
             ));
         }
     };
-    Ok(class)
+    match (class, &args.reason) {
+        (HandlerClass::Unchecked, None) => Err(syn::Error::new_spanned(
+            attr,
+            "`#[handler::unchecked]` requires a reason: write \
+             `#[handler::unchecked(reason = \"…\")]` naming why the reply check is given up \
+             (it replies more than once, replies from outside the actor, or relays a request)",
+        )),
+        (HandlerClass::Unchecked, Some(reason)) if reason.value().trim().is_empty() => Err(syn::Error::new_spanned(
+            reason,
+            "`#[handler::unchecked(reason = \"…\")]` requires a non-empty reason naming why the \
+             reply check is given up",
+        )),
+        (HandlerClass::Single, Some(reason)) => Err(syn::Error::new_spanned(
+            reason,
+            "`reason` belongs only on `#[handler::unchecked(reason = \"…\")]` — a single or \
+             task handler's reply is checked, so it has nothing to explain",
+        )),
+        _ => Ok(class),
+    }
 }
 
 /// The ctx parameter's angle-bracketed **type** arguments in declaration
-/// order, lifetimes skipped: `[]` for `WasmCtx<'_>`, `[Erased, Manual]` for
-/// `WasmCtx<'_, Erased, Manual>`, `[Self]` for `WasmCtx<'_, Self>`. Both
+/// order, lifetimes skipped: `[]` for `WasmCtx<'_>`, `[Erased, Unchecked]` for
+/// `WasmCtx<'_, Erased, Unchecked>`, `[Self]` for `WasmCtx<'_, Self>`. Both
 /// transports spell the actor first (issues 4158 + 6279), so one positional
 /// reader serves `WasmCtx` / `NativeCtx` / `WireCtx` alike.
 /// `None` when the second parameter is not a reference to a path type at all —
@@ -425,12 +501,15 @@ pub struct NativeActorHandlerFn {
     pub is_slice: bool,
     /// ADR-0109: the handler's reply contract, classified from its
     /// return type. A `-> R` native handler auto-replies `R` through
-    /// `OutboundReply::reply`, the same path a manual `ctx.reply` takes.
+    /// `OutboundReply::reply`, the same path an unchecked handler's `ctx.reply` takes.
     pub reply: HandlerReply,
-    /// ADR-0112 / ADR-0134: the declared reply class (single / manual).
+    /// ADR-0112 / ADR-0134: the declared reply class (single / unchecked).
     /// Selects the ctx view the dispatch arm passes and the manifest reply
     /// tag.
     pub class: HandlerClass,
+    /// The stated reason of an unchecked handler (#7193), `Some` exactly when
+    /// `class` is [`HandlerClass::Unchecked`].
+    pub unchecked_reason: Option<syn::LitStr>,
     /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]), replayed
     /// onto its dispatch arm, capability entry, measured-kind id, marker impl,
     /// and inventory submission.

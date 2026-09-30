@@ -4,7 +4,7 @@
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
-use crate::model::ctx::{Erased, Manual, Single};
+use crate::model::ctx::{Erased, Single, Unchecked};
 use crate::model::{Addressable, HandlesKind, One, Resolve};
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
@@ -92,7 +92,7 @@ fn deferred_arm_returns_hold() {
     let mail =
         unsafe { Mail::__from_ptr(DeferredAsk::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, handle, 0x10) };
 
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let rc = <Deferrer as crate::WasmDispatch<Deferrer>>::dispatch(&mut deferrer, &mut ctx, mail);
     assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD);
 
@@ -154,7 +154,7 @@ fn undecodable_payload_for_a_known_kind_falls_to_the_strict_tail() {
         Mail::__from_ptr(Poke::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, NO_REPLY_HANDLE, 0x10)
     };
 
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let rc = <StrictProbe as crate::WasmDispatch<StrictProbe>>::dispatch(&mut probe, &mut ctx, mail);
 
     // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind
@@ -173,21 +173,21 @@ fn undecodable_payload_for_a_known_kind_falls_to_the_strict_tail() {
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
 }
 
 /// ADR-0112: the mode marker is layout-neutral — the `Single` and
-/// `Manual` views have identical size + alignment. This is the
+/// `Unchecked` views have identical size + alignment. This is the
 /// invariant the `as_single` pointer reborrow rests on. The actor marker
 /// is layout-neutral too — the invariant the `__for_actor` / `erase`
 /// reborrows rest on (issue 6279).
 #[test]
 fn ffi_ctx_layout_identical_across_modes() {
-    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
-    assert_eq!(size_of::<WasmCtx<'static, RootPeer, Manual>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, RootPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
+    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Unchecked>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Unchecked>>(),);
+    assert_eq!(size_of::<WasmCtx<'static, RootPeer, Unchecked>>(), size_of::<WasmCtx<'static, Erased, Unchecked>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, RootPeer, Unchecked>>(), align_of::<WasmCtx<'static, Erased, Unchecked>>(),);
 }
 
 /// ADR-0114 addressing amendment: a ctx self-identified as the cluster
@@ -220,7 +220,7 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     )
     .expect("a succeeding init installs the inline grandchild");
 
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
     // The root has no registry parent entry — its parent is cross-cluster.
     assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent");
@@ -271,7 +271,7 @@ fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     )
     .expect("install inline child");
 
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
     let request = ctx.__for_actor::<PeerDependent>().send_tracked::<RootPeer>(&());
     assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");

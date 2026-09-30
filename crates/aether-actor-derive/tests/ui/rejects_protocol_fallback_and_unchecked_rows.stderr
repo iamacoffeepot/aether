@@ -1,5 +1,5 @@
 error[E0308]: mismatched types
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:94:25
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:94:25
    |
 94 |     ctx.send_to(target, &Note { seq: 1 });
    |         -------         ^^^^^^^^^^^^^^^^ expected `&Ping`, found `&Note`
@@ -15,7 +15,7 @@ note: method defined here
    |            ^^^^^^^
 
 error[E0277]: `FallbackOnly` has no contract row for `Ping`
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:98:22
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:98:22
    |
 98 |     assert_covered::<Pinger, FallbackOnly>();
    |                      ^^^^^^ no handler for `Ping` on this target
@@ -23,7 +23,7 @@ error[E0277]: `FallbackOnly` has no contract row for `Ping`
    = note: a `#[fallback]` does not count as handling a kind
 help: the trait `Contract<Ping>` is not implemented for `FallbackOnly`
       but trait `Contract<Note>` is implemented for it
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:48:1
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:48:1
    |
 48 | #[actor]
    | ^^^^^^^^
@@ -31,14 +31,14 @@ help: the trait `Contract<Ping>` is not implemented for `FallbackOnly`
    = note: required for `FallbackOnly` to implement `CoversRows<(Row<Ping, Pong>,)>`
    = note: required for `Pinger` to implement `CoveredBy<FallbackOnly>`
 note: required by a bound in `assert_covered`
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:91:22
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:91:22
    |
 91 | fn assert_covered<P: CoveredBy<R>, R>() {}
    |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `FallbackOnly` has no contract row for `Ping`
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:99:22
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:99:22
    |
 99 |     assert_covered::<ByHand, FallbackOnly>();
    |                      ^^^^^^ no handler for `Ping` on this target
@@ -46,7 +46,7 @@ error[E0277]: `FallbackOnly` has no contract row for `Ping`
    = note: a `#[fallback]` does not count as handling a kind
 help: the trait `Contract<Ping>` is not implemented for `FallbackOnly`
       but trait `Contract<Note>` is implemented for it
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:48:1
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:48:1
    |
 48 | #[actor]
    | ^^^^^^^^
@@ -54,47 +54,47 @@ help: the trait `Contract<Ping>` is not implemented for `FallbackOnly`
    = note: required for `FallbackOnly` to implement `CoversRows<(Row<Ping, Undeclared>,)>`
    = note: required for `ByHand` to implement `CoveredBy<FallbackOnly>`
 note: required by a bound in `assert_covered`
-  --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:91:22
+  --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:91:22
    |
 91 | fn assert_covered<P: CoveredBy<R>, R>() {}
    |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0271]: type mismatch resolving `<ManualSingle as Contract<Ping>>::Reply == Pong`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:100:22
+error[E0271]: type mismatch resolving `<UncheckedSingle as Contract<Ping>>::Reply == Pong`
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:100:22
     |
-100 |     assert_covered::<Pinger, ManualSingle>();
-    |                      ^^^^^^ type mismatch resolving `<ManualSingle as Contract<Ping>>::Reply == Pong`
+100 |     assert_covered::<Pinger, UncheckedSingle>();
+    |                      ^^^^^^ type mismatch resolving `<UncheckedSingle as Contract<Ping>>::Reply == Pong`
     |
 note: expected this to be `Pong`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:65:1
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:65:1
     |
  65 | #[actor]
     | ^^^^^^^^
-    = note: required for `ManualSingle` to implement `CoversRows<(Row<Ping, Pong>,)>`
-    = note: required for `Pinger` to implement `CoveredBy<ManualSingle>`
+    = note: required for `UncheckedSingle` to implement `CoversRows<(Row<Ping, Pong>,)>`
+    = note: required for `Pinger` to implement `CoveredBy<UncheckedSingle>`
 note: required by a bound in `assert_covered`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:91:22
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:91:22
     |
  91 | fn assert_covered<P: CoveredBy<R>, R>() {}
     |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`
     = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0271]: type mismatch resolving `<ManualSilent as Contract<Note>>::Reply == Silent`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:101:22
+error[E0271]: type mismatch resolving `<UncheckedSilent as Contract<Note>>::Reply == Silent`
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:101:22
     |
-101 |     assert_covered::<Noter, ManualSilent>();
-    |                      ^^^^^ type mismatch resolving `<ManualSilent as Contract<Note>>::Reply == Silent`
+101 |     assert_covered::<Noter, UncheckedSilent>();
+    |                      ^^^^^ type mismatch resolving `<UncheckedSilent as Contract<Note>>::Reply == Silent`
     |
 note: expected this to be `Silent`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:79:1
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:79:1
     |
  79 | #[actor]
     | ^^^^^^^^
-    = note: required for `ManualSilent` to implement `CoversRows<(Row<Note, Silent>,)>`
-    = note: required for `Noter` to implement `CoveredBy<ManualSilent>`
+    = note: required for `UncheckedSilent` to implement `CoversRows<(Row<Note, Silent>,)>`
+    = note: required for `Noter` to implement `CoveredBy<UncheckedSilent>`
 note: required by a bound in `assert_covered`
-   --> tests/ui/rejects_protocol_fallback_and_manual_rows.rs:91:22
+   --> tests/ui/rejects_protocol_fallback_and_unchecked_rows.rs:91:22
     |
  91 | fn assert_covered<P: CoveredBy<R>, R>() {}
     |                      ^^^^^^^^^^^^ required by this bound in `assert_covered`

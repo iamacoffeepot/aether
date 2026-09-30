@@ -110,6 +110,7 @@ fn project_capabilities_trims_docs_unless_full() {
             name: "aether.test.handler".to_owned(),
             doc: Some(multi.to_owned()),
             reply: ReplyContract::None,
+            reason: None,
         }],
         fallback: Some(FallbackCapability { doc: Some(leading_blank.to_owned()) }),
         doc: Some(multi.to_owned()),

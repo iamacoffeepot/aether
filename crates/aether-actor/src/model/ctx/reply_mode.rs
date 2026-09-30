@@ -10,7 +10,7 @@
 //! - [`Single`] — 0-or-1 reply via the return value (ADR-0109). No
 //!   `reply` / `reply_to` (a transitional exception holds while the
 //!   migration runs; ADR-0112 §Consequences).
-//! - [`Manual`] — the handler issues its own replies; `OutboundReply`
+//! - [`Unchecked`] — the handler issues its own replies; `OutboundReply`
 //!   (`reply` / `reply_to`) is implemented for this mode.
 //!
 //! The trait is sealed through a private supertrait so a guest crate
@@ -24,7 +24,7 @@ mod sealed {
 }
 
 /// Marker selecting a per-handler ctx's reply surface (ADR-0112,
-/// ADR-0134). Sealed: the only implementors are [`Single`] and [`Manual`].
+/// ADR-0134). Sealed: the only implementors are [`Single`] and [`Unchecked`].
 pub trait ReplyMode: sealed::Sealed {}
 
 /// single-class marker (ADR-0112): the handler replies 0-or-1 through
@@ -32,20 +32,20 @@ pub trait ReplyMode: sealed::Sealed {}
 /// an unmarked `WasmCtx<'_>` / `NativeCtx<'_>` is the single-mode view.
 pub struct Single;
 
-/// manual-class marker (ADR-0112): the handler issues its own replies
+/// unchecked-class marker (ADR-0112): the handler issues its own replies
 /// via `OutboundReply` (`reply` / `reply_to`), which is implemented
 /// only for this mode.
-pub struct Manual;
+pub struct Unchecked;
 
 impl sealed::Sealed for Single {}
-impl sealed::Sealed for Manual {}
+impl sealed::Sealed for Unchecked {}
 
 impl ReplyMode for Single {}
-impl ReplyMode for Manual {}
+impl ReplyMode for Unchecked {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Manual, Single};
+    use super::{Single, Unchecked};
     use core::mem::size_of;
 
     /// The mode markers are zero-sized — the invariant the layout-
@@ -55,6 +55,6 @@ mod tests {
     #[test]
     fn reply_mode_types_are_zsts() {
         assert_eq!(size_of::<Single>(), 0);
-        assert_eq!(size_of::<Manual>(), 0);
+        assert_eq!(size_of::<Unchecked>(), 0);
     }
 }

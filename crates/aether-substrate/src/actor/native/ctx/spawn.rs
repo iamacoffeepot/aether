@@ -35,7 +35,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     ///
     /// The parent is the ctx's own actor, never a caller-supplied one
     /// (issue 4158): the `#[actor]` macro hands every handler whose ctx does
-    /// not spell `Erased` — `NativeCtx<'_>`, `NativeCtx<'_, Self, Manual>` —
+    /// not spell `Erased` — `NativeCtx<'_>`, `NativeCtx<'_, Self, Unchecked>` —
     /// a ctx typed by the actor it is dispatching for (ADR-0231 §7). A parent that
     /// disagrees with the executing binding is therefore not a runtime
     /// error to check but a state with no spelling.

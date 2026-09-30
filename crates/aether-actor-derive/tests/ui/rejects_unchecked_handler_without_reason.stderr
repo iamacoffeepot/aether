@@ -1,0 +1,11 @@
+error: `#[handler::unchecked]` requires a reason: write `#[handler::unchecked(reason = "…")]` naming why the reply check is given up (it replies more than once, replies from outside the actor, or relays a request)
+  --> tests/ui/rejects_unchecked_handler_without_reason.rs:24:5
+   |
+24 |     #[handler::unchecked]
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+error: `#[handler::unchecked(reason = "…")]` requires a non-empty reason naming why the reply check is given up
+  --> tests/ui/rejects_unchecked_handler_without_reason.rs:38:35
+   |
+38 |     #[handler::unchecked(reason = "  ")]
+   |                                   ^^^^

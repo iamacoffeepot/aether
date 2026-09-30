@@ -72,7 +72,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
     impl Dispatch<Self> for PreSeedProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -90,6 +90,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
                     name: DeclaredPing::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 }]
                 .into(),
                 fallback: None,
@@ -182,7 +183,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     impl Dispatch<Self> for SpawnCostProbe {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -207,12 +208,14 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
                         name: CostPing::NAME.to_owned(),
                         doc: None,
                         reply: ReplyContract::None,
+                        reason: None,
                     },
                     HandlerCapability {
                         id: CostQuit::ID,
                         name: CostQuit::NAME.to_owned(),
                         doc: None,
                         reply: ReplyContract::None,
+                        reason: None,
                     },
                 ]
                 .into(),

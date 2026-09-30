@@ -36,7 +36,7 @@ pub fn reply_marker_impl(
                 type Reply = #reply_ty;
             }
         },
-        (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Manual, _) => quote! {},
+        (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Unchecked, _) => quote! {},
     };
     quote! { #marker #crosses }
 }
@@ -65,13 +65,13 @@ fn crosses_actors_requirement(kind_ty: &Type, site: &ReplyMarkerSite<'_>) -> Tok
 
 /// The `::aether_data::ReplyContract` expression one native handler reports
 /// in its `HandlerEntry` inventory row and its `HandlerCapability` row
-/// (ADR-0231 §4). The class decides `Manual` from the attribute, never from the
+/// (ADR-0231 §4). The class decides `Unchecked` from the attribute, never from the
 /// return type; a single handler reads `One(R::ID)` for `-> R` /
 /// `-> Pending<R>` and `None` for `-> ()`. All four native emitters read this
 /// one mapping, so the manifest and the capability rows cannot drift apart.
 pub fn native_reply_contract(class: HandlerClass, reply: &HandlerReply) -> TokenStream2 {
     match (class, reply.manifest_kind()) {
-        (HandlerClass::Manual, _) => quote! { ::aether_data::ReplyContract::Manual },
+        (HandlerClass::Unchecked, _) => quote! { ::aether_data::ReplyContract::Unchecked },
         (HandlerClass::Single, Some(reply_ty)) => {
             quote! { ::aether_data::ReplyContract::One(<#reply_ty as ::aether_data::Kind>::ID) }
         }
@@ -79,13 +79,30 @@ pub fn native_reply_contract(class: HandlerClass, reply: &HandlerReply) -> Token
     }
 }
 
+/// The `Option<&'static str>` expression carrying an unchecked handler's
+/// stated reason (#7193) into its `HandlerEntry` inventory row and its
+/// `aether.kinds.inputs` record: `Some("…")` for an unchecked handler, `None`
+/// for every other class.
+pub fn static_reason(reason: Option<&syn::LitStr>) -> TokenStream2 {
+    reason.map_or_else(|| quote! { ::core::option::Option::None }, |lit| quote! { ::core::option::Option::Some(#lit) })
+}
+
+/// The `Option<String>` expression carrying an unchecked handler's stated
+/// reason (#7193) into its `HandlerCapability` row.
+pub fn owned_reason(reason: Option<&syn::LitStr>) -> TokenStream2 {
+    reason.map_or_else(
+        || quote! { ::core::option::Option::None },
+        |lit| quote! { ::core::option::Option::Some(::std::borrow::ToOwned::to_owned(#lit)) },
+    )
+}
+
 /// The type one handler's `Contract<K>` row names as its reply (ADR-0231 §1):
 /// `O` for a single `-> O` or `-> Pending<O>` handler, `Silent` for `-> ()`,
-/// and `Undeclared` for a manual handler, whose class decides regardless of
+/// and `Undeclared` for an unchecked handler, whose class decides regardless of
 /// its return type.
 pub fn contract_reply_ty(class: HandlerClass, reply: &HandlerReply) -> TokenStream2 {
     match (class, reply.manifest_kind()) {
-        (HandlerClass::Manual, _) => quote! { ::aether_actor::Undeclared },
+        (HandlerClass::Unchecked, _) => quote! { ::aether_actor::Undeclared },
         (HandlerClass::Single, Some(reply_ty)) => quote! { #reply_ty },
         (HandlerClass::Single, None) => quote! { ::aether_actor::Silent },
     }

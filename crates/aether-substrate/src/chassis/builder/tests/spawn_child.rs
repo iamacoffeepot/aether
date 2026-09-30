@@ -68,7 +68,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl Dispatch<Self> for ChildCap {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -117,7 +117,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -274,7 +274,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl Dispatch<Self> for FailingChild {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -314,7 +314,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -391,7 +391,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
     impl Dispatch<Self> for Child {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -434,7 +434,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
     impl Dispatch<Self> for ActualParent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

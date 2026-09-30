@@ -112,7 +112,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     impl Dispatch<Self> for InitTripwireCap {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {

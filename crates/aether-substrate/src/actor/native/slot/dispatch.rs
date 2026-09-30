@@ -99,7 +99,7 @@ fn is_first_dispatch_miss(kind: KindId) -> bool {
 /// to detect an undeclared handler (iamacoffeepot/aether#4261).
 pub fn typed_then_fallback_or_warn<A>(
     actor: &mut Box<A::State>,
-    ctx: &mut NativeCtx<'_, A, crate::Manual>,
+    ctx: &mut NativeCtx<'_, A, crate::Unchecked>,
     kind: KindId,
     payload: &[u8],
 ) -> bool
@@ -149,7 +149,7 @@ where
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
 pub fn dispatch_log_tail_if_matching<A>(
-    ctx: &mut NativeCtx<'_, A, crate::Manual>,
+    ctx: &mut NativeCtx<'_, A, crate::Unchecked>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -177,7 +177,7 @@ pub fn dispatch_log_tail_if_matching<A>(
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
 pub fn dispatch_trace_tail_if_matching<A>(
-    ctx: &mut NativeCtx<'_, A, crate::Manual>,
+    ctx: &mut NativeCtx<'_, A, crate::Unchecked>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -208,7 +208,7 @@ pub fn dispatch_trace_tail_if_matching<A>(
 /// only fields this arm reads.
 pub fn dispatch_cost_tail_if_matching<A>(
     binding: &NativeBinding,
-    ctx: &mut NativeCtx<'_, A, crate::Manual>,
+    ctx: &mut NativeCtx<'_, A, crate::Unchecked>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {

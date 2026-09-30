@@ -5,7 +5,7 @@
 //! `#[actor]` emits one [`Contract<K>`] impl per handler and one
 //! [`Contracts`] impl per actor, from the same parsed signature. A single or
 //! deferred `-> O` handler's row is `O`, a `-> ()` handler's row is
-//! [`Silent`], and a manual handler's row is [`Undeclared`]. A `#[fallback]`
+//! [`Silent`], and an unchecked handler's row is [`Undeclared`]. A `#[fallback]`
 //! contributes no row.
 //!
 //! The one [`Contracts`] impl carries the rows as a type-level list,
@@ -23,7 +23,7 @@ use super::declared::RowIndex;
 /// [`ReplyShape`] impl over every kind.
 pub struct Silent;
 
-/// The permanent row shape of a manual handler, whose replies are issued by
+/// The permanent row shape of an unchecked handler, whose replies are issued by
 /// hand and so have no statically declared kind (ADR-0231 §6). A protocol may
 /// name this shape to promise that it handles a kind without promising how it
 /// responds.
@@ -56,7 +56,7 @@ impl ReplyShape for Silent {
 }
 
 impl ReplyShape for Undeclared {
-    const CONTRACT: ReplyContract = ReplyContract::Manual;
+    const CONTRACT: ReplyContract = ReplyContract::Unchecked;
 }
 
 impl<O: ActorMail> ReplyShape for O {
@@ -73,7 +73,7 @@ mod silent_sealed {
 }
 
 /// A row that answers a published event with no typed reply (ADR-0231 §8):
-/// [`Silent`], or a manual handler's [`Undeclared`]. Sealed.
+/// [`Silent`], or an unchecked handler's [`Undeclared`]. Sealed.
 ///
 /// The flat [`ctx.subscribe::<P, K>()`](crate::WasmCtx::subscribe) verb
 /// requires the subscriber's [`Contract<K>`] row to be one, because a

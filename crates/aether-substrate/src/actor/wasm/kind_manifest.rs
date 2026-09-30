@@ -46,8 +46,8 @@ use aether_actor::{DependencyResolver, One};
 use aether_data::{
     ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, CONTENT_ADDRESSED_SECTION, EnumVariant,
     INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
-    LABELS_SECTION_VERSION, LabelNode, NamedField, PRIVATE_INPUTS_SECTION, SchemaCell, SchemaShape, SchemaType,
-    VariantLabel, canonical::kind_id_from_shape, wire,
+    LABELS_SECTION_VERSION, LabelNode, NamedField, PRIVATE_INPUTS_SECTION, ReplyContract, SchemaCell, SchemaShape,
+    SchemaType, VariantLabel, canonical::kind_id_from_shape, wire,
 };
 use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability};
 use serde::de::DeserializeOwned;
@@ -327,7 +327,7 @@ pub struct ActorInputs {
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
 /// ADR-0096) into one [`ActorInputs`] per exported actor type. The
-/// record stream is `[0x06][wire(InputsRecord)]` back-to-back; an
+/// record stream is `[0x07][wire(InputsRecord)]` back-to-back; an
 /// `ActorBoundary { namespace }` record opens a new group and the
 /// Handler / Fallback / Component / Config / Dependency / Instanced records that
 /// follow belong to it, in declaration order. A single-actor module emits
@@ -410,12 +410,31 @@ fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, St
                     instanced: false,
                 });
             }
-            InputsRecord::Handler { id, name, doc, reply } => {
+            InputsRecord::Handler { id, name, doc, reply, reason } => {
+                // #7193: an unchecked row states why it gives up the reply
+                // check, and only an unchecked row carries a reason, so a
+                // decoded row never shows an unexplained `Unchecked`.
+                let unchecked = reply == ReplyContract::Unchecked;
+                match (unchecked, reason.as_deref()) {
+                    (true, None) => {
+                        return Err(format!("{section}: unchecked handler `{name}` carries no reason"));
+                    }
+                    (true, Some(text)) if text.trim().is_empty() => {
+                        return Err(format!("{section}: unchecked handler `{name}` carries a blank reason"));
+                    }
+                    (false, Some(_)) => {
+                        return Err(format!(
+                            "{section}: handler `{name}` carries a reason but its reply {reply:?} is checked"
+                        ));
+                    }
+                    _ => {}
+                }
                 current_capabilities(&mut groups).handlers.push(HandlerCapability {
                     id,
                     name: name.into_owned(),
                     doc: doc.map(Cow::into_owned),
                     reply,
+                    reason: reason.map(Cow::into_owned),
                 });
             }
             InputsRecord::Fallback { doc } => {
@@ -1196,13 +1215,15 @@ mod tests {
                 name: "aether.tick".into(),
                 doc: Some("substrate drives this".into()),
                 // ADR-0112: a `-> R` handler's reply class reads back.
-                reply: aether_data::ReplyContract::One(aether_data::KindId(0xbeef)),
+                reply: ReplyContract::One(aether_data::KindId(0xbeef)),
+                reason: None,
             },
             InputsRecord::Handler {
                 id: aether_data::KindId(0xff),
                 name: "aether.ping".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::None,
+                reply: ReplyContract::None,
+                reason: None,
             },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
@@ -1212,11 +1233,11 @@ mod tests {
         assert_eq!(caps.handlers[0].id, aether_data::KindId(42));
         assert_eq!(caps.handlers[0].name, "aether.tick");
         assert_eq!(caps.handlers[0].doc.as_deref(), Some("substrate drives this"));
-        assert_eq!(caps.handlers[0].reply, aether_data::ReplyContract::One(aether_data::KindId(0xbeef)));
+        assert_eq!(caps.handlers[0].reply, ReplyContract::One(aether_data::KindId(0xbeef)));
         assert_eq!(caps.handlers[1].id, aether_data::KindId(0xff));
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
-        assert_eq!(caps.handlers[1].reply, aether_data::ReplyContract::None);
+        assert_eq!(caps.handlers[1].reply, ReplyContract::None);
         assert!(caps.fallback.is_none());
     }
 
@@ -1229,27 +1250,56 @@ mod tests {
                 id: aether_data::KindId(1),
                 name: "silent".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::None,
+                reply: ReplyContract::None,
+                reason: None,
             },
             InputsRecord::Handler {
                 id: aether_data::KindId(2),
                 name: "single".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::One(aether_data::KindId(0xabcd)),
+                reply: ReplyContract::One(aether_data::KindId(0xabcd)),
+                reason: None,
             },
             InputsRecord::Handler {
                 id: aether_data::KindId(3),
-                name: "manual".into(),
+                name: "unchecked".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::Manual,
+                reply: ReplyContract::Unchecked,
+                reason: Some("relays at run time".into()),
             },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let caps = read_inputs_from_bytes(&wasm).unwrap();
         assert_eq!(caps.handlers.len(), 3);
-        assert_eq!(caps.handlers[0].reply, aether_data::ReplyContract::None);
-        assert_eq!(caps.handlers[1].reply, aether_data::ReplyContract::One(aether_data::KindId(0xabcd)));
-        assert_eq!(caps.handlers[2].reply, aether_data::ReplyContract::Manual);
+        assert_eq!(caps.handlers[0].reply, ReplyContract::None);
+        assert_eq!(caps.handlers[1].reply, ReplyContract::One(aether_data::KindId(0xabcd)));
+        assert_eq!(caps.handlers[2].reply, ReplyContract::Unchecked);
+        assert_eq!(caps.handlers[2].reason.as_deref(), Some("relays at run time"));
+        assert!(caps.handlers[0].reason.is_none());
+    }
+
+    #[test]
+    fn a_reason_that_disagrees_with_its_reply_is_refused() {
+        // #7193: the reader refuses a handler record whose reason presence
+        // disagrees with its reply class, so `describe_*` never shows an
+        // unchecked row without its reason or a checked row with one.
+        let handler = |reply, reason: Option<&'static str>| InputsRecord::Handler {
+            id: aether_data::KindId(9),
+            name: "t.row".into(),
+            doc: None,
+            reply,
+            reason: reason.map(Cow::Borrowed),
+        };
+        for (record, expected) in [
+            (handler(ReplyContract::Unchecked, None), "carries no reason"),
+            (handler(ReplyContract::Unchecked, Some("  ")), "carries a blank reason"),
+            (handler(ReplyContract::None, Some("relays")), "carries a reason but"),
+            (handler(ReplyContract::One(aether_data::KindId(3)), Some("relays")), "carries a reason but"),
+        ] {
+            let wasm = wasm_with_section(INPUTS_SECTION, &inputs_section(&[record]));
+            let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+            assert!(err.contains(expected), "err was: {err}");
+        }
     }
 
     #[test]
@@ -1275,7 +1325,8 @@ mod tests {
                 id: aether_data::KindId(7),
                 name: "aether.config_query".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::None,
+                reply: ReplyContract::None,
+                reason: None,
             },
             InputsRecord::Config {
                 id: aether_data::KindId(0x00c0_ffee),
@@ -1307,7 +1358,8 @@ mod tests {
             id: aether_data::KindId(7),
             name: "aether.tick".into(),
             doc: None,
-            reply: aether_data::ReplyContract::None,
+            reply: ReplyContract::None,
+            reason: None,
         }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let caps = read_inputs_from_bytes(&wasm).unwrap();
@@ -1339,14 +1391,16 @@ mod tests {
                 id: aether_data::KindId(1),
                 name: "ui.click".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::None,
+                reply: ReplyContract::None,
+                reason: None,
             },
             InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
             InputsRecord::Handler {
                 id: aether_data::KindId(2),
                 name: "ui.draw".into(),
                 doc: None,
-                reply: aether_data::ReplyContract::None,
+                reply: ReplyContract::None,
+                reason: None,
             },
             InputsRecord::Fallback { doc: Some("catchall".into()) },
         ]);
@@ -1377,7 +1431,8 @@ mod tests {
             id: aether_data::KindId(7),
             name: "aether.tick".into(),
             doc: None,
-            reply: aether_data::ReplyContract::None,
+            reply: ReplyContract::None,
+            reason: None,
         }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let actors = read_actor_inputs_from_bytes(&wasm).unwrap();

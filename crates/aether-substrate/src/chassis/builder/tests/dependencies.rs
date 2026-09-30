@@ -18,7 +18,7 @@ use crate::actor::native::{Dispatch, SpawnError};
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::testing::{TestChassis, bare_substrate};
-use crate::{BootError, Manual, NativeActor, NativeInitCtx};
+use crate::{BootError, NativeActor, NativeInitCtx, Unchecked};
 
 pod_kind!(Probe { tag: u32 }, "test.deps.probe", 0xDE90_0001_0000_0001);
 
@@ -122,7 +122,7 @@ impl aether_actor::Lifecycle<Self> for HandWrittenDependent {
 impl Dispatch<Self> for HandWrittenDependent {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, Manual>,
+        _ctx: &mut NativeCtx<'_, Self, Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

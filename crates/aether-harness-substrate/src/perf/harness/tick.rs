@@ -105,18 +105,21 @@ impl Dispatch<Self> for TickSource {
                     name: <Tick as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
                 HandlerCapability {
                     id: CountQuery::ID,
                     name: <CountQuery as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::One(CountReport::ID),
+                    reason: None,
                 },
                 HandlerCapability {
                     id: LifecycleSubscribeResult::ID,
                     name: <LifecycleSubscribeResult as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
             ],
             ..ComponentCapabilities::default()
@@ -125,7 +128,7 @@ impl Dispatch<Self> for TickSource {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {

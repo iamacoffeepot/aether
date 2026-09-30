@@ -8,7 +8,7 @@
 //!
 //! - `__aether_handler_set_dispatch` — the set's own kind-id if-chain,
 //!   returning `DISPATCH_HANDLED_RELEASE` from a wasm single arm,
-//!   `DISPATCH_HANDLED` from a manual arm or any native arm, or
+//!   `DISPATCH_HANDLED` from an unchecked arm or any native arm, or
 //!   `DISPATCH_UNKNOWN_KIND` when no arm matched (#6412). The adopter
 //!   calls it after its local chain misses (ADR-0169 §2), which is what makes
 //!   a locally-declared handler authoritative over an inherited one. It takes
@@ -136,13 +136,13 @@ use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
     erase_unless_ctx_names_actor, extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor,
-    handler_cfgs, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
+    handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
     ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
-    contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, position_past, reply_marker_impl,
-    row_entry,
+    contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, owned_reason, position_past,
+    reply_marker_impl, row_entry, static_reason,
 };
 
 /// Which actor transport a set's handlers are written against, read off the
@@ -158,16 +158,16 @@ pub enum SetTransport {
 
 impl SetTransport {
     /// The ctx type the set's dispatch method takes: typed by the adopting
-    /// actor (#6533), in its `Manual` view — the same view `#[actor]`
+    /// actor (#6533), in its `Unchecked` view — the same view `#[actor]`
     /// dispatches with. The native adopter hands its typed ctx straight
     /// through; the guest adopter upgrades its erased one at the delegation.
     fn dispatch_ctx(self) -> TokenStream2 {
         match self {
             Self::Wasm => quote! {
-                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Manual>
+                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Unchecked>
             },
             Self::Native => quote! {
-                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Manual>
+                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Unchecked>
             },
         }
     }
@@ -273,8 +273,8 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             continue;
         };
 
-        let variant = parse_handler_variant(&f.attrs[idx])?;
-        if variant == HandlerVariant::Task {
+        let args = parse_handler_args(&f.attrs[idx])?;
+        if args.variant == HandlerVariant::Task {
             return Err(syn::Error::new_spanned(
                 &*f,
                 "#[handler(task)] is not supported in a #[handler_set] — a dispatch \
@@ -327,7 +327,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         };
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
-        let class = parse_handler_class(&f.attrs[idx], variant)?;
+        let class = parse_handler_class(&f.attrs[idx], &args)?;
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
         // #6533: type the member by its adopter on the trait method itself, so
@@ -349,7 +349,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // from it, and all of them resolve in this crate — the three emitted
         // here directly, and the bridge markers through the gate pair
         // `build_native_marker_bridge` resolves at definition time.
-        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class });
+        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class, unchecked_reason: args.reason });
     }
 
     if handlers.is_empty() {
@@ -469,6 +469,7 @@ fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
         let kind_ty = &h.kind_ty;
         let cfgs = &h.cfgs;
         let reply = native_reply_contract(h.class, &h.reply);
+        let reason = owned_reason(h.unchecked_reason.as_ref());
         quote! {
             #(#cfgs)*
             __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
@@ -476,6 +477,7 @@ fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
                 reply: #reply,
+                reason: #reason,
             });
         }
     });
@@ -562,6 +564,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
         let reply_expr = native_reply_contract(h.class, &h.reply);
+        let reason = static_reason(h.unchecked_reason.as_ref());
         wrap_in_gate(
             gate.as_ref(),
             quote! {
@@ -572,6 +575,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
                         id: <#kind_ty as ::aether_data::Kind>::ID,
                         name: <#kind_ty as ::aether_data::Kind>::NAME,
                         reply: #reply_expr,
+                        reason: #reason,
                     }
                 }
             },
@@ -755,7 +759,7 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
             (HandlerClass::Single, _) => quote! {
                 Self::#method(#receiver, __aether_ctx.as_single() #erase, __aether_decoded);
             },
-            (HandlerClass::Manual, _) => quote! {
+            (HandlerClass::Unchecked, _) => quote! {
                 Self::#method(#receiver, __aether_ctx #erase, __aether_decoded);
             },
         };

@@ -293,7 +293,7 @@ fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
 with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is

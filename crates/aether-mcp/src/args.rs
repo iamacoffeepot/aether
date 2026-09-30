@@ -1091,11 +1091,14 @@ pub struct NativeHandlerJson {
     pub input_name: String,
     /// The handler's reply class (ADR-0231 §4): `"none"` for a silent
     /// `-> ()` handler, `"one"` for a `-> R` / `-> Pending<R>` handler,
-    /// `"manual"` for a manual handler that replies at run time with no
-    /// declared kind.
+    /// `"unchecked"` for an unchecked handler that replies at run time with
+    /// no declared kind.
     pub reply_class: &'static str,
     pub reply_id: Option<String>,
     pub reply_name: Option<String>,
+    /// An `"unchecked"` handler's stated reason for giving up the reply
+    /// check (#7193); `null` for every other class.
+    pub reason: Option<String>,
 }
 
 /// One native cap's handlers, grouped under its mailbox `namespace`

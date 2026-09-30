@@ -95,7 +95,7 @@ impl Component {
     /// `receive` returns when the guest reports a single-class arm
     /// (`DISPATCH_HANDLED_RELEASE`, ADR-0112) or an unhandled kind
     /// (`DISPATCH_UNKNOWN_KIND`) — neither can answer later (#6412). A
-    /// manual handler or `#[fallback]` returns `DISPATCH_HANDLED` and its
+    /// unchecked handler or `#[fallback]` returns `DISPATCH_HANDLED` and its
     /// handle stays held until answered. A table holding every
     /// addressable handle fails the delivery, which the trampoline turns
     /// into an ADR-0063 fail-fast.

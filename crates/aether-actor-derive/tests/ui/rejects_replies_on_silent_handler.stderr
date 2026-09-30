@@ -9,7 +9,7 @@ help: the trait `Replies<Ping>` is not implemented for `SilentProbe`
    |
 13 | struct SilentProbe;
    | ^^^^^^^^^^^^^^^^^^
-   = note: the handler may be silent, manual, or reply with a different kind
+   = note: the handler may be silent, unchecked, or reply with a different kind
 note: required by a bound in `assert_replies`
   --> tests/ui/rejects_replies_on_silent_handler.rs:27:22
    |

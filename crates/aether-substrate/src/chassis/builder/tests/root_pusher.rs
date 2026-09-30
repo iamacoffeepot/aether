@@ -90,7 +90,7 @@ impl NativeActor for EchoCap {
 impl Dispatch<Self> for EchoCap {
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {

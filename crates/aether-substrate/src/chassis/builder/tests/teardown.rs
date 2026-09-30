@@ -248,7 +248,7 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
     impl Dispatch<Self> for Exploder {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {

@@ -8,8 +8,8 @@
 
 use std::time::{Duration, Instant};
 
-use aether_actor::Manual;
 use aether_actor::OutboundReply;
+use aether_actor::Unchecked;
 use aether_data::KindId;
 use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::actor::native::NativeCtx;
@@ -136,7 +136,7 @@ impl LifecycleCapabilityState {
     /// state mutation + reply but logs at `error`: reaching here means
     /// the settlement pipeline stalled past `advance_timeout`. No-op when
     /// nothing is pending.
-    pub fn force_complete_pending<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>) {
+    pub fn force_complete_pending<A>(&mut self, ctx: &mut NativeCtx<'_, A, Unchecked>) {
         let Some(pending) = self.pending.take() else {
             return;
         };

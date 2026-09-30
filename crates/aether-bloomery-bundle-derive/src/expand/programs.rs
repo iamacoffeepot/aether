@@ -146,10 +146,10 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
 /// invocation that asked, keyed by the root's own request (ADR-0240 D6).
 fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
     quote! {
-        #[handler::manual]
+        #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
         fn on_read_artifact(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
             request: #program::kinds::ReadArtifact,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};
@@ -188,10 +188,10 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             ctx.send_to(invocation, &result);
         }
 
-        #[handler::manual]
+        #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
         fn on_api_call(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
             request: #program::kinds::ApiCall,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};

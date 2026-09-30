@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 // Imports for the `#[cfg(test)]` `RouteInventorySink` loopback fixture
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
-use aether_actor::{Manual, OutboundReply, actor};
+use aether_actor::{OutboundReply, Unchecked, actor};
 use aether_inventory::kinds::ResolvedName;
 use aether_rpc::{CallSettled, ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -118,9 +118,9 @@ impl NativeActor for AddressRouteSink {
     #[handler::single]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::manual]
+    #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: ForwardEnvelope) {
         self.calls.lock().expect("address-route calls mutex is never poisoned").push(mail.clone());
         let owed = ctx.defer_reply_to(ctx.reply_target());
         if mail.kind == ResolveAddress::ID {
@@ -193,9 +193,9 @@ impl NativeActor for ScriptedRouteSink {
     #[handler::single]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::manual]
+    #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: ForwardEnvelope) {
         let reply = if mail.kind == ResolveAddress::ID {
             let request = ResolveAddress::decode_from_bytes(&mail.payload).expect("test resolver request decodes");
             ScriptedRouteReply {
@@ -248,8 +248,8 @@ impl NativeActor for RouteInventorySink {
     #[handler::single]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::manual]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: ForwardEnvelope) {
+    #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Erased, Unchecked>, _mail: ForwardEnvelope) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // The reply is the ReplyEvent the server matches to the in-flight
         // wire call by the echoed correlation; the CallSettled terminal then

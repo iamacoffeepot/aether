@@ -38,12 +38,18 @@ fn published_rows_answers_a_live_routes_exact_rows_and_none_otherwise() {
     let rows = vec![
         (KindId(1), ReplyContract::None),
         (KindId(2), ReplyContract::One(KindId(10))),
-        (KindId(3), ReplyContract::Manual),
+        (KindId(3), ReplyContract::Unchecked),
     ];
     let contract = RouteContract::from_capabilities(&ComponentCapabilities {
         handlers: rows
             .iter()
-            .map(|(id, reply)| HandlerCapability { id: *id, name: String::new(), doc: None, reply: *reply })
+            .map(|(id, reply)| HandlerCapability {
+                id: *id,
+                name: String::new(),
+                doc: None,
+                reply: *reply,
+                reason: None,
+            })
             .collect(),
         ..ComponentCapabilities::default()
     });

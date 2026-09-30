@@ -1,12 +1,12 @@
 //! ADR-0231 §2: an actor covers a `#[protocol]` when it has a handler for each
 //! row's kind replying exactly the row's reply; an extra handler and a
-//! `#[fallback]` do not get in the way. This includes an explicit manual row:
+//! `#[fallback]` do not get in the way. This includes an explicit unchecked row:
 //! it narrows as a reference and path, sends without a reply-handler bound,
-//! and maps to `ReplyContract::Manual` in the same list the actor publishes.
+//! and maps to `ReplyContract::Unchecked` in the same list the actor publishes.
 
 use aether_actor::{
-    ActorInitError, ActorPath, ActorRef, CastTarget, Contracts, CoveredBy, Mail, Manual, Protocol, ProtocolPath,
-    ProtocolRef, RowSet, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
+    ActorInitError, ActorPath, ActorRef, CastTarget, Contracts, CoveredBy, Mail, Protocol, ProtocolPath,
+    ProtocolRef, RowSet, Unchecked, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[repr(C)]
@@ -79,14 +79,14 @@ impl WasmActor for LoaderActor {
     #[handler::single]
     fn on_extra(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Extra) {}
 
-    #[handler::manual]
-    fn on_forward(&mut self, _ctx: &mut WasmCtx<'_, Self, Manual>, _mail: Forward) {}
+    #[handler::unchecked(reason = "test: an explicit unchecked protocol row")]
+    fn on_forward(&mut self, _ctx: &mut WasmCtx<'_, Self, Unchecked>, _mail: Forward) {}
 
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
-/// A sender with no handler for any reply the manual recipient might choose.
+/// A sender with no handler for any reply the unchecked recipient might choose.
 struct Sender;
 
 #[actor]
@@ -101,7 +101,7 @@ impl WasmActor for Sender {
     fn on_trigger(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Trigger) {}
 }
 
-fn narrow_and_send_manual(
+fn narrow_and_send_unchecked(
     ctx: &mut WasmCtx<'_, Sender>,
     reference: ActorRef<LoaderActor>,
     path: &ActorPath<LoaderActor>,

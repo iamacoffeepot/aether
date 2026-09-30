@@ -363,7 +363,7 @@ pub fn fs_reply_source(correlation_id: u64) -> Source {
     Source::with_correlation(SourceAddr::None, correlation_id)
 }
 
-/// Manual tempdir under the system temp root, namespaced by `prefix` and
+/// Unchecked tempdir under the system temp root, namespaced by `prefix` and
 /// `tag` plus the pid and a nanosecond nonce so concurrent tests never
 /// collide. Avoids pulling in the `tempfile` crate; the caller cleans up
 /// via [`cleanup`] after asserting.

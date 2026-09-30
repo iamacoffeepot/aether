@@ -279,7 +279,7 @@ pub fn handler_set(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// with the struct's docs listing each row under its method name. `-> O` is a
 /// single row and a missing return (or `-> ()`) a silent one; a target's
 /// deferred `-> Pending<O>` handler covers the row `O`, which is spelled
-/// `-> O` here. A manual row has no spelling (ADR-0231 §6). A target covers the
+/// `-> O` here. An unchecked row has no spelling (ADR-0231 §6). A target covers the
 /// protocol, `MeshLoader: CoveredBy<R>`, when it has a row for every kind with
 /// the exact reply, matched by kind, never by method name.
 ///

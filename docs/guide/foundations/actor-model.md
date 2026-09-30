@@ -318,11 +318,14 @@ A handler declares how it answers through its class marker
 [ADR-0134](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0134-multi-reply-class-and-explicit-handler-classes.md)).
 The **single** class (`#[handler::single]`) answers 0-or-1 through
 its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
-**manual** class (`#[handler::manual]`) takes a `Manual` ctx and issues its own
-replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
-turn. Manual is for a handler that replies more than once, replies from outside
-the actor, or relays a request; it is never a default — a handler that never
-replies to its own inbound mail is `#[handler::single]` with a silent `-> ()`.
+**unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
+ctx and issues its own replies by hand (`ctx.reply` / `ctx.reply_to`), which the
+engine does not check. It gives up the reply check, so it is only for a handler
+that replies more than once, replies from outside the actor, or relays a
+request, and its `reason` says which: the reason rides the inputs manifest and
+the native handler inventory, and `describe_component` / `describe_handlers`
+show it beside the row. It is never a default — a handler that never replies to
+its own inbound mail is `#[handler::single]` with a silent `-> ()`.
 
 A single handler that answers one exact kind in a later turn returns
 `-> Pending<R>`. The offload dispatch calls mint that receipt for work a worker
@@ -337,8 +340,8 @@ subscribers (`Publishes<K>` / `subscribe`).
 
 `#[actor]` records each handler's answer as a type-level **contract row**,
 `impl Contract<K> for A { type Reply = …; type Index = … }`: the reply kind `O`
-for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for a
-manual handler. Each row names its position in the actor's one type-level
+for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for an
+unchecked handler. Each row names its position in the actor's one type-level
 row list, `Contracts::Rows`, so a row exists only where a handler does: a
 hand-written row for a kind the actor does not handle does not compile, and a
 handled kind of a public actor is declared `pub` (ADR-0231 §10). It also emits
@@ -354,12 +357,12 @@ child's alias its own type's.
 A **protocol** names a set of contract rows under a stable type, independent of
 any implementation (ADR-0231 §2). `#[protocol]` on a trait of signatures
 declares one: each method is a row, `-> O` single and no return silent, and the
-explicit return `-> Undeclared` manual. The trait becomes a unit struct whose
+explicit return `-> Undeclared` unchecked. The trait becomes a unit struct whose
 `impl Protocol` lists the rows as
 `type Rows = (Row<K, O>, …)`. `MeshLoader: CoveredBy<R>` holds when the target
 `R` has a contract row for every kind with the exact reply. Rows match by kind,
-never by method name; a `#[fallback]` has no row and a manual handler's
-`Undeclared` row covers only an explicit manual protocol row. That row promises
+never by method name; a `#[fallback]` has no row and an unchecked handler's
+`Undeclared` row covers only an explicit unchecked protocol row. That row promises
 the target handles the kind without imposing a reply-handler obligation on the
 sender. Coverage is sealed: `aether-actor` computes it
 from `Rows`, and a hand-written `CoveredBy` impl does not compile.
@@ -463,8 +466,8 @@ MCP and RPC boundary.
 ### Helpers that only send
 
 The class marker rides on the context type — a single handler's `WasmCtx<'_>`
-is `WasmCtx<'_, Self, Single>` and a manual handler holds
-`WasmCtx<'_, Self, Manual>` — which is what makes a stray `ctx.reply` in a
+is `WasmCtx<'_, Self, Single>` and an unchecked handler holds
+`WasmCtx<'_, Self, Unchecked>` — which is what makes a stray `ctx.reply` in a
 single handler a compile error. The actor is the first parameter, the reply
 mode the second, and a ctx that omits its actor is typed by it: `#[actor]`
 fills in `Self`, so the ctx reaches only the actors the handler's actor
@@ -493,9 +496,9 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
     announce(&mut ctx.sends(), self.renderer, &self.frame);        // Single
 }
 
-#[handler::manual]
-fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _r: Redraw) {
-    announce(&mut ctx.sends(), self.renderer, &self.frame);        // Manual — same helper
+#[handler::unchecked(reason = "example: the same helper from the unchecked class")]
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Unchecked>, _r: Redraw) {
+    announce(&mut ctx.sends(), self.renderer, &self.frame);        // Unchecked — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
 ```
@@ -792,7 +795,7 @@ type, and can spawn an `Instanced` native actor when that child declares
 `ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
 from the ctx. A handler opts into the call by naming its own actor in its ctx
 signature — `ctx: &mut NativeCtx<'_, Self, Single>`, or
-`NativeCtx<'_, Self, Manual>` for a manual-reply handler — and the `#[actor]`
+`NativeCtx<'_, Self, Unchecked>` for an unchecked handler — and the `#[actor]`
 macro hands such a handler a ctx typed by the actor being dispatched. Every
 other handler keeps the plain `NativeCtx<'_>` and reaches no spawn surface, so
 a birth cannot be placed under a parent other than the one running.

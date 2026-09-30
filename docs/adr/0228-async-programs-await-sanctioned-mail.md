@@ -290,7 +290,7 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   join `Env<Async>` later without a cap type parameter in the first
   cut.
 - **HTTP `fetch` as the first `Env<Async>` method.** Deferred: it is
-  Sampled, needs `Replies<Fetch>` on a still-manual handler, and is
+  Sampled, needs `Replies<Fetch>` on a still-unchecked handler, and is
   not required to prove await. Artifact `read` is.
 - **Native driver performs the HTTP lap; programs only flatten and
   parse.** Rejected: the driver becomes a per-program I/O specialist.
