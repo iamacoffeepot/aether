@@ -66,10 +66,10 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// wire, or a short path that only expands against the live registry. A
     /// holder that already knows the actor type resolves an
     /// [`ActorPath<R>`] instead, through [`Self::resolve`], and gets a
-    /// kind-checked [`ActorRef<R>`]. After #6932, this verb serves identity
-    /// (naming what a path resolves to) and the guard cast
-    /// ([`Self::cast`](super::WasmCtx::cast), over a reference this proves),
-    /// not a checked send.
+    /// kind-checked [`ActorRef<R>`]. An erased reference has no send verb
+    /// (ADR-0231 §4), so this verb serves identity (naming what a path
+    /// resolves to) and the guard cast
+    /// ([`Self::cast`](super::WasmCtx::cast), over a reference this proves).
     ///
     /// # Errors
     ///

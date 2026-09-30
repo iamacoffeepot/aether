@@ -6,22 +6,19 @@ use super::{ActorRef, ErasedActorRef, ProtocolRef};
 use crate::model::{HandlesKind, Protocol, RowAt};
 
 mod sealed {
-    use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
+    use crate::reference::{ActorRef, ProtocolRef};
 
     /// The seal: only the proven references in this crate are targets.
     pub trait Sealed {}
 
     impl<R> Sealed for ActorRef<R> {}
 
-    impl Sealed for ErasedActorRef {}
-
     impl<P> Sealed for ProtocolRef<P> {}
 
     impl<T: Sealed + ?Sized> Sealed for &T {}
 }
 
-/// The index of a target that needs no row lookup, an [`ActorRef<R>`] or an
-/// [`ErasedActorRef`]: the default of [`Target`]'s index parameter, so
+/// The index of a target that needs no row lookup, an [`ActorRef<R>`]: the default of [`Target`]'s index parameter, so
 /// `Target<K>` is `Target<K, Direct>`. Inferred, never written.
 pub struct Direct;
 
@@ -31,12 +28,16 @@ pub struct Direct;
 /// context-carrying siblings) take `impl Target<K, I>`, so the kind is inferred
 /// from the payload and no turbofish is written. An [`ActorRef<R>`] is a
 /// target only for the kinds `R` handles, which keeps the compile-time check
-/// a typed send to `R` carries. An [`ErasedActorRef`] is a target for
-/// every kind, unchecked, as ADR-0230 §2 allows for a proof whose actor type
-/// the holder cannot name. Either way the kind must be [`ActorMail`], so no
-/// target carries engine-only mail (ADR-0233). A borrow of either is a target too, so a reference
-/// reached through a borrow, such as a map lookup, sends without a copy-out.
-/// A held reference is `Copy`, so a call site passes it by value.
+/// a typed send to `R` carries. The kind must be [`ActorMail`], so no target
+/// carries engine-only mail (ADR-0233). A borrow of a target is a target too,
+/// so a reference reached through a borrow, such as a map lookup, sends
+/// without a copy-out. A held reference is `Copy`, so a call site passes it by
+/// value.
+///
+/// An [`ErasedActorRef`] is not a target: an erased reference has no send
+/// verb (ADR-0231 §4). It names, identifies, monitors, and replies; a holder
+/// that must send through one casts it once, where it arrives, to a protocol
+/// it handles.
 ///
 /// A [`ProtocolRef<P>`] is a target only for the kinds `P` lists (ADR-0231
 /// §3). A protocol implements no [`Contract<K>`](crate::Contract), so its
@@ -48,6 +49,16 @@ pub struct Direct;
 ///
 /// The trait is sealed: no crate outside `aether-actor` adds a target, so a
 /// foreign impl cannot forward an erased proof as any kind it likes.
+///
+/// An erased reference does not compile as a target, for any kind:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{ErasedActorRef, WasmCtx};
+///
+/// fn ping(ctx: &mut WasmCtx<'_>, peer: ErasedActorRef) {
+///     ctx.send_to(peer, &());
+/// }
+/// ```
 ///
 /// ```
 /// use aether_actor::{ActorRef, Addressable, HandlesKind, One, WasmCtx};
@@ -133,12 +144,6 @@ pub trait Target<K: ActorMail, I = Direct>: sealed::Sealed {
 impl<R: HandlesKind<K>, K: ActorMail> Target<K> for ActorRef<R> {
     fn erased(&self) -> ErasedActorRef {
         self.erase()
-    }
-}
-
-impl<K: ActorMail> Target<K> for ErasedActorRef {
-    fn erased(&self) -> ErasedActorRef {
-        *self
     }
 }
 

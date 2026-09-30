@@ -2,6 +2,7 @@
 
 use core::any::type_name;
 use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
 use aether_data::MailboxId;
@@ -82,6 +83,22 @@ impl<P> Clone for ProtocolRef<P> {
 }
 
 impl<P> Copy for ProtocolRef<P> {}
+
+/// Equal when both prove the same target, whatever `P` is phantom over, as
+/// [`ActorRef`](crate::ActorRef) compares.
+impl<P> PartialEq for ProtocolRef<P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+    }
+}
+
+impl<P> Eq for ProtocolRef<P> {}
+
+impl<P> Hash for ProtocolRef<P> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.target.hash(state);
+    }
+}
 
 /// A reference prints its protocol type, never its position.
 impl<P> fmt::Debug for ProtocolRef<P> {

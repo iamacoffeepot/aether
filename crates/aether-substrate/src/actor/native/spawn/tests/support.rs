@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::{ActorRef, Addressable, HandlesKind, Many};
 use aether_data::{ActorId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -43,14 +43,26 @@ pub(super) enum ActivationEvent {
     Drop(thread::ThreadId),
 }
 
+/// What an [`activation_sink`] stands in for: the peer a probe pokes from its
+/// `wire` and `unwire`. The sink's inline route takes any kind, so its proof is
+/// typed as this marker, which handles only the poke.
+pub(super) struct PokeSink;
+
+impl Addressable for PokeSink {
+    const NAMESPACE: &'static str = "test.activation.poke_sink";
+    type Resolver = Many;
+}
+
+impl HandlesKind<ActivationPoke> for PokeSink {}
+
 pub(super) struct ActivationProbe {
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: Option<ErasedActorRef>,
+    lifecycle_target: Option<ActorRef<PokeSink>>,
 }
 
 pub(super) struct ActivationConfig {
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: Option<ErasedActorRef>,
+    lifecycle_target: Option<ActorRef<PokeSink>>,
 }
 
 impl ActivationConfig {
@@ -60,7 +72,7 @@ impl ActivationConfig {
 
     pub(super) fn with_lifecycle_target(
         events: crossbeam_channel::Sender<ActivationEvent>,
-        lifecycle_target: ErasedActorRef,
+        lifecycle_target: ActorRef<PokeSink>,
     ) -> Self {
         Self { events, lifecycle_target: Some(lifecycle_target) }
     }
@@ -137,7 +149,7 @@ pub(super) fn prepared_probe_with_lifecycle_target(
     spawner: &Arc<Spawner>,
     name: &str,
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: ErasedActorRef,
+    lifecycle_target: ActorRef<PokeSink>,
 ) -> PreparedSpawnCommit {
     let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
     let staged = spawner
@@ -154,7 +166,7 @@ pub(super) fn prepared_probe_with_lifecycle_target(
 pub(super) fn activation_sink(
     registry: &Registry,
     name: &str,
-) -> (ErasedActorRef, crossbeam_channel::Receiver<KindId>) {
+) -> (ActorRef<PokeSink>, crossbeam_channel::Receiver<KindId>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
     let sink = registry.register_inline(
         &boot_authority(),
@@ -163,7 +175,7 @@ pub(super) fn activation_sink(
             let _ = sender.send(dispatch.kind);
         }),
     );
-    (sink, receiver)
+    (Registry::declared_dependency::<PokeSink>(sink.id()), receiver)
 }
 
 pub(super) fn finalized_probe(

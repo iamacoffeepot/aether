@@ -32,6 +32,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_actor::protocol;
+use aether_kinds::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+};
 use aether_math::{Rgba, Vec2};
 use aether_render::{ScreenVertex, ShapeShadow, ShapeStroke, ShapeTexture};
 use serde::{Deserialize, Serialize};
@@ -2497,12 +2501,30 @@ pub struct EditorConfig {
 /// shell and relays what the shell forwards to its child panel.
 ///
 /// The payload names only the region; the address is the envelope's sender,
-/// which the shell reads as an `ErasedActorRef` and stores. That is why the kind
-/// carries no mailbox field: an id in a decoded kind is a position anyone can
-/// spell, while the sender is a position the host stamped (ADR-0230).
+/// which the shell casts to [`EditorInput`] once and stores. That is why the
+/// kind carries no mailbox field: an id in a decoded kind is a position anyone
+/// can spell, while the sender is a position the host stamped (ADR-0230).
 #[aether_data::kind(name = "aether.widget.editor.region_attach")]
 pub struct RegionAttach {
     pub region: String,
+}
+
+/// What an [`EditorShell`](crate::EditorShell) forwards to an attached region:
+/// the nine raw input kinds, each silent. A region announcing itself with
+/// [`RegionAttach`] must publish every row, as
+/// [`EditorRegion`](crate::EditorRegion) does; the shell casts the sender to
+/// this protocol at attach and refuses one that does not cover it.
+#[protocol]
+pub trait EditorInput {
+    fn mouse_button(mail: MouseButton);
+    fn mouse_button_release(mail: MouseButtonRelease);
+    fn mouse_move(mail: MouseMove);
+    fn mouse_wheel(mail: MouseWheel);
+    fn key(mail: Key);
+    fn key_release(mail: KeyRelease);
+    fn text_input(mail: TextInput);
+    fn ime_preedit(mail: ImePreedit);
+    fn modifiers(mail: Modifiers);
 }
 
 const fn owns_input_by_default() -> bool {

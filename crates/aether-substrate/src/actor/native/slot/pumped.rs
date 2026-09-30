@@ -983,7 +983,7 @@ mod tests {
         let self_id = MailboxId(0x_0DED_0011);
         let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx));
-        let probe = fx.registry.resolve_live(self_id).expect("the booted probe's route is live");
+        let probe = Registry::activated::<PumpProbe>(self_id);
 
         let state_after_turn = slot.host_turn(|state, ctx| {
             state.pings = 10;

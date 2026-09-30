@@ -101,17 +101,20 @@ return.
 
 Each session delivers `session_data` and `session_closed` as itself, so the
 host stamps the session as the envelope sender. The consumer writes or closes
-through that sender: `ctx.sender()`, then
+through that sender: `ctx.sender()`, cast as below, then
 `ctx.send_to(session, &SessionWrite { .. })` or `&SessionClose {}`. Accepted
 and outbound sessions are addressed the same way. There are no route helpers,
 and the consumer never derives a session's mailbox from its name. Raw sockets
 stay in native state.
 
-That consumer-to-session write is still an erased shape on `main` that #6895
-retires: it goes through `ctx.sender()`'s `ErasedActorRef`, and a guest has no
-cast or typed resolve yet to prove the session with. Under the design rules, a
-reference that is sent through is a typed proof
-([R-0039](../contributing/design-rules.md#r-0039)).
+An erased reference has no send verb (ADR-0231 §4), so the consumer casts
+the session sender once, on the session's first delivery, to a protocol with
+the `SessionWrite` / `SessionClose` rows it needs, keeps the
+`ProtocolRef<P>` with its session state, and writes through that
+([R-0044](../contributing/design-rules.md#r-0044)). A guest casts with
+`WasmCtx::cast`; the tcp load probe fixture
+(`crates/aether-test-fixtures-bundle/src/tcp_load_probe.rs`) is the worked
+example.
 
 Listener/session names live under the engine's lineage. They are not globally
 unique across engines and should be discovered from result/notification data,

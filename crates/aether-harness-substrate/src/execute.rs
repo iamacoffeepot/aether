@@ -212,7 +212,7 @@ impl PreparedSend {
 }
 
 mod sealed {
-    use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef};
+    use aether_actor::{ActorRef, ProtocolRef};
     use aether_kinds::trace::TraceTail;
     use aether_kinds::{CostTail, LogTail};
 
@@ -221,7 +221,6 @@ mod sealed {
 
     impl<R> Sealed for &ActorRef<R> {}
     impl<P> Sealed for &ProtocolRef<P> {}
-    impl Sealed for ErasedActorRef {}
 
     /// Seals [`super::FrameworkTail`] to the three kinds the native dispatch
     /// loop answers for every actor.
@@ -248,11 +247,10 @@ mod sealed {
 ///   log, trace, and cost queries the dispatch loop answers for every actor,
 ///   whether or not its type declares a handler for them.
 ///
-/// The [`ErasedActorRef`] impl is transitional and leaves with #6932: its
-/// prepared send proves the reference's retained path through the chassis
-/// boundary before each delivery and checks nothing about the kind. `K` and
-/// `I` are inferred from the reference and the mail, so no call site names
-/// them.
+/// An [`ErasedActorRef`] is not a target: an erased reference has no send
+/// verb (ADR-0231 §4), so a test holding one casts it once to a protocol with
+/// [`SubstrateHarness::cast`]. `K` and `I` are inferred from the reference and
+/// the mail, so no call site names them.
 ///
 /// A kind the actor does not handle fails at compile time, and the tail
 /// index opens only the three framework kinds:
@@ -339,14 +337,7 @@ impl<K: FrameworkTail, P> SendTarget<K, Tail> for &ProtocolRef<P> {
     }
 }
 
-impl<K: Kind> SendTarget<K> for ErasedActorRef {
-    fn prepare(self, mail: &K) -> PreparedSend {
-        prepare_through_boundary(self, mail)
-    }
-}
-
-/// The boundary push the framework-tail arm and the transitional erased impl
-/// share: name the reference's retained canonical path, prove it through
+/// The boundary push of the framework-tail arm: name the reference's retained canonical path, prove it through
 /// `accept_call`, then deliver tracked or for a reply.
 fn prepare_through_boundary<K: Kind>(target: ErasedActorRef, mail: &K) -> PreparedSend {
     let kind = K::ID;

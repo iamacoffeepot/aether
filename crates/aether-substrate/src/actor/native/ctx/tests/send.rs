@@ -65,7 +65,7 @@ struct SendToWithContext {
     value: u32,
 }
 
-/// Runs `send_detached_to_with_context` through the dependency's erased proof.
+/// Runs `send_detached_to_with_context` through the dependency's proof.
 #[aether_data::kind(name = "test.native_send.send_detached_to_with_context", copy)]
 struct SendDetachedToWithContext {
     value: u32,
@@ -76,7 +76,7 @@ struct SendDetachedToWithContext {
 struct ForwardTo;
 
 /// Runs the inherent `send_detached_to` through the relay's protocol
-/// reference, then the `MailSender` delegation through its erased proof.
+/// reference, then the `MailSender` delegation through the same reference.
 #[aether_data::kind(name = "test.native_send.send_detached_to")]
 struct SendDetachedTo;
 
@@ -97,10 +97,6 @@ struct FlatSend;
 struct SendWithContext {
     value: u32,
 }
-
-/// Runs the raw-kind verbs with an engine-only kind, then an ordinary one.
-#[aether_data::kind(name = "test.native_send.send_engine_only")]
-struct SendEngineOnly;
 
 /// What one [`SendProbe`] turn read off its ctx and what its verbs emitted.
 #[derive(Debug, Clone)]
@@ -189,7 +185,7 @@ impl NativeActor for SendProbe {
 
     #[handler::single]
     fn on_send_detached_to_with_context(&mut self, ctx: &mut NativeCtx<'_>, trigger: SendDetachedToWithContext) {
-        let bouncer = ctx.actor_ref::<Bouncer>().erase();
+        let bouncer = ctx.actor_ref::<Bouncer>();
         let sent = ctx.send_detached_to_with_context(bouncer, &Poke, NativeRequestContext { value: trigger.value });
         self.turns.push(Turn::of(ctx, vec![Some(sent)], vec![sent]));
     }
@@ -203,7 +199,7 @@ impl NativeActor for SendProbe {
     #[handler::single]
     fn on_send_detached_to(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendDetachedTo) {
         let inherent = ctx.send_detached_to(self.relay.narrow::<CastRelay>(), &CastOnly { code: 10 });
-        MailSender::send_detached_to(ctx, self.relay.erase(), &CastOnly { code: 11 });
+        MailSender::send_detached_to(ctx, self.relay.narrow::<CastRelay>(), &CastOnly { code: 11 });
         let delegated = last_sent(ctx);
         self.turns.push(Turn::of(ctx, vec![Some(inherent), Some(delegated)], vec![inherent, delegated]));
     }
@@ -243,18 +239,6 @@ impl NativeActor for SendProbe {
             sender: ctx.sender(),
             taken,
         });
-    }
-
-    #[handler::single]
-    fn on_send_engine_only(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendEngineOnly) {
-        use aether_kinds::MonitorNotice;
-
-        let stub = ctx.actor_ref::<StubActor>().erase();
-        let notice = MonitorNotice.encode_into_bytes();
-        let tracked = ctx.send_envelope_tracked_to(stub, MonitorNotice::ID, &notice);
-        let detached = ctx.send_envelope_detached_to(stub, MonitorNotice::ID, &notice);
-        let control = ctx.send_envelope_detached_to(stub, CastOnly::ID, &CastOnly { code: 8 }.encode_into_bytes());
-        self.turns.push(Turn::of(ctx, vec![tracked, detached, control], control.into_iter().collect()));
     }
 }
 
@@ -314,8 +298,7 @@ impl Rig {
 /// store the context under the correlation of the mail they routed: the
 /// answering actor's real reply turn takes it back, which is how the bloomery
 /// driver's replies find their way back to the continuation that sent them.
-/// The legs cover all three `Target` impls: a typed reference by value, a
-/// borrow of one, and an erased proof.
+/// The legs cover a typed reference by value and a borrow of one.
 #[test]
 fn send_to_family_inherits_or_detaches_and_stores_context() {
     let mut rig = Rig::boot();
@@ -481,24 +464,6 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
         },
         "the declared dependency answers on the caller's chain, and its reply takes the context back",
     );
-}
-
-/// ADR-0233: the raw-kind verbs are the native door no `ActorMail` bound
-/// guards, so each refuses an engine-only kind, returning no mail id and
-/// routing nothing, while an ordinary kind through the same verb still
-/// arrives. Catches a native actor forging a departure notice by its id.
-#[test]
-fn raw_send_of_an_engine_only_kind_is_refused() {
-    let mut rig = Rig::boot();
-
-    let (_root, turn) = rig.run(&SendEngineOnly, None);
-
-    assert_eq!(turn.emitted[0], None, "the tracked raw verb refuses engine-only mail");
-    assert_eq!(turn.emitted[1], None, "the detached raw verb refuses engine-only mail");
-    assert!(turn.emitted[2].is_some(), "an ordinary kind still sends");
-    let arrived = rig.stub_mail.try_recv().expect("the ordinary kind routed at flush");
-    assert_eq!(arrived.kind, CastOnly::ID, "only the ordinary kind reaches the sink");
-    assert!(rig.stub_mail.try_recv().is_err(), "no engine-only mail reached the sink");
 }
 
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple

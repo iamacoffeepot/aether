@@ -14,10 +14,10 @@
 //! `ctx.sends()` hands out this view: the ctx's by-proof outbound-mail verbs,
 //! none of the reply channel. The view keeps the actor of the ctx it
 //! came from, so helpers take `&mut Sends<'_, A>` and are callable from every
-//! handler class. A helper sends through a proof it is handed:
+//! handler class. A helper sends through a typed proof it is handed:
 //!
 //! ```ignore
-//! fn announce<A>(sends: &mut Sends<'_, A>, focused: ErasedActorRef) {
+//! fn announce<A>(sends: &mut Sends<'_, A>, focused: ProtocolRef<Focusable>) {
 //!     sends.send_to(focused, &FocusGained { keyboard: true });
 //! }
 //!
@@ -82,8 +82,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 impl<A> Sends<'_, A> {
     /// Send `payload` through a held reference, inheriting the handler's
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`](crate::ActorRef) is
-    /// kind-checked against `K`, a [`ProtocolRef<P>`](crate::ProtocolRef) against the kinds `P`
-    /// lists, and an [`ErasedActorRef`](crate::ErasedActorRef) is not checked.
+    /// kind-checked against `K` and a [`ProtocolRef<P>`](crate::ProtocolRef) against the kinds
+    /// `P` lists. An [`ErasedActorRef`](crate::ErasedActorRef) is not a target.
     pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         self.route::<K>(target.erased().id().0, encode_guest(payload), 1, ChainMode::Inherit);
     }

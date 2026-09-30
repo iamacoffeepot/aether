@@ -21,13 +21,13 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`Target`]: an [`ActorRef<R>`](crate::ActorRef) is kind-checked, so the
     /// send compiles only when `R` handles `K`, a
     /// [`ProtocolRef<P>`](crate::ProtocolRef) only for a kind `P` lists (its
-    /// row index `I` inferred), and an [`ErasedActorRef`] is not checked. The
-    /// erased proof for a recipient known only at runtime is one a
-    /// spawn ([`InlineChild::erase`](super::InlineChild::erase),
-    /// [`Self::spawn_inline_child_by_tag`]), a `child_as` / `sibling_as`
-    /// lookup, or [`Self::sender`] produced — never a computed position
-    /// (ADR-0230). There is no by-name counterpart, because text is not a
-    /// proof. Routes through the inline registry and inherits the handler's
+    /// row index `I` inferred). An [`ErasedActorRef`] is not a target
+    /// (ADR-0231 §4): a recipient known only at runtime, such as
+    /// [`Self::sender`]'s, is cast once to a protocol with
+    /// [`Self::cast`](super::WasmCtx::cast), and a spawned child is sent
+    /// through its [`InlineChild`](super::InlineChild) or a reference it
+    /// narrows to — never a computed position (ADR-0230). There is no
+    /// by-name counterpart, because text is not a proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
     pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
         self.push(target.erased(), payload, ChainMode::Inherit);
@@ -144,7 +144,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// `chain`, stamping this actor as the sender (issue 1987). A
     /// cluster-member recipient dispatches in place; any other hands off to
     /// the host (ADR-0114 addressing amendment).
-    fn push<K: ActorMail>(&self, recipient: ErasedActorRef, payload: &K, chain: ChainMode) {
+    pub(crate) fn push<K: ActorMail>(&self, recipient: ErasedActorRef, payload: &K, chain: ChainMode) {
         self.inline.route_or_enqueue(recipient.id().0, K::ID.0, encode_guest(payload), 1, chain, self.mailbox);
     }
 

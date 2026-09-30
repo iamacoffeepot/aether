@@ -1,6 +1,6 @@
 //! Input-only editor shell over independently-rooted peer regions (ADR-0141).
 
-use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ProtocolRef, Target, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -8,14 +8,15 @@ use aether_kinds::{
 use aether_window::WindowCapability;
 
 use super::routing::{RegionFocusTransition, RegionInputLane, Routing};
-use super::{EditorConfig, RegionAttach};
+use super::{EditorConfig, EditorInput, RegionAttach};
 
 /// The sole interactive-input subscriber for a configured set of editor peers.
 ///
 /// It holds no address of its own: [`Routing`] stores the proof each region
-/// handed over when it announced itself (ADR-0230) and gives that same value
-/// back as a route's target, so the shell has nothing to resolve and no way to
-/// address a region that never announced.
+/// handed over when it announced itself (ADR-0230), cast once to
+/// [`EditorInput`], and gives that same value back as a route's target, so the
+/// shell has nothing to resolve and no way to address a region that never
+/// announced.
 pub struct EditorShell {
     routing: Routing,
 }
@@ -26,25 +27,30 @@ impl EditorShell {
     ///
     /// The reference [`Routing`] returned is handed to the send whole: no
     /// position is opened anywhere in the shell.
-    ///
-    /// Priming recurses exactly once: the nested call carries no focus edge of
-    /// its own, so it sends the modifiers and returns.
-    fn forward<A, K: ActorMail>(
+    fn forward<A, K: ActorMail, I>(
         &self,
         ctx: &mut WasmCtx<'_, A>,
         focus: Option<RegionFocusTransition>,
-        target: Option<ErasedActorRef>,
+        target: Option<ProtocolRef<EditorInput>>,
         payload: &K,
-    ) {
+    ) where
+        ProtocolRef<EditorInput>: Target<K, I>,
+    {
+        self.prime(ctx, focus);
+
+        if let Some(reference) = target {
+            ctx.send_to(reference, payload);
+        }
+    }
+
+    /// Send the cached modifiers to the region `focus` newly focused, when it
+    /// takes the modifiers lane and any have arrived.
+    fn prime<A>(&self, ctx: &mut WasmCtx<'_, A>, focus: Option<RegionFocusTransition>) {
         if let Some(next) = focus.and_then(|transition| transition.next)
             && self.routing.target_accepts(next, RegionInputLane::Modifiers)
             && let Some(modifiers) = self.routing.cached_modifiers()
         {
-            self.forward(ctx, None, Some(next), modifiers);
-        }
-
-        if let Some(reference) = target {
-            ctx.send_to(reference, payload);
+            ctx.send_to(next, modifiers);
         }
     }
 }
@@ -81,9 +87,11 @@ impl WasmActor for EditorShell {
     /// A region announcing that it is the actor behind one of the declared
     /// region names. The address is the envelope sender, never a field of the
     /// mail: the host stamped it, so it is a proof rather than a position the
-    /// sender chose. An unknown name, a second announcement for a name already
-    /// attached, and a sourceless dispatch are each reported and ignored —
-    /// none of them may re-point a live route.
+    /// sender chose. It is cast to [`EditorInput`] here, once, so every later
+    /// forward sends through a typed proof. An unknown name, a second
+    /// announcement for a name already attached, a sourceless dispatch, and a
+    /// sender that does not cover [`EditorInput`] are each reported and
+    /// ignored — none of them may re-point a live route.
     #[handler::single]
     fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
         let Some(reference) = ctx.sender() else {
@@ -91,6 +99,14 @@ impl WasmActor for EditorShell {
                 target: "aether_widget_editor",
                 region = attach.region.as_str(),
                 "region attach arrived with no sender; ignoring",
+            );
+            return;
+        };
+        let Some(reference) = ctx.cast::<EditorInput>(reference) else {
+            tracing::warn!(
+                target: "aether_widget_editor",
+                region = attach.region.as_str(),
+                "region attach sender does not cover the editor input protocol; ignoring",
             );
             return;
         };

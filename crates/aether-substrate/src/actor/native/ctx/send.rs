@@ -1,10 +1,9 @@
 //! How mail leaves this ctx.
 //!
-//! Three surfaces over one buffered push. The untyped `send_envelope_*`
-//! family carries already-encoded `(kind, bytes)` for endpoints that hold no
-//! compile-time types, addressed only by proof (ADR-0230), and `fanout`
-//! multicasts one encoding to a runtime recipient set of proofs. A
-//! boundary item, proven by
+//! Several surfaces over one buffered push. Every held-reference verb takes a
+//! [`Target`], a proof checked for the kind it sends (ADR-0230, ADR-0231 §4),
+//! and `fanout` multicasts one encoding to a runtime recipient set of such
+//! proofs. A boundary item, proven by
 //! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle) or, for a
 //! wire `Call`, [`NativeCtx::accept_call`](super::NativeCtx::accept_call),
 //! leaves only through `deliver_detached` or `deliver_forwarded`. The call a
@@ -20,13 +19,14 @@
 //!
 //! Every typed verb encodes through the envelope encoder (ADR-0238 decision
 //! 3): each `Blob` field is shared through the engine store and its entry
-//! rides the envelope, so an in-process recipient reads the same bytes. The
-//! raw verbs carry pre-encoded bytes, which may already hold tag-1 fields
-//! when a handler forwards what it received. While the handled mail has
-//! attachments, a raw verb resolves each such hash against them and attaches
-//! the entry, and a hash they do not carry refuses the send (resolve on send,
-//! ADR-0238 decision 3). A handler whose mail has no attachments holds no
-//! blob, so its raw sends go out unwalked.
+//! rides the envelope, so an in-process recipient reads the same bytes.
+//! `send_encoded_detached_to` and the deferred envelope reply carry
+//! pre-encoded bytes, which may already hold tag-1 fields when a handler
+//! forwards what it received. While the handled mail has attachments, each
+//! such hash resolves against them and the entry is attached, and a hash they
+//! do not carry refuses the send (resolve on send, ADR-0238 decision 3). A
+//! handler whose mail has no attachments holds no blob, so its pre-encoded
+//! sends go out unwalked.
 
 use aether_actor::{
     CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, OutboundReply, ReplyMode, SendableTo,
@@ -69,10 +69,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// body of
     /// [`DeferredReply::reply_envelope`](crate::actor::native::DeferredReply::reply_envelope).
     /// An engine-only `kind` (ADR-0233) is refused with a warning and nothing
-    /// is sent, as the `send_envelope_*_to` verbs refuse it. The bytes'
-    /// tag-1 fields resolve against the handled mail's attachments as those
-    /// verbs resolve them, and a hash they do not carry is refused the same
-    /// way.
+    /// is sent, since no typed bound checks the raw kind here. The bytes'
+    /// tag-1 fields resolve against the handled mail's attachments as
+    /// [`Self::send_encoded_detached_to`] resolves them, and a hash they do
+    /// not carry is refused the same way.
     pub(crate) fn reply_envelope_to_target(
         &mut self,
         sender: Source,
@@ -141,64 +141,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         }
     }
 
-    /// The tracked send through a proof: dispatch already-encoded bytes of
-    /// `kind` to the actor `target` proves (ADR-0230), inheriting this
-    /// handler's causal chain, and return the minted [`MailId`] for
-    /// settlement subscription.
-    ///
-    /// It takes no `R: HandlesKind<K>` gate, which would need the kind and
-    /// receiver at the compile site. An endpoint that routes mail with
-    /// runtime kinds holds neither, only the proof and opaque payload bytes,
-    /// so this dispatches through the same lineage-aware path the typed
-    /// verbs take without that check. A capability fanning
-    /// out pre-encoded bytes to its own subscriber table is the shape this
-    /// exists for: `WindowCapability::on_inject` replays an injected
-    /// event to the window subscribers, and `aether-lifecycle`'s
-    /// `broadcast_to_subscribers` pushes each stage payload to the proofs its
-    /// subscriber table holds.
-    ///
-    /// At a chassis-root edge (no `in_flight_mail_id`) the returned id
-    /// is the root of a fresh causal chain; mid-handler it is the new mail's
-    /// id inside the inherited chain, and a settlement subscription on it
-    /// fires when *that mail's* descendants settle, not the whole chain.
-    ///
-    /// Differs from [`Self::fanout`] only in what it carries: `fanout`
-    /// encodes one typed `K` and pushes it to many recipients, while this
-    /// takes `(KindId, &[u8])` already encoded and dispatches one.
-    ///
-    /// An engine-only `kind` (ADR-0233) is refused with a warning and
-    /// `None`, since no typed bound checks the raw kind here: nothing was
-    /// sent, so there is no mail id to hand back.
-    ///
-    /// While the handled mail has attachments, each tag-1 field in `bytes`
-    /// resolves against them and rides with the send, so forwarding received
-    /// bytes shares their entries (ADR-0238 decision 3). A hash they do not
-    /// carry, or bytes that do not match `kind`'s schema, is refused with a
-    /// warning and `None`.
-    #[must_use]
-    pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
-        self.push_envelope_tracked(target, kind, bytes, self.outbound_parent(), self.outbound_root())
-    }
-
-    /// The push behind the tracked and detached envelope sends: refuse an
-    /// engine-only `kind`, then [`Self::push_encoded`].
-    fn push_envelope_tracked(
-        &self,
-        target: ErasedActorRef,
-        kind: KindId,
-        bytes: &[u8],
-        parent: Option<MailId>,
-        root: Option<MailId>,
-    ) -> Option<MailId> {
-        if refuse_engine_only(kind) {
-            return None;
-        }
-        self.push_encoded(target, kind, bytes, parent, root)
-    }
-
     /// Resolve the tag-1 fields of `bytes`, a `kind` mail, and push them to
-    /// `target` under `(parent, root)`: the push shared by the raw envelope
-    /// verbs and [`Self::send_encoded_detached_to`].
+    /// `target` under `(parent, root)`: the push behind
+    /// [`Self::send_encoded_detached_to`].
     fn push_encoded(
         &self,
         target: ErasedActorRef,
@@ -219,32 +164,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         }))
     }
 
-    /// Dispatch already-encoded bytes of `kind` to the actor `target` proves
-    /// (ADR-0230) on a fresh causal chain, ignoring this handler's in-flight
-    /// lineage, and return the minted [`MailId`]: the root of the new chain,
-    /// so a settlement subscription on it fires when the dispatch's whole
-    /// descendant subtree drains.
-    ///
-    /// Use this when the cap is acting on an external event (wire-borne
-    /// RPC call, file watcher, timer) rather than forwarding a mail that
-    /// was already in flight. `RpcServerState::handle_call` is the model
-    /// consumer: it relays an engine-addressed wire `Call` to the proxy
-    /// registered for that engine. The inbound that wakes the cap is an
-    /// internal wake mail causally unrelated to the wire-borne `Call`, so
-    /// inheriting its chain would attribute the dispatch to the wrong root
-    /// and `subscribe_settlement_mail` would never fire (descendants don't
-    /// settle individually; only the chain root does).
-    ///
-    /// An engine-only `kind` (ADR-0233) is refused with a warning and
-    /// `None`, as [`Self::send_envelope_tracked_to`] refuses it, and the
-    /// bytes' tag-1 fields resolve, or refuse, as they do there.
-    #[must_use]
-    pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
-        self.push_envelope_tracked(target, kind, bytes, None, None)
-    }
-
     /// Dispatch a payload encoded elsewhere to the actor `target` proves on a
-    /// fresh causal chain, as [`Self::send_envelope_detached_to`] does, and
+    /// fresh causal chain, ignoring this handler's in-flight lineage, and
     /// return the minted [`MailId`], the new chain's root.
     ///
     /// The kind comes from `K` and the bytes from [`Encoded<K>`], whose only
@@ -253,7 +174,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) compiles only for a kind
     /// `P` lists, an unchecked row included. `K: ActorMail` keeps engine-only mail
     /// out at compile time, so no runtime refusal repeats it. The bytes'
-    /// tag-1 fields resolve, or refuse with `None`, as the raw verbs' do.
+    /// tag-1 fields resolve against the handled mail's attachments, and a hash
+    /// they do not carry, or bytes that do not match `K`'s schema, is refused
+    /// with a warning and `None`.
     ///
     /// It serves a sender that encodes off the thread that sends: the HTTP
     /// server's reader encodes each buffered request and its dispatch shard
@@ -274,8 +197,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the send compiles only when `R` handles `K`, and a
     /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) target is checked
     /// against `P`'s rows, so it compiles only when `P` lists `K`; the row's
-    /// index `I` is inferred. An [`ErasedActorRef`] is not checked, which
-    /// ADR-0230 §2 allows for a proof whose actor type the caller cannot name.
+    /// index `I` is inferred. An [`ErasedActorRef`] is not a target: a holder
+    /// casts it once to a protocol where it arrives (ADR-0231 §4).
     ///
     /// Its consumer is the fleet server's `TerminateEngine` forward to the
     /// proxy its spawn proved.
@@ -322,12 +245,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// returns the minted [`MailId`]. The target is kind-checked the same way:
     /// an [`ActorRef<R>`](aether_actor::ActorRef) only for the kinds `R`
     /// handles, a [`ProtocolRef<P>`](aether_actor::ProtocolRef) only for the
-    /// kinds `P` lists, an [`ErasedActorRef`] unchecked.
+    /// kinds `P` lists.
     ///
     /// Its consumers are the bloomery driver's journal reads and appends,
     /// through its typed journal reference, and its four bundle-root sends
-    /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
-    /// kept from its load reply's stamped sender).
+    /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, through the role
+    /// protocol it cast the load reply's stamped sender to).
     #[must_use]
     pub fn send_to_with_context<K: ActorMail, C: Kind, I>(
         &mut self,
@@ -522,9 +445,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         );
     }
 
-    /// Deliver a proven boundary item on a fresh causal chain, as
-    /// [`Self::send_envelope_detached_to`] does, and return the minted
-    /// [`MailId`] — the root of that chain, which a settlement subscription
+    /// Deliver a proven boundary item on a fresh causal chain, ignoring this
+    /// handler's in-flight lineage, and return the minted [`MailId`] — the root of that chain, which a settlement subscription
     /// can wait on.
     ///
     /// Its consumers are `aether.render`'s `CaptureFrame`, where each
@@ -634,7 +556,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 }
 
-/// The raw-kind verbs' ADR-0233 door: `true`, after a warning, when `kind` is
+/// The raw-kind reply's ADR-0233 door: `true`, after a warning, when `kind` is
 /// engine-only mail an actor may not originate.
 fn refuse_engine_only(kind: KindId) -> bool {
     let refused = is_engine_only(kind);
@@ -656,7 +578,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     }
 
     fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
-        let _ = NativeCtx::send_detached_to(self, target.erased(), payload);
+        let _ = NativeCtx::send_detached_to(self, target, payload);
     }
 }
 

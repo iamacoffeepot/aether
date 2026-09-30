@@ -9,6 +9,7 @@
 
 use std::fs;
 
+use aether_actor::protocol;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -16,6 +17,14 @@ use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{GateProbe, GateQuery, GateQueryResult};
 
 const GATE: &str = "test.republish.gate";
+
+/// The rows of the successor gate the test sends: v2's `GateProbe` and the
+/// query that reads what it recorded.
+#[protocol]
+trait Gate {
+    fn probe(mail: GateProbe);
+    fn query(mail: GateQuery) -> GateQueryResult;
+}
 
 fn load_gate(wasm: &[u8], key: &str) -> LoadComponent {
     LoadComponent { wasm: wasm.to_vec(), name: Some(key.to_owned()), config: Vec::new(), export: Some(GATE.to_owned()) }
@@ -37,9 +46,10 @@ fn a_successor_load_republishes_every_live_instance_before_it_spawns() {
 
     assert!(harness.accepts(first, GateProbe::ID), "the live gate moved to the successor with the load");
     assert!(harness.accepts(second, GateProbe::ID), "the loaded gate runs the successor");
-    harness.execute(vec![("probe", HarnessOp::send_and_settle(first, &GateProbe { seq: 3 }))]).expect("probe gate a");
+    let first = harness.cast::<Gate>(first).expect("the moved gate publishes the successor's rows");
+    harness.execute(vec![("probe", HarnessOp::send_and_settle(&first, &GateProbe { seq: 3 }))]).expect("probe gate a");
     let report = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(first, &GateQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&first, &GateQuery))])
         .expect("query gate a")
         .reply::<GateQueryResult>("query")
         .expect("decode GateQueryResult");

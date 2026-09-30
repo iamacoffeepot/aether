@@ -123,7 +123,8 @@ fn prove(registry: &Registry, recipient: &ErasedActorPath) -> Result<ErasedActor
 /// bundle items through
 /// [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle),
 /// the guest `send_mail_p32` / `reply_mail_p32` host functions, and the
-/// native `send_envelope_*_to` verbs. The engine's own senders push through
+/// native deferred reply envelope (`DeferredReply::reply_envelope`). The
+/// engine's own senders push through
 /// the mailer and cross none of these doors, so they stay exempt.
 ///
 /// The set is folded once from the link-time `EngineOnlyKind` list, so it

@@ -113,14 +113,18 @@ own tests, and the fixture manifest's comment says so.
 
 The receiver never declares the dependent. The dependent's announcement is an
 ordinary kind the receiver handles (`RegionAttach`, which names only the
-region), and the receiver's handler keeps the mail's sender
-(`crates/aether-widget/src/editor.rs`):
+region), and the receiver's handler casts the mail's sender to the protocol it
+will send and keeps the result (`crates/aether-widget/src/editor.rs`):
 
 ```rust
 #[handler::single]
 fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
     let Some(reference) = ctx.sender() else {
         tracing::warn!(/* … */ "region attach arrived with no sender; ignoring");
+        return;
+    };
+    let Some(reference) = ctx.cast::<EditorInput>(reference) else {
+        tracing::warn!(/* … */ "region attach sender does not cover the editor input protocol; ignoring");
         return;
     };
 
@@ -133,28 +137,29 @@ fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
 `ctx.sender()` returns `Option<ErasedActorRef>`: a proof minted from the source
 the host stamped on the envelope, with no lookup. It is `None` for a sourceless
 dispatch (session, remote-engine, or broadcast mail), so the handler reports
-that and returns. It needs no actor type, so it works on the erased ctx.
-`Routing::attach` (`crates/aether-widget/src/routing.rs`) stores the
-reference against the declared region name, and refuses an unknown name or a
-second announcement for a region already attached rather than re-pointing a
-live route.
-
-Later pushes go through the stored reference with `ctx.send_to(reference,
-&kind)`, as `EditorShell::forward` does for every input event it routes. An
-`ErasedActorRef` is not kind-checked (an `ActorRef<R>` is), so the receiver
-must send only kinds the announcing actor handles. The editor relies on that
-by construction: `EditorRegion` handles each of the nine input kinds the shell
-forwards.
-
-That stored erased sender is the shape on `main`, and it is the erased send
-#6895 removes. Under the design rules
-([R-0039](../contributing/design-rules.md#r-0039),
-[R-0040](../contributing/design-rules.md#r-0040)), the receiver instead holds
-a `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
-two ways: by casting the envelope sender at receipt
+that and returns. An erased reference has no send verb
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
-§4), or by proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`)
-that the announcement carries. A guest has the cast, `WasmCtx::cast`, and the
+§4), so the handler casts it once, at receipt, to `EditorInput`, the
+protocol of the nine silent input rows the shell forwards. The cast answers
+`None` when the sender's published rows do not cover the protocol, and the
+handler refuses that attach. `Routing::attach`
+(`crates/aether-widget/src/routing.rs`) stores the typed reference against
+the declared region name, and refuses an unknown name or a second
+announcement for a region already attached rather than re-pointing a live
+route.
+
+Later pushes go through the stored `ProtocolRef<EditorInput>` with
+`ctx.send_to(reference, &kind)`, as `EditorShell::forward` does for every
+input event it routes, and each send is kind-checked against the protocol's
+rows. `EditorRegion` covers every row, so it attaches.
+
+Under the design rules
+([R-0044](../contributing/design-rules.md#r-0044),
+[R-0040](../contributing/design-rules.md#r-0040)), a receiver holds a
+`ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
+two ways: by casting the envelope sender at receipt, as the shell does, or by
+proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`) that the
+announcement carries. A guest has the cast, `WasmCtx::cast`, and the
 `ActorPath<R>` door, `WasmCtx::resolve` (#7205); its `ProtocolPath<P>` decode
 lands with ADR-0241.
 
@@ -185,27 +190,27 @@ Two shapes reach the loader, and both reuse doors above:
   itself, so the loader keeps that reply's `ctx.sender()` as its proof of the
   component and mails the component through it. The component keeps
   `ctx.sender()` from that mail, as in the reverse direction above.
-- **The loader's path rides in config.** The loader puts its own `ErasedActorPath`
-  in the component's config, and the component's `wire` proves it once with
-  `ctx.resolve_path` and keeps the `ErasedActorRef`.
+- **The loader's path rides in config.** The loader puts its own path in the
+  component's config, and the component's `wire` proves it once and keeps
+  the proof.
 
-Either way the component holds an `ErasedActorRef`, so its sends to the loader
-are not kind-checked. Both are shapes on `main` that #6895 retires. A
-reference kept from `ctx.sender()` becomes a `ProtocolRef<P>` cast at
-receipt, as in the reverse direction above. The loader's config field becomes
-a typed path, an `ActorPath<R>` or a `ProtocolPath<P>` by what the component
-needs, and the component stores the typed proof `ctx.resolve` returns for it.
+Either way the component sends to the loader only through a typed proof,
+since an erased reference has no send verb. A reference kept from
+`ctx.sender()` is cast to a `ProtocolRef<P>` at receipt, as in the reverse
+direction above. The loader's config field is a typed path, an
+`ActorPath<R>` or a `ProtocolPath<P>` by what the component needs, and the
+component stores the typed proof `ctx.resolve` returns for it.
 
 ## Stored state holds proofs
 
 Keep proofs in actor state, never a `MailboxId`. For an actor the state will
 send to, the proof is typed: an `ActorRef<R>` or a `ProtocolRef<P>`
-([R-0039](../contributing/design-rules.md#r-0039)). An `ErasedActorRef` is
+([R-0044](../contributing/design-rules.md#r-0044)). An `ErasedActorRef` is
 kept only where nothing is sent through it: comparing identity, keying a
 table, naming a path, or monitoring. The editor shell holds no address of its
-own: `Routing` stores the proof each region handed over and gives that same
-value back as a route's target, so the shell has nothing to resolve. On `main`
-that proof is the erased sender, which #6895 retires as described above.
+own: `Routing` stores the proof each region handed over, cast once to
+`EditorInput`, and gives that same value back as a route's target, so the
+shell has nothing to resolve.
 
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`
@@ -220,7 +225,8 @@ send to arrives as a typed path instead
 script in `crates/aether-bloomery-bootstrap` now resolves its typed
 `ActorPath<JournalActor>` and `ActorPath<BundleDriver>` config fields with
 `WasmCtx::resolve` and keeps the two kind-checked `ActorRef`s (#7205),
-replacing the erased `resolve_path` proof #6895 was removing. A guest has
+replacing its erased `resolve_path` proof, through which nothing can be
+sent (#6895). A guest has
 no door for a payload-borne position and will not get
 one, because no guest API takes a `MailboxId`; a guest is told where to send by
 an `ActorPath<R>`, a `ProtocolPath<P>`, or the envelope sender.
@@ -247,9 +253,9 @@ The native `ActorPath<R>` arm still waits for a caller: the editor shell's
 - A payload field carrying the sender's position, re-resolved at every send.
   The kind names what the sender stands for (`RegionAttach` names the region);
   the envelope carries who sent it.
-- A stored `ErasedActorRef` that is later sent through. Store a typed proof,
-  an `ActorRef<R>` or a `ProtocolRef<P>`
-  ([R-0039](../contributing/design-rules.md#r-0039)).
+- A stored `ErasedActorRef` meant to be sent through later: no send verb
+  takes one. Store a typed proof, an `ActorRef<R>` or a `ProtocolRef<P>`
+  ([R-0044](../contributing/design-rules.md#r-0044)).
 - An `ErasedActorPath` field its receiver will send to. Carry an
   `ActorPath<R>` or a `ProtocolPath<P>`
   ([R-0040](../contributing/design-rules.md#r-0040)).

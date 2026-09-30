@@ -13,7 +13,7 @@
 
 use std::fs;
 
-use aether_actor::{Addressable, HandlesKind, HeldReply, actor};
+use aether_actor::{Addressable, HandlesKind, HeldReply, actor, protocol};
 use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Blob, ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -30,6 +30,12 @@ const GATE: &str = "test.republish.gate";
 const OBSERVER_EXPORT: &str = "test.source_observer";
 const MATRIX_PARENT_EXPORT: &str = "test.matrix.parent";
 const MATRIX_CHILD_EXPORT: &str = "test.matrix.child";
+
+/// The gate row the test reads: how many times its `wire` ran.
+#[protocol]
+trait WireCounted {
+    fn wired(mail: WireCountQuery) -> CountReport;
+}
 
 /// Monitor the component at `target`; the reply confirms the watch stands.
 #[aether_data::kind(name = "test.spawn_door.watch", no_serde)]
@@ -169,8 +175,9 @@ fn a_spawn_stands_up_an_absent_name_and_answers_a_live_one_with_itself() {
     let load = LoadComponent { wasm, name: Some("a".to_owned()), config: Vec::new(), export: Some(GATE.to_owned()) };
     let (gate, loaded) = harness.load_any(&load).unwrap_or_else(|error| panic!("a load of a live name: {error}"));
     assert_eq!(loaded, path, "a load of the live name answers with the live instance");
+    let gate = harness.cast::<WireCounted>(gate).expect("the gate answers WireCountQuery");
     let wired = harness
-        .execute(vec![("wired", HarnessOp::send_and_await_reply(gate, &WireCountQuery))])
+        .execute(vec![("wired", HarnessOp::send_and_await_reply(&gate, &WireCountQuery))])
         .expect("query the gate")
         .reply::<CountReport>("wired")
         .expect("decode CountReport");
