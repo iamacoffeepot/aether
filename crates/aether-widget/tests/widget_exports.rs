@@ -1,11 +1,13 @@
-//! Named-export and replace-reconstruct coverage for the widget module's
-//! `export!` lists (issue 5538).
+//! Export and replace-reconstruct coverage for the widget module's `export!`
+//! lists (issue 5538, issue 7206).
 //!
-//! The widget wasm build is a grab-bag defaultless module (ADR-0138). A type
-//! missing from `export!` cannot be loaded by `module@actor` selector, and
-//! ADR-0114 §5 reconstructs inline children from that same list — so a
-//! panel-spawned Dropdown, `TabStrip`, or `MenuBar` vanishes across
-//! `replace_component` even though typed spawn still works on a cold Tick.
+//! The widget wasm build is a grab-bag defaultless module (ADR-0138). Only its
+//! roots are `public`; the set widgets are `private`, because a root-loaded
+//! one has no in-cluster parent to send its draw list to. ADR-0114 §5
+//! reconstructs inline children from both lists — so a panel-spawned
+//! Dropdown, `TabStrip`, or `MenuBar` missing from `private` would vanish
+//! across `replace_component` even though typed spawn still works on a cold
+//! Tick.
 //!
 //! Reconstruction assertions send input to the original child aliases
 //! *without* a post-replace Tick: `WidgetPanel` does not persist `spawned`,
@@ -36,9 +38,8 @@ use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Mo
 use aether_substrate::testing::successor_wasm;
 use aether_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
 use aether_widget::{
-    DialogConfig, DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, SplitterAxis, SplitterConfig,
-    TabStripConfig, Theme, ToastConfig, TooltipConfig, TooltipSection, WidgetChildSpec, WidgetControlState,
-    WidgetFrame, WidgetKind, WidgetPanel,
+    DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, TabStripConfig, Theme, WidgetChildSpec,
+    WidgetControlState, WidgetFrame, WidgetKind, WidgetPanel,
 };
 use support::widget_caps;
 
@@ -64,15 +65,13 @@ fn bench(width: u32, height: u32) -> SubstrateHarness {
     .expect("boot")
 }
 
-/// NAMESPACEs of the seven actors both `export!` lists omitted.
-const SEVEN: [&str; 7] = [
-    "aether.widget.dropdown",
-    "aether.widget.tab_strip",
-    "aether.widget.menu_bar",
-    "aether.widget.tooltip",
-    "aether.widget.toast",
-    "aether.widget.dialog",
-    "aether.widget.splitter",
+/// NAMESPACEs of the five roots the `public` list exports.
+const PUBLIC_ROOTS: [&str; 5] = [
+    "aether.widget",
+    "aether.widget.scroll",
+    "aether.widget.editor",
+    "aether.widget.editor_region",
+    "aether.widget.panel",
 ];
 
 fn wasm_or_skip(stem: &str) -> Option<Vec<u8>> {
@@ -130,47 +129,6 @@ fn menu_bar_config() -> MenuBarConfig {
     }
 }
 
-fn tooltip_config() -> TooltipConfig {
-    TooltipConfig { sections: vec![TooltipSection::new(["Hint"])], theme: Theme::DEFAULT, ..TooltipConfig::default() }
-}
-
-fn toast_config() -> ToastConfig {
-    ToastConfig { theme: Theme::DEFAULT, ..ToastConfig::default() }
-}
-
-fn dialog_config() -> DialogConfig {
-    DialogConfig { title: "Confirm".to_owned(), theme: Theme::DEFAULT, ..DialogConfig::default() }
-}
-
-fn splitter_config() -> SplitterConfig {
-    SplitterConfig {
-        axis: SplitterAxis::Horizontal,
-        min_pixels: 40.0,
-        max_pixels: 400.0,
-        position_pixels: 120.0,
-        theme: Theme::DEFAULT,
-        ..SplitterConfig::default()
-    }
-}
-
-/// Typed `Config` bytes for one of the seven named exports. Empty raw payload
-/// is not a typed-config guest's init (ADR-0090): the host decodes
-/// `Self::Config` from these bytes.
-fn encoded_config_for(export: &str) -> Vec<u8> {
-    let bytes = match export {
-        "aether.widget.dropdown" => dropdown_config().encode_into_bytes(),
-        "aether.widget.tab_strip" => tab_strip_config().encode_into_bytes(),
-        "aether.widget.menu_bar" => menu_bar_config().encode_into_bytes(),
-        "aether.widget.tooltip" => tooltip_config().encode_into_bytes(),
-        "aether.widget.toast" => toast_config().encode_into_bytes(),
-        "aether.widget.dialog" => dialog_config().encode_into_bytes(),
-        "aether.widget.splitter" => splitter_config().encode_into_bytes(),
-        other => panic!("named-load table is missing a Config for {other}"),
-    };
-    assert!(!bytes.is_empty(), "{export}: encoded Config must be a typed payload, not empty raw bytes");
-    bytes
-}
-
 fn panel_config() -> PanelConfig {
     PanelConfig {
         x: 10.0,
@@ -207,8 +165,9 @@ fn panel_config() -> PanelConfig {
     }
 }
 
-/// ADR-0138: a bare load of this grab-bag must error and name every omitted
-/// actor, while each of those seven NAMESPACEs must resolve as a named export.
+/// ADR-0138: a bare load of this grab-bag must error and name every public
+/// root a caller can select, and no set widget, which is listed only so a
+/// replace rebuilds it.
 fn assert_selectors(wasm: &[u8], stem: &str) {
     let mut harness = bench(64, 48);
 
@@ -223,45 +182,19 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
         .expect("bare load sequence");
     match bare.reply::<LoadResult>("bare").expect("decode bare LoadResult") {
         LoadResult::Err { error } => {
-            for export in SEVEN {
+            for export in PUBLIC_ROOTS {
                 assert!(
                     error.contains(export),
                     "{stem}: bare-load error must name {export} so a caller can select it; got {error}"
                 );
             }
+            assert!(
+                !error.contains("aether.widget.dropdown"),
+                "{stem}: a private set widget is not a selectable export; got {error}"
+            );
         }
         LoadResult::Ok { path: name, .. } => {
             panic!("{stem}: a bare load of the widget module must error, not instantiate {name}")
-        }
-    }
-
-    for export in SEVEN {
-        let loaded = harness
-            .execute(vec![(
-                "named",
-                HarnessOp::send_and_await_reply(
-                    &harness.actor_ref::<ComponentHostCapability>(),
-                    &LoadComponent {
-                        wasm: wasm.to_vec(),
-                        // Each export is instanced, so an unnamed load would
-                        // take a counter key; the load names it by its type.
-                        name: Some(export.to_owned()),
-                        config: encoded_config_for(export),
-                        export: Some(export.to_owned()),
-                    },
-                ),
-            )])
-            .unwrap_or_else(|error| panic!("{stem}: named load of {export}: {error}"));
-        match loaded.reply::<LoadResult>("named").expect("decode named LoadResult") {
-            LoadResult::Ok { path: name, .. } => {
-                assert!(
-                    name.to_string() == format!("{export}:{export}"),
-                    "{stem}: named load of {export} must instantiate that NAMESPACE; got {name}"
-                );
-            }
-            LoadResult::Err { error } => {
-                panic!("{stem}: named load of {export} must succeed; got err {error}")
-            }
         }
     }
 }
@@ -340,7 +273,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
 }
 
 #[test]
-fn default_wasm_exports_the_seven_by_selector() {
+fn default_wasm_exports_only_the_roots_by_selector() {
     let Some(wasm) = wasm_or_skip(DEFAULT_STEM) else {
         return;
     };

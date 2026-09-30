@@ -23,18 +23,15 @@
 //! lane where the root's own layout order put them — which is what the root's
 //! clip subtraction reads to decide whose text a fill may cut.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::ErasedActorRef;
 use aether_math::Vec2;
 
-use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
+use crate::{WidgetClipRect, WidgetDrawItem, WidgetDrawList};
 
 /// One child's place in a compositing node's layout. `child` is the proof of
-/// the inline child the reply is attributed to; `subname` is the child's
-/// inline address segment (recorded so a despawn can name what it removed
-/// without the caller re-supplying it); `origin` is the offset applied to
+/// the inline child the reply is attributed to; `origin` is the offset applied to
 /// every draw the child reports; `list` is that child's draws for the current
 /// frame, `None` until it replies. `clip` is the optional parent-local bound
 /// enforced over every draw returned by the child subtree. `overlay` puts the
@@ -42,34 +39,20 @@ use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, Wi
 /// see [`Composite::set_slot_overlay`].
 struct Slot {
     child: ErasedActorRef,
-    subname: String,
     origin: Vec2,
     clip: Option<WidgetClipRect>,
     overlay: bool,
     list: Option<WidgetDrawList>,
 }
 
-/// One membership change buffered at a slot chokepoint, folded into a
-/// [`ChildrenChanged`] event when the owning actor drains it. An add carries
-/// the full identity (subname + the spawned actor's type namespace); a remove
-/// names just the subname, which the dropped [`Slot`] already stored.
-enum MembershipDelta {
-    Added { subname: String, type_namespace: String },
-    Removed { subname: String },
-}
-
 /// A compositing node's per-frame accumulator: registered child slots plus
 /// the node's own chrome. Reset each frame with [`Self::begin_frame`],
-/// filled as children reply, flattened once [`Self::is_complete`]. It also
-/// buffers membership deltas at the slot chokepoints ([`Self::register_slot`]
-/// / [`Self::forget_slot`]) for the owning actor to drain and emit up the
-/// lane — orthogonal to the per-frame fill cycle.
+/// filled as children reply, flattened once [`Self::is_complete`].
 #[derive(Default)]
 pub struct Composite {
     slots: Vec<Slot>,
     chrome: Vec<WidgetDrawItem>,
     overlay_chrome: Vec<WidgetDrawItem>,
-    pending_membership: Vec<MembershipDelta>,
 }
 
 impl Composite {
@@ -80,36 +63,21 @@ impl Composite {
     }
 
     /// Register a child slot at `origin` and optional parent-local `clip`,
-    /// once, when the child is spawned, naming it `subname` and its actor type
-    /// `type_namespace` (the spawned actor's `NAMESPACE`). The slot persists
-    /// across frames (the child's alias and assigned layout are stable); only
-    /// its per-frame `list` resets. A duplicate registration of the same
-    /// `child` is ignored so a
-    /// re-`wire` cannot inflate the completion count — and records no
-    /// membership delta, so a re-register does not re-announce the child.
-    pub fn register_slot(
-        &mut self,
-        child: ErasedActorRef,
-        origin: Vec2,
-        clip: Option<WidgetClipRect>,
-        subname: &str,
-        type_namespace: &str,
-    ) {
+    /// once, when the child is spawned. The slot persists across frames (the
+    /// child's alias and assigned layout are stable); only its per-frame
+    /// `list` resets. A duplicate registration of the same `child` is ignored
+    /// so a re-`wire` cannot inflate the completion count.
+    pub fn register_slot(&mut self, child: ErasedActorRef, origin: Vec2, clip: Option<WidgetClipRect>) {
         if self.slots.iter().any(|slot| slot.child == child) {
             return;
         }
-        self.slots.push(Slot { child, subname: String::from(subname), origin, clip, overlay: false, list: None });
-        self.pending_membership.push(MembershipDelta::Added {
-            subname: String::from(subname),
-            type_namespace: String::from(type_namespace),
-        });
+        self.slots.push(Slot { child, origin, clip, overlay: false, list: None });
     }
 
     /// Update an existing slot's parent-local origin and clip without changing
-    /// membership or its current-frame reply. Stateful containers use this to
+    /// the slot set or its current-frame reply. Stateful containers use this to
     /// move one retained content root as their offset changes; re-registering
-    /// would either be ignored as a duplicate or manufacture false membership
-    /// churn.
+    /// would be ignored as a duplicate.
     pub fn update_slot_layout(&mut self, child: ErasedActorRef, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
             return false;
@@ -120,7 +88,7 @@ impl Composite {
     }
 
     /// Put a registered slot's ordinary draws in the **overlay lane** rather
-    /// than the ordinary one, without touching its membership, layout, or
+    /// than the ordinary one, without touching the slot set, its layout, or
     /// current-frame reply. Returns whether a slot was found.
     ///
     /// This is the lane a plate that *hosts* the root's own children needs.
@@ -147,38 +115,13 @@ impl Composite {
 
     /// Drop the slot for `child` — the despawn counterpart of
     /// [`Self::register_slot`], so a torn-down child stops being counted
-    /// toward completion. Records a membership delta naming the dropped slot's
-    /// `subname` (self-derived, so the caller need only key by the stable
-    /// `child` alias). Returns whether a slot was removed.
+    /// toward completion. Returns whether a slot was removed.
     pub fn forget_slot(&mut self, child: ErasedActorRef) -> bool {
         let Some(index) = self.slots.iter().position(|slot| slot.child == child) else {
             return false;
         };
-        let removed = self.slots.remove(index);
-        self.pending_membership.push(MembershipDelta::Removed { subname: removed.subname });
+        self.slots.remove(index);
         true
-    }
-
-    /// Drain the buffered membership deltas into one [`ChildrenChanged`]
-    /// (`added` folds every buffered add, `removed` every buffered remove, in
-    /// buffer order), clearing the buffer. `None` when nothing changed since
-    /// the last drain — so a quiet frame emits no event, and the first-spawn
-    /// burst of N adds drains as one batched event.
-    pub fn take_membership_changes(&mut self) -> Option<ChildrenChanged> {
-        if self.pending_membership.is_empty() {
-            return None;
-        }
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
-        for delta in self.pending_membership.drain(..) {
-            match delta {
-                MembershipDelta::Added { subname, type_namespace } => {
-                    added.push(MembershipEntry { subname, type_namespace });
-                }
-                MembershipDelta::Removed { subname } => removed.push(subname),
-            }
-        }
-        Some(ChildrenChanged { added, removed })
     }
 
     /// Begin a frame: clear both chrome buffers and reset every slot to
@@ -346,8 +289,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = proven(1);
         let b = proven(2);
-        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.widget");
-        composite.register_slot(b, Vec2::ZERO, None, "b", "aether.widget");
+        composite.register_slot(a, Vec2::ZERO, None);
+        composite.register_slot(b, Vec2::ZERO, None);
         composite.begin_frame();
         assert!(!composite.is_complete(), "two slots, none filled");
         assert!(composite.fill(a, list(vec![quad(0.0, 0.1)])));
@@ -359,7 +302,7 @@ mod tests {
     #[test]
     fn a_reply_from_an_unregistered_child_is_dropped() {
         let mut composite = Composite::new();
-        composite.register_slot(proven(1), Vec2::ZERO, None, "a", "aether.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None);
         composite.begin_frame();
         assert!(
             !composite.fill(proven(99), list(vec![quad(0.0, 0.5)])),
@@ -372,7 +315,7 @@ mod tests {
     fn begin_frame_resets_fills_but_keeps_slots() {
         let mut composite = Composite::new();
         let a = proven(1);
-        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.widget");
+        composite.register_slot(a, Vec2::ZERO, None);
         composite.begin_frame();
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(composite.is_complete());
@@ -381,16 +324,13 @@ mod tests {
     }
 
     #[test]
-    fn updating_slot_layout_moves_and_clips_without_membership_churn() {
+    fn updating_slot_layout_moves_and_clips() {
         let mut composite = Composite::new();
         let child = proven(1);
-        composite.register_slot(child, Vec2::ZERO, None, "content", "aether.widget");
-        let initial_membership = composite.take_membership_changes().expect("registration emits membership");
-        assert_eq!(initial_membership.added.len(), 1);
+        composite.register_slot(child, Vec2::ZERO, None);
 
         let clip = WidgetClipRect { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
         assert!(composite.update_slot_layout(child, Vec2::new(-3.0, -2.0), Some(clip)));
-        assert!(composite.take_membership_changes().is_none(), "layout motion is not a membership change");
         composite.begin_frame();
         assert!(composite.fill(child, list(vec![quad(4.0, 0.5)])));
         assert_eq!(
@@ -415,8 +355,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = proven(1);
         let b = proven(2);
-        composite.register_slot(a, Vec2::ZERO, None, "a", "aether.widget");
-        composite.register_slot(b, Vec2::ZERO, None, "b", "aether.widget");
+        composite.register_slot(a, Vec2::ZERO, None);
+        composite.register_slot(b, Vec2::ZERO, None);
         composite.begin_frame();
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(!composite.is_complete(), "b still owed");
@@ -429,8 +369,8 @@ mod tests {
         let mut composite = Composite::new();
         let a = proven(1);
         let b = proven(2);
-        composite.register_slot(a, Vec2::new(100.0, 0.0), None, "a", "aether.widget");
-        composite.register_slot(b, Vec2::new(200.0, 0.0), None, "b", "aether.widget");
+        composite.register_slot(a, Vec2::new(100.0, 0.0), None);
+        composite.register_slot(b, Vec2::new(200.0, 0.0), None);
         composite.begin_frame();
         composite.extend_chrome([quad(0.0, 0.9)]); // chrome at local origin
         composite.fill(a, list(vec![quad(1.0, 0.1)]));
@@ -465,8 +405,6 @@ mod tests {
             proven(11),
             Vec2::new(4.0, 3.0),
             Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
-            "leaf",
-            "aether.widget",
         );
         interior.begin_frame();
         assert!(interior.fill(
@@ -479,8 +417,6 @@ mod tests {
             proven(22),
             Vec2::new(10.0, 8.0),
             Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
-            "interior",
-            "aether.widget",
         );
         root.begin_frame();
         assert!(root.fill(proven(22), interior.flatten(None)));
@@ -511,8 +447,6 @@ mod tests {
             proven(11),
             Vec2::new(4.0, 3.0),
             Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
-            "leaf",
-            "aether.widget",
         );
         interior.begin_frame();
         interior.extend_chrome([clipped_quad(0.0, 0.2, WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 })]);
@@ -532,8 +466,6 @@ mod tests {
             proven(22),
             Vec2::new(10.0, 8.0),
             Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
-            "interior",
-            "aether.widget",
         );
         root.begin_frame();
         root.extend_chrome([quad(0.0, 0.1)]);
@@ -585,10 +517,8 @@ mod tests {
             plate,
             Vec2::new(100.0, 0.0),
             Some(WidgetClipRect { x: 0.0, y: 0.0, width: 40.0, height: 10.0 }),
-            "on_plate",
-            "aether.widget",
         );
-        root.register_slot(outside, Vec2::new(200.0, 0.0), None, "under_plate", "aether.widget");
+        root.register_slot(outside, Vec2::new(200.0, 0.0), None);
         assert!(root.set_slot_overlay(plate, true));
         assert!(!root.set_slot_overlay(proven(99), true), "an unregistered child has no lane to set");
 
@@ -641,8 +571,8 @@ mod tests {
         let mut root = Composite::new();
         let background = proven(1);
         let on_plate = proven(2);
-        root.register_slot(background, Vec2::ZERO, None, "background", "aether.widget");
-        root.register_slot(on_plate, Vec2::ZERO, None, "on_plate", "aether.widget");
+        root.register_slot(background, Vec2::ZERO, None);
+        root.register_slot(on_plate, Vec2::ZERO, None);
         assert!(root.set_slot_overlay(on_plate, true));
 
         root.begin_frame();
@@ -675,58 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn registers_buffer_one_batched_add_per_child_in_order() {
+    fn a_duplicate_register_does_not_inflate_the_completion_count() {
         let mut composite = Composite::new();
-        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.widget.slider");
-        composite.register_slot(proven(2), Vec2::ZERO, None, "beta", "aether.widget.button");
-        let changed = composite.take_membership_changes().expect("two adds are buffered and drain together");
-        assert!(changed.removed.is_empty(), "no removals in an add-only batch");
-        assert_eq!(
-            changed.added,
-            vec![
-                MembershipEntry { subname: "alpha".into(), type_namespace: "aether.widget.slider".into() },
-                MembershipEntry { subname: "beta".into(), type_namespace: "aether.widget.button".into() },
-            ],
-            "both adds drain as one batch, in registration order, carrying subname + type",
-        );
-    }
-
-    #[test]
-    fn forget_buffers_one_remove_naming_the_dropped_subname() {
-        let mut composite = Composite::new();
-        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.widget");
-        composite.take_membership_changes().expect("drain the add so the remove stands alone");
-        assert!(composite.forget_slot(proven(1)), "the slot is removed");
-        let changed = composite.take_membership_changes().expect("the remove is buffered");
-        assert!(changed.added.is_empty(), "no adds in a remove-only batch");
-        assert_eq!(
-            changed.removed,
-            vec![String::from("alpha")],
-            "the remove names the dropped slot's subname, self-derived from the slot",
-        );
-    }
-
-    #[test]
-    fn take_membership_changes_clears_the_buffer_and_is_none_when_quiet() {
-        let mut composite = Composite::new();
-        assert!(composite.take_membership_changes().is_none(), "nothing has changed yet, so there is no event");
-        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.widget");
-        assert!(composite.take_membership_changes().is_some(), "the buffered add drains as an event");
-        assert!(
-            composite.take_membership_changes().is_none(),
-            "the drain cleared the buffer, so a second drain finds nothing",
-        );
-    }
-
-    #[test]
-    fn a_dedup_suppressed_reregister_records_no_delta() {
-        let mut composite = Composite::new();
-        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.widget");
-        composite.take_membership_changes().expect("drain the first, genuine add");
-        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.widget");
-        assert!(
-            composite.take_membership_changes().is_none(),
-            "a re-register of an existing child is dedup-suppressed and announces nothing",
-        );
+        composite.register_slot(proven(1), Vec2::ZERO, None);
+        composite.register_slot(proven(1), Vec2::ZERO, None);
+        composite.begin_frame();
+        assert!(composite.fill(proven(1), list(vec![quad(0.0, 0.1)])));
+        assert!(composite.is_complete(), "the re-register was ignored, so one reply completes the frame");
     }
 }

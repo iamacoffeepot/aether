@@ -91,19 +91,17 @@ impl ButtonWidget {
         self.arms.clear();
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.is_available() {
                 self.clear_arms();
             }
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
-    fn emit_click<A>(ctx: &WasmCtx<'_, A>) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&ButtonActivated);
-        }
+    fn emit_click(ctx: &WasmCtx<'_, Self>) {
+        ctx.parent().send(&ButtonActivated);
     }
 
     /// Apply one key press. Returns whether activation fires immediately.
@@ -131,7 +129,7 @@ impl WidgetDefaults for ButtonWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ButtonConfig` again to relabel or restyle it in place.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ButtonWidget {
     type Config = ButtonConfig;
     const NAMESPACE: &'static str = "aether.widget.button";
@@ -222,7 +220,9 @@ impl WasmActor for ButtonWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
+        reply_draw(&ctx.parent(), &self.state, || {
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic())
+        });
     }
 }
 

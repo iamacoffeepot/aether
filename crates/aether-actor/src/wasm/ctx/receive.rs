@@ -1,8 +1,8 @@
 //! The receive-stage ctx — [`WasmCtx`], the per-mail handle every handler
 //! and every post-init lifecycle hook is handed: its fields, its
 //! construction and reply-mode coercions, and the inbound accessors that
-//! read them. Its outbound mail surface lives in `super::send`, its
-//! cluster-relative addressing in `super::relative`, and its child-spawning
+//! read them. Its outbound mail surface lives in `super::send`, its typed
+//! parent door in `super::parent`, and its child-spawning
 //! verbs in `super::spawn`.
 
 use core::marker::PhantomData;

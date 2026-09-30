@@ -36,7 +36,7 @@ use aether_data::{INPUTS_SECTION_VERSION, Kind};
 
 use super::contract::ReplyShape;
 use super::protocol::Row;
-use super::{CallerAddressable, DependencyResolver, Singleton};
+use super::{CallerAddressable, DependencyResolver, HandlesKind, Singleton};
 
 /// The first position of a declaration list: its head.
 ///
@@ -67,6 +67,10 @@ mod sealed {
     /// Private supertrait sealing [`super::DependencyList`] to its two
     /// structural impls.
     pub trait DependencySealed {}
+
+    /// Private supertrait sealing [`super::AllHandle`] to its two structural
+    /// impls.
+    pub trait AllHandleSealed<K> {}
 }
 
 /// `I: ListIndex<L, T>` holds when position `I` of the declaration list `L`
@@ -114,6 +118,29 @@ impl<H, Tail, K, I: RowIndex<Tail, K>> sealed::RowSealed<(H, Tail), K> for There
 impl<H, Tail, K, I: RowIndex<Tail, K>> RowIndex<(H, Tail), K> for There<I> {
     type Reply = I::Reply;
 }
+
+/// `L: AllHandle<K>` holds when every entry of the non-empty declared parent
+/// list `L` handles `K`. It is the bound a send through
+/// [`InlineParent`](crate::InlineParent) carries, because a child that lists
+/// several parents in `child_of(..)` does not know which of them holds it, so
+/// a kind it sends up must be one every parent handles. With one parent it
+/// reduces to `P: HandlesKind<K>`.
+///
+/// Sealed, and implemented only structurally: `(P, ())` when `P` handles `K`,
+/// and `(P, (Q, Tail))` when `P` handles `K` and `(Q, Tail)` does.
+#[diagnostic::on_unimplemented(
+    message = "a declared parent in `{Self}` has no handler for `{K}`",
+    note = "every type in `child_of(..)` must handle a kind sent through `ctx.parent()`"
+)]
+pub trait AllHandle<K: Kind>: sealed::AllHandleSealed<K> {}
+
+impl<K: Kind, P: HandlesKind<K>> sealed::AllHandleSealed<K> for (P, ()) {}
+
+impl<K: Kind, P: HandlesKind<K>> AllHandle<K> for (P, ()) {}
+
+impl<K: Kind, P: HandlesKind<K>, Q, Tail> sealed::AllHandleSealed<K> for (P, (Q, Tail)) where (Q, Tail): AllHandle<K> {}
+
+impl<K: Kind, P: HandlesKind<K>, Q, Tail> AllHandle<K> for (P, (Q, Tail)) where (Q, Tail): AllHandle<K> {}
 
 /// An actor's declaration lists (ADR-0231 §10): the dependencies it declares
 /// in `#[actor(depends(..))]`, the inline children it declares in

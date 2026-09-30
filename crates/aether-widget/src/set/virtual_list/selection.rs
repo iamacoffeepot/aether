@@ -79,10 +79,8 @@ impl VirtualListWidget {
         self.move_selection(movement)
     }
 
-    pub(super) fn emit<A>(ctx: &WasmCtx<'_, A>, selected_index: u32) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&VirtualListSelected { index: selected_index });
-        }
+    pub(super) fn emit(ctx: &WasmCtx<'_, Self>, selected_index: u32) {
+        ctx.parent().send(&VirtualListSelected { index: selected_index });
     }
 }
 

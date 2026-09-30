@@ -69,10 +69,8 @@ impl MenuBarEffects {
 
     /// The activation first, the open edge second: a consumer sees the command
     /// it invoked before the menu reports itself gone.
-    fn emit<A>(self, ctx: &WasmCtx<'_, A>) {
-        let Some(parent) = ctx.parent() else {
-            return;
-        };
+    fn emit(self, ctx: &WasmCtx<'_, MenuBarWidget>) {
+        let parent = ctx.parent();
         if let Some(activated) = self.activated {
             parent.send(&activated);
         }
@@ -487,7 +485,7 @@ impl WidgetDefaults for MenuBarWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `MenuBarConfig` again to replace the menus in place.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for MenuBarWidget {
     type Config = MenuBarConfig;
     const NAMESPACE: &'static str = "aether.widget.menu_bar";
@@ -526,7 +524,7 @@ impl WasmActor for MenuBarWidget {
         self.theme = config.theme;
         closed.emit(ctx);
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -536,7 +534,7 @@ impl WasmActor for MenuBarWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         if !self.state.is_available() {
             self.pressed_title = None;
@@ -639,7 +637,7 @@ impl WasmActor for MenuBarWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || {
+        reply_draw(&ctx.parent(), &self.state, || {
             WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()).with_overlay(self.overlay_items())
         });
     }

@@ -30,12 +30,17 @@ pub struct ActorOpts {
     /// `Root` record in the lineage section, which the component host checks
     /// before it loads, boots, or replaces-with-boot the type, and it emits
     /// the `Root` marker impl a native root carries, because a loaded guest is
-    /// named at the root as a native actor is.
+    /// named at the root as a native actor is. Beside a `child_of(..)` list it
+    /// makes `ctx.parent()` an `Option`, `None` when the actor is placed at
+    /// the root.
     pub root: bool,
     /// ADR-0166: the actor types that may directly parent this actor, from
     /// one `child_of(A, B, …)` list. The list becomes `Declared::Parents`, and
     /// each listed type emits `impl ChildOf<P> for Self` at its position in it
-    /// (ADR-0231 §10), so the list is the whole placement set.
+    /// (ADR-0231 §10), so the list is the whole placement set. A non-empty
+    /// list emits `HasParent`, which opens `ctx.parent()`: an infallible
+    /// `InlineParent` without `root`, an `Option` of one with it, and in both
+    /// forms a send compiles only for a kind every listed parent handles.
     pub child_of: Vec<syn::TypePath>,
     /// ADR-0230: actor types this actor depends on, from one
     /// `depends(A, B, …)` list. The list becomes `Declared::Depends`, and

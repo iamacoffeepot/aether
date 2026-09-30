@@ -14,9 +14,12 @@ layout for each new knob.
 The module exports several types, so a load must name one (ADR-0241 §9): load a widget by its
 `module@export` selector against the `aether_widget` stem — `WidgetPanel` is
 `aether_widget@aether.widget.panel`, the `EditorShell` arbiter is
-`aether_widget@aether.widget.editor`, and so on. **Every stock widget is
-exported**, not a chosen subset, so any of them can be loaded by selector as
-well as spawned inline by a root.
+`aether_widget@aether.widget.editor`, and so on. **Only the roots are
+exported**: `Widget`, `ScrollWidget`, `EditorShell`, `EditorRegion`, and
+`WidgetPanel`. The set widgets declare no `root`, because a root-loaded one
+has no in-cluster parent to send its draw list to; they are listed under
+`export!(private = [..])` so a replace rebuilds them, and a host reaches them
+only by having a panel or a scroll spawn them inline.
 
 Its actors need the window, lifecycle, render, text and clipboard capabilities
 live. Each declares the capabilities it mails (ADR-0230), and the declaration is
@@ -171,7 +174,14 @@ widget sends can misreport it.
   [the focus-visible rule](#the-focus-ring-marks-keyboard-focus).
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
   `RadioSelected { index }`, `VirtualListSelected { index }`, and
-  `ButtonActivated` flow to the parent through `ctx.parent()`. A slider streams
+  `ButtonActivated` flow to the parent through `ctx.parent()`. A set widget's
+  `ctx.parent()` is infallible, because it lives only under a declared parent,
+  and a send through it compiles only for a kind every parent in its
+  `child_of(WidgetPanel, ScrollWidget)` handles. So `ScrollWidget` handles each
+  value-up kind by relaying it unchanged to its own parent, which attributes
+  it to the scroll slot; it consumes `WidgetStateChanged` and
+  `WidgetEligibilityChanged` instead, because the panel's focus tracks the
+  scroll slot rather than its content. A slider streams
   `committed: false` values through a drag and a final `committed: true` on
   release, so a consumer previews the drag and commits the expensive work
   once.

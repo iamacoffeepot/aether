@@ -101,7 +101,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 
-use aether_actor::{DependsOn, WasmCtx};
+use aether_actor::{AllHandle, Declared, DependsOn, InlineParent, WasmCtx};
 use aether_clipboard::{
     ClipboardCapability, GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult,
 };
@@ -118,6 +118,7 @@ use crate::text_edit::{DisplayedEdit, EditPolicy, FontMetricsAdapter, SingleLine
 use crate::theme::{Theme, ThemeState};
 use crate::{
     ButtonEmphasis, ButtonTone, WidgetClipRect, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    WidgetStateChanged,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,8 +415,8 @@ fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeSt
     }
 }
 
-fn apply_text_control_state<A>(
-    ctx: &WasmCtx<'_, A>,
+fn apply_text_control_state<A: Declared<Parents: AllHandle<WidgetStateChanged>>>(
+    parent: &InlineParent<'_, A>,
     state: &mut InteractionState,
     edit: &mut TextEditState,
     dragging: &mut bool,
@@ -428,7 +429,7 @@ fn apply_text_control_state<A>(
         if !state.is_available() {
             *dragging = false;
         }
-        emit_state_changed(ctx, state);
+        emit_state_changed(parent, state);
     }
 }
 
@@ -524,9 +525,13 @@ fn update_text_modifiers(state: &InteractionState, modifiers: &mut Option<Modifi
     }
 }
 
-fn apply_static_control_state<A>(ctx: &WasmCtx<'_, A>, state: &mut InteractionState, next: WidgetControlState) {
+fn apply_static_control_state<A: Declared<Parents: AllHandle<WidgetStateChanged>>>(
+    parent: &InlineParent<'_, A>,
+    state: &mut InteractionState,
+    next: WidgetControlState,
+) {
     if state.replace(next) {
-        emit_state_changed(ctx, state);
+        emit_state_changed(parent, state);
     }
 }
 
@@ -563,13 +568,14 @@ fn clamp_optional_selection(selected: Option<usize>, len: usize) -> Option<usize
 /// Discharge the hidden-widget branch of the always-reply compositing
 /// protocol. Hidden controls retain their slot, so every `Collect` must still
 /// produce one empty draw-list reply.
-pub(super) fn reply_if_hidden<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState) -> bool {
+pub(super) fn reply_if_hidden<A: Declared<Parents: AllHandle<WidgetDrawList>>>(
+    parent: &InlineParent<'_, A>,
+    state: &InteractionState,
+) -> bool {
     if state.is_visible() {
         return false;
     }
-    if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList::items(Vec::new()));
-    }
+    parent.send(&WidgetDrawList::items(Vec::new()));
     true
 }
 
@@ -578,13 +584,15 @@ pub(super) fn reply_if_hidden<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState)
 /// widget is visible, so a hidden widget builds no geometry, and the list it
 /// returns states only the lanes that widget actually fills
 /// ([`WidgetDrawList::items`] and friends).
-pub(super) fn reply_draw<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState, draw: impl FnOnce() -> WidgetDrawList) {
-    if reply_if_hidden(ctx, state) {
+pub(super) fn reply_draw<A: Declared<Parents: AllHandle<WidgetDrawList>>>(
+    parent: &InlineParent<'_, A>,
+    state: &InteractionState,
+    draw: impl FnOnce() -> WidgetDrawList,
+) {
+    if reply_if_hidden(parent, state) {
         return;
     }
-    if let Some(parent) = ctx.parent() {
-        parent.send(&draw());
-    }
+    parent.send(&draw());
 }
 
 /// A flat-colored rectangle in a widget's own local coordinates — the
@@ -1255,17 +1263,18 @@ pub(super) fn single_line_edit_overlay(edit: &SingleLineEdit<'_>) -> Vec<WidgetD
 /// Reply one single-line editor's frame: its ordinary draw, plus the hover
 /// overflow plate when the contents are too wide for the box. Shared by the
 /// text field and the numeric editor, which draw the same box.
-pub(super) fn reply_single_line_edit<A>(ctx: &WasmCtx<'_, A>, edit: SingleLineEdit<'_>) {
-    if reply_if_hidden(ctx, edit.state) {
+pub(super) fn reply_single_line_edit<A: Declared<Parents: AllHandle<WidgetDrawList>>>(
+    parent: &InlineParent<'_, A>,
+    edit: SingleLineEdit<'_>,
+) {
+    if reply_if_hidden(parent, edit.state) {
         return;
     }
     let list = WidgetDrawList::items(single_line_edit_draw_items(&edit))
         .with_intrinsic(edit.intrinsic)
         .with_overlay(single_line_edit_overlay(&edit));
 
-    if let Some(parent) = ctx.parent() {
-        parent.send(&list);
-    }
+    parent.send(&list);
 }
 
 /// The `Screen`-space `DrawText` origin y that vertically centers a single

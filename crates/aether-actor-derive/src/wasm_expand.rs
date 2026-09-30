@@ -424,6 +424,41 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     });
+    // ADR-0114 addressing amendment: a `child_of(..)` list opens the typed
+    // parent door, in the form `root` fixes — infallible for a child-only
+    // actor, an `Option` for one that may also be placed at the root. With no
+    // `child_of(..)`, no impl is emitted and `ctx.parent()` does not compile.
+    let has_parent_impl = (!opts.child_of.is_empty()).then(|| {
+        if opts.root {
+            quote! {
+                impl #impl_generics ::aether_actor::HasParent for #self_ty #where_clause {
+                    type Parent<'__aether_parent> = ::core::option::Option<
+                        ::aether_actor::InlineParent<'__aether_parent, Self>,
+                    >;
+
+                    fn __parent(
+                        found: ::core::option::Option<::aether_actor::InlineParent<'_, Self>>,
+                    ) -> Self::Parent<'_> {
+                        found
+                    }
+                }
+            }
+        } else {
+            quote! {
+                impl #impl_generics ::aether_actor::HasParent for #self_ty #where_clause {
+                    type Parent<'__aether_parent> = ::aether_actor::InlineParent<'__aether_parent, Self>;
+
+                    fn __parent(
+                        found: ::core::option::Option<::aether_actor::InlineParent<'_, Self>>,
+                    ) -> Self::Parent<'_> {
+                        found.expect(
+                            "a child-only actor has no Root record, so it lives only under a declared parent",
+                        )
+                    }
+                }
+            }
+        }
+    });
     // ADR-0231 §10: the actor's one `Declared` impl lists its `depends(..)`,
     // `spawns(..)`, and `child_of(..)` entries, and each `DependsOn` /
     // `Spawns` / `ChildOf` impl names its entry's position there, so none
@@ -706,6 +741,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #actor_impl
         #root_impl
         #(#child_impls)*
+        #has_parent_impl
         #declared
         #(#depends_impls)*
         #(#spawns_impls)*

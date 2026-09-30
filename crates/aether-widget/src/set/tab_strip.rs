@@ -264,18 +264,16 @@ impl TabStripWidget {
         true
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.adopt_control_state(next) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
-    fn emit<A>(ctx: &WasmCtx<'_, A>, selected: usize) {
-        if let Some(parent) = ctx.parent() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = selected as u32;
-            parent.send(&TabStripSelected { index });
-        }
+    fn emit(ctx: &WasmCtx<'_, Self>, selected: usize) {
+        #[allow(clippy::cast_possible_truncation)]
+        let index = selected as u32;
+        ctx.parent().send(&TabStripSelected { index });
     }
 }
 
@@ -300,7 +298,7 @@ impl WidgetDefaults for TabStripWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `TabStripConfig` again to replace the labels or the style in place —
 /// that holds the current tab. Send it [`SetSelection`] to move the tab.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TabStripWidget {
     type Config = TabStripConfig;
     const NAMESPACE: &'static str = "aether.widget.tab_strip";
@@ -413,7 +411,9 @@ impl WasmActor for TabStripWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
+        reply_draw(&ctx.parent(), &self.state, || {
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic())
+        });
     }
 }
 

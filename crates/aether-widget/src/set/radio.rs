@@ -73,20 +73,18 @@ impl RadioGroupWidget {
     }
 
     /// Emit the current selection up to the panel root.
-    fn emit<A>(&self, ctx: &WasmCtx<'_, A>) {
-        if let Some(parent) = ctx.parent() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = self.selected as u32;
-            parent.send(&RadioSelected { index });
-        }
+    fn emit(&self, ctx: &WasmCtx<'_, Self>) {
+        #[allow(clippy::cast_possible_truncation)]
+        let index = self.selected as u32;
+        ctx.parent().send(&RadioSelected { index });
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.pressed = false;
             }
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
@@ -172,7 +170,7 @@ impl WidgetDefaults for RadioGroupWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `RadioConfig` again to replace the options or theme in place — that
 /// holds the current choice. Send it [`SetSelection`] to move the choice.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.widget.radio";
@@ -255,7 +253,7 @@ impl WasmActor for RadioGroupWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
+        reply_draw(&ctx.parent(), &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

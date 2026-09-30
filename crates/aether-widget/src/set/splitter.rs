@@ -181,10 +181,8 @@ impl SplitterWidget {
     }
 
     /// Report a hover edge up so the host can answer it with a cursor.
-    fn report_hover<A>(ctx: &WasmCtx<'_, A>, entered: bool) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&SplitterHover { entered });
-        }
+    fn report_hover(ctx: &WasmCtx<'_, Self>, entered: bool) {
+        ctx.parent().send(&SplitterHover { entered });
     }
 
     /// The pointer is on the strip. Reports whether the enter goes up — an
@@ -260,7 +258,7 @@ impl WidgetDefaults for SplitterWidget {
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child. Re-send
 /// `SplitterConfig` to move the split from the host's side.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SplitterWidget {
     type Config = SplitterConfig;
     const NAMESPACE: &'static str = "aether.widget.splitter";
@@ -297,7 +295,7 @@ impl WasmActor for SplitterWidget {
         self.theme = config.theme;
         self.position_pixels = self.clamped(config.position_pixels);
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
@@ -306,7 +304,7 @@ impl WasmActor for SplitterWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         if !self.state.can_mutate() {
             self.drag = None;
@@ -336,9 +334,7 @@ impl WasmActor for SplitterWidget {
             return;
         }
         self.position_pixels = position;
-        if let Some(parent) = ctx.parent() {
-            parent.send(&SplitterChanged { position_pixels: position });
-        }
+        ctx.parent().send(&SplitterChanged { position_pixels: position });
     }
 
     /// The release ends the drag wherever it reached, and pays out the leave
@@ -367,7 +363,7 @@ impl WasmActor for SplitterWidget {
         if self.take_owed_leave() {
             Self::report_hover(ctx, false);
         }
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
+        reply_draw(&ctx.parent(), &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

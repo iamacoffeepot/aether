@@ -49,18 +49,15 @@ impl VirtualListWidget {
     /// the fact the host is told stays true while the list scrolls under a
     /// still pointer — which is the half a host redoing the geometry itself
     /// could never get right.
-    pub(super) fn settle_hovered_row<A>(&mut self, ctx: &WasmCtx<'_, A>) {
+    pub(super) fn settle_hovered_row(&mut self, ctx: &WasmCtx<'_, Self>) {
         let next = self.pointer_row();
         if self.hovered_row == next {
             return;
         }
         self.hovered_row = next;
-        let Some(parent) = ctx.parent() else {
-            return;
-        };
 
         let frame = next.and_then(|row| self.row_frame(row)).map_or_else(PlacementBounds::default, |row| (&row).into());
-        parent.send(&VirtualListHover { index: next.and_then(|row| u32::try_from(row).ok()), frame });
+        ctx.parent().send(&VirtualListHover { index: next.and_then(|row| u32::try_from(row).ok()), frame });
     }
 
     /// The verb under a point, if the point is on one. Consulted *before* the

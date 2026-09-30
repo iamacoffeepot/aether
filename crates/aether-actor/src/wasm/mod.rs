@@ -57,8 +57,8 @@ mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, Held, InlineChild, NO_INBOUND_SOURCE, Pending, RelativeMailbox, ResolvePathError, Sends, SpawnError,
-    WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorTypeTag, HasParent, Held, InlineChild, InlineParent, NO_INBOUND_SOURCE, Pending, ResolvePathError, Sends,
+    SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 /// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start

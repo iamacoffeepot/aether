@@ -1,6 +1,6 @@
 //! What a ctx reads off the dispatch it was built for — the threaded
 //! source, the reply correlation, the reply-mode views' layout, and the
-//! relative verbs' in-place routing.
+//! typed parent door's in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
@@ -190,21 +190,19 @@ fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(align_of::<WasmCtx<'static, RootPeer, Unchecked>>(), align_of::<WasmCtx<'static, Erased, Unchecked>>(),);
 }
 
-/// ADR-0114 addressing amendment: a ctx self-identified as the cluster
-/// root resolves `child(name)` to the resident inline child, returns
-/// `None` for a missing name, and a send through the resolved relative
-/// routes in place (enqueues locally — no host call, which would panic
-/// on the host build). `parent()` of the root is `None` (cross-cluster).
+/// ADR-0114 addressing amendment: a ctx typed by a child-only actor resolves
+/// `parent()` to the parent the registry recorded at install, and a send
+/// through it routes in place (enqueues locally — no host call, which would
+/// panic on the host build). The root reaches the child through the
+/// tag-checked `child_as`.
 #[test]
-fn ctx_relative_verbs_resolve_and_route_in_place() {
+fn ctx_parent_resolves_and_routes_in_place() {
     let registry = Registry::new();
     let root = 0x7100_u64;
     registry.set_self_id(root);
-    // Install a child of the root keyed by a synthetic alias, then a
-    // grandchild under it. Record each parent the way `spawn_inline_child`
-    // would.
+    // Install a child of the root keyed by a synthetic alias, recording its
+    // parent the way `spawn_inline_child` would.
     let widget = MailboxId(0x7101);
-    let label = MailboxId(0x7102);
     install_inline_child::<SucceedingChild>(
         &registry,
         widget,
@@ -212,45 +210,26 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
         (),
     )
     .expect("a succeeding init installs the inline child");
-    install_inline_child::<SucceedingChild>(
-        &registry,
-        label,
-        ChildRecord { full_subname: String::from("label"), parent: widget.0, ..ChildRecord::default() },
-        (),
-    )
-    .expect("a succeeding init installs the inline grandchild");
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let root_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let child = root_ctx.child_as::<SucceedingChild>("widget").expect("the widget resolves by subname and tag");
+    assert_eq!(child.id(), widget, "child_as resolves to the alias id");
 
-    // The root has no registry parent entry — its parent is cross-cluster.
-    assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent");
+    let mut child_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(widget.0, &registry, NO_INBOUND_SOURCE);
+    let parent = child_ctx.__for_actor::<SucceedingChild>().parent();
+    assert_eq!(parent.reference(), ErasedActorRef::new(MailboxId(root)), "the parent resolves to the recorded parent");
 
-    // child(name) resolves the resident widget; a missing name is None.
-    let child = ctx.child("widget").expect("the widget resolves by subname");
-    assert_eq!(child.id, widget, "child resolves to the alias id");
-    assert!(ctx.child("missing").is_none(), "a missing subname resolves to None");
-    assert_eq!(child.reference(), ErasedActorRef::new(widget), "the relative's proof names the resolved child");
-    assert_ne!(
-        child.reference(),
-        ErasedActorRef::new(MailboxId(root)),
-        "the relative's proof is not the addresser's own",
-    );
-    let grandchild = child.child("label").expect("the grandchild resolves relative to the child handle");
-    assert_eq!(grandchild.id, label, "handle-relative child walk reaches the grandchild");
-    assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None");
-
-    // The resolved relative is a cluster member, so a send routes in
-    // place; the local path enqueues and makes no host call (the host
-    // stub panics on the host build, so reaching this line without a
-    // panic proves the send took the local branch). A `()` payload
-    // encodes to empty bytes.
+    // The recorded parent is the cluster root, so a send routes in place;
+    // the local path enqueues and makes no host call (the host stub panics
+    // on the host build, so reaching this line without a panic proves the
+    // send took the local branch). A `()` payload encodes to empty bytes.
     assert_eq!(
-        registry.route_decision(child.id.0),
+        registry.route_decision(root),
         RouteDecision::Local,
-        "the resolved relative is classified as an in-cluster recipient",
+        "the resolved parent is classified as an in-cluster recipient",
     );
-    child.send(&());
-    assert_eq!(registry.queued_len(), 1, "a send to a resolved relative enqueues locally — no scheduler hop");
+    parent.send(&());
+    assert_eq!(registry.queued_len(), 1, "a send to the parent enqueues locally — no scheduler hop");
 }
 
 /// A tracked send to a resident cluster member never leaves the guest, so it

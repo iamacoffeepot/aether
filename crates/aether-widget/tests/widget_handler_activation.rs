@@ -1,11 +1,11 @@
-//! Named-load activation of `WidgetDefaults` adopters (issue 5671).
+//! Activation of `WidgetDefaults` adopters' override bodies (issue 5671).
 //!
 //! A local `#[handler]` that redeclares a set kind concatenates the same
-//! kind into the trampoline manifest twice. `CostTable::prepare` then
-//! rejects the duplicate and named `LoadComponent` fails with
-//! `ActivationRejected`, while inline panel reconstruction still succeeds.
-//! These scenarios load the already-exported adopters by typed config and
-//! drive the override bodies that existing panel tests do not cover.
+//! kind into the trampoline manifest twice, which `CostTable::prepare`
+//! rejects. The set widgets are spawned only inline under a panel or a
+//! scroll (issue 7206), so these scenarios load a panel that spawns the
+//! adopters and drive the override bodies that the other panel tests do not
+//! cover.
 //!
 //! Skips when no wgpu adapter is available or the stem wasm has not been
 //! pre-built (the shared `require_runtime` gate): the widget module declares
@@ -17,16 +17,15 @@ mod support;
 use std::fs;
 
 use aether_actor::{ActorRef, ChildOf, Instanced};
-use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
-use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick};
+use aether_kinds::{LoadComponent, LogTailResult, MouseMove, TextInput, Tick};
 use aether_widget::set::{NumericWidget, VirtualListWidget};
 use aether_widget::{
-    ButtonConfig, FocusLost, HoverLost, NumericConfig, PanelConfig, SegmentedConfig, TextAreaConfig, TextFieldConfig,
-    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetKind, WidgetPanel,
+    FocusLost, HoverLost, NumericConfig, PanelConfig, Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec,
+    WidgetKind, WidgetPanel,
 };
 use support::widget_caps;
 
@@ -51,12 +50,6 @@ fn bench(width: u32, height: u32) -> SubstrateHarness {
     .expect("boot")
 }
 
-/// The address a root loaded from `export` under the key `name` registers
-/// at: its own namespace and the key (ADR-0241 §5).
-fn guest_address(export: &str, name: &str) -> String {
-    format!("{export}:{name}")
-}
-
 /// The `C` child the panel spawned under `subname`.
 fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
     harness: &SubstrateHarness,
@@ -66,103 +59,6 @@ fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
     harness
         .child::<WidgetPanel, C>(&panel, LoadName::new(subname).expect("a valid child subname"))
         .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
-}
-
-struct NamedLoad {
-    export: &'static str,
-    name: &'static str,
-    config: Vec<u8>,
-}
-
-fn exported_adopters() -> [NamedLoad; 6] {
-    [
-        NamedLoad {
-            export: "aether.widget.button",
-            name: "button",
-            config: ButtonConfig { label: "Go".to_owned(), theme: Theme::DEFAULT, ..ButtonConfig::default() }
-                .encode_into_bytes(),
-        },
-        NamedLoad {
-            export: "aether.widget.text_field",
-            name: "text_field",
-            config: TextFieldConfig {
-                initial: String::new(),
-                max_chars: 0,
-                theme: Theme::DEFAULT,
-                ..TextFieldConfig::default()
-            }
-            .encode_into_bytes(),
-        },
-        NamedLoad {
-            export: "aether.widget.text_area",
-            name: "text_area",
-            config: TextAreaConfig {
-                initial: String::new(),
-                max_chars: 0,
-                rows: 3,
-                theme: Theme::DEFAULT,
-                ..TextAreaConfig::default()
-            }
-            .encode_into_bytes(),
-        },
-        NamedLoad {
-            export: "aether.widget.numeric",
-            name: "numeric",
-            config: NumericConfig {
-                min: 0.0,
-                max: 100.0,
-                step: 1.0,
-                initial: 0.0,
-                theme: Theme::DEFAULT,
-                ..NumericConfig::default()
-            }
-            .encode_into_bytes(),
-        },
-        NamedLoad {
-            export: "aether.widget.segmented",
-            name: "segmented",
-            config: SegmentedConfig {
-                options: vec!["Raise".to_owned(), "Lower".to_owned()],
-                initial: 0,
-                theme: Theme::DEFAULT,
-                ..SegmentedConfig::default()
-            }
-            .encode_into_bytes(),
-        },
-        NamedLoad {
-            export: "aether.widget.virtual_list",
-            name: "virtual_list",
-            config: VirtualListConfig {
-                items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
-                initial: Some(0),
-                visible_row_count: 2,
-                theme: Theme::DEFAULT,
-                ..VirtualListConfig::default()
-            }
-            .encode_into_bytes(),
-        },
-    ]
-}
-
-fn load_named(harness: &mut SubstrateHarness, wasm: &[u8], case: &NamedLoad) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some(case.name.to_owned()),
-                    config: case.config.clone(),
-                    export: Some(case.export.to_owned()),
-                },
-            ),
-        )])
-        .expect("named load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("named load {} ({}) failed: {error}", case.name, case.export),
-    }
 }
 
 fn load_panel_with(
@@ -208,30 +104,6 @@ fn field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
 
 fn numeric_value(message: &str) -> Option<f32> {
     field(message, "value")?.parse().ok()
-}
-
-/// Duplicate local+set kinds used to reject `CostTable::prepare` at named
-/// load. Each already-exported adopter must activate under the stock wasm
-/// artifact.
-#[test]
-fn named_load_exported_widget_defaults_adopters_succeeds() {
-    for stem in WASM_STEMS {
-        let Some(wasm_path) = require_runtime(stem) else {
-            continue;
-        };
-        let wasm = fs::read(&wasm_path).expect("read widget wasm");
-        let mut harness = bench(64, 48);
-        for case in exported_adopters() {
-            let name = load_named(&mut harness, &wasm, &case);
-            assert_eq!(
-                name,
-                guest_address(case.export, case.name),
-                "{stem} named load of {} must register under {}; got {name}",
-                case.export,
-                guest_address(case.export, case.name),
-            );
-        }
-    }
 }
 
 /// Numeric blur commits the typed buffer. The shared default only cancels

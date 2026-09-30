@@ -271,7 +271,7 @@ impl WidgetDefaults for DialogWidget {
 /// children standing on it and raise them into the overlay lane
 /// (`Composite::set_slot_overlay`), so the plate arrives under its own
 /// contents and over the screen it covers.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DialogWidget {
     type Config = DialogConfig;
     const NAMESPACE: &'static str = "aether.widget.dialog";
@@ -305,7 +305,7 @@ impl WasmActor for DialogWidget {
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -315,7 +315,7 @@ impl WasmActor for DialogWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
@@ -335,17 +335,13 @@ impl WasmActor for DialogWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
-        if let Some(placed) = self.take_placement_change()
-            && let Some(parent) = ctx.parent()
-        {
-            parent.send(&placed);
+        if let Some(placed) = self.take_placement_change() {
+            ctx.parent().send(&placed);
         }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList::overlay(self.overlay_items()));
-        }
+        ctx.parent().send(&WidgetDrawList::overlay(self.overlay_items()));
     }
 }
 

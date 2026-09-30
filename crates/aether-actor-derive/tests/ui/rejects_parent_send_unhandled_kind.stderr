@@ -1,0 +1,34 @@
+error[E0277]: `Ignores` has no handler for `Report`
+  --> tests/ui/rejects_parent_send_unhandled_kind.rs:54:27
+   |
+54 |         ctx.parent().send(&report);
+   |                      ---- ^^^^^^^ `Ignores` does not handle `Report`
+   |                      |
+   |                      required by a bound introduced by this call
+   |
+help: the trait `HandlesKind<Report>` is not implemented for `Ignores`
+  --> tests/ui/rejects_parent_send_unhandled_kind.rs:28:1
+   |
+28 | struct Ignores;
+   | ^^^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
+help: the following other types implement trait `HandlesKind<K>`
+  --> tests/ui/rejects_parent_send_unhandled_kind.rs:16:1
+   |
+16 | #[actor(root)]
+   | ^^^^^^^^^^^^^^ `Handles`
+...
+44 | #[actor(instanced, child_of(Handles, Ignores))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Child`
+   = note: required for `(Ignores, ())` to implement `AllHandle<Report>`
+   = note: 1 redundant requirement hidden
+   = note: required for `(Handles, (Ignores, ()))` to implement `AllHandle<Report>`
+note: required by a bound in `InlineParent::<'_, A>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/parent.rs
+   |
+   |     pub fn send<K: ActorMail>(&self, payload: &K)
+   |            ---- required by a bound in this associated function
+   |     where
+   |         A::Parents: AllHandle<K>,
+   |                     ^^^^^^^^^^^^ required by this bound in `InlineParent::<'_, A>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

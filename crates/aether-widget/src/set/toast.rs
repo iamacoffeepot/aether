@@ -301,13 +301,11 @@ impl ToastWidget {
 const BAR_UNIT_RATIO: f32 = 0.75;
 
 /// Emit the region's placement when a mutation actually changed the stack.
-fn report<A>(ctx: &WasmCtx<'_, A>, changed: bool, placed: WidgetPlaced) {
+fn report(ctx: &WasmCtx<'_, ToastWidget>, changed: bool, placed: WidgetPlaced) {
     if !changed {
         return;
     }
-    if let Some(parent) = ctx.parent() {
-        parent.send(&placed);
-    }
+    ctx.parent().send(&placed);
 }
 
 widget_chrome!(ToastWidget, font_metrics);
@@ -325,7 +323,7 @@ impl WidgetDefaults for ToastWidget {
 /// Not loaded directly — the root spawns it as an inline child. Its lineage
 /// address takes a `ToastNotice` from any actor, so raising a notice by hand
 /// over MCP is one `send_mail`.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToastWidget {
     type Config = ToastConfig;
     const NAMESPACE: &'static str = "aether.widget.toast";
@@ -372,7 +370,7 @@ impl WasmActor for ToastWidget {
         self.theme = config.theme;
         report(ctx, changed, self.placement());
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -383,7 +381,7 @@ impl WasmActor for ToastWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         if !self.state.is_available() {
             let changed = self.clear();
@@ -408,7 +406,7 @@ impl WasmActor for ToastWidget {
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let expired = self.age();
         report(ctx, expired, self.placement());
-        reply_draw(ctx, &self.state, || WidgetDrawList::overlay(self.overlay_items()));
+        reply_draw(&ctx.parent(), &self.state, || WidgetDrawList::overlay(self.overlay_items()));
     }
 }
 

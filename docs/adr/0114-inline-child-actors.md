@@ -5,6 +5,7 @@
 - **Amended:** 2026-09-26 — `Rebuildable<M>` and `Spawns<C>` are safe traits whose impls name a position in `export!`'s module list and the spawner's `spawns(..)` list ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10).
 - **Amended:** 2026-09-26 — every `export!` checks coverage through each listed type's `Declared::Spawns` list, which must be `ListedIn` the module (every child on it `Rebuildable<M>`), so a hand-written `Declared` impl is checked as an emitted one is; the hidden `__aether_listed_children` is gone ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md) §10).
 - **Amended:** 2026-09-29 — the typed inline spawn gate is `A: Spawns<C>` alone: each `Spawns<C>` impl also names the spawner's position in `C`'s `child_of(..)` list as `Placement`, so it proves `C` may be placed beneath the spawner, and `spawn_inline` needs no `ModuleChild` or `ChildOf` bound (#7210).
+- **Amended:** 2026-09-30 — `ctx.parent()` exists only for an actor that declares `child_of(..)`. Its form is fixed by `root`: an infallible `InlineParent` for a child-only actor, an `Option` of one for an actor that is also `root`. A send through it compiles only for a kind every declared parent handles (`A::Parents: AllHandle<K>`). `ctx.child(name)`, `ctx.sibling(name)`, and the untyped `RelativeMailbox` are removed; a parent sends down through the `InlineChild` its spawn returned, and a relative is looked up with the tag-checked `child_as` / `sibling_as` (#7206).
 
 ## Context
 

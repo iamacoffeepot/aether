@@ -108,8 +108,8 @@ impl TextAreaWidget {
         text_control_theme_state(&self.state, self.dragging)
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
-        apply_text_control_state(ctx, &mut self.state, &mut self.edit, &mut self.dragging, next);
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
+        apply_text_control_state(&ctx.parent(), &mut self.state, &mut self.edit, &mut self.dragging, next);
     }
 
     fn pump_font_metrics<A: DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
@@ -375,7 +375,6 @@ impl WidgetDefaults for TextAreaWidget {
 /// [`SetText`] replaces what it holds.
 #[actor(
     instanced,
-    root,
     child_of(WidgetPanel, ScrollWidget),
     handler_set(WidgetDefaults),
     depends(TextCapability, ClipboardCapability)
@@ -464,9 +463,7 @@ impl WasmActor for TextAreaWidget {
             KEY_ENTER => match self.enter_action() {
                 EnterAction::Ignore => {}
                 EnterAction::Commit => {
-                    if let Some(parent) = ctx.parent() {
-                        parent.send(&TextCommitted { text: String::from(self.edit.value()) });
-                    }
+                    ctx.parent().send(&TextCommitted { text: String::from(self.edit.value()) });
                 }
                 EnterAction::InsertNewline => {
                     if self.edit.insert("\n", self.policy()) {
@@ -548,7 +545,7 @@ impl WasmActor for TextAreaWidget {
 
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
+        reply_draw(&ctx.parent(), &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 
