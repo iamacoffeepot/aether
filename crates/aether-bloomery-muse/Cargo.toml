@@ -20,6 +20,7 @@ aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-fea
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-http = { path = "../aether-http", default-features = false }
+regex = { version = "1.12", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 serde_json = { workspace = true }
 

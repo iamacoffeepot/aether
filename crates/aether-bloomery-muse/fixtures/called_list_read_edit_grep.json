@@ -1,0 +1,68 @@
+{
+  "id": "resp_0030",
+  "object": "response",
+  "created_at": 1790000500,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "msg_0030",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Looking at the source, renaming the function, and checking the rename.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc_00300",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_list",
+      "name": "tree-list",
+      "arguments": "{\"path\": \"src\"}"
+    },
+    {
+      "id": "fc_00301",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_read",
+      "name": "tree-read",
+      "arguments": "{\"path\": \"src/lib.rs\"}"
+    },
+    {
+      "id": "fc_00302",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_edit",
+      "name": "tree-edit",
+      "arguments": "{\"path\": \"src/lib.rs\", \"old\": \"smelt\", \"new\": \"smelt_iron\"}"
+    },
+    {
+      "id": "fc_00303",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_grep",
+      "name": "tree-grep",
+      "arguments": "{\"pattern\": \"smelt_\\\\w+\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1400,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 120,
+    "output_tokens_details": {
+      "reasoning_tokens": 30
+    },
+    "total_tokens": 1520
+  }
+}

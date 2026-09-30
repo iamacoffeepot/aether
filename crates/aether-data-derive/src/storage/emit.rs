@@ -108,6 +108,16 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
             &#schema_static,
             &[ #( #alias_pairs ),* ],
         );
+
+        // Native-only: the storage mirror of the mail derive's
+        // `DescriptorEntry` row, so the kind's schema is found by its id.
+        #[cfg(not(target_family = "wasm"))]
+        ::aether_data::__inventory::inventory::submit! {
+            ::aether_data::storage::StorageKindEntry {
+                name: <#name as ::aether_data::Kind>::NAME,
+                schema: &#schema_static,
+            }
+        }
     })
 }
 

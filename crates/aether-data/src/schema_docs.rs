@@ -26,7 +26,7 @@ use crate::Schema;
 use crate::canonical::primitives::{
     cow_enum_variants, cow_field_docs, cow_named_fields, cow_schema_types, cow_variant_docs,
 };
-use crate::schema::{EnumVariant, NamedField, SchemaCell, SchemaType};
+use crate::schema::{EnumVariant, LabelNode, NamedField, SchemaCell, SchemaType};
 
 /// How deep [`require_documented`] walks before it refuses the type as too
 /// deeply nested. Type nesting bounds the walk; the cap turns a pathological
@@ -135,7 +135,7 @@ impl PartialEq for DocCell {
 
 impl Eq for DocCell {}
 
-/// `'static` borrows of `T`'s schema and doc tree, for a const check over a
+/// `'static` borrows of `T`'s schema, labels, and doc tree, for a const check or record over a
 /// type named only through a generic parameter or a trait projection, where
 /// a borrowed temporary would need a destructor at compile time.
 pub struct StaticSchema<T: ?Sized>(PhantomData<T>);
@@ -143,6 +143,8 @@ pub struct StaticSchema<T: ?Sized>(PhantomData<T>);
 impl<T: Schema + ?Sized + 'static> StaticSchema<T> {
     /// `&T::SCHEMA`.
     pub const SCHEMA: &'static SchemaType = &T::SCHEMA;
+    /// `&T::LABEL_NODE`.
+    pub const LABEL_NODE: &'static LabelNode = &T::LABEL_NODE;
     /// `&T::DOC_NODE`.
     pub const DOC_NODE: &'static DocNode = &T::DOC_NODE;
 }

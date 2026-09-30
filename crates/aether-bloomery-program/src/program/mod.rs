@@ -50,7 +50,7 @@ pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCa
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use ran::Ran;
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
-pub use section::{Declaration, DeclarationsError, declarations};
+pub use section::{Declaration, DeclarationsError, ProgramKind, declarations};
 pub use tool::{
     Edited, ErasedTooled, MAX_FUNCTION_NAME_BYTES, ToolArguments, ToolDefinitionError, ToolSchema, Tooled,
     function_name, program_name, tool_definition, tooled,

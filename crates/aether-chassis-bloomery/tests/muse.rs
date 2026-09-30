@@ -1,7 +1,7 @@
 //! End-to-end: one `muse.turn` Sampled call on the shipped bloomery composition, answered by a loopback stub server
 //! when the harness allows its host, recorded as a refused turn when the deny-by-default allowlist holds, and
 //! refused before dialing when the binary's own flags bind an engine secret to a host the turn reaches over plain
-//! http.
+//! http. The driver then declares the loaded bundle's programs with the schemas its records carry.
 
 use std::error::Error;
 use std::fs;
@@ -16,11 +16,11 @@ use aether_bloomery_kinds::{
     RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, artifact_digest,
 };
 use aether_bloomery_muse::{
-    Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems,
+    Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput, TurnItem, TurnItems,
     TurnOutcome, TurnResult,
 };
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::Kind;
+use aether_data::{Kind, Schema, SchemaType, wire};
 use aether_harness_bloomery::{BloomeryHarness, Record, SeededJournal};
 use aether_harness_substrate::test_helpers::require_wasm;
 use clap::Parser;
@@ -236,6 +236,36 @@ fn an_empty_allowlist_records_a_refused_turn_without_dialing() -> Result<(), Box
         ],
     );
     assert!(nothing_dialed(&listener)?, "a denied fetch opens no connection");
+    Ok(())
+}
+
+#[test]
+fn the_driver_declares_a_loaded_bundle_s_programs_with_their_schemas() -> Result<(), Box<dyn Error>> {
+    // Catches a bundle generator that fills a record from the wrong type, labels lost between the real wasm and the
+    // driver (the schema decodes without its field names), and a driver that answers from no table.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let Some(seed) = seed(&format!("http://{}/v1/responses", listener.local_addr()?))? else {
+        return Ok(());
+    };
+    let (call, _) = turn(&seed)?;
+    let mut harness = BloomeryHarness::start([seed.batch]);
+    let outcome = harness.call(&call);
+    assert!(matches!(outcome, CallOutcome::Fault { .. }), "expected the denied turn's Fault, got {outcome:?}");
+
+    let declarations = harness.declarations();
+    let muse = declarations
+        .bundles
+        .iter()
+        .find(|declared| declared.bundle == seed.bundle)
+        .expect("the driver declares the loaded muse bundle");
+    let record = muse
+        .programs
+        .iter()
+        .find(|program| program.name.as_str() == "muse.session.record")
+        .expect("the muse bundle declares muse.session.record");
+    assert_eq!(record.result_name, "muse.session");
+    let schema = wire::from_bytes::<SchemaType>(&record.result_schema).expect("the result schema decodes");
+    assert_eq!(schema, <Session as Schema>::SCHEMA);
     Ok(())
 }
 

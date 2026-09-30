@@ -182,6 +182,7 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-http",
+ "regex",
  "serde",
  "serde_json",
 ]

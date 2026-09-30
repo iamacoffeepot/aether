@@ -165,10 +165,22 @@ pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
 #[must_use]
 pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = write_str(name, &mut out, 0);
-    pos = write_schema(schema, &mut out, pos);
+    let pos = canonical_write_kind(name, schema, &mut out, 0);
     assert!(pos == N, "canonical_serialize_kind: size mismatch between len pass and serialize pass");
     out
+}
+
+/// Write the canonical `(name, schema)` record into `out` at `cursor`,
+/// returning the advanced cursor: the form a record that embeds a kind's
+/// shape beside other fields writes it in. The bytes are those
+/// [`canonical_serialize_kind`] produces, [`canonical_len_kind`] long.
+///
+/// # Panics
+/// Panics on an `Owned` cell or `Cow`, which only a decoded schema holds,
+/// and when `out` is too short.
+pub const fn canonical_write_kind(name: &str, schema: &SchemaType, out: &mut [u8], cursor: usize) -> usize {
+    let pos = write_str(name, out, cursor);
+    write_schema(schema, out, pos)
 }
 
 /// Runtime sibling of `canonical_serialize_kind`. The derive folds the

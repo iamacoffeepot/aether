@@ -29,6 +29,8 @@
 //!   - `inputs`: `InputsRecord` record encoders (ADR-0033).
 //!   - `docs`: `DocNode` doc-tree serializer, for records that carry a
 //!     type's field docs beside its kind id.
+//!   - `merge`: the runtime rebuild of a named `SchemaType` from a
+//!     canonical shape and its labels.
 
 // clippy's `ptr_arg` rightly recommends `&[T]` / `&str` over
 // `&Cow<[T]>` / `&Cow<str>` in most APIs — deref coercion makes
@@ -42,6 +44,7 @@
 mod docs;
 mod inputs;
 mod labels;
+mod merge;
 pub(crate) mod primitives;
 mod schema;
 
@@ -52,10 +55,13 @@ pub use inputs::{
     write_inputs_config, write_inputs_dependency, write_inputs_fallback, write_inputs_handler, write_inputs_instanced,
     write_reply_contract,
 };
-pub use labels::{canonical_len_labels, canonical_serialize_labels};
+pub use labels::{
+    canonical_len_label_node, canonical_len_labels, canonical_serialize_labels, canonical_write_label_node,
+};
+pub use merge::{MAX_MERGE_DEPTH, MergeError, merge_schema};
 pub use schema::{
     canonical_kind_bytes, canonical_len_kind, canonical_len_schema, canonical_schema_bytes, canonical_serialize_kind,
-    canonical_serialize_schema, kind_id_from_parts, kind_id_from_shape,
+    canonical_serialize_schema, canonical_write_kind, kind_id_from_parts, kind_id_from_shape,
 };
 
 #[cfg(test)]
