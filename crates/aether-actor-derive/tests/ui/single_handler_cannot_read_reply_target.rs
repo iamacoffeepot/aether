@@ -2,7 +2,7 @@
 //! surface. A single-class dispatch returns `DISPATCH_HANDLED_RELEASE` and
 //! the substrate frees its handle when the handler returns, so a single
 //! handler that kept the handle would answer nothing. `reply_target` lives
-//! only on the `Unchecked` ctx, so reading it from a `#[handler::single]` body
+//! only on the `Unchecked` ctx, so reading it from a `#[handler::tell]` body
 //! is a compile error. A handler that keeps its handle declares
 //! `#[handler::unchecked(..)]`.
 
@@ -33,7 +33,7 @@ impl aether_actor::WasmActor for HandleKeeper {
         Ok(HandleKeeper)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
         // The `Single` ctx has no `reply_target`, so this fails to compile.
         let _kept = ctx.reply_target();

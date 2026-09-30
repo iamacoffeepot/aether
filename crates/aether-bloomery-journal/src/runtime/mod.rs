@@ -174,7 +174,7 @@ impl NativeActor for JournalActor {
         })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_read_events(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: ReadEvents) -> ReadEventsResult {
         let ReadEvents { after, limit } = request;
         if !(1..=MAX_READ_EVENTS).contains(&limit) {
@@ -195,7 +195,7 @@ impl NativeActor for JournalActor {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_read_head(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: ReadHead) -> ReadHeadResult {
         match state.journal.head() {
             Ok(head) => ReadHeadResult::Ok { head: head.0 },
@@ -215,7 +215,7 @@ impl NativeActor for JournalActor {
     /// this actor committed before the request was handled, so the read sees
     /// them all. A member the read cache still holds is answered from it
     /// without opening a connection.
-    #[handler::single]
+    #[handler::request]
     fn on_read_artifact(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -247,7 +247,7 @@ impl NativeActor for JournalActor {
     /// committed before the request was handled, so the walk sees them all.
     /// Members the read cache still holds are reused without reading their
     /// files, and only the misses go into the slab.
-    #[handler::single]
+    #[handler::request]
     fn on_read_closure(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -279,7 +279,7 @@ impl NativeActor for JournalActor {
     /// after the commit, so a read sent once it arrives finds every staged
     /// artifact; a citation naming neither a staged nor a stored artifact
     /// refuses the whole stage.
-    #[handler::single]
+    #[handler::request]
     fn on_stage(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: Stage) -> Pending<StageResult> {
         let store = state.store.clone();
         state.stages.submit(ctx, move || stage_reply(stage(&store, request.into_artifacts())))
@@ -292,7 +292,7 @@ impl NativeActor for JournalActor {
         state.stages.complete(ctx, done);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_move_head(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
         let (head, to, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
@@ -307,7 +307,7 @@ impl NativeActor for JournalActor {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_publish(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: Publish) -> PublishResult {
         let (artifacts, moves, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
@@ -326,7 +326,7 @@ impl NativeActor for JournalActor {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_append_records(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -386,7 +386,7 @@ impl NativeActor for JournalActor {
     /// when the head is already past `after`, otherwise held until
     /// [`JournalActorState::commit`] wakes it. Every path answers through
     /// the one held ticket, so the row is `WatchHeadResult` (ADR-0243 §2).
-    #[handler::single]
+    #[handler::request]
     fn on_watch_head(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: WatchHead) -> Pending<WatchHeadResult> {
         let (pending, held) = ctx.hold::<WatchHeadResult>();
 

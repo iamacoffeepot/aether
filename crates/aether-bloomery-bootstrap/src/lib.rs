@@ -84,7 +84,7 @@ impl WasmActor for EnvironmentBootstrap {
 
     /// An import's answer: after the base, import the toolchain; after the
     /// toolchain, read the journal head.
-    #[handler::single]
+    #[handler::response]
     fn on_import_result(&mut self, ctx: &mut WasmCtx<'_>, result: ImportResult) {
         let Some((peers, phase)) = self.take_live("import_result") else {
             return;
@@ -108,7 +108,7 @@ impl WasmActor for EnvironmentBootstrap {
     }
 
     /// The journal head: stage the merge input under it.
-    #[handler::single]
+    #[handler::response]
     fn on_read_head_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadHeadResult) {
         let Some((peers, phase)) = self.take_live("read_head_result") else {
             return;
@@ -132,7 +132,7 @@ impl WasmActor for EnvironmentBootstrap {
     /// A publish's answer: after staging, call the merge; after the head move,
     /// the bootstrap is done. A fence conflict resends the same publish at the
     /// journal's head.
-    #[handler::single]
+    #[handler::response]
     fn on_publish_result(&mut self, ctx: &mut WasmCtx<'_>, result: PublishResult) {
         let Some((peers, phase)) = self.take_live("publish_result") else {
             return;
@@ -175,7 +175,7 @@ impl WasmActor for EnvironmentBootstrap {
     }
 
     /// The merge's outcome: read the environment its transition recorded.
-    #[handler::single]
+    #[handler::response]
     fn on_call_outcome(&mut self, ctx: &mut WasmCtx<'_>, outcome: CallOutcome) {
         let Some((peers, phase)) = self.take_live("call_outcome") else {
             return;
@@ -197,7 +197,7 @@ impl WasmActor for EnvironmentBootstrap {
     }
 
     /// The merged environment: move its platform's head to it.
-    #[handler::single]
+    #[handler::response]
     fn on_read_artifact_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadArtifactResult) {
         let Some((peers, phase)) = self.take_live("read_artifact_result") else {
             return;

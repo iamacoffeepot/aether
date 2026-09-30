@@ -6,8 +6,8 @@
 //! ADR-0134) because the marker selects which reply surface the handler is
 //! allowed to reach: `reply` / `reply_to` exist only on `Unchecked`, not on
 //! `Single`. That is load-bearing at the handler
-//! boundary — a `#[handler::single]` whose body calls `ctx.reply` must not
-//! compile. It is pure friction one call deeper: a helper factored out of a
+//! boundary — a `#[handler::request]`, `tell`, `event`, or `response` whose
+//! body calls `ctx.reply` must not compile. It is pure friction one call deeper: a helper factored out of a
 //! handler to *send* something inherits a type parameter it never reads, and
 //! the author discovers that through a mismatched-`Single`/`Unchecked` error.
 //!
@@ -21,7 +21,7 @@
 //!     sends.send_to(focused, &FocusGained { keyboard: true });
 //! }
 //!
-//! #[handler::single]
+//! #[handler::tell]
 //! fn on_click(&mut self, ctx: &mut WasmCtx<'_>, _c: Click) {
 //!     announce(&mut ctx.sends(), self.focused);
 //! }

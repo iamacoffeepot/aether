@@ -22,7 +22,7 @@ impl WasmActor for DependentProbe {
         Ok(DependentProbe { bumps: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: self.bumps });

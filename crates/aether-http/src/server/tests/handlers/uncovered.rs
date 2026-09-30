@@ -32,7 +32,7 @@ impl NativeActor for UncoveredStreamRouter {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: HttpServerRequest) -> HttpRouterResult {
         if request.headers.iter().any(|header| header.name.eq_ignore_ascii_case("upgrade")) {
             HttpRouterResult::WebSocket(WebSocketAccept { subprotocol: None, headers: Vec::new() })

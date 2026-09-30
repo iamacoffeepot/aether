@@ -281,7 +281,7 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     ctx.subscribe::<LifecycleCapability, Render>();
 }
 
-#[handler::single]
+#[handler::event]
 fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
     ctx.send_many::<RenderCapability>(&self.triangles);
 }

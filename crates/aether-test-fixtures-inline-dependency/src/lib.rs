@@ -36,7 +36,7 @@ impl WasmActor for Holder {
         };
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_spawn_outcome_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: SpawnOutcomeQuery) -> SpawnOutcome {
         self.outcome
     }
@@ -56,7 +56,7 @@ impl WasmActor for Needy {
         Ok(Needy { pings: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {
         self.pings += 1;
     }

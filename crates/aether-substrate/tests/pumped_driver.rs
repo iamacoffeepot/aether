@@ -42,7 +42,7 @@ impl NativeActor for Echo {
         Ok(Self { answered: 0 })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_bounce(&mut self, _ctx: &mut NativeCtx<'_>, _bounce: Bounce) -> Bounced {
         self.answered += 1;
         Bounced { answered: self.answered }
@@ -66,18 +66,18 @@ impl NativeActor for Counter {
         Ok(Self { bumps: 0, relayed: 0, bounced: 0 })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_bump(&mut self, _ctx: &mut NativeCtx<'_>, bump: Bump) {
         self.bumps += bump.n;
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_relay(&mut self, ctx: &mut NativeCtx<'_>, _relay: Relay) {
         self.relayed += 1;
         ctx.send::<Echo>(&Bounce);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_bounced(&mut self, _ctx: &mut NativeCtx<'_>, bounced: Bounced) {
         self.bounced = bounced.answered;
     }

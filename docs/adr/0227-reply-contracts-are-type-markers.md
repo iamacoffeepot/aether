@@ -65,9 +65,9 @@ handler signature is already the source of truth.
 
    | Handler | Marker |
    | --- | --- |
-   | `#[handler::single]` `-> R` | `Replies<K, Reply = R>` |
-   | `#[handler::single]` `-> Pending<R>` | `Replies<K, Reply = R>` |
-   | `#[handler::single]` `-> ()` | `HandlesKind<K>` only |
+   | `#[handler::request]` `-> R` | `Replies<K, Reply = R>` |
+   | `#[handler::request]` `-> Pending<R>` | `Replies<K, Reply = R>` |
+   | `#[handler::tell]` / `event` / `response` `-> ()` | `HandlesKind<K>` only |
    | `#[handler::multi]` emitting `I` | `Streams<K, Item = I>` |
    | `#[handler::unchecked(reason = "…")]` | `HandlesKind<K>` only |
 

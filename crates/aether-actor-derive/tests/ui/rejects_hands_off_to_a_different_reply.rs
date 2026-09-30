@@ -51,12 +51,12 @@ impl WasmActor for Asked {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, _ctx: &mut WasmCtx<'_>, mail: Ask) -> Answered {
         Answered { seq: mail.seq }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_note(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Note) {}
 }
 

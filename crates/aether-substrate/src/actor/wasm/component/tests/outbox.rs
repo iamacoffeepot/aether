@@ -119,13 +119,13 @@ impl NativeActor for Host {
         Ok(Self { guests, old, candidate: None, refused: None, holds: 0, probes: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _hold: Hold) {
         self.deliver(ctx);
         self.holds += 1;
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_answer(&mut self, ctx: &mut NativeCtx<'_>, _answer: Answer) {
         self.deliver(ctx);
     }
@@ -133,7 +133,7 @@ impl NativeActor for Host {
     /// A republish's prepare: refused before any guest is touched when the
     /// module would not be admitted, else the candidate is built held and
     /// takes the old guest's state and reply table.
-    #[handler::single]
+    #[handler::tell]
     fn on_prepare(&mut self, ctx: &mut NativeCtx<'_>, _prepare: Prepare) {
         if let Err(refusal) = ctx.admission_preview(&self.guests.candidate) {
             self.refused = Some(refusal);
@@ -153,14 +153,14 @@ impl NativeActor for Host {
         self.candidate = Some(candidate);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_commit(&mut self, ctx: &mut NativeCtx<'_>, _commit: Commit) {
         let mut candidate = self.candidate.take().expect("a candidate is prepared");
         candidate.flush_held_outbox(ctx);
         self.old = candidate;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_abort(&mut self, _ctx: &mut NativeCtx<'_>, _abort: Abort) {
         let mut candidate = self.candidate.take().expect("a candidate is prepared");
         candidate.discard_held_outbox();
@@ -168,7 +168,7 @@ impl NativeActor for Host {
         self.old.resume_correlations(candidate.correlation_cursor());
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_probe(&mut self, ctx: &mut NativeCtx<'_>, _probe: Probe) {
         self.probes.push(ctx.in_flight_root());
     }

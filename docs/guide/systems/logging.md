@@ -112,7 +112,7 @@ populates the actor's ring. Nothing else is required — there's no log capabili
 to address, no batch to flush:
 
 ```rust
-#[handler::single]
+#[handler::event]
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
     tracing::debug!(frame = self.frame, "advancing");
 }

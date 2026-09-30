@@ -893,7 +893,7 @@ impl NativeActor for FleetServer {
     /// Send `ListEngines` (fieldless). Reply: `ListEnginesResult
     /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }],
     /// recently_died: [{ engine_id, rpc_port, reason, died_age_millis }] }`.
-    #[handler::single]
+    #[handler::request]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListEngines) -> ListEnginesResult {
         let now = Instant::now();
         let engines = state
@@ -940,7 +940,7 @@ impl NativeActor for FleetServer {
     /// pre-allocation failure (a selector miss) carries `None`. Process preparation remains synchronous, but success is
     /// replied only after the registry owner authoritatively activates the
     /// staged proxy.
-    #[handler::single]
+    #[handler::request]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> Pending<SpawnEngineResult> {
         let (pending, held) = ctx.hold::<SpawnEngineResult>();
 
@@ -1076,7 +1076,7 @@ impl NativeActor for FleetServer {
     /// entry. Reply: `TerminateEngineResult::Ok`, or `Err { error }`
     /// for an `engine_id` that doesn't parse or names no
     /// supervised engine.
-    #[handler::single]
+    #[handler::request]
     fn on_terminate(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: TerminateEngine) -> TerminateEngineResult {
         let engine_id = match Uuid::parse_str(&mail.engine_id) {
             Ok(uuid) => EngineId(uuid),
@@ -1116,7 +1116,7 @@ impl NativeActor for FleetServer {
     /// `died` for an already-removed engine (e.g. one a concurrent
     /// `terminate_substrate` already dropped) is a logged no-op, so
     /// it can't race the terminate path.
-    #[handler::single]
+    #[handler::tell]
     fn on_engine_died(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             tracing::warn!(
@@ -1159,7 +1159,7 @@ impl NativeActor for FleetServer {
     /// fires this at itself after `restart_backoff_millis`. The handler
     /// looks the token up and re-forks the filed recipe under a fresh
     /// engine id. A token with no pending entry is a silent no-op.
-    #[handler::single]
+    #[handler::tell]
     fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, mail: EngineRestartDue) {
         if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
             state.restart_engine(ctx, supervision);
@@ -1178,7 +1178,7 @@ impl NativeActor for FleetServer {
     /// table entry so `list_engines` reports a fresh
     /// `last_heartbeat_age_millis`. An `alive` for an unknown engine
     /// (already evicted) is a silent no-op.
-    #[handler::single]
+    #[handler::tell]
     fn on_engine_alive(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             return;
@@ -1205,7 +1205,7 @@ impl NativeActor for FleetServer {
     /// unpinned content remains eligible for same-call or later budget
     /// eviction. A name or `pin: true` retains the hash; unpin removes
     /// only the explicit flag, so a remaining name still protects.
-    #[handler::single]
+    #[handler::request]
     fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone(), mail.pin) {
             Ok(hash) => UploadBinaryResult::Ok { hash, name: mail.name },
@@ -1221,7 +1221,7 @@ impl NativeActor for FleetServer {
     /// field is no constraint). Reply: `ListEngineBinariesResult { binaries,
     /// total_matched }`, with a stable newest-first page produced before
     /// entries cross the wire.
-    #[handler::single]
+    #[handler::request]
     fn on_list_engine_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -1247,7 +1247,7 @@ impl NativeActor for FleetServer {
     /// unnamed unpinned content remains eligible for same-call or later
     /// budget eviction. A name or `pin: true` retains the hash; unpin
     /// removes only the explicit flag, so a remaining name still protects.
-    #[handler::single]
+    #[handler::request]
     fn on_upload_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -1269,7 +1269,7 @@ impl NativeActor for FleetServer {
     /// protects). Reply: `SetArtifactPinnedResult::Ok { hash, pinned }`
     /// after a successful persist, or `Err { error }` for an unknown hash
     /// or a persistence failure. A failed unpin keeps prior protection.
-    #[handler::single]
+    #[handler::request]
     fn on_set_artifact_pinned(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -1292,7 +1292,7 @@ impl NativeActor for FleetServer {
     /// matching more than one component is a clean ambiguity error).
     /// Reply: `ResolveComponentResult::Ok { hash, wasm, name, manifest,
     /// export }`, or `Err { error }` for no match / ambiguity.
-    #[handler::single]
+    #[handler::request]
     fn on_resolve_component(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -1309,7 +1309,7 @@ impl NativeActor for FleetServer {
     /// no constraint). Reply: `ListComponentBinariesResult { components,
     /// total_matched }`, with a stable newest-first page produced before
     /// entries cross the wire.
-    #[handler::single]
+    #[handler::request]
     fn on_list_component_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

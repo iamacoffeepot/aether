@@ -350,7 +350,7 @@ impl WasmActor for ToastWidget {
     }
 
     /// Raise a notice. Fire-and-forget from anywhere.
-    #[handler::single]
+    #[handler::tell]
     fn on_notice(&mut self, ctx: &mut WasmCtx<'_>, notice: ToastNotice) {
         let changed = self.raise(notice);
         report(ctx, changed, self.placement());
@@ -360,7 +360,7 @@ impl WasmActor for ToastWidget {
     /// the oldest notices leave rather than standing past a limit the host
     /// has since lowered — and a changed lifetime applies to notices raised
     /// after it.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ToastConfig) {
         self.max_standing = usize::try_from(config.max_standing).unwrap_or(usize::MAX);
         self.lifetime_frames = config.lifetime_frames;
@@ -380,7 +380,7 @@ impl WasmActor for ToastWidget {
     /// Update external availability. A region that is switched off drops what
     /// it was holding: a refusal shown minutes later, when the screen has
     /// moved on, is worse than one never shown.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -393,7 +393,7 @@ impl WasmActor for ToastWidget {
 
     /// Install a font-metrics reply; the next `Collect` wraps against real
     /// advances.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -404,7 +404,7 @@ impl WasmActor for ToastWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         let expired = self.age();
         report(ctx, expired, self.placement());

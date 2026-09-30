@@ -201,14 +201,14 @@ impl WasmActor for ToggleWidget {
     /// A live press arm survives too — the switch the reader is pressing is
     /// still the switch they pressed — and only becoming unavailable cancels
     /// it, through [`Self::apply_control_state`].
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ToggleConfig) {
         self.label = config.label;
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -217,18 +217,18 @@ impl WasmActor for ToggleWidget {
     /// host set what it would be told about. Any live arm is cancelled: the
     /// press that armed it would otherwise complete against a value the reader
     /// never saw.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_toggle(&mut self, _ctx: &mut WasmCtx<'_>, set: SetToggle) {
         self.on = set.on;
         self.clear_arms();
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         self.arms.press_mouse_button(&self.frame, self.state.can_mutate(), press);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button == mouse_button::LEFT
             && let Some(on) = self.release_at(release.x, release.y)
@@ -237,21 +237,21 @@ impl WasmActor for ToggleWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if let Some(on) = self.press_key(key.code) {
             Self::emit(ctx, on);
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         if let Some(on) = self.release_key(release.code) {
             Self::emit(ctx, on);
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }

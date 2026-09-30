@@ -33,12 +33,12 @@ impl NativeActor for SplitCap {
         Ok(SplitCapState { pings: 0, pongs: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _ping: Ping) {
         state.pings += 1;
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_pong(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _pong: Pong) {
         state.pongs += 1;
     }

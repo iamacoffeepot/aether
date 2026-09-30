@@ -126,13 +126,13 @@ impl NativeActor for WindowInstance {
     }
 
     /// Ask the manager to close this window.
-    #[handler::single]
+    #[handler::request]
     fn on_close(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: CloseWindow) -> Pending<CloseWindowResult> {
         forward(ctx, WindowCommand::Close, WindowForwardContext::Close)
     }
 
     /// Ask the manager to change this window's presentation mode.
-    #[handler::single]
+    #[handler::request]
     fn on_set_mode(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -146,7 +146,7 @@ impl NativeActor for WindowInstance {
     }
 
     /// Ask the manager to retitle this window.
-    #[handler::single]
+    #[handler::request]
     fn on_set_title(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -156,7 +156,7 @@ impl NativeActor for WindowInstance {
     }
 
     /// Ask the manager to install this window's native menu bar.
-    #[handler::single]
+    #[handler::request]
     fn on_set_menu(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -166,7 +166,7 @@ impl NativeActor for WindowInstance {
     }
 
     /// Ask the manager to set this window's pointer shape.
-    #[handler::single]
+    #[handler::request]
     fn on_set_cursor(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -176,13 +176,13 @@ impl NativeActor for WindowInstance {
     }
 
     /// Ask the manager to bring this window to the foreground.
-    #[handler::single]
+    #[handler::request]
     fn on_focus(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> Pending<FocusWindowResult> {
         forward(ctx, WindowCommand::Focus, WindowForwardContext::Focus)
     }
 
     /// Ask the manager to schedule this window for redraw.
-    #[handler::single]
+    #[handler::request]
     fn on_request_redraw(
         _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -192,13 +192,13 @@ impl NativeActor for WindowInstance {
     }
 
     /// Answer the held public request the manager just resolved.
-    #[handler::single]
+    #[handler::response]
     fn on_command_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ApplyWindowCommandResult) {
         complete(ctx, result);
     }
 
     /// Shut down: the manager is retiring this endpoint.
-    #[handler::single]
+    #[handler::tell]
     fn on_retire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RetireWindow) {
         ctx.shutdown();
     }

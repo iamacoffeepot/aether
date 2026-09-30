@@ -68,7 +68,7 @@ impl NativeActor for InventoryCapability {
     /// `Bounded`/`Declared` templates locally; resolve `Dynamic`
     /// families per-id via `aether.inventory.resolve`.
     // Read from the process-global link-time inventories.
-    #[handler::single]
+    #[handler::request]
     fn on_manifest(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: Manifest) -> ManifestResult {
         let names = name_entries()
             .map(|entry| NameEntryWire { domain: entry.domain.to_vec(), name: entry.name.into() })
@@ -114,7 +114,7 @@ impl NativeActor for InventoryCapability {
     // which reads the same registry `ComponentHostCapability` registers
     // into, so a `load_component`'s kinds are visible the moment it returns
     // (ADR-0091 §2) without the cap holding its own handle on it.
-    #[handler::single]
+    #[handler::request]
     fn on_list_kinds(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
         let kinds = ctx
             .kind_descriptors()
@@ -152,7 +152,7 @@ impl NativeActor for InventoryCapability {
     /// unparseable id), at which point the caller renders the
     /// ADR-0064 tagged-id string itself. Call this only for ids a
     /// locally-folded manifest couldn't resolve.
-    #[handler::single]
+    #[handler::request]
     fn on_resolve(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
         ResolveResult {
             resolved: mail.ids.into_iter().map(|id| ResolvedName { name: ctx.tagged_id_name(&id), id }).collect(),
@@ -165,7 +165,7 @@ impl NativeActor for InventoryCapability {
     /// the path, never a mailbox position; the wire deliberately projects
     /// failures as diagnostic text instead of exposing the substrate error
     /// enum.
-    #[handler::single]
+    #[handler::request]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
     fn on_resolve_address(
         _state: &mut Self::State,
@@ -210,7 +210,7 @@ impl NativeActor for InventoryCapability {
     // keeps `describe_handlers` from double-reporting a shared handler.
     // `HashSet::insert` keeps the first occurrence, preserving inventory
     // order for the survivors.
-    #[handler::single]
+    #[handler::request]
     fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
         let mut seen = HashSet::new();
         let handlers = handler_entries()
@@ -551,7 +551,7 @@ mod tests {
         /// A synchronous `-> ProbeReply` handler — the reply contract
         /// the link-time inventory captures. Stateless: the link-time
         /// `HandlerEntry` is what the test reads, not handler state.
-        #[handler::single]
+        #[handler::request]
         fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ProbeReq) -> ProbeReply {
             ProbeReply {}
         }

@@ -76,13 +76,13 @@ impl NativeActor for UncheckedEngineRoute {
         })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_register(&mut self, ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteForTest) {
         self.registration_requests.push_back(mail.engine_id);
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: mail.engine_id });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_registration_result(&mut self, _ctx: &mut NativeCtx<'_>, mail: crate::RegisterEngineRouteResult) {
         let engine_id = self.registration_requests.pop_front().expect("registration request precedes its result");
         self.registrations.send((engine_id, mail)).expect("registration result receiver stays live");
@@ -101,12 +101,12 @@ impl NativeActor for UncheckedEngineRoute {
         ctx.reply_to(target, &crate::CallSettled::Ok);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_barrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: EngineRouteBarrierForTest) {
         assert_eq!(self.pending.len(), 1, "the post-forward barrier observes one pending remote call");
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_stop(&mut self, ctx: &mut NativeCtx<'_>, _mail: StopEngineRouteForTest) {
         assert_eq!(self.pending.len(), 1, "the route stops with the second remote call pending");
         ctx.shutdown();
@@ -137,13 +137,13 @@ impl NativeActor for WrongEngineRoute {
         })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_register(&mut self, ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteForTest) {
         self.registration_requests.push_back(mail.engine_id);
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: mail.engine_id });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_registration_result(&mut self, _ctx: &mut NativeCtx<'_>, mail: crate::RegisterEngineRouteResult) {
         let engine_id = self.registration_requests.pop_front().expect("registration request precedes its result");
         self.registrations.send((engine_id, mail)).expect("registration result receiver stays live");
@@ -151,7 +151,7 @@ impl NativeActor for WrongEngineRoute {
 
     // A real handler for the right kind with the wrong contract: silent does
     // not cover EngineRoute's explicit unchecked row.
-    #[handler::single]
+    #[handler::tell]
     fn on_forward(&mut self, _ctx: &mut NativeCtx<'_>, _mail: crate::ForwardEnvelope) {
         self.forwards.send(()).expect("wrong-route observer stays live");
     }
@@ -1308,7 +1308,7 @@ impl NativeActor for BlobSharer {
     }
 
     /// Reply with a shared blob.
-    #[handler::single]
+    #[handler::request]
     fn on_blob_request(&mut self, ctx: &mut NativeCtx<'_, Self>, mail: BlobRequest) -> BlobResult {
         let blob = ctx.check_in(patterned(mail.blob_len).into_boxed_slice());
         let padding =

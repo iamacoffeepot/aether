@@ -412,7 +412,7 @@ impl NativeActor for TextCapability {
     /// replies `Ok { font_id, name, resident_bytes }` once registered
     /// or `Err` with the failure reason (bad path, or an unparseable
     /// file). The `font_id` is session-scoped — thread it into `draw`.
-    #[handler::single]
+    #[handler::request]
     fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
         let (pending, held) = ctx.hold::<LoadFontResult>();
         if state.join_font_load(&mail.namespace, &mail.path, |waiters| waiters.load.push(held)) {
@@ -430,7 +430,7 @@ impl NativeActor for TextCapability {
     /// write that font through `aether.fs` before loading it. A load of a
     /// `name` whose parse is already in flight joins it and is answered by
     /// that parse.
-    #[handler::single]
+    #[handler::request]
     fn on_load_font_bytes(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -456,7 +456,7 @@ impl NativeActor for TextCapability {
     /// hot path, and replying `Ok` once registered (the font is then
     /// addressable by the assigned id too) or `Err` on a bad path /
     /// unparseable file. An unknown `font_id` replies `Err`.
-    #[handler::single]
+    #[handler::request]
     fn on_font_metrics(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -494,11 +494,13 @@ impl NativeActor for TextCapability {
     /// request context names. `Ok` stages the font's parse off the hot path,
     /// whose completion answers the font's waiters; `Err` answers every
     /// waiter with the fs error, each in the shape its request is owed.
-    #[handler::single]
-    fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
-        let Some(FontRead { namespace, path }) = ctx.take_context() else {
-            return;
-        };
+    #[handler::response]
+    fn on_read_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: ReadResult,
+        FontRead { namespace, path }: FontRead,
+    ) {
         match mail {
             ReadResult::Ok { bytes, .. } => {
                 let name = font_name_from_path(&path);
@@ -563,7 +565,7 @@ impl NativeActor for TextCapability {
     /// Store the atlas `texture_id` once `create_texture` replies. The
     /// cap creates exactly one texture, so the single reply is always
     /// its atlas — no correlation key needed.
-    #[handler::single]
+    #[handler::response]
     fn on_create_texture_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CreateTextureResult) {
         state.atlas_create_inflight = false;
         match mail {
@@ -593,7 +595,7 @@ impl NativeActor for TextCapability {
     /// frame; the next frame recovers fully. The first `draw` lazily
     /// creates the atlas texture and draws nothing until the reply lands —
     /// resend every frame (immediate-mode contract).
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
         let Some(font) = state.font_for_draw(&mail) else {
             return;
@@ -615,7 +617,7 @@ impl NativeActor for TextCapability {
     /// send; every other transition preserves the authored order as a separate
     /// run. Each item's glyph uploads are sent before any subsequent run
     /// flush, preserving `aether.render` FIFO upload-before-use ordering.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_batch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTextBatch) {
         let Some(texture_id) = state.atlas_texture_for_draw(ctx) else {
             return;

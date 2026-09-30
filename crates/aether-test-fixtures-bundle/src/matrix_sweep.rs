@@ -207,7 +207,7 @@ impl WasmActor for MatrixParent {
     /// cross-cluster send. Everything settles in this one receive's drain. The
     /// handler spells its actor type because `actor_ref` and the flat `send`
     /// are bounded `A: DependsOn<R>`.
-    #[handler::single]
+    #[handler::tell]
     fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_, MatrixParent>, _msg: RunMatrix) {
         record_observer(ctx.actor_ref::<SourceObserver>());
         ctx.send::<SourceObserver>(&SourceQuery);
@@ -219,7 +219,7 @@ impl WasmActor for MatrixParent {
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
     /// cell with whether the parent's sender is its proof of child\[a\] (the
     /// membrane's own-id path).
-    #[handler::single]
+    #[handler::tell]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased>, ping: MatrixPing) {
         let expected = ctx.child_as::<MatrixChild>("a").map(InlineChild::erase);
         record_cell(ping.cell, sender_matches(ctx.sender(), expected));
@@ -227,7 +227,7 @@ impl WasmActor for MatrixParent {
 
     /// The observer's reply to the parent's own query, routed to the origin
     /// the host stamped on it.
-    #[handler::single]
+    #[handler::response]
     fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
         if report.had_sender {
             record_report_to_parent();
@@ -236,7 +236,7 @@ impl WasmActor for MatrixParent {
 
     /// Read the cluster's shared observation log and reply the structured
     /// matrix report. Sent after `RunMatrix` has fully settled.
-    #[handler::single]
+    #[handler::request]
     fn on_collect_matrix(&mut self, _ctx: &mut WasmCtx<'_>, _query: CollectMatrix) -> MatrixReport {
         snapshot_report()
     }
@@ -260,7 +260,7 @@ impl WasmActor for MatrixChild {
     /// for the sibling and self pings — then, when the ping is the fan-out ping
     /// (parent → child\[a\]), drive the child-origin cells and the
     /// cross-cluster send, all in place.
-    #[handler::single]
+    #[handler::tell]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased>, ping: MatrixPing) {
         let expected = match ping.cell {
             MATRIX_CELL_PARENT_TO_CHILD => ctx.parent().as_ref().map(RelativeMailbox::reference),
@@ -307,7 +307,7 @@ impl WasmActor for MatrixChild {
 
     /// The observer's reply to child\[a\]'s cross-cluster query, routed to
     /// the origin the host stamped on it.
-    #[handler::single]
+    #[handler::response]
     fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
         if report.had_sender {
             record_report_to_child();

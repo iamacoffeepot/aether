@@ -92,7 +92,7 @@ impl WasmActor for EditorShell {
     /// announcement for a name already attached, a sourceless dispatch, and a
     /// sender that does not cover [`EditorInput`] are each reported and
     /// ignored — none of them may re-point a live route.
-    #[handler::single]
+    #[handler::tell]
     fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
         let Some(reference) = ctx.sender() else {
             tracing::warn!(
@@ -120,13 +120,13 @@ impl WasmActor for EditorShell {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         let route = self.routing.pointer_press(&press);
         self.forward(ctx, route.focus, route.target, &press);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         let target = self.routing.pointer_release(&release);
         self.forward(ctx, None, target, &release);
@@ -137,41 +137,41 @@ impl WasmActor for EditorShell {
     /// table, finds nothing, and hands the child it had lit its `HoverLost`;
     /// without it the abandoned pane keeps drawing a hover wash under a pointer
     /// that is in another pane entirely.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         let route = self.routing.pointer_motion(&moved);
         self.forward(ctx, None, route.exited, &moved);
         self.forward(ctx, None, route.target, &moved);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         self.forward(ctx, None, self.routing.wheel(&wheel), &wheel);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let route = self.routing.key_press(&key);
         self.forward(ctx, route.focus, route.target, &key);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         let route = self.routing.key_release(&release);
         self.forward(ctx, route.focus, route.target, &release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         self.forward(ctx, None, self.routing.text_input_target(), &input);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         self.forward(ctx, None, self.routing.ime_preedit_target(), &preedit);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         let target = self.routing.modifiers(&modifiers);
         self.forward(ctx, None, target, &modifiers);

@@ -379,7 +379,7 @@ mod tests {
             Ok(Self { wakes: 0 })
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_inbound_ready(&mut self, _ctx: &mut NativeCtx<'_>, _ready: RpcInboundReady) {
             self.wakes += 1;
         }

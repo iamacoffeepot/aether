@@ -70,57 +70,57 @@ impl NativeActor for ReplySink {
         Ok(Self { arrivals })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_call_outcome(&mut self, ctx: &mut NativeCtx<'_>, outcome: CallOutcome) {
         self.forward(ctx, Reply::Call(Box::new(outcome)));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_move_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: MoveHeadResult) {
         self.forward(ctx, Reply::MoveHead(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_publish_result(&mut self, ctx: &mut NativeCtx<'_>, result: PublishResult) {
         self.forward(ctx, Reply::Publish(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_processed(&mut self, ctx: &mut NativeCtx<'_>, processed: Processed) {
         self.forward(ctx, Reply::Processed(processed));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_load_result(&mut self, ctx: &mut NativeCtx<'_>, result: LoadResult) {
         self.forward(ctx, Reply::Load(Box::new(result)));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_publish_code_result(&mut self, ctx: &mut NativeCtx<'_>, result: aether_kinds::PublishResult) {
         self.forward(ctx, Reply::PublishCode(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_spawn_result(&mut self, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
         self.forward(ctx, Reply::Spawn(Box::new(result)));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_list_components_result(&mut self, ctx: &mut NativeCtx<'_>, result: ListComponentsResult) {
         self.forward(ctx, Reply::List(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_watch_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: WatchHeadResult) {
         self.forward(ctx, Reply::Watch(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_import_result(&mut self, ctx: &mut NativeCtx<'_>, result: ImportResult) {
         self.forward(ctx, Reply::Import(result));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_run_result(&mut self, ctx: &mut NativeCtx<'_>, result: RunResult) {
         self.forward(ctx, Reply::Run(Box::new(result)));
     }

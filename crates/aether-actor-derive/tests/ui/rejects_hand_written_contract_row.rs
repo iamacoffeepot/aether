@@ -29,7 +29,7 @@ impl WasmActor for A {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_handled(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Handled) {}
 }
 

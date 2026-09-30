@@ -37,7 +37,7 @@ impl NativeActor for Nest {
         Ok(Self::default())
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, _hatch: Hatch) {
         let _ = self;
         let _receipt =
@@ -63,7 +63,7 @@ impl NativeActor for Dependent {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_fold(&mut self, ctx: &mut NativeCtx<'_>, _fold: Fold) {
         let _ = self;
         ctx.send_to(ctx.actor_ref::<OneDep>(), &CastOnly { code: 1 });

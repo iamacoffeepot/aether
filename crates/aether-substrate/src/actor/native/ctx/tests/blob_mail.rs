@@ -82,7 +82,7 @@ struct Leave;
 trait KeepsSetBlobs {
     fn kept_blobs(&self) -> &Mutex<Vec<Blob>>;
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_set_carrier(&self, _ctx: &mut NativeCtx<'_>, mail: SetCarrier) {
         self.kept_blobs().lock().expect("kept blobs lock").push(mail.blob);
     }
@@ -125,7 +125,7 @@ impl NativeActor for Keeper {
         Ok(Self { kept: Mutex::new(Vec::new()), forward })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_carrier(&mut self, ctx: &mut NativeCtx<'_>, mail: Carrier) {
         if let Some(next) = self.forward {
             ctx.send_to(next, &Carrier { blob: mail.blob.clone() });
@@ -133,23 +133,23 @@ impl NativeActor for Keeper {
         self.kept.lock().expect("kept blobs lock").push(mail.blob);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_pair(&mut self, _ctx: &mut NativeCtx<'_>, mail: Pair) {
         self.kept.lock().expect("kept blobs lock").extend([mail.first, mail.second]);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Ask) -> Carrier {
         let _ = self;
         Carrier { blob: Blob::from(SHARED.to_vec()) }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_report(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Report) -> Kept {
         Kept { bytes: self.kept.lock().expect("kept blobs lock").iter().map(read).collect() }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_leave(&mut self, ctx: &mut NativeCtx<'_>, _mail: Leave) {
         let _ = self;
         ctx.shutdown();
@@ -170,16 +170,16 @@ impl NativeActor for Sink {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_carrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Carrier) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_carrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SetCarrier) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_pair(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Pair) {}
 
-    #[handler::single]
+    #[handler::tell]
     fn on_note(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Note) {}
 }
 
@@ -290,43 +290,43 @@ impl NativeActor for Courier {
         Ok(Self { routes, me: None, kept: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_carrier(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendCarrier) {
         for to in &self.routes.to {
             ctx.send_to(to, &Carrier { blob: self.blob() });
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_fan_out(&mut self, ctx: &mut NativeCtx<'_>, _trigger: FanOut) {
         ctx.fanout(self.routes.to.iter(), &Carrier { blob: self.blob() });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_ask(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendAsk) {
         ctx.send_to(self.routes.asked.expect("a keeper to ask"), &Ask { tag: 1 });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_reply_carrier(&mut self, _ctx: &mut NativeCtx<'_>, _trigger: ReplyCarrier) -> Carrier {
         Carrier { blob: self.blob() }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_blob_free(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendBlobFree) {
         let noted = self.routes.noted.expect("a sink to note");
         ctx.send_to(noted, &Note { text: "no blobs here".into() });
         ctx.send_to(noted, &CastOnly { code: 0x6748 });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_set_carrier(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendSetCarrier) {
         for to in &self.routes.to {
             ctx.send_to(to, &SetCarrier { blob: self.blob() });
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_send_pair(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendPair) {
         let pair = Pair { first: Blob::from(SHARED.to_vec()), second: Blob::from(SHARED.to_vec()) };
         for to in &self.routes.to {

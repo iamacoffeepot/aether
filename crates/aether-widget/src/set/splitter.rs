@@ -286,7 +286,7 @@ impl WasmActor for SplitterWidget {
     /// Replace the range and position in place. A live drag ends: the config
     /// is the host's own word about where the split is, and a drag still
     /// following the pointer would immediately overwrite it.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SplitterConfig) {
         self.axis = config.axis;
         self.min_pixels = config.min_pixels;
@@ -303,7 +303,7 @@ impl WasmActor for SplitterWidget {
 
     /// Update external availability; a splitter that can no longer be dragged
     /// drops the drag it was holding.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -316,7 +316,7 @@ impl WasmActor for SplitterWidget {
     /// A left press on the strip begins the drag. The root gives the child
     /// drag capture on the same press, so the moves that follow reach here
     /// even once the pointer has left the strip.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.can_mutate() || !self.contains(press.x, press.y) {
             return;
@@ -327,7 +327,7 @@ impl WasmActor for SplitterWidget {
     /// Motion during a drag moves the split, clamped, and reports it only
     /// when it actually moved — a drag past the end of the range goes quiet
     /// instead of re-sending the same clamped value every frame.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         let Some(position) = self.dragged_position(moved.x, moved.y) else {
             return;
@@ -344,7 +344,7 @@ impl WasmActor for SplitterWidget {
     /// The release ends the drag wherever it reached, and pays out the leave
     /// the drag deferred — a pointer that came up off the strip has left it,
     /// and the host is owed the edge that puts its cursor back.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT {
             return;
@@ -359,7 +359,7 @@ impl WasmActor for SplitterWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         // A drag cancelled by anything but a release — focus loss, the host
         // disabling the strip — leaves the same debt, and this is the first

@@ -141,7 +141,7 @@ impl WasmActor for MeshViewer {
     /// Substrate-driven; do not send manually. If no triangles render
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
-    #[handler::single]
+    #[handler::event]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if !self.cache.faces.is_empty() {
             ctx.send_many::<RenderCapability>(&self.cache.faces);
@@ -153,7 +153,7 @@ impl WasmActor for MeshViewer {
 
     /// Rebuild and submit the cached DSL outline loops for the eye that
     /// answered this Render's request. No active camera means no outline.
-    #[handler::single]
+    #[handler::response]
     fn on_camera_eye_result(&mut self, ctx: &mut WasmCtx<'_>, result: CameraEyeResult) {
         let Some(eye) = result.eye.map(Vec3::from_array) else {
             return;
@@ -181,7 +181,7 @@ impl WasmActor for MeshViewer {
     // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
     // the load body delegates straight to `FsCapability` via `ctx`.
     #[allow(clippy::needless_pass_by_value)] // aether-suppression-request: narrowed from the existing pair (#7148); the handler ABI takes `msg` by value
-    #[handler::single]
+    #[handler::request]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) -> Pending<MeshLoadResult> {
         let (pending, held) = ctx.hold::<MeshLoadResult>();
         tracing::info!(
@@ -213,11 +213,8 @@ impl WasmActor for MeshViewer {
     ///
     /// # Agent
     /// Substrate-driven; do not send manually.
-    #[handler::single]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased>, r: ReadResult) {
-        let Some(context) = ctx.take_context::<MeshLoadContext>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased>, r: ReadResult, context: MeshLoadContext) {
         let outcome = match r {
             ReadResult::Ok { bytes, .. } => self.load_bytes(&context.path, &bytes),
             ReadResult::Err { error, .. } => {

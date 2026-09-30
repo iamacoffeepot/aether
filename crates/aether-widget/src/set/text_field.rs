@@ -168,28 +168,28 @@ impl WasmActor for TextFieldWidget {
     /// this holds the text, the caret, and the selection: a host may relabel or
     /// restyle a field under someone typing in it. [`SetText`] is the lane that
     /// replaces the contents.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextFieldConfig) {
         self.reconfigure(config.max_chars, config.theme);
         self.apply_control_state(ctx, config.state);
         self.pump_font_metrics(ctx);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
 
     /// Replace the buffer from the host. Silent — no [`TextCommitted`], since
     /// the host wrote the value it would be told about.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_text(&mut self, _ctx: &mut WasmCtx<'_>, set: SetText) {
         self.edit.replace_value(set.text, set.keep_caret);
     }
 
     /// Insert committed text over the active selection. `TextInput` is already
     /// resolved through the layout and IME, so any composition ends here.
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
         if !self.state.can_mutate() {
             return;
@@ -203,7 +203,7 @@ impl WasmActor for TextFieldWidget {
     ///
     /// Nothing is suppressed on repeat — a held Backspace arrives as a stream
     /// of `Key` presses and every one of them deletes.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
             return;
@@ -222,20 +222,20 @@ impl WasmActor for TextFieldWidget {
     }
 
     /// Settle an outstanding clipboard read into the buffer.
-    #[handler::single]
+    #[handler::response]
     fn on_get_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
         let (policy, mutable) = (self.policy(), self.state.can_mutate());
         accept_clipboard_paste(&mut self.paste_pending, &mut self.edit, policy, mutable, result);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
         report_clipboard_copy(&result);
     }
 
     /// A left press places the caret at the pointer and arms a drag; other
     /// buttons are ignored.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         let Some(event_x) = arm_text_drag(&self.state, &mut self.dragging, press) else {
             return;
@@ -244,7 +244,7 @@ impl WasmActor for TextFieldWidget {
     }
 
     /// A move during a live drag extends the selection to the pointer.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if !self.dragging || !self.state.is_available() {
             return;
@@ -254,21 +254,21 @@ impl WasmActor for TextFieldWidget {
     }
 
     /// A left release ends the drag.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.dragging, false, release);
     }
 
     /// Cache the latest modifier state (Ctrl / Shift / …) so Shift-extended
     /// movement and future chord-aware edits can consult it.
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         update_text_modifiers(&self.state, &mut self.modifiers, modifiers);
     }
 
     /// Track the in-flight IME composition at the active selection. Empty text
     /// clears it.
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         if !self.state.can_mutate() {
             return;
@@ -282,7 +282,7 @@ impl WasmActor for TextFieldWidget {
 
     /// Install a font-metrics reply and pump any deferred newer request. A
     /// stale reply (its font is no longer the desired one) is dropped.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -295,7 +295,7 @@ impl WasmActor for TextFieldWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_single_line_edit(
             ctx,

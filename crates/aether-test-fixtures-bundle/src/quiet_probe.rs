@@ -45,7 +45,7 @@ impl WasmActor for QuietProbe {
     /// # Agent
     /// Send `aether.test_fixtures.log_marker`; read the line back with
     /// `actor_logs`.
-    #[handler::single]
+    #[handler::tell]
     fn on_log_marker(&mut self, _ctx: &mut WasmCtx<'_>, _: LogMarker) {
         tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
     }
@@ -60,7 +60,7 @@ impl WasmActor for QuietProbe {
     /// Send `aether.test_fixtures.asset_probe`; the reply
     /// `aether.test_fixtures.asset_probe_result` carries `{ pulled, len,
     /// checksum }`.
-    #[handler::single]
+    #[handler::request]
     fn on_asset_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: AssetProbe) -> AssetProbeResult {
         self.asset.clone()
     }

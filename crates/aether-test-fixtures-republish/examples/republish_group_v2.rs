@@ -57,12 +57,12 @@ impl WasmActor for Peer {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }

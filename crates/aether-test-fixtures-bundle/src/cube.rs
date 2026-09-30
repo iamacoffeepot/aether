@@ -136,7 +136,7 @@ impl WasmActor for Cube {
     /// advance for every `aether.lifecycle`-subscribed mailbox. A
     /// `capture_frame` taken after one tick shows the centered cube
     /// silhouette.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, _: Tick) {
         ctx.send::<RenderCapability>(&ViewProjection { view_proj: self.view_proj });
         ctx.send_many::<RenderCapability>(&Cube::triangles());

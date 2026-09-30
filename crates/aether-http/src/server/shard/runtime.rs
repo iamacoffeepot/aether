@@ -91,7 +91,7 @@ impl NativeActor for HttpDispatchShard {
     /// Internal wake mail — not part of the cap's external surface. The
     /// supervisor and this shard's reader sidecars fire this; the handler
     /// drains the mpsc and acts per item.
-    #[handler::single]
+    #[handler::tell]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
@@ -157,7 +157,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — a streaming handler sends this after replying
     /// [`HttpResponseStreamOpen`], paced by the cap's
     /// [`HttpStreamCredit`] grants.
-    #[handler::single]
+    #[handler::tell]
     fn on_response_chunk(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, chunk: HttpResponseChunk) {
         state.push_chunk(chunk.stream_id, chunk.body);
     }
@@ -168,7 +168,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — a streaming handler sends this once after its
     /// final [`HttpResponseChunk`] to close the stream.
-    #[handler::single]
+    #[handler::tell]
     fn on_response_stream_end(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, end: HttpResponseStreamEnd) {
         state.end_stream(end.stream_id);
     }
@@ -185,7 +185,7 @@ impl NativeActor for HttpDispatchShard {
     /// mails, to let the cap deliver more of the request body.
     ///
     /// [`HttpStreamCredit`]: crate::kinds::HttpStreamCredit
-    #[handler::single]
+    #[handler::tell]
     fn on_request_credit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, credit: HttpRequestCredit) {
         state.replenish_reader_credit(credit.stream_id, credit.credit);
     }
@@ -196,7 +196,7 @@ impl NativeActor for HttpDispatchShard {
     ///
     /// # Agent
     /// Internal — fires from the settlement registry, not external mail.
-    #[handler::single]
+    #[handler::event]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
         let Some(pending) = state.in_flight.remove(&correlation) else {
@@ -216,7 +216,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — an upgraded connection's handler sends this to
     /// speak to the peer; the cap frames it and drains it under the credit
     /// window.
-    #[handler::single]
+    #[handler::tell]
     fn on_websocket_message(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, msg: WebSocketMessage) {
         if let Some(conn_id) = state.streams.get(&msg.stream_id).map(|s| s.conn_id) {
             state.send_ws_message(conn_id, msg.binary, &msg.data);
@@ -237,7 +237,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — an upgraded connection's handler sends this to close
     /// the socket.
-    #[handler::single]
+    #[handler::tell]
     fn on_websocket_close(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, close: WebSocketClose) {
         if let Some(conn_id) = state.streams.get(&close.stream_id).map(|s| s.conn_id) {
             state.send_ws_close(conn_id, close.code, &close.reason);
@@ -264,7 +264,7 @@ impl NativeActor for HttpDispatchShard {
     /// ([`Self::on_response_chunk`] / [`Self::on_response_stream_end`] /
     /// [`Self::on_websocket_message`]), keyed by their explicit `stream_id`
     /// payload — a second correlation regime living beside this one.
-    #[handler::single]
+    #[handler::response]
     fn on_router_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, reply: HttpRouterResult) {
         let Some(RequestId(correlation)) = ctx.in_reply_to() else {
             return;
@@ -289,7 +289,7 @@ impl NativeActor for HttpDispatchShard {
     /// # Agent
     /// Not user-callable — a request-streaming handler replies this to the
     /// terminator once it has drained the body.
-    #[handler::single]
+    #[handler::response]
     fn on_stream_end_reply(state: &mut Self::State, ctx: &mut NativeCtx<'_>, response: HttpServerResponse) {
         let Some(RequestId(correlation)) = ctx.in_reply_to() else {
             return;

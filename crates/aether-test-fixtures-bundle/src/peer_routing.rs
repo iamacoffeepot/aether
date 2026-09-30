@@ -20,7 +20,7 @@ impl WasmActor for ParentPeerCaller {
         Ok(ParentPeerCaller)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         ctx.send::<ParentPeerTarget>(&Bump);
     }
@@ -36,7 +36,7 @@ impl WasmActor for ParentPeerTarget {
         Ok(ParentPeerTarget)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
@@ -55,7 +55,7 @@ impl WasmActor for ParentPeerStandIn {
         Ok(ParentPeerStandIn)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }

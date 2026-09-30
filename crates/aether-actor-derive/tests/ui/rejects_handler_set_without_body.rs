@@ -22,7 +22,7 @@ struct Ping {
 
 #[handler_set]
 trait Shared {
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping);
 }
 

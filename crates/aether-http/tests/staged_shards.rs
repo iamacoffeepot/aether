@@ -32,7 +32,7 @@ impl NativeActor for ColdHttpHandler {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_owned(), method: None, shared: false });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(
         _state: &mut ColdHttpHandlerState,
         _ctx: &mut NativeCtx<'_>,
@@ -45,7 +45,7 @@ impl NativeActor for ColdHttpHandler {
         })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_registered(_state: &mut ColdHttpHandlerState, _ctx: &mut NativeCtx<'_>, _result: RegisterRouteResult) {}
 }
 

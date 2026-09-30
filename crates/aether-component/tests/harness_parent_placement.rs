@@ -147,7 +147,7 @@ impl NativeActor for Launcher {
         Ok(Self { staged: None })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, _hatch: HatchHeld) {
         let receipt =
             ctx.spawn_child::<HeldParent>(Subname::Named("held"), (), ()).stage().expect("the held parent stages");
@@ -184,7 +184,7 @@ impl NativeActor for HeldParent {
     }
 
     /// Never sent here: an actor declares at least one handler.
-    #[handler::single]
+    #[handler::tell]
     fn on_hatch(&mut self, _ctx: &mut NativeCtx<'_>, _hatch: HatchHeld) {
         self.hatches += 1;
     }

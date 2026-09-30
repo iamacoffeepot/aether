@@ -150,7 +150,7 @@ handler, since its events could never be handled (ADR-0231 §4).
 Then handle the event as ordinary mail and inspect its source id:
 
 ```rust
-#[handler::single]
+#[handler::event]
 fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
     if key.window == self.editor_window {
         self.handle_editor_key(key.code);

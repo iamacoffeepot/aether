@@ -192,7 +192,7 @@ impl WasmActor for RadioGroupWidget {
     /// Replace the options / theme in place, re-clamping the selection into
     /// the new vector. `initial` seeds the group only at `init`, so a
     /// re-sent config does not move the reader's choice; [`SetSelection`] does.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: RadioConfig) {
         self.options = config.options;
         self.selected = clamp_selection(self.selected, self.options.len());
@@ -200,7 +200,7 @@ impl WasmActor for RadioGroupWidget {
         self.apply_control_state(ctx, config.state);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -208,7 +208,7 @@ impl WasmActor for RadioGroupWidget {
     /// Push the chosen row from the host, clamped into the options. Silent —
     /// no [`RadioSelected`]. A `None` index is ignored: a radio group always
     /// has a selection.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
         if let Some(index) = set.index {
             self.selected = clamp_option_index(index, self.options.len());
@@ -216,7 +216,7 @@ impl WasmActor for RadioGroupWidget {
     }
 
     /// A left click selects the row under the cursor.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.can_mutate() {
             return;
@@ -230,13 +230,13 @@ impl WasmActor for RadioGroupWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.pressed, false, release);
     }
 
     /// Up / Down move the selection while focused (clamped at the ends).
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let direction = match key.code {
             KEY_UP => RadioDirection::Previous,
@@ -253,7 +253,7 @@ impl WasmActor for RadioGroupWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }

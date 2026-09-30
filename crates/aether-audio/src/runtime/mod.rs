@@ -197,7 +197,7 @@ impl NativeActor for AudioCapability {
     /// Fire-and-forget. The synth keys voices on
     /// `(sender, instrument_id, pitch)`; sending two `NoteOn`s with
     /// the same triple is a no-op.
-    #[handler::single]
+    #[handler::tell]
     fn on_note_on(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
         state.handle_note_on(ctx, mail);
     }
@@ -206,7 +206,7 @@ impl NativeActor for AudioCapability {
     ///
     /// # Agent
     /// Fire-and-forget.
-    #[handler::single]
+    #[handler::tell]
     fn on_note_off(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
         state.handle_note_off(ctx, mail);
     }
@@ -216,7 +216,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
-    #[handler::single]
+    #[handler::request]
     fn on_set_master_gain(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -230,7 +230,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Reply: `SetReverbSendResult`. `Ok { applied_send }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
-    #[handler::single]
+    #[handler::request]
     fn on_set_reverb_send(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -240,7 +240,7 @@ impl NativeActor for AudioCapability {
     }
 
     /// Set a per-sender level trim (ADR-0127).
-    #[handler::single]
+    #[handler::request]
     fn on_set_sender_gain(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -250,19 +250,19 @@ impl NativeActor for AudioCapability {
     }
 
     /// Schedule a batch of timed note events (ADR-0104).
-    #[handler::single]
+    #[handler::request]
     fn on_schedule(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Schedule) -> ScheduleResult {
         state.handle_schedule(ctx, mail)
     }
 
     /// Fetch, decode, and play an audio asset in the track lane.
-    #[handler::single]
+    #[handler::request]
     fn on_play_track(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: PlayTrack) -> Pending<PlayTrackResult> {
         state.handle_play_track(ctx, mail)
     }
 
     /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
-    #[handler::single]
+    #[handler::response]
     fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ReadResult) {
         state.handle_read_result(ctx, mail);
     }
@@ -274,13 +274,13 @@ impl NativeActor for AudioCapability {
     }
 
     /// Fade out and retire a track started by `play_track`.
-    #[handler::single]
+    #[handler::tell]
     fn on_stop_track(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
         state.handle_stop_track(ctx, mail);
     }
 
     /// Load a sampled instrument bank from an `.sfz` file (ADR-0103 §4/§5).
-    #[handler::single]
+    #[handler::request]
     fn on_load_instrument(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

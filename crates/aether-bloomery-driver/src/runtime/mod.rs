@@ -187,7 +187,7 @@ impl NativeActor for BundleDriver {
 
     /// The held ticket is stored before the commands run, because the core
     /// may answer within this same dispatch (an already recorded outcome).
-    #[handler::single]
+    #[handler::request]
     fn on_call(state: &mut Self::State, ctx: &mut NativeCtx<'_>, call: Call) -> Pending<CallOutcome> {
         let (pending, held) = ctx.hold::<CallOutcome>();
         let (caller, commands) = state.core.call(call);
@@ -196,7 +196,7 @@ impl NativeActor for BundleDriver {
         pending
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_await_processed(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -209,20 +209,24 @@ impl NativeActor for BundleDriver {
         pending
     }
 
-    #[handler::single]
-    fn on_read_events(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadEventsResult) {
-        let Some(ticket) = ctx.take_context::<EventsTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_read_events(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: ReadEventsResult,
+        ticket: EventsTicket,
+    ) {
         let commands = state.core.on_events(ticket, result);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_read_artifact(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadArtifactResult) {
-        let Some(ticket) = ctx.take_context::<ArtifactTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_read_artifact(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: ReadArtifactResult,
+        ticket: ArtifactTicket,
+    ) {
         let commands = state.core.on_artifact(ticket, result);
         state.perform(ctx, commands);
     }
@@ -230,7 +234,7 @@ impl NativeActor for BundleDriver {
     /// Serves a bundle root's fetch-on-miss: the core answers it from its
     /// artifact cache or one shared journal read per digest, and the held
     /// reply carries the answer back to the root with the root's correlation.
-    #[handler::single]
+    #[handler::request]
     fn on_fetch_artifact(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -246,7 +250,7 @@ impl NativeActor for BundleDriver {
     /// Serves a bundle root's relayed program API call: the core sends it to
     /// the API's provider or refuses it, and the held reply carries the
     /// answer back to the root with the root's correlation.
-    #[handler::single]
+    #[handler::request]
     fn on_api_call(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: ApiCall) -> Pending<ApiCallResult> {
         let (pending, held) = ctx.hold::<ApiCallResult>();
         let (caller, commands) = state.core.call_api(request);
@@ -255,42 +259,41 @@ impl NativeActor for BundleDriver {
         pending
     }
 
-    #[handler::single]
-    fn on_fetch_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: FetchResult) {
-        let Some(ticket) = ctx.take_context::<ApiTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_fetch_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: FetchResult, ticket: ApiTicket) {
         let commands = state.core.on_api_reply(ticket, ApiReply::Fetch(result));
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_workspace_run_result(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         result: aether_bloomery_workspace::RunResult,
+        ticket: ApiTicket,
     ) {
-        let Some(ticket) = ctx.take_context::<ApiTicket>() else {
-            return;
-        };
         let commands = state.core.on_api_reply(ticket, ApiReply::Workspace(result));
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_read_closure(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: ReadClosureResult) {
-        let Some(ticket) = ctx.take_context::<ClosureTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_read_closure(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: ReadClosureResult,
+        ticket: ClosureTicket,
+    ) {
         let commands = state.core.on_closure(ticket, result);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_append_records(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: AppendRecordsResult) {
-        let Some(ticket) = ctx.take_context::<AppendTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_append_records(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: AppendRecordsResult,
+        ticket: AppendTicket,
+    ) {
         let commands = state.core.on_appended(ticket, result);
         state.perform(ctx, commands);
     }
@@ -298,11 +301,8 @@ impl NativeActor for BundleDriver {
     /// The bundle's code is published: spawn its root at the bound bundle
     /// namespace under the unit key, with the same ticket, or finish the
     /// load failed when the publish was refused or bound no bundle root.
-    #[handler::single]
-    fn on_publish_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: PublishResult) {
-        let Some(ticket) = ctx.take_context::<LoadTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_publish_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: PublishResult, ticket: LoadTicket) {
         let namespace = match result {
             PublishResult::Ok { types } => types
                 .into_iter()
@@ -328,11 +328,8 @@ impl NativeActor for BundleDriver {
     /// the engine already held live under the unit key is `Adopted`
     /// (ADR-0226 D9). A root that does not publish a declared role fails the
     /// load, so the core never addresses it in that role.
-    #[handler::single]
-    fn on_spawn_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
-        let Some(ticket) = ctx.take_context::<LoadTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_spawn_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: SpawnResult, ticket: LoadTicket) {
         let load = state.loading.remove(&ticket);
         let outcome = match (result, ctx.sender(), load) {
             (SpawnResult::Err { error }, ..) => LoadOutcome::Failed { error },
@@ -353,47 +350,37 @@ impl NativeActor for BundleDriver {
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_invoked(state: &mut Self::State, ctx: &mut NativeCtx<'_>, invoked: Invoked) {
-        let Some(ticket) = ctx.take_context::<InvokeTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_invoked(state: &mut Self::State, ctx: &mut NativeCtx<'_>, invoked: Invoked, ticket: InvokeTicket) {
         let commands = state.core.on_invoked(ticket, invoked);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_watch_head_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: WatchHeadResult) {
-        let Some(ticket) = ctx.take_context::<WatchTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_watch_head_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: WatchHeadResult,
+        ticket: WatchTicket,
+    ) {
         let commands = state.core.on_watched(ticket, result);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_warmed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, warmed: Warmed) {
-        let Some(ticket) = ctx.take_context::<WarmTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_warmed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, warmed: Warmed, ticket: WarmTicket) {
         let commands = state.core.on_warmed(ticket, warmed);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_evaluated(state: &mut Self::State, ctx: &mut NativeCtx<'_>, evaluated: Evaluated) {
-        let Some(ticket) = ctx.take_context::<EvaluateTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_evaluated(state: &mut Self::State, ctx: &mut NativeCtx<'_>, evaluated: Evaluated, ticket: EvaluateTicket) {
         let commands = state.core.on_evaluated(ticket, evaluated);
         state.perform(ctx, commands);
     }
 
-    #[handler::single]
-    fn on_status(state: &mut Self::State, ctx: &mut NativeCtx<'_>, status: Status) {
-        let Some(ticket) = ctx.take_context::<StatusTicket>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_status(state: &mut Self::State, ctx: &mut NativeCtx<'_>, status: Status, ticket: StatusTicket) {
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
     }

@@ -38,7 +38,7 @@ impl WasmActor for PaintProbe {
     /// # Agent
     /// Not sent manually; the substrate's tick fanout fires it once per
     /// advance for every lifecycle-subscribed mailbox.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, _: Tick) {
         if self.render.visible != 0 {
             let r = f32::from(self.render.r) / 255.0;
@@ -56,7 +56,7 @@ impl WasmActor for PaintProbe {
     /// Send via `send_mail` with `kind_name = "aether.test_fixture.set_render"`
     /// and params `{ r, g, b, visible }`. Used by `capture_frame`
     /// scenarios to flip the fixture's render output between frames.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
         self.render = mail;
     }

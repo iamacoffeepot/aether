@@ -129,7 +129,7 @@ impl NativeActor for WindowCapability {
         Ok(WindowCapabilityState { backend })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListWindows) -> ListWindowsResult {
         let windows = match &state.backend {
             #[cfg(feature = "desktop")]
@@ -140,7 +140,7 @@ impl NativeActor for WindowCapability {
         ListWindowsResult::Ok { windows }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: CreateWindow) -> Pending<CreateWindowResult> {
         let (pending, held) = ctx.hold::<CreateWindowResult>();
         match &mut state.backend {
@@ -176,7 +176,7 @@ impl NativeActor for WindowCapability {
     /// window that child is. The answer rides the child's held reply: at once
     /// for every command the backend applies on this turn, later for a
     /// desktop close, which is answered once its native window is detached.
-    #[handler::single]
+    #[handler::request]
     fn on_apply_command(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -199,7 +199,7 @@ impl NativeActor for WindowCapability {
     /// (ADR-0231 §3); it is proven live here, at receipt, and the table keeps
     /// the `ProtocolRef<Subscriber<K>>` that proof returns. A path whose
     /// actor has gone answers `Err` naming it.
-    #[handler::single]
+    #[handler::request]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
         match state.subscribers_mut().subscribe_path(ctx, mail.selector, &mail.subscription) {
             Ok(()) => SubscribeWindowResult::Ok,
@@ -208,7 +208,7 @@ impl NativeActor for WindowCapability {
     }
 
     /// Subscribe the calling actor to one kind for one selector.
-    #[handler::single]
+    #[handler::request]
     fn on_subscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -223,7 +223,7 @@ impl NativeActor for WindowCapability {
     /// Drop an explicitly named actor's subscription to one kind for one
     /// selector. The path is proven live at receipt and its key removed; a
     /// path whose actor has gone answers `Err` naming it.
-    #[handler::single]
+    #[handler::request]
     fn on_unsubscribe(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -236,7 +236,7 @@ impl NativeActor for WindowCapability {
     }
 
     /// Drop the calling actor's subscription to one kind for one selector.
-    #[handler::single]
+    #[handler::request]
     fn on_unsubscribe_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -313,7 +313,7 @@ impl NativeActor for WindowCapability {
     /// publish, or a payload that does not decode as the kind, warns and
     /// sends nothing.
     #[cfg(feature = "synthetic")]
-    #[handler::single]
+    #[handler::tell]
     fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: crate::InjectWindowEvent) {
         if let Err(error) = state.subscribers().publish_encoded(ctx, &mail.window, mail.kind, &mail.payload) {
             tracing::warn!(target: "aether_window", window = %mail.window, %error, "injected window event not published");
@@ -322,7 +322,7 @@ impl NativeActor for WindowCapability {
 
     /// A monitored actor departed: a window child, whose window the backend
     /// retires, or a subscriber, whose every row is dropped.
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
         let Some(departed) = ctx.sender() else {
             return;

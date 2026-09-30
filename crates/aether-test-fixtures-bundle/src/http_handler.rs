@@ -69,7 +69,7 @@ impl WasmActor for HttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Response(HttpServerResponse {
             status: 200,
@@ -195,7 +195,7 @@ impl WasmActor for StreamingHttpHandler {
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
     /// every inbound request; this actor binds the `/` catch-all in `wire`.
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
@@ -207,7 +207,7 @@ impl WasmActor for StreamingHttpHandler {
     /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
     /// window slot; the handler emits at most that many `HttpResponseChunk`s
     /// in response.
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         self.progress.spend_credit(ctx, &credit);
     }
@@ -255,7 +255,7 @@ impl WasmActor for WebSocketHandler {
     /// `HttpServerRequest` for a websocket upgrade; replying
     /// `HttpRouterResult::WebSocket` completes the handshake,
     /// `HttpRouterResult::Response` declines it.
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::WebSocket(WebSocketAccept { subprotocol: None, headers: Vec::new() })
     }
@@ -267,7 +267,7 @@ impl WasmActor for WebSocketHandler {
     /// # Agent
     /// Not sent manually — the cap dispatches one per complete inbound
     /// websocket message on the upgraded connection.
-    #[handler::single]
+    #[handler::tell]
     fn on_message(&mut self, ctx: &mut WasmCtx<'_>, msg: WebSocketMessage) {
         // The connection handle was captured on this connection's
         // accept-time credit grant (ADR-0132/ADR-0133), which always
@@ -296,7 +296,7 @@ impl WasmActor for WebSocketHandler {
     ///
     /// # Agent
     /// Not sent manually — the cap grants credit as writer slots free.
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         // ADR-0133: capture the connection handle from the accept-time
         // credit grant — its counterparty is whoever owns the socket, cast
@@ -322,7 +322,7 @@ impl WasmActor for WebSocketHandler {
     ///
     /// # Agent
     /// Not sent manually — the cap reports a peer close here.
-    #[handler::single]
+    #[handler::tell]
     fn on_close(&mut self, _ctx: &mut WasmCtx<'_>, close: WebSocketClose) {
         self.connections.remove(&close.stream_id);
     }
@@ -430,7 +430,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// Not sent manually — the `aether.http.server` cap dispatches it on a
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
@@ -442,7 +442,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// # Agent
     /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
     /// window slot.
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         self.progress.spend_credit(ctx, &credit);
     }

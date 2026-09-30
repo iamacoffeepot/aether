@@ -8,7 +8,7 @@ struct RuntimeState;
 impl NativeActor for RuntimeState {
     const NAMESPACE: &'static str = "test.struct_hosted_cap";
 
-    #[handler::single]
+    #[handler::request]
     fn on_ping(state: &mut Self::State, ctx: &mut Ctx, mail: Ping) -> Pong {
         Pong { seq: mail.seq }
     }

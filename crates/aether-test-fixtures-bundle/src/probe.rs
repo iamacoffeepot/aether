@@ -90,7 +90,7 @@ impl WasmActor for Probe {
     /// per advance for every lifecycle-subscribed mailbox. Watch
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: self.tick_count });
@@ -104,7 +104,7 @@ impl WasmActor for Probe {
     /// Not sent manually; the window actor's fan-out fires it for
     /// every matching subscriber when a key is pressed.
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
         ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code });
     }
@@ -115,7 +115,7 @@ impl WasmActor for Probe {
     /// # Agent
     /// Send `aether.test_fixtures.unsubscribe_keys` to the probe; later key
     /// presses stop producing `key_observed` from it.
-    #[handler::single]
+    #[handler::tell]
     fn on_unsubscribe_keys(&mut self, ctx: &mut WasmCtx<'_, Self>, _: UnsubscribeKeys) {
         ctx.unsubscribe::<WindowCapability, Key>();
     }
@@ -128,7 +128,7 @@ impl WasmActor for Probe {
     /// Not sent manually; the window actor's fan-out fires it for
     /// every `TextInput`-subscribed mailbox when text is committed.
     /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         ctx.send::<SubstrateHarnessObserver>(&TextInputObserved { text: input.text });
     }
@@ -153,7 +153,7 @@ impl WasmActor for KeyProbe {
 
     /// Broadcasts a `key_observed` for each `Key` dispatch, as [`Probe`]
     /// does.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
         ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code });
     }
@@ -181,7 +181,7 @@ impl WasmActor for ProbeWithConfig {
     /// Reply with a `ConfigEcho` describing the cached config. Lets
     /// the integration test observe what the typed `init` actually
     /// received without scraping logs or readback.
-    #[handler::single]
+    #[handler::request]
     fn on_config_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: ConfigQuery) -> ConfigEcho {
         ConfigEcho { seed: self.seed, label: self.label.clone() }
     }

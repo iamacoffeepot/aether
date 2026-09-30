@@ -59,7 +59,7 @@ impl WasmActor for CarryRequester {
         self.unanswered = count;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunCarriedRequest) {
         let _ = ctx.send_with_context::<ReplyHolder>(
             &CarriedRequest { tag: run.tag },
@@ -68,18 +68,15 @@ impl WasmActor for CarryRequester {
         self.unanswered += 1;
     }
 
-    #[handler::single]
-    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult) {
-        if ctx
-            .take_context::<CarriedContext>()
-            .is_some_and(|context| context.tag == reply.tag && context.generation == GENERATION)
-        {
+    #[handler::response]
+    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult, context: Option<CarriedContext>) {
+        if context.is_some_and(|context| context.tag == reply.tag && context.generation == GENERATION) {
             self.unanswered = self.unanswered.saturating_sub(1);
             ctx.send::<SubstrateHarnessObserver>(&CarriedReplyMatched);
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.unanswered }
     }
@@ -100,7 +97,7 @@ impl WasmActor for HeldRelay {
         Ok(HeldRelay { answered: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         held.answer(ctx, &HeldRequestResult { tag: request.tag });
@@ -108,15 +105,13 @@ impl WasmActor for HeldRelay {
         pending
     }
 
-    #[handler::single]
-    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult) {
-        if let Some(context) = ctx.take_context::<HeldRelayContext>() {
-            self.answered += 1;
-            context.held.answer(ctx, &result);
-        }
+    #[handler::response]
+    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult, context: HeldRelayContext) {
+        self.answered += 1;
+        context.held.answer(ctx, &result);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.answered }
     }
@@ -136,13 +131,13 @@ impl WasmActor for HeldRequester {
         Ok(HeldRequester { sent: Vec::new(), matched: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunHeldRequest) {
         ctx.send_detached::<HeldRelay>(&HeldRequest { tag: run.tag });
         self.sent.push(run.tag);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: HeldRequestResult) {
         if let Some(index) = self.sent.iter().position(|tag| *tag == reply.tag) {
             self.sent.swap_remove(index);
@@ -151,7 +146,7 @@ impl WasmActor for HeldRequester {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.matched }
     }

@@ -1881,13 +1881,13 @@ mod tests {
             Ok(Self)
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_tick(&mut self, ctx: &mut NativeCtx<'_>, tick: Tick) {
             let _ = self;
             ctx.send::<aether_test_fixtures_kinds::SubstrateHarnessObserver>(&tick);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_shutdown(&mut self, ctx: &mut NativeCtx<'_>, shutdown: aether_kinds::Shutdown) {
             let _ = self;
             ctx.send::<aether_test_fixtures_kinds::SubstrateHarnessObserver>(&shutdown);

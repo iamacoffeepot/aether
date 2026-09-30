@@ -37,7 +37,7 @@ macro_rules! shared_routed_handler {
                 });)+
             }
 
-            #[handler::single]
+            #[handler::request]
             fn on_request(
                 _state: &mut Self::State,
                 _ctx: &mut NativeCtx<'_>,

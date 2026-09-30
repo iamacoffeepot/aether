@@ -1346,7 +1346,7 @@ mod tests {
             Ok(Self { gate: Some(gate), asked: false })
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) -> Pending<GatedAnswer> {
             let gate = self.gate.take().expect("one ask per probe");
             self.asked = true;
@@ -1429,7 +1429,7 @@ mod tests {
             self.buffered = Some((ctx.acquire_settlement_hold(), ctx.reply_target()));
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_drain(&mut self, ctx: &mut NativeCtx<'_>, _drain: Drain) {
             let (hold, reply_to) = self.buffered.take().expect("a drain follows its accept");
             let gate = self.gate.take().expect("one drain per probe");

@@ -41,12 +41,12 @@ impl WasmActor for CarryRequester {
         Ok(CarryRequester)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, _ctx: &mut WasmCtx<'_>, _run: RunCarriedRequest) {}
 
-    #[handler::single]
-    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult) {
-        if ctx.take_context::<CarriedContext>().is_some_and(|context| context.tag == reply.tag) {
+    #[handler::response]
+    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult, context: Option<CarriedContext>) {
+        if context.is_some_and(|context| context.tag == reply.tag) {
             ctx.send::<SubstrateHarnessObserver>(&CarriedReplyMatched);
         }
     }
@@ -72,18 +72,16 @@ impl WasmActor for ReshapedHeldRelay {
         Ok(ReshapedHeldRelay)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         held.answer(ctx, &HeldRequestResult { tag: request.tag });
         pending
     }
 
-    #[handler::single]
-    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult) {
-        if let Some(context) = ctx.take_context::<HeldRelayContext>() {
-            context.held.answer(ctx, &result);
-        }
+    #[handler::response]
+    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult, context: HeldRelayContext) {
+        context.held.answer(ctx, &result);
     }
 }
 

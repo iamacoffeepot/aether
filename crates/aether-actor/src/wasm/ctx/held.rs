@@ -1,5 +1,5 @@
 //! A wasm guest's typed deferred reply (ADR-0243 §6): the [`Pending`]
-//! receipt a `#[handler::single]` returns, and the move-only [`Held`] ticket
+//! receipt a `#[handler::request]` returns, and the move-only [`Held`] ticket
 //! that answers it later.
 //!
 //! [`WasmCtx::hold`] mints the pair. The receipt goes back to the `#[actor]`

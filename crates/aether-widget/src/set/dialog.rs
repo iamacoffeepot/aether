@@ -297,7 +297,7 @@ impl WasmActor for DialogWidget {
     }
 
     /// Rename the dialog or change its floor in place.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: DialogConfig) {
         self.title = config.title;
         self.min_width_pixels = config.min_width_pixels;
@@ -312,7 +312,7 @@ impl WasmActor for DialogWidget {
 
     /// Update external availability — the lane a host raises and drops the
     /// plate through.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -321,7 +321,7 @@ impl WasmActor for DialogWidget {
 
     /// Install a font-metrics reply; the next `Collect` measures the title
     /// against real advances, which can raise the plate's own floor.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -333,7 +333,7 @@ impl WasmActor for DialogWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;

@@ -37,12 +37,12 @@ impl WasmActor for EditorRegionProbe {
         ctx.send::<EditorShell>(&RegionAttach { region: self.region_name.clone() });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, MouseButton { button, x, y, .. }: MouseButton) {
         self.inputs.push(ObservedEditorInput::PointerPress { button, x_pixels: x, y_pixels: y });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(
         &mut self,
         _ctx: &mut WasmCtx<'_>,
@@ -51,12 +51,12 @@ impl WasmActor for EditorRegionProbe {
         self.inputs.push(ObservedEditorInput::PointerRelease { button, x_pixels: x, y_pixels: y });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, MouseMove { x, y, .. }: MouseMove) {
         self.inputs.push(ObservedEditorInput::PointerMotion { x_pixels: x, y_pixels: y });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, MouseWheel { delta_x, delta_y, x, y, .. }: MouseWheel) {
         self.inputs.push(ObservedEditorInput::Wheel {
             delta_x_pixels: delta_x,
@@ -66,22 +66,22 @@ impl WasmActor for EditorRegionProbe {
         });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, Key { code, .. }: Key) {
         self.inputs.push(ObservedEditorInput::KeyPress { code });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, KeyRelease { code, .. }: KeyRelease) {
         self.inputs.push(ObservedEditorInput::KeyRelease { code });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
         self.inputs.push(ObservedEditorInput::TextInput { text: input.text });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         self.inputs.push(ObservedEditorInput::ImePreedit {
             text: preedit.text,
@@ -90,12 +90,12 @@ impl WasmActor for EditorRegionProbe {
         });
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, Modifiers { shift, ctrl, alt, meta, .. }: Modifiers) {
         self.inputs.push(ObservedEditorInput::Modifiers { shift, ctrl, alt, meta });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_drain_editor_inputs(&mut self, _ctx: &mut WasmCtx<'_>, _query: DrainEditorInputs) -> DrainEditorInputsResult {
         DrainEditorInputsResult { region_name: self.region_name.clone(), inputs: mem::take(&mut self.inputs) }
     }

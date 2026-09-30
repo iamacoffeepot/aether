@@ -38,7 +38,7 @@ impl WasmActor for Asked {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ask(&mut self, _ctx: &mut WasmCtx<'_>, mail: Ask) -> Answered {
         Answered { seq: mail.seq }
     }

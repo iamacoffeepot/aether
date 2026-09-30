@@ -67,7 +67,7 @@ impl aether_substrate::actor::native::NativeActor for CfgNativeCap {
         Ok(CfgNativeCapState { seen: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_always(
         state: &mut Self::State,
         _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
@@ -76,7 +76,7 @@ impl aether_substrate::actor::native::NativeActor for CfgNativeCap {
         state.seen += 1;
     }
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(target_family = "wasm")]
     fn on_gated(
         state: &mut Self::State,

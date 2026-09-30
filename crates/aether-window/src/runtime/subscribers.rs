@@ -392,32 +392,32 @@ pub mod fixture {
             Ok(Self { key, report })
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_key(&mut self, ctx: &mut NativeCtx<'_>, mail: Key) {
             self.record(ctx, &mail);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseMove) {
             self.record(ctx, &mail);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_mouse_button(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseButton) {
             self.record(ctx, &mail);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_mouse_wheel(&mut self, ctx: &mut NativeCtx<'_>, mail: MouseWheel) {
             self.record(ctx, &mail);
         }
 
-        #[handler::single]
+        #[handler::event]
         fn on_window_size(&mut self, ctx: &mut NativeCtx<'_>, mail: WindowSize) {
             self.record(ctx, &mail);
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_leave(&mut self, ctx: &mut NativeCtx<'_>, _mail: Leave) {
             let _ = self;
             ctx.shutdown();

@@ -54,12 +54,12 @@ impl WasmActor for FsDemux {
         Ok(Self::default())
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_, Self>, msg: RunFsDemux) {
         self.run(ctx, msg);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run_context(&mut self, ctx: &mut WasmCtx<'_, Self>, msg: RunFsContextDemux) {
         *self = Self::default();
 
@@ -68,7 +68,7 @@ impl WasmActor for FsDemux {
         let _ = ctx.send_with_context::<FsCapability>(&read, FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, _reply: ReadResult) {
         self.read_result(ctx);
     }
@@ -202,12 +202,12 @@ impl WasmActor for InlineFsDemuxChild {
         Ok(Self { demux: FsDemux::default() })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_, Self>, msg: RunFsDemux) {
         self.demux.run(ctx, msg);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, _reply: ReadResult) {
         self.demux.read_result(ctx);
     }

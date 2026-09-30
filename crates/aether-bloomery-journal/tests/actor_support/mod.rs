@@ -31,7 +31,7 @@ impl NativeActor for TestAnchor {
         Ok(Self { pings: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_anchor_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: AnchorPing) {
         self.pings += 1;
     }
@@ -133,7 +133,7 @@ impl NativeActor for BlobProbe {
         Ok(Self { arrivals })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_read_artifact_result(&mut self, ctx: &mut NativeCtx<'_>, result: ReadArtifactResult) {
         let probed = match result {
             ReadArtifactResult::Found { artifact } => Probed::Artifact(Member::read(&artifact)),
@@ -142,7 +142,7 @@ impl NativeActor for BlobProbe {
         self.forward(ctx, probed);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_read_closure_result(&mut self, ctx: &mut NativeCtx<'_>, result: ReadClosureResult) {
         let probed = match result {
             ReadClosureResult::Found { root, artifacts } => {
