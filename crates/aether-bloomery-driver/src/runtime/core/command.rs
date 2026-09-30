@@ -2,17 +2,17 @@
 
 use aether_bloomery_kinds::{
     ApiCallResult, AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult,
-    ReadClosure, ReadEvents, Warm, WatchHead,
+    ReadArtifacts, ReadClosure, ReadEvents, Warm, WatchHead,
 };
 
 use super::ticket::{
-    ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket,
-    LoadTicket, StatusTicket, WarmTicket, WatchTicket,
+    ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket,
+    InvokeTicket, LoadTicket, StatusTicket, WarmTicket, WatchTicket,
 };
 
 /// One effect the shell performs on the core's behalf.
 ///
-/// `ReadEvents`, `ReadArtifact`, `ReadClosure`, `Append`, `Load`,
+/// `ReadEvents`, `ReadArtifact`, `ReadArtifacts`, `ReadClosure`, `Append`, `Load`,
 /// `Invoke`, `WatchHead`, `Warm`, `Evaluate`, `QueryStatus`, `Fetch`, and
 /// `RunWorkspace` each carry the ticket the shell hands back with the reply.
 /// `Answer` delivers a [`Call`'s](aether_bloomery_kinds::Call) one outcome
@@ -40,6 +40,14 @@ pub enum Command {
         ticket: ArtifactTicket,
         /// The artifact request.
         request: ReadArtifact,
+    },
+    /// Read the artifacts a routing page's entries cite, answered as a
+    /// prefix under the core's byte budget.
+    ReadArtifacts {
+        /// Ticket the matching [`ReadArtifactsResult`](aether_bloomery_kinds::ReadArtifactsResult) arrives under.
+        ticket: ArtifactsTicket,
+        /// The batched artifact request.
+        request: ReadArtifacts,
     },
     /// Read one input's transitive closure under the core's byte budget.
     ReadClosure {

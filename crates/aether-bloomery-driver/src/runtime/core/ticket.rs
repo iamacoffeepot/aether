@@ -37,6 +37,7 @@ macro_rules! tickets {
 tickets! {
     EventsTicket => "aether.bloomery.driver.ticket.events",
     ArtifactTicket => "aether.bloomery.driver.ticket.artifact",
+    ArtifactsTicket => "aether.bloomery.driver.ticket.artifacts",
     ClosureTicket => "aether.bloomery.driver.ticket.closure",
     AppendTicket => "aether.bloomery.driver.ticket.append",
     LoadTicket => "aether.bloomery.driver.ticket.load",

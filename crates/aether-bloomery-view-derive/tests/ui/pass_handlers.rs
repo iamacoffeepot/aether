@@ -1,6 +1,7 @@
 use core::convert::Infallible;
 
-use aether_bloomery_view::{View, ViewCursor, view};
+use aether_bloomery_kinds::Ref;
+use aether_bloomery_view::{Cited, CitedError, View, ViewCursor, view};
 
 #[derive(Clone, aether_data::Storage)]
 #[kind(name = "test.view.pass.event")]
@@ -25,7 +26,36 @@ impl View for Aggregate {
     }
 }
 
+#[derive(Clone, aether_data::Storage)]
+#[kind(name = "test.view.pass.cited_event")]
+struct CitedEvent {
+    cites: Ref<Event>,
+}
+
+#[derive(Default)]
+struct Reads {
+    cursor: ViewCursor,
+    seen: u64,
+}
+
+#[view(cursor = cursor)]
+impl View for Reads {
+    #[fold]
+    fn read(&mut self, event: CitedEvent, cited: &Cited) -> Result<(), CitedError> {
+        self.seen += cited.get(event.cites)?.0;
+        Ok(())
+    }
+
+    #[fold]
+    fn count(&mut self, event: Event) {
+        self.seen += event.0;
+    }
+}
+
 fn main() {
     let aggregate = Aggregate::empty();
     let _ = aggregate.cursor();
+
+    let mut reads = Reads::empty();
+    let _ = reads.advance_cited(&[], &[]);
 }

@@ -23,6 +23,7 @@ fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> Jour
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(event)).expect("storage encode"),
+        cites: Vec::new(),
     }
 }
 
@@ -64,7 +65,7 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
     // Catches a driver intent encoded through a codec the root or driver can't decode; the rule not
     // selected in the bundle; `input` not taken from the trigger; the wrong program head or name reaching #6210.
     let moved = moved_to(1, "inputs", Ref::<SummarizeInput>::from_digest(Digest::from_bytes([7; 32])));
-    match evaluated(&mut harness, root, &Event::new(moved)) {
+    match evaluated(&mut harness, root, &Event::new(moved, Vec::new())) {
         Evaluated::Completed { seq: 1, intents } => {
             assert_eq!(intents.len(), 1);
             let intent = &intents[0];
@@ -86,7 +87,7 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
     // Catches a trigger that fires on every head move: under #6210 that would call the program on the
     // reactor-set move itself.
     let other_kind = moved_to(2, "inputs", Ref::<Tree>::from_digest(Digest::from_bytes([9; 32])));
-    match evaluated(&mut harness, root, &Event::new(other_kind)) {
+    match evaluated(&mut harness, root, &Event::new(other_kind, Vec::new())) {
         Evaluated::Completed { seq: 2, intents } => assert!(intents.is_empty()),
         other => panic!("{other:?}"),
     }
@@ -104,7 +105,7 @@ fn selected_text_returns_a_fresh_encoded_summarize_input() -> Result<(), Box<dyn
 
     let text = Ref::<Utf8Text>::from_digest(Digest::from_bytes([3; 32]));
     let moved = moved_to(1, "test.bloomery.summarize.text", text);
-    match evaluated(&mut harness, root, &Event::new(moved)) {
+    match evaluated(&mut harness, root, &Event::new(moved, Vec::new())) {
         Evaluated::Completed { seq: 1, intents } => {
             assert_eq!(intents.len(), 1);
             let call = CallProgram::decode_from_bytes(intents[0].bytes()).expect("CallProgram mail decodes");

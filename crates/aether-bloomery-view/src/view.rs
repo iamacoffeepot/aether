@@ -4,6 +4,8 @@ use core::error::Error;
 
 use aether_bloomery_kinds::{Entry, Seq};
 
+use crate::cited::Cited;
+
 /// A fold over a contiguous journal prefix.
 ///
 /// [`Self::empty`] starts at `Seq(0)`. A successful [`Self::advance`]
@@ -32,4 +34,18 @@ pub trait View: 'static {
     /// [`Self::Error`] when the batch cannot be folded. The owner must treat a
     /// panic or a failed batch as leaving this view unusable.
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error>;
+
+    /// Consume `entries` as [`Self::advance`] does, where `cited[i]` holds
+    /// the artifacts `entries[i]` cites directly. An entry past the end of
+    /// `cited` cites nothing.
+    ///
+    /// The default ignores the citations and calls [`Self::advance`]; a
+    /// `#[view]` whose folds read citations generates its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::advance`].
+    fn advance_cited(&mut self, entries: &[Entry], _cited: &[Cited]) -> Result<(), Self::Error> {
+        self.advance(entries)
+    }
 }

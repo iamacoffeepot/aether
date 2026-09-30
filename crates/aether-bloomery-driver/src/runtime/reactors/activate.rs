@@ -1,9 +1,9 @@
 //! Activation: loads, `Warm` paging, reuse, rejections, and owed catch-up (ADR-0226 decision 5).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use aether_bloomery_kinds::{
-    Activated, Detail, Digest, DriverRecord, Evaluated, Head, JournalEntry, OpaqueBytes, Seq, Warm, WarmEntries, Warmed,
+    Activated, Detail, Digest, DriverRecord, Evaluated, Head, OpaqueBytes, Seq, Warm, WarmEntries, Warmed,
 };
 use aether_bloomery_view::HeadActivation;
 
@@ -12,7 +12,8 @@ use crate::runtime::reactors::claim::Claim;
 use crate::runtime::reactors::instance::Health;
 use crate::runtime::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
 use crate::runtime::reactors::{
-    ActivationPhase, ActivationStep, ActivationWork, CatchUp, Delivery, PlanOrder, RoutingRead, SeqPhase, WarmBatch,
+    ActivationPhase, ActivationStep, ActivationWork, CatchUp, CitedEntry, Delivery, PlanOrder, RoutingRead, SeqPhase,
+    WarmBatch,
 };
 
 /// Next step of an owed catch-up.
@@ -22,7 +23,7 @@ enum CatchUpStep {
     /// Read the page after the scratch cursor.
     Read(u64),
     /// Deliver the owed entry.
-    Deliver(Digest, JournalEntry),
+    Deliver(Digest, CitedEntry),
 }
 
 impl ProgramCore {
@@ -181,19 +182,27 @@ impl ProgramCore {
     }
 
     /// Warm the current activation's root with one page, trimmed below its live-from.
-    pub(crate) fn continue_warm_page(&mut self, entries: Vec<JournalEntry>, out: &mut Vec<Command>) {
+    pub(crate) fn continue_warm_page(&mut self, entries: Vec<CitedEntry>, out: &mut Vec<Command>) {
         let Some((digest, live_from)) =
             self.routing.activation().map(|activation| (activation.bundle, activation.live_from))
         else {
             self.abort("warm page arrived with no activation".to_string(), out);
             return;
         };
-        self.send_warm(digest, entries.into_iter().filter(|entry| entry.seq < live_from).collect(), out);
+        self.send_warm(digest, entries.into_iter().filter(|cited| cited.entry.seq < live_from).collect(), out);
     }
 
-    /// Send one `Warm` batch of `entries` to `digest`'s ready root.
-    pub(crate) fn send_warm(&mut self, digest: Digest, entries: Vec<JournalEntry>, out: &mut Vec<Command>) {
-        let batch = match WarmEntries::new(entries) {
+    /// Send one `Warm` batch of `entries` to `digest`'s ready root, carrying
+    /// each artifact the batch cites once.
+    pub(crate) fn send_warm(&mut self, digest: Digest, entries: Vec<CitedEntry>, out: &mut Vec<Command>) {
+        let mut seen = BTreeSet::new();
+        let mut artifacts = Vec::new();
+        let mut page = Vec::with_capacity(entries.len());
+        for CitedEntry { entry, artifacts: cited } in entries {
+            artifacts.extend(cited.into_iter().filter(|artifact| seen.insert(artifact.claimed().unverified())));
+            page.push(entry);
+        }
+        let batch = match WarmEntries::new(page) {
             Ok(batch) => batch,
             Err(error) => {
                 self.abort(format!("warm batch for {digest} is {error}"), out);
@@ -204,13 +213,21 @@ impl ProgramCore {
             self.abort(format!("warm for digest {digest}, which has no ready root"), out);
             return;
         }
+        let (first, last) = (batch.first(), batch.last());
+        let request = match Warm::new(batch, artifacts) {
+            Ok(request) => request,
+            Err(error) => {
+                self.abort(format!("warm batch for {digest} is refused: {error}"), out);
+                return;
+            }
+        };
         let ticket = self.mint(WarmTicket::mint);
-        self.routing.warms.insert(ticket, WarmBatch { digest, first: batch.first(), last: batch.last() });
-        out.push(Command::Warm { ticket, bundle: digest, request: Warm::new(batch) });
+        self.routing.warms.insert(ticket, WarmBatch { digest, first, last });
+        out.push(Command::Warm { ticket, bundle: digest, request });
     }
 
     /// Buffer one catch-up page, trimmed to `N`, and deliver the next owed seq.
-    pub(crate) fn continue_catch_up_page(&mut self, entries: Vec<JournalEntry>, out: &mut Vec<Command>) {
+    pub(crate) fn continue_catch_up_page(&mut self, entries: Vec<CitedEntry>, out: &mut Vec<Command>) {
         let Some(work) = self.routing.current.as_mut() else {
             self.abort("catch-up page arrived with no seq in progress".to_string(), out);
             return;
@@ -220,7 +237,7 @@ impl ProgramCore {
             self.abort("catch-up page arrived with no catch-up in progress".to_string(), out);
             return;
         };
-        catch_up.page = entries.into_iter().filter(|entry| entry.seq <= trigger).collect();
+        catch_up.page = entries.into_iter().filter(|cited| cited.entry.seq <= trigger).collect();
         self.drive_catch_up(out);
     }
 
@@ -242,12 +259,12 @@ impl ProgramCore {
             let Some(entry) = catch_up.page.pop_front() else {
                 break CatchUpStep::Read(catch_up.scratch.cursor().0);
             };
-            if let Err(error) = catch_up.scratch.apply(&entry.to_entry()) {
-                let reason = format!("catch-up scratch rejected entry {}: {error}", entry.seq);
+            if let Err(error) = catch_up.scratch.apply(&entry.entry.to_entry()) {
+                let reason = format!("catch-up scratch rejected entry {}: {error}", entry.entry.seq);
                 self.abort(reason, out);
                 return;
             }
-            if entry.seq == catch_up.next {
+            if entry.entry.seq == catch_up.next {
                 break CatchUpStep::Deliver(*bundle, entry);
             }
         };
@@ -255,7 +272,7 @@ impl ProgramCore {
             CatchUpStep::Done => self.activate_head(out),
             CatchUpStep::Read(after) => self.emit_routing_read(after, RoutingRead::CatchUp, out),
             CatchUpStep::Deliver(digest, entry) => {
-                let cause = entry.seq;
+                let cause = entry.entry.seq;
                 self.deliver(digest, Delivery::CatchUp { cause }, entry, out);
             }
         }

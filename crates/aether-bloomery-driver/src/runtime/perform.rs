@@ -41,6 +41,9 @@ impl BundleDriverState {
                 Command::ReadArtifact { ticket, request } => {
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
+                Command::ReadArtifacts { ticket, request } => {
+                    let _ = ctx.send_to_with_context(self.journal, &request, ticket);
+                }
                 Command::ReadClosure { ticket, request } => {
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }

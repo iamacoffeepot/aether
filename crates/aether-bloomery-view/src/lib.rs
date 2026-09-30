@@ -40,6 +40,11 @@
 //! }
 //! ```
 //!
+//! A fold may take a third parameter, `cited: &Cited`, holding the artifacts
+//! its entry cites directly, which the driver read before delivery.
+//! [`Cited::get`] verifies and decodes one on access, and answers only a
+//! digest the entry itself cites. A failed read is the fold's own error.
+//!
 //! Existing named guards project small values from the aggregate by declaring
 //! it as their view dependency. The owner warms one `TreeMoves` instance and
 //! lends it to every guard; the aggregate itself does not need `Clone` or
@@ -72,6 +77,7 @@ extern crate alloc;
 
 mod activations;
 mod authoring;
+mod cited;
 mod heads;
 mod history;
 mod publish;
@@ -83,6 +89,7 @@ mod view;
 pub use activations::{ActivationFoldError, Activations, HeadActivation};
 pub use aether_bloomery_view_derive::{fold, view};
 pub use authoring::{ViewCursor, ViewFoldError};
+pub use cited::{Cited, CitedError};
 pub use heads::{HeadFoldError, Heads};
 pub use history::HeadHistory;
 pub use publish::{Publish, PublishError};
@@ -95,6 +102,7 @@ pub use view::View;
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use crate::authoring::{ViewCursor, ViewFoldError, check_next};
+    pub use crate::cited::Cited;
     pub use aether_bloomery_kinds::{DecodeError, Entry, Seq};
     pub use aether_data::Storage;
 

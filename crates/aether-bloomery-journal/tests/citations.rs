@@ -4,7 +4,7 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, JournalError, OpaqueBytes, Ref, Seq, Utf8Text};
+use aether_bloomery_journal::{AppendError, Batch, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, Utf8Text};
 use aether_data::{Citations, Cites, Kind};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -154,5 +154,30 @@ fn a_citation_whose_identity_is_not_thirty_two_bytes_is_refused() -> Result<(), 
     }
     assert_eq!(journal.head()?, Seq(0));
     assert_eq!(journal.get_bytes(&staged.digest())?, None);
+    Ok(())
+}
+
+#[test]
+fn an_entry_reads_back_what_it_cites_and_an_older_entry_cites_nothing() -> Result<(), Box<dyn Error>> {
+    // Catches entry citations dropped at append or read, and a root whose
+    // entries predate entry citations failing to read.
+    let (root, mut journal) = common::temp_journal(0)?;
+    let mut batch = Batch::new();
+    let text = batch.stage_text("cited");
+    batch.push_event(&CiteText { text }, None)?;
+    journal.append(Seq(0), &batch)?;
+    let read = journal.read_cited(Seq(0), 10)?;
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].1, vec![text.digest()]);
+    drop(journal);
+
+    let conn = rusqlite::Connection::open(root.path().join("journal.sqlite"))?;
+    conn.execute_batch("DROP TABLE entry_citations")?;
+    drop(conn);
+
+    let reopened = Journal::open(root.path())?;
+    let older = reopened.read_cited(Seq(0), 10)?;
+    assert_eq!(older.len(), 1);
+    assert!(older[0].1.is_empty(), "an entry appended before entry citations cites nothing");
     Ok(())
 }

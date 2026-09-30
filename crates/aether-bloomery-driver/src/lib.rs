@@ -14,9 +14,9 @@
 
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, DriverParams, EVENTS_PAGE,
-    EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket,
-    WarmTicket, WatchTicket,
+    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, Command, DriverParams,
+    EVENTS_PAGE, EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles,
+    StatusTicket, WarmTicket, WatchTicket,
 };
 
 /// `aether.bloomery.driver` actor **identity** (ADR-0122 split): the native

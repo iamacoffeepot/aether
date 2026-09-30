@@ -25,6 +25,7 @@ fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> Jour
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(event)).expect("storage encode"),
+        cites: Vec::new(),
     }
 }
 
@@ -120,7 +121,8 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     }
 
     let tree = Ref::<Tree>::from_digest(Digest::from_bytes([2; 32]));
-    let warmup = Warm::new(WarmEntries::new(vec![moved_to(1, "current", tree)]).expect("dense"));
+    let warmup = Warm::new(WarmEntries::new(vec![moved_to(1, "current", tree)]).expect("dense"), Vec::new())
+        .expect("no artifacts");
     let warmed: Warmed = reply(&mut harness, &root, &warmup, "warm");
     match warmed {
         Warmed::Folded { through: 1 } => {}
@@ -128,7 +130,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     }
 
     let moved = moved_to(2, "inputs", Ref::<SummarizeInput>::from_digest(Digest::from_bytes([7; 32])));
-    let evaluated: Evaluated = reply(&mut harness, &root, &Event::new(moved), "event");
+    let evaluated: Evaluated = reply(&mut harness, &root, &Event::new(moved, Vec::new()), "event");
     match evaluated {
         Evaluated::Completed { seq: 2, intents } => {
             assert_eq!(intents.len(), 1);

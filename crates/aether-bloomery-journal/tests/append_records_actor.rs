@@ -9,8 +9,8 @@ use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Entry, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
     Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
-    OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, Ref,
-    RequestSource, Requested, RuleName, Transition, Utf8Text,
+    OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, ReadEvents, ReadEventsResult, RecordedHead,
+    RecordedHeadMove, Ref, RequestSource, Requested, RuleName, Transition, Utf8Text,
 };
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
@@ -55,6 +55,11 @@ impl Fixture {
 
     fn append(&self, correlation: u64, command: &AppendRecords) -> AppendRecordsResult {
         request(&self.registry, self.actor, self.caller, correlation, command);
+        reply(&self.replies, correlation)
+    }
+
+    fn read_events(&self, correlation: u64, after: u64) -> ReadEventsResult {
+        request(&self.registry, self.actor, self.caller, correlation, &ReadEvents { after, limit: 128 });
         reply(&self.replies, correlation)
     }
 
@@ -309,4 +314,45 @@ fn records_take_consecutive_seqs_in_request_order() {
     assert_eq!(tail[3].seq, Seq(5));
     assert_eq!(tail[3].cause, Some(Seq(1)));
     assert_eq!(tail[3].decode::<RecordedHeadMove>().expect("decode head moved"), head_moved);
+}
+
+#[test]
+fn a_read_page_carries_what_each_driver_record_cites() {
+    // Catches a transition read back citing nothing, so a rule on its run
+    // could never see its input or result, a head move missing its
+    // destination, and citations attached to the wrong entry.
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let fixture = Fixture::start(&temp.path().join("journal"));
+
+    let input = EncodedArtifact::opaque_bytes(b"cited-input");
+    let input_digest = input.digest();
+    let requested = Requested { program: program_ref(), input: input_digest, source: native_source() };
+    assert_eq!(
+        fixture.append(
+            1,
+            &AppendRecords::new(vec![input], vec![DriverRecord::Requested { cause: None, record: requested }], 0)
+        ),
+        AppendRecordsResult::Committed { head: 1, artifacts: vec![input_digest] }
+    );
+
+    let result = EncodedArtifact::opaque_bytes(b"cited-result");
+    let result_digest = result.digest();
+    let target = EncodedArtifact::opaque_bytes(b"cited-target");
+    let target_digest = target.digest();
+    let moved = RecordedHeadMove::new(RecordedHead::from(&Head::<OpaqueBytes>::new("cited-move")), target_digest);
+    let transition = Transition { program: program_ref(), input: input_digest, result: result_digest };
+    let records = vec![
+        DriverRecord::Transition { cause: 1, record: transition },
+        DriverRecord::HeadMoved { cause: 1, record: moved },
+    ];
+    assert_eq!(
+        fixture.append(2, &AppendRecords::new(vec![result, target], records, 1)),
+        AppendRecordsResult::Committed { head: 3, artifacts: vec![result_digest, target_digest] }
+    );
+
+    let ReadEventsResult::Ok { entries, .. } = fixture.read_events(3, 0) else {
+        panic!("the page reads");
+    };
+    let cites: Vec<Vec<Digest>> = entries.into_iter().map(|entry| entry.cites).collect();
+    assert_eq!(cites, vec![Vec::new(), vec![input_digest, result_digest], vec![target_digest]]);
 }

@@ -114,7 +114,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
         ReadEventsResult::Ok {
             after: 0,
             head: alpha_expected.len() as u64,
-            entries: alpha_expected[..2].iter().map(JournalEntry::from_entry).collect(),
+            entries: alpha_expected[..2].iter().map(|entry| JournalEntry::from_entry(entry, Vec::new())).collect(),
         }
     );
     assert_eq!(
@@ -122,7 +122,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
         ReadEventsResult::Ok {
             after: 0,
             head: beta_expected.len() as u64,
-            entries: beta_expected.iter().map(JournalEntry::from_entry).collect(),
+            entries: beta_expected.iter().map(|entry| JournalEntry::from_entry(entry, Vec::new())).collect(),
         }
     );
 
@@ -131,7 +131,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     let ReadEventsResult::Ok { after: 2, head: 3, entries } = tail else {
         panic!("expected alpha's final page, got {tail:?}");
     };
-    assert_eq!(entries, [JournalEntry::from_entry(&alpha_expected[2])]);
+    assert_eq!(entries, [JournalEntry::from_entry(&alpha_expected[2], Vec::new())]);
     assert_eq!(entries[0].seq, 3);
     assert_eq!(entries[0].kind, Marker::ID);
     assert_eq!(entries[0].cause, Some(2));

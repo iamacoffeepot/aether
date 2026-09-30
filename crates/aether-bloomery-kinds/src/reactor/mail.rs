@@ -8,7 +8,7 @@ use core::fmt;
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{CastEligible, Citations, Cites, LabelNode, Schema, SchemaType};
 
-use crate::{Detail, JournalEntry, ReactorName};
+use crate::{ClosureArtifact, Detail, Digest, JournalEntry, ReactorName};
 
 use super::ReactorIntent;
 
@@ -131,17 +131,55 @@ impl<'de> WireDecode<'de> for WarmEntries {
     }
 }
 
-/// Fold-only warmup of a contiguous prefix. The root still checks `first == cursor + 1`.
-#[aether_data::kind(name = "aether.bloomery.reactor.warm", eq, no_serde)]
+/// Why [`Warm::new`] refused an artifact list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UncitedArtifact {
+    digest: Digest,
+}
+
+impl UncitedArtifact {
+    /// The claimed digest of the artifact no entry in the batch cites.
+    #[must_use]
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+}
+
+impl fmt::Display for UncitedArtifact {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "artifact {} is cited by no entry in the batch", self.digest)
+    }
+}
+
+impl StdError for UncitedArtifact {}
+
+/// Fold-only warmup of a contiguous prefix, beside the artifacts its entries
+/// cite. The root still checks `first == cursor + 1`.
+///
+/// `artifacts` is the deduplicated union of what the batch's entries cite
+/// directly; each entry's [`JournalEntry::cites`] scopes which of them that
+/// entry's folds may read.
+#[aether_data::kind(name = "aether.bloomery.reactor.warm", no_serde)]
 pub struct Warm {
     entries: WarmEntries,
+    artifacts: Vec<ClosureArtifact>,
 }
 
 impl Warm {
-    /// Carry an already-validated batch.
-    #[must_use]
-    pub fn new(entries: WarmEntries) -> Self {
-        Self { entries }
+    /// Carry an already-validated batch and the artifacts its entries cite.
+    ///
+    /// # Errors
+    ///
+    /// [`UncitedArtifact`] naming the first artifact whose claimed digest
+    /// no entry in the batch cites, so a root is never handed bytes no
+    /// entry scopes.
+    pub fn new(entries: WarmEntries, artifacts: Vec<ClosureArtifact>) -> Result<Self, UncitedArtifact> {
+        let cited = |digest: Digest| entries.as_slice().iter().any(|entry| entry.cites.contains(&digest));
+        let uncited = artifacts.iter().map(|artifact| artifact.claimed().unverified()).find(|digest| !cited(*digest));
+        if let Some(digest) = uncited {
+            return Err(UncitedArtifact { digest });
+        }
+        Ok(Self { entries, artifacts })
     }
 
     /// The warmup prefix.
@@ -150,10 +188,22 @@ impl Warm {
         &self.entries
     }
 
+    /// The artifacts the batch's entries cite, each carried once.
+    #[must_use]
+    pub fn artifacts(&self) -> &[ClosureArtifact] {
+        &self.artifacts
+    }
+
     /// Take the warmup prefix.
     #[must_use]
     pub fn into_entries(self) -> WarmEntries {
         self.entries
+    }
+
+    /// Take the warmup prefix and the artifacts its entries cite.
+    #[must_use]
+    pub fn into_parts(self) -> (WarmEntries, Vec<ClosureArtifact>) {
+        (self.entries, self.artifacts)
     }
 }
 
@@ -168,17 +218,20 @@ pub enum Warmed {
     Poisoned { last_trusted: u64, reason: Detail },
 }
 
-/// One live journal entry. The root checks `seq == cursor + 1`.
-#[aether_data::kind(name = "aether.bloomery.reactor.event", eq, no_serde)]
+/// One live journal entry beside the artifacts it cites directly. The root
+/// checks `seq == cursor + 1`.
+#[aether_data::kind(name = "aether.bloomery.reactor.event", no_serde)]
 pub struct Event {
     entry: JournalEntry,
+    artifacts: Vec<ClosureArtifact>,
 }
 
 impl Event {
-    /// Carry one journal envelope.
+    /// Carry one journal envelope and the artifacts its
+    /// [`JournalEntry::cites`] names.
     #[must_use]
-    pub fn new(entry: JournalEntry) -> Self {
-        Self { entry }
+    pub fn new(entry: JournalEntry, artifacts: Vec<ClosureArtifact>) -> Self {
+        Self { entry, artifacts }
     }
 
     /// The live entry.
@@ -187,10 +240,22 @@ impl Event {
         &self.entry
     }
 
+    /// The artifacts the entry cites.
+    #[must_use]
+    pub fn artifacts(&self) -> &[ClosureArtifact] {
+        &self.artifacts
+    }
+
     /// Take the live entry.
     #[must_use]
     pub fn into_entry(self) -> JournalEntry {
         self.entry
+    }
+
+    /// Take the live entry and the artifacts it cites.
+    #[must_use]
+    pub fn into_parts(self) -> (JournalEntry, Vec<ClosureArtifact>) {
+        (self.entry, self.artifacts)
     }
 }
 

@@ -136,6 +136,20 @@ Nothing on main can carry any of this yet:
    and doesn't fail the set. An unbound or empty set selects nothing and
    is a valid state. This covers the old W6 genesis item.
 
+   Every routing page, whether steady, warm, catch-up, or restart warm,
+   passes one point before it routes: the driver collects the digests its
+   entries cite (`JournalEntry.cites`, ADR-0220), answers hits from its
+   artifact cache, and reads the misses with one `ReadArtifacts`. That read
+   answers a prefix by contract, so the driver asks again for the rest. A
+   `Warm` carries the deduplicated union of what its entries cite, and an
+   `Event` carries what its one entry cites; the bundle scopes each entry's
+   reads to its own citations (ADR-0222). A warm and a live delivery of the
+   same entry therefore carry the same artifacts. A `ReadArtifacts` that
+   answers `Err` is re-issued up to three times, then the driver aborts the
+   way a failed `ReadEvents` does. `Missing` means the journal broke its
+   append guarantee, and the driver aborts. Neither reaches a root, so
+   neither poisons a view.
+
    When a member head's selection changes at `N`, the predecessor still
    evaluates `N`. The successor is activated before `N+1`: the driver
    loads it and sends fold-only `Warm` batches through `live_from − 1`,
@@ -296,6 +310,10 @@ Nothing on main can carry any of this yet:
       "too large". The walk never truncates. The table is created if it
       doesn't exist and is filled when a staged artifact is inserted.
 
+    `ReadEvents` answers each entry with the digests it cites directly, as
+    `append` recorded them, and routing reads those artifacts with
+    `ReadArtifacts` under the driver's closure byte budget (decision 5).
+
     `AppendRecords` is what makes ADR-0224 ¶7 true.
 
 11. **Driver mail.**
@@ -313,8 +331,9 @@ Nothing on main can carry any of this yet:
       still outstanding.
 
     The driver pulls events with `ReadEvents` and uses `WatchHead` to
-    wake. Its outbound mail is `LoadComponent`, the root protocols of
-    ADR-0224 and ADR-0225, and the journal commands.
+    wake, and reads what routed entries cite with `ReadArtifacts`. Its
+    outbound mail is `LoadComponent`, the root protocols of ADR-0224 and
+    ADR-0225, and the journal commands.
 
 ## Consequences
 
@@ -359,7 +378,13 @@ Nothing on main can carry any of this yet:
   journal read shared by every fetch of that digest; a missing artifact
   is never cached, because it can be stored later (issue #6258). Each
   `SetHeads` change consults the same cache and still checks the cached
-  artifact's kind against its own target head.
+  artifact's kind against its own target head. Routing's cited-artifact
+  reads fill and consult the same cache.
+- **Every routed entry's citations are read.** A head move cites its
+  destination and a `Transition` its input and result, so routing reads
+  those artifacts even when no live reactor asks for them; the cache bounds
+  the repeats. A `Warm` or `Event` carries them as `Blob` handles
+  (ADR-0238), so the mail stays small.
 - **Amendments.** Following ADR-0224's precedent, the older ADRs stay
   unedited. This ADR amends:
   - ADR-0223: the feeder becomes this driver; `DropComponent` is never

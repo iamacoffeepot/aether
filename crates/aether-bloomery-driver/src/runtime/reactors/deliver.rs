@@ -5,12 +5,12 @@
 
 use std::iter::once;
 
-use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Evaluated, Event, JournalEntry, Status};
+use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Evaluated, Event, Status};
 
 use crate::runtime::core::{Command, EvaluateTicket, ProgramCore, StatusTicket};
 use crate::runtime::reactors::instance::Health;
 use crate::runtime::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
-use crate::runtime::reactors::{Delivery, PlanOrder};
+use crate::runtime::reactors::{CitedEntry, Delivery, PlanOrder};
 
 /// The seq an `Evaluated` reply answers.
 fn replied_seq(evaluated: &Evaluated) -> u64 {
@@ -84,15 +84,15 @@ impl ProgramCore {
         out
     }
 
-    /// Send `entry` to `digest`'s live root.
-    pub(crate) fn deliver(&mut self, digest: Digest, delivery: Delivery, entry: JournalEntry, out: &mut Vec<Command>) {
+    /// Send `entry` and the artifacts it cites to `digest`'s live root.
+    pub(crate) fn deliver(&mut self, digest: Digest, delivery: Delivery, entry: CitedEntry, out: &mut Vec<Command>) {
         if !self.live_ready(digest) {
-            self.abort(format!("event {} for digest {digest}, which has no ready root", entry.seq), out);
+            self.abort(format!("event {} for digest {digest}, which has no ready root", entry.entry.seq), out);
             return;
         }
         let ticket = self.mint(EvaluateTicket::mint);
         self.routing.deliveries.insert(ticket, delivery);
-        out.push(Command::Evaluate { ticket, bundle: digest, request: Event::new(entry) });
+        out.push(Command::Evaluate { ticket, bundle: digest, request: Event::new(entry.entry, entry.artifacts) });
     }
 
     /// Plan one live reply to `Event(N)`.

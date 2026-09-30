@@ -1,14 +1,14 @@
 //! Type-level parameter lists a signature macro can emit.
 //!
-//! Authors write `heads: Heads` and `current: CurrentCompilation`. The
-//! signature macro emits [`Arg`] chains with inferred role markers (`Arg<_, T,
-//! Rest>`). Rust selects the view or guard implementation from each concrete
-//! parameter type. Distinct role markers keep the impls from overlapping. The
-//! macro does not classify type names.
+//! Authors write `heads: Heads`, `current: CurrentCompilation`, and
+//! `cited: Cited`. The signature macro emits [`Arg`] chains with inferred role
+//! markers (`Arg<_, T, Rest>`). Rust selects the view, guard, or citations
+//! implementation from each concrete parameter type. Distinct role markers
+//! keep the impls from overlapping. The macro does not classify type names.
 
 use core::marker::PhantomData;
 
-use aether_bloomery_view::Publish;
+use aether_bloomery_view::{Cited, Publish};
 
 use crate::guard::Guard;
 use crate::trigger::Trigger;
@@ -19,6 +19,10 @@ pub enum AsView {}
 
 /// Role of a named guard parameter.
 pub enum AsGuard {}
+
+/// Role of the trigger's [`Cited`] parameter: the artifacts the trigger
+/// entry cites directly.
+pub enum AsCited {}
 
 /// Empty parameter list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +37,9 @@ pub type ViewArg<P, Rest = Nil> = Arg<AsView, P, Rest>;
 /// Named guard parameter followed by `Rest`.
 pub type GuardArg<P, Rest = Nil> = Arg<AsGuard, P, Rest>;
 
+/// The trigger's [`Cited`] parameter followed by `Rest`.
+pub type CitedArg<Rest = Nil> = Arg<AsCited, Cited, Rest>;
+
 /// Inferred parameter list. Implemented for [`Nil`] and [`Arg`] chains.
 pub trait Params<T: Trigger>: Sized + 'static {
     /// Views this list needs, joined for a single fold pass.
@@ -41,15 +48,17 @@ pub trait Params<T: Trigger>: Sized + 'static {
     /// Owned values resolved from the trigger and those views.
     type Value;
 
-    /// Resolve every parameter, or decline if a named guard returns [`None`].
-    fn resolve(trigger: &T, views: <Self::Views as ViewSet>::Refs<'_>) -> Option<Self::Value>;
+    /// Resolve every parameter from the trigger, the artifacts its entry
+    /// cites, and the folded views, or decline if a named guard returns
+    /// [`None`].
+    fn resolve(trigger: &T, cited: &Cited, views: <Self::Views as ViewSet>::Refs<'_>) -> Option<Self::Value>;
 }
 
 impl<T: Trigger> Params<T> for Nil {
     type Views = NoViews;
     type Value = ();
 
-    fn resolve(_trigger: &T, (): ()) -> Option<Self::Value> {
+    fn resolve(_trigger: &T, _cited: &Cited, (): ()) -> Option<Self::Value> {
         Some(())
     }
 }
@@ -60,9 +69,10 @@ impl<T: Trigger, V: Publish + Send, Rest: Params<T>> Params<T> for Arg<AsView, V
 
     fn resolve(
         trigger: &T,
+        cited: &Cited,
         (view, rest): (<V as ViewSet>::Refs<'_>, <Rest::Views as ViewSet>::Refs<'_>),
     ) -> Option<Self::Value> {
-        Some((V::snapshot(view), Rest::resolve(trigger, rest)?))
+        Some((V::snapshot(view), Rest::resolve(trigger, cited, rest)?))
     }
 }
 
@@ -72,8 +82,19 @@ impl<T: Trigger, G: Guard<T>, Rest: Params<T>> Params<T> for Arg<AsGuard, G, Res
 
     fn resolve(
         trigger: &T,
+        cited: &Cited,
         (views, rest): (<G::Views as ViewSet>::Refs<'_>, <Rest::Views as ViewSet>::Refs<'_>),
     ) -> Option<Self::Value> {
-        Some((G::resolve(trigger, views)?, Rest::resolve(trigger, rest)?))
+        Some((G::resolve(trigger, views)?, Rest::resolve(trigger, cited, rest)?))
+    }
+}
+
+/// The trigger's citations, owned: each artifact is a cheap `Blob` clone.
+impl<T: Trigger, Rest: Params<T>> Params<T> for Arg<AsCited, Cited, Rest> {
+    type Views = Rest::Views;
+    type Value = (Cited, Rest::Value);
+
+    fn resolve(trigger: &T, cited: &Cited, rest: <Rest::Views as ViewSet>::Refs<'_>) -> Option<Self::Value> {
+        Some((cited.clone(), Rest::resolve(trigger, cited, rest)?))
     }
 }

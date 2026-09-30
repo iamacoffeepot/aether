@@ -11,6 +11,6 @@ pub use declaration::{
     RuleRecord, reactor_declarations, reactor_record_len, write_reactor_record,
 };
 pub use intent::ReactorIntent;
-pub use mail::{Evaluated, Event, Status, StatusQuery, Warm, WarmEntries, WarmEntriesError, Warmed};
+pub use mail::{Evaluated, Event, Status, StatusQuery, UncitedArtifact, Warm, WarmEntries, WarmEntriesError, Warmed};
 pub use protocols::ReactorRoot;
 pub use set::{ReactorSet, ReactorSetError};

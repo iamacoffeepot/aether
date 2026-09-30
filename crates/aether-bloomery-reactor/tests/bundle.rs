@@ -28,11 +28,19 @@ fn journal_moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) ->
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(event)).expect("storage encode"),
+        cites: Vec::new(),
     }
 }
 
 fn fold_fail(seq: u64) -> JournalEntry {
-    JournalEntry { seq, kind: REACTOR_FOLD_FAIL_KIND, cause: None, recorded_at_millis: 0, bytes: Vec::new() }
+    JournalEntry {
+        seq,
+        kind: REACTOR_FOLD_FAIL_KIND,
+        cause: None,
+        recorded_at_millis: 0,
+        bytes: Vec::new(),
+        cites: Vec::new(),
+    }
 }
 
 fn load_root(harness: &mut SubstrateHarness, wasm_path: &Path) -> (String, ProtocolRef<ReactorRoot>, ErasedActorPath) {
@@ -84,12 +92,14 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
     let warmed: Warmed = reply(
         &mut harness,
         &root,
-        &Warm::new(WarmEntries::new(vec![journal_moved(1, "current", program)]).expect("dense")),
+        &Warm::new(WarmEntries::new(vec![journal_moved(1, "current", program)]).expect("dense"), Vec::new())
+            .expect("no artifacts"),
         "warm",
     );
     assert!(matches!(warmed, Warmed::Folded { through: 1 }), "{warmed:?}");
 
-    let live: Evaluated = reply(&mut harness, &root, &Event::new(journal_moved(2, "source", tree)), "event");
+    let live: Evaluated =
+        reply(&mut harness, &root, &Event::new(journal_moved(2, "source", tree), Vec::new()), "event");
     match live {
         Evaluated::Completed { seq: 2, intents } => {
             assert_eq!(intents.len(), 2);
@@ -110,10 +120,12 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
         other => panic!("{other:?}"),
     }
 
-    let other: Evaluated = reply(&mut harness, &root, &Event::new(journal_moved(3, "other", tree)), "other");
+    let other: Evaluated =
+        reply(&mut harness, &root, &Event::new(journal_moved(3, "other", tree), Vec::new()), "other");
     assert!(matches!(other, Evaluated::Completed { seq: 3, ref intents } if intents.len() == 2), "{other:?}");
 
-    let repeated: Evaluated = reply(&mut harness, &root, &Event::new(journal_moved(4, "source", tree)), "repeat");
+    let repeated: Evaluated =
+        reply(&mut harness, &root, &Event::new(journal_moved(4, "source", tree), Vec::new()), "repeat");
     match repeated {
         Evaluated::Completed { seq: 4, intents } => {
             assert_eq!(intents.len(), 1, "the keyed aggregate reports source has moved twice");
@@ -126,7 +138,7 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
         let wasm_path = require_wasm("aether_test_fixtures_reactor").expect("wasm");
         let mut second = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
         let (_, declined, _) = load_root(&mut second, &wasm_path);
-        reply(&mut second, &declined, &Event::new(journal_moved(1, "source", tree)), "decline")
+        reply(&mut second, &declined, &Event::new(journal_moved(1, "source", tree), Vec::new()), "decline")
     };
     match declined {
         Evaluated::Completed { seq: 1, intents } => {
@@ -137,10 +149,10 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
         other => panic!("{other:?}"),
     }
 
-    let gap: Evaluated = reply(&mut harness, &root, &Event::new(journal_moved(9, "source", tree)), "gap");
+    let gap: Evaluated = reply(&mut harness, &root, &Event::new(journal_moved(9, "source", tree), Vec::new()), "gap");
     assert!(matches!(gap, Evaluated::OutOfSequence { seq: 9, expected: 5 }), "{gap:?}");
 
-    let poisoned: Evaluated = reply(&mut harness, &root, &Event::new(fold_fail(5)), "poison");
+    let poisoned: Evaluated = reply(&mut harness, &root, &Event::new(fold_fail(5), Vec::new()), "poison");
     assert!(matches!(poisoned, Evaluated::Poisoned { seq: 5, last_trusted: 4, .. }), "{poisoned:?}");
     let status: Status = reply(&mut harness, &root, &StatusQuery, "status");
     assert!(status.poisoned());

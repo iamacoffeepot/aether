@@ -5,7 +5,7 @@ use std::fmt;
 
 use aether_data::{Citation, Citations, Cites, KindId, Storage, StorageData, StorageError};
 
-use crate::Seq;
+use crate::{Digest, Seq};
 
 /// An encoded event ready to append. There is no public path from raw bytes into the log.
 pub struct Draft {
@@ -13,6 +13,10 @@ pub struct Draft {
     pub(crate) cause: Option<Seq>,
     pub(crate) bytes: Vec<u8>,
     pub(crate) cites: Vec<Citation>,
+    /// Digests the entry cites whose kind no `Ref` states: a `Transition`'s
+    /// input and result. Recorded as the entry's citations after the typed
+    /// ones, and checked for existence by the batch, never for a prefix.
+    pub(crate) untyped: Vec<Digest>,
 }
 
 impl Draft {
@@ -28,7 +32,13 @@ impl Draft {
         let mut sink = Citations::default();
         event.cites(&mut sink);
         let bytes = K::encode_storage(&StorageData::from_value(event.clone())).map_err(DraftError::Storage)?;
-        Ok(Self { kind: K::ID, cause, bytes, cites: sink.into_vec() })
+        Ok(Self { kind: K::ID, cause, bytes, cites: sink.into_vec(), untyped: Vec::new() })
+    }
+
+    /// This draft citing `digests` as well, untyped, after its typed citations.
+    pub(crate) fn citing_untyped(mut self, digests: impl IntoIterator<Item = Digest>) -> Self {
+        self.untyped.extend(digests);
+        self
     }
 
     /// Citations collected from the event at construction.

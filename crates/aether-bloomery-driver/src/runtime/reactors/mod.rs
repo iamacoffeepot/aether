@@ -9,6 +9,7 @@
 mod activate;
 mod adopt;
 mod batch;
+mod cited;
 mod claim;
 mod deliver;
 mod follow;
@@ -20,15 +21,15 @@ mod restart;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
-    ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName, ReactorSet,
-    SetHeads,
+    ActivationRejected, ClosureArtifact, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName,
+    ReactorSet, SetHeads,
 };
 use aether_bloomery_view::Heads;
 
 use self::instance::Instance;
 use self::intents::PlannedIntent;
 use crate::runtime::core::{
-    CallerId, EvaluateTicket, EventsTicket, PlannedRecord, StatusTicket, WarmTicket, WatchTicket,
+    ArtifactsTicket, CallerId, EvaluateTicket, EventsTicket, PlannedRecord, StatusTicket, WarmTicket, WatchTicket,
 };
 
 /// Member heads selected at one prefix, each with its bound digest.
@@ -59,6 +60,32 @@ pub struct PendingRead {
     pub after: u64,
     /// What the page is for.
     pub purpose: RoutingRead,
+}
+
+/// One journal entry beside the artifacts it cites directly, read before
+/// the entry routes, so a `Warm` and a live `Event` carrying it hand a root
+/// the same artifacts.
+#[derive(Debug, Clone)]
+pub struct CitedEntry {
+    /// The journal entry.
+    pub entry: JournalEntry,
+    /// One artifact per distinct digest in [`JournalEntry::cites`], in citation order.
+    pub artifacts: Vec<ClosureArtifact>,
+}
+
+/// A routing page parked on the read of the artifacts its entries cite.
+#[derive(Debug)]
+pub struct PendingCited {
+    /// What the page is for once it routes.
+    pub purpose: RoutingRead,
+    /// The page, trimmed to the journal-view cursor.
+    pub entries: Vec<JournalEntry>,
+    /// Cited artifacts already in hand, from the cache or earlier answers.
+    pub found: BTreeMap<Digest, ClosureArtifact>,
+    /// Cited digests still to read, in citation order.
+    pub missing: VecDeque<Digest>,
+    /// Failed reads re-issued so far for the outstanding request.
+    pub retries: u32,
 }
 
 /// One committed routing batch awaiting read-back.
@@ -175,8 +202,9 @@ pub struct CatchUp {
     pub scratch: Heads,
     /// Next owed seq to deliver.
     pub next: u64,
-    /// Buffered entries not yet folded, trimmed to `N`.
-    pub page: VecDeque<JournalEntry>,
+    /// Buffered entries not yet folded, trimmed to `N`, each beside its
+    /// cited artifacts.
+    pub page: VecDeque<CitedEntry>,
 }
 
 /// The head being activated; its queue index is the seq's `activate_index`.
@@ -197,8 +225,8 @@ pub struct ActivationWork {
 pub struct SeqWork {
     /// Trigger seq.
     pub n: u64,
-    /// Journal entry `N`.
-    pub entry: JournalEntry,
+    /// Journal entry `N` and the artifacts it cites.
+    pub entry: CitedEntry,
     /// Selection at prefix `N-1`.
     pub prev: Selection,
     /// Live digests evaluating `N` and the heads each serves.
@@ -221,7 +249,7 @@ pub struct SeqWork {
 
 impl SeqWork {
     /// Work for `n` with its live fan-out already sent.
-    pub fn new(n: u64, entry: JournalEntry, prev: Selection, live: Served) -> Self {
+    pub fn new(n: u64, entry: CitedEntry, prev: Selection, live: Served) -> Self {
         Self {
             n,
             entry,
@@ -314,8 +342,12 @@ pub struct Routing {
     pub sets: BTreeMap<Digest, Option<ReactorSet>>,
     /// Outstanding routing page read, if any.
     pub read: Option<PendingRead>,
-    /// Buffered steady entries after `R`, trimmed to the journal-view cursor.
-    pub page: VecDeque<JournalEntry>,
+    /// Buffered steady entries after `R`, trimmed to the journal-view
+    /// cursor, each beside its cited artifacts.
+    pub page: VecDeque<CitedEntry>,
+    /// A page waiting on its cited artifacts before it routes, with the
+    /// ticket its outstanding `ReadArtifacts` answers under, if any.
+    pub cited: Option<(ArtifactsTicket, PendingCited)>,
     /// Outstanding `WatchHead`, if any.
     pub watch: Option<WatchTicket>,
     /// Set when the journal ended the watch because it closed
@@ -354,6 +386,7 @@ impl Routing {
             sets: BTreeMap::new(),
             read: None,
             page: VecDeque::new(),
+            cited: None,
             watch: None,
             watch_ended: false,
             awaiters: Vec::new(),

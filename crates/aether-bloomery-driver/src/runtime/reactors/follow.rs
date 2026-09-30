@@ -49,7 +49,8 @@ impl ProgramCore {
         out
     }
 
-    /// Continue one routing page read, trimmed to the journal-view cursor.
+    /// Continue one routing page read, trimmed to the journal-view cursor:
+    /// read what its entries cite, then route it.
     pub(crate) fn continue_routing_events(
         &mut self,
         read: &PendingRead,
@@ -69,12 +70,7 @@ impl ProgramCore {
         };
         let fence = self.journal.cursor();
         let entries: Vec<JournalEntry> = entries.into_iter().filter(|entry| entry.seq <= fence).collect();
-        match read.purpose {
-            RoutingRead::Steady => self.routing.page = entries.into(),
-            RoutingRead::Warm => self.continue_warm_page(entries, out),
-            RoutingRead::CatchUp => self.continue_catch_up_page(entries, out),
-            RoutingRead::RestartWarm => self.continue_restart_warm_page(entries, out),
-        }
+        self.fetch_cited(read.purpose, entries, out);
         self.drive_routing(out);
     }
 
@@ -116,6 +112,7 @@ impl ProgramCore {
             .values()
             .any(|read| matches!(read, ArtifactRead::ReactorSet(_) | ArtifactRead::SetHeadsDestination));
         routing.read.is_none()
+            && routing.cited.is_none()
             && routing.deliveries.is_empty()
             && routing.warms.is_empty()
             && routing.statuses.is_empty()
@@ -148,8 +145,8 @@ impl ProgramCore {
             self.emit_routing_read(self.routing.cursor(), RoutingRead::Steady, out);
             return;
         };
-        if entry.seq != next {
-            self.abort(format!("routing page holds {} where {next} is next", entry.seq), out);
+        if entry.entry.seq != next {
+            self.abort(format!("routing page holds {} where {next} is next", entry.entry.seq), out);
             return;
         }
         let prev = self.selection();
@@ -162,7 +159,7 @@ impl ProgramCore {
             }
             self.deliver(*digest, Delivery::Live { digest: *digest }, entry.clone(), out);
         }
-        if let Err(error) = self.routing.heads.apply(&entry.to_entry()) {
+        if let Err(error) = self.routing.heads.apply(&entry.entry.to_entry()) {
             self.abort(format!("routing heads rejected entry {next}: {error}"), out);
             return;
         }
