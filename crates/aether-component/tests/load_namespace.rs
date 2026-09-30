@@ -1,9 +1,7 @@
-//! ADR-0138 (issue #7163): an unselected `LoadComponent` no longer falls
-//! back to a module's `export!(default = ...)` opt-in. It succeeds only
-//! when the module exports exactly one non-boot type — a single-actor
-//! module's sole export, or a multi-actor module's unique one — and is
-//! refused, naming every export, otherwise: whether or not the module
-//! declares a default.
+//! An unselected `LoadComponent` (ADR-0241 §9, superseding ADR-0138's
+//! default slot): it succeeds only when the module exports exactly one
+//! non-boot type, and is refused, naming every export, otherwise, whether or
+//! not the module declares an `export!(default = …)`.
 
 use std::fs;
 
@@ -11,8 +9,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::LoadComponent;
 
-/// The bundle's opted-in default (ADR-0138) — no longer reachable by an
-/// unselected load, only by naming it.
+/// The bundle's opted-in default (ADR-0138), reachable only by naming it.
 const BUNDLE_DEFAULT_EXPORT: &str = "test.probe";
 /// The single-actor fixture's own namespace, the only type it exports.
 const SOLE_EXPORT_NAMESPACE: &str = "test.stateful.typed";

@@ -421,10 +421,10 @@ impl ComponentHostCapabilityState {
             let tag = aether_data::ActorId::singleton(requested).0;
             (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
         } else {
-            // ADR-0138 (issue #7163): no fallback to a module's `export!(default
-            // = …)` any more — an unselected load succeeds only when the module
-            // exports exactly one non-boot type, and is refused, naming every
-            // export, otherwise.
+            // ADR-0241 §9: every spawn names its namespace, so an unselected
+            // load takes the module's one non-boot export and is refused,
+            // naming every export, when there is not exactly one; an
+            // `export!(default = …)` opt-in selects nothing here.
             let boot_ns = manifest.boot();
             let selectable: Vec<_> = actors
                 .iter()
