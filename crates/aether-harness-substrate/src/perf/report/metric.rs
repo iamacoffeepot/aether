@@ -66,14 +66,8 @@ pub struct CellJson {
 }
 
 impl CellJson {
-    #[allow(clippy::cast_precision_loss)]
     pub(super) fn percentile(&self, p: Pct) -> f64 {
-        let ns = match p {
-            Pct::P50 => self.p50,
-            Pct::P90 => self.p90,
-            Pct::P99 => self.p99,
-        };
-        ns as f64
+        p.pick(self.p50, self.p90, self.p99)
     }
 
     pub(super) fn key(&self) -> CellKey {
@@ -97,6 +91,22 @@ impl Pct {
         }
     }
     pub(super) const ALL: [Self; 3] = [Self::P50, Self::P90, Self::P99];
+
+    /// This percentile's value out of a cell's `p50` / `p90` / `p99`.
+    pub(super) fn pick(self, p50: u64, p90: u64, p99: u64) -> f64 {
+        measured(match self {
+            Self::P50 => p50,
+            Self::P90 => p90,
+            Self::P99 => p99,
+        })
+    }
+}
+
+/// A measured count (nanoseconds, bytes) as the `f64` the paired statistics
+/// run over. Measurements sit far below 2^53, where the conversion is exact.
+#[allow(clippy::cast_precision_loss)]
+pub(super) const fn measured(v: u64) -> f64 {
+    v as f64
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

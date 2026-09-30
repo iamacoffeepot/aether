@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::perf::stats::{iqr_sorted, median_sorted, sorted};
+
+use super::bloomery_session::{SessionComparison, SessionSection, compare_session, decode_session_cells};
+use super::bloomery_steps::{StepComparison, StepsSection, compare_steps, decode_steps_cells};
 use super::keep_up::{KeepUpComparison, KeepUpSection, compare_keepup, decode_keepup_cells};
 use super::latency::{CellComparison, compare_latency, decode_latency_cells, is_latency_section};
 use super::throughput::{ThroughputComparison, ThroughputSection, compare_throughput, decode_throughput_cells};
@@ -62,10 +66,10 @@ pub enum UncomparedReason {
 
 /// One section's outcome in a [`ComparisonReport`]: a typed verdict grid
 /// (`Compared` for latency, `ThroughputCompared` for the saturation rate,
-/// iamacoffeepot/aether#1202) or a reasoned skip (`Uncompared`). The two
-/// compared variants carry the same headline counts so the rollup sums
-/// over both, but distinct cell payloads so each renders with its own
-/// table.
+/// iamacoffeepot/aether#1202, and the two bloomery variants), a no-verdict
+/// trend (`KeepUpCompared`), or a reasoned skip (`Uncompared`). The verdict
+/// variants carry the same headline counts so the rollup sums over them, but
+/// distinct cell payloads so each renders with its own table.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SectionReport {
@@ -89,6 +93,26 @@ pub enum SectionReport {
     KeepUpCompared {
         name: String,
         cells: Vec<KeepUpComparison>,
+    },
+    /// A bloomery run's per-step wall time (`bloomery.steps`): one
+    /// lower-is-better verdict per (sessions × shape × step × percentile).
+    BloomeryStepsCompared {
+        name: String,
+        improved: usize,
+        stable: usize,
+        regressed: usize,
+        cells: Vec<StepComparison>,
+    },
+    /// A bloomery run's per-session figures (`bloomery.session`): a
+    /// higher-is-better sessions/sec verdict per (sessions × shape) where every
+    /// trial measured a rate, with journal growth and peak memory as trend. The
+    /// counts cover only the rows that carry a rate verdict.
+    BloomerySessionCompared {
+        name: String,
+        improved: usize,
+        stable: usize,
+        regressed: usize,
+        cells: Vec<SessionComparison>,
     },
     Uncompared {
         name: String,
@@ -197,6 +221,14 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
             let base_cells = decode_keepup_cells(&base[..k]);
             let cand_cells = decode_keepup_cells(&cand[..k]);
             sections.push(compare_keepup(name, &base_cells, &cand_cells, k));
+        } else if name == StepsSection::NAME {
+            let base_cells = decode_steps_cells(&base[..k]);
+            let cand_cells = decode_steps_cells(&cand[..k]);
+            sections.push(compare_steps(name, &base_cells, &cand_cells, k, cfg));
+        } else if name == SessionSection::NAME {
+            let base_cells = decode_session_cells(&base[..k]);
+            let cand_cells = decode_session_cells(&cand[..k]);
+            sections.push(compare_session(name, &base_cells, &cand_cells, k, cfg));
         } else {
             sections.push(SectionReport::Uncompared { name: name.clone(), reason: UncomparedReason::UnknownName });
         }
@@ -247,6 +279,51 @@ pub(super) fn classify(
         Verdict::Improved
     } else {
         Verdict::Regressed
+    }
+}
+
+/// One paired comparison of a value series: each side's across-trial median
+/// and IQR, the median and IQR-classified verdict of the per-trial paired
+/// deltas, and that delta as a percentage of the base median.
+#[derive(Serialize, Clone, Debug)]
+pub struct PairedStats {
+    pub base_median: f64,
+    pub base_iqr: f64,
+    pub cand_median: f64,
+    pub cand_iqr: f64,
+    pub delta_median: f64,
+    pub delta_pct: f64,
+    pub verdict: Verdict,
+}
+
+/// Pair `base_vals[t]` against `cand_vals[t]` (trial `t` of each side) and
+/// classify the deltas in direction `dir` — the one way a section turns two
+/// value series into a [`Verdict`]. A zero base median reports a `0` delta
+/// percentage rather than dividing by it.
+pub(super) fn paired(base_vals: Vec<f64>, cand_vals: Vec<f64>, dir: Direction, cfg: CompareConfig) -> PairedStats {
+    let deltas: Vec<f64> = cand_vals.iter().zip(&base_vals).map(|(c, b)| c - b).collect();
+
+    let base_sorted = sorted(base_vals);
+    let cand_sorted = sorted(cand_vals);
+    let delta_sorted = sorted(deltas.clone());
+
+    let base_median = median_sorted(&base_sorted);
+    let delta_median = median_sorted(&delta_sorted);
+    let verdict = classify(&deltas, delta_median, iqr_sorted(&delta_sorted), base_median, dir, cfg);
+    let delta_pct = if base_median > 0.0 {
+        delta_median / base_median * 100.0
+    } else {
+        0.0
+    };
+
+    PairedStats {
+        base_median,
+        base_iqr: iqr_sorted(&base_sorted),
+        cand_median: median_sorted(&cand_sorted),
+        cand_iqr: iqr_sorted(&cand_sorted),
+        delta_median,
+        delta_pct,
+        verdict,
     }
 }
 

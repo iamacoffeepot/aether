@@ -4,9 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::perf::stats::{iqr_sorted, median_sorted, sorted};
-
-use super::comparison::{CompareConfig, Direction, SectionReport, Verdict, classify};
+use super::comparison::{CompareConfig, Direction, SectionReport, Verdict, paired};
 use super::trial::TrialReport;
 
 /// One cell's measured throughput in a single trial
@@ -118,7 +116,6 @@ pub(super) fn find_throughput_cell<'a>(cells: &'a [ThroughputCell], key: &Throug
 /// metric/percentile axis) and classified higher-is-better. A cell missing
 /// from any trial of either side is dropped, exactly as in the latency
 /// compare.
-#[allow(clippy::cast_precision_loss)]
 pub(super) fn compare_throughput(
     name: &str,
     base_cells: &[Vec<ThroughputCell>],
@@ -144,34 +141,18 @@ pub(super) fn compare_throughput(
         // carries `Some` here (iamacoffeepot/aether#1226).
         let base_vals: Vec<f64> = base_hits.iter().filter_map(|c| c.mails_per_sec).collect();
         let cand_vals: Vec<f64> = cand_hits.iter().filter_map(|c| c.mails_per_sec).collect();
-        let deltas: Vec<f64> = (0..k).map(|t| cand_vals[t] - base_vals[t]).collect();
-
-        let base_sorted = sorted(base_vals.clone());
-        let cand_sorted = sorted(cand_vals.clone());
-        let delta_sorted = sorted(deltas.clone());
-
-        let base_median = median_sorted(&base_sorted);
-        let cand_median = median_sorted(&cand_sorted);
-        let delta_median = median_sorted(&delta_sorted);
-        let delta_iqr = iqr_sorted(&delta_sorted);
-
-        let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::HigherIsBetter, cfg);
-        let delta_pct = if base_median > 0.0 {
-            delta_median / base_median * 100.0
-        } else {
-            0.0
-        };
+        let stats = paired(base_vals, cand_vals, Direction::HigherIsBetter, cfg);
 
         cells.push(ThroughputComparison {
             workers: key.workers,
             topo: key.topo.clone(),
-            base_median,
-            base_iqr: iqr_sorted(&base_sorted),
-            cand_median,
-            cand_iqr: iqr_sorted(&cand_sorted),
-            delta_median,
-            delta_pct,
-            verdict,
+            base_median: stats.base_median,
+            base_iqr: stats.base_iqr,
+            cand_median: stats.cand_median,
+            cand_iqr: stats.cand_iqr,
+            delta_median: stats.delta_median,
+            delta_pct: stats.delta_pct,
+            verdict: stats.verdict,
         });
     }
 
