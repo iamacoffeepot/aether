@@ -311,9 +311,10 @@ registry owner (§3), and the host reads it there.
   and the name decides the answer. A live name: the reply names it and
   nothing is re-initialised. An absent name: the engine stands the instance
   up. A tombstoned name: the spawn is refused, because the name is spent
-  (§8). It covers native and guest types alike: a native type is spawned
-  from its boot-time publication, which gives outside callers a way to start
-  a native instance by mail that they lack today.
+  (§8). The door spawns published guest types. A native namespace is
+  composed by its chassis or parent, and spawning one by mail is not
+  supported yet, so a `Spawn` naming one, a composed singleton's included,
+  is refused with an error saying so (see Alternatives considered).
 
 `LoadComponent` becomes a convenience that publishes and spawns in one call.
 `ReplaceComponent { wasm, configs: Vec<(ErasedActorPath, Vec<u8>)> }` becomes
@@ -449,3 +450,11 @@ step 3.
   unpublish would add is reclaiming the memory of a dead publication, one
   nothing will spawn again. Revisit when memory held by dead publications
   becomes a measured cost.
+- **Native spawn by mail.** Deferred. Every instanced native type today
+  takes wiring from its composer or parent, as `Params` (`JournalActor`,
+  `BundleDriver`, `Autoloader`) or as `Config` (`WasmTrampoline`,
+  `FleetProxy`, `HttpDispatchShard`, `TcpListenerActor`, `TcpSessionActor`),
+  so a door now (#7179) would stage only test fixtures. When it returns, a
+  native type opts in explicitly through its `#[actor]` (no inferred probe),
+  and the door stays crate-private to the component host rather than a
+  public `NativeCtx` spawn-by-name verb. Revisit when native types settle.
