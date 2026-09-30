@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::key::RunKey;
 use crate::runtime::run::{Allotment, Observed};
-use crate::{Resource, RunResult};
+use crate::{Resource, RunError, RunResult};
 
 /// The least memory a seen key's allotment gets: 256 MiB.
 pub const MIN_MEMORY_BYTES: u64 = 256 << 20;
@@ -152,17 +152,17 @@ impl Estimates {
                 blend(&mut estimate.memory_bytes, memory);
                 blend(&mut estimate.wall_nanos, wall);
             }
-            RunResult::Exhausted(Resource::Memory) => {
+            RunResult::Err(RunError::Exhausted(Resource::Memory)) => {
                 let grown = u128::from(allotment.memory_bytes).saturating_mul(GROWTH);
                 let ceiling = u128::from(self.ceiling.memory_bytes.get());
                 self.table.entry(*key).or_default().memory_bytes = Some(grown.min(ceiling));
             }
-            RunResult::Exhausted(Resource::Time) => {
+            RunResult::Err(RunError::Exhausted(Resource::Time)) => {
                 let grown = allotment.deadline.as_nanos().saturating_mul(GROWTH);
                 let ceiling = self.ceiling.deadline.as_nanos();
                 self.table.entry(*key).or_default().wall_nanos = Some(grown.min(ceiling));
             }
-            RunResult::Refused(_) | RunResult::Failed { .. } => {}
+            RunResult::Err(RunError::Refused(_) | RunError::Failed { .. }) => {}
         }
     }
 }

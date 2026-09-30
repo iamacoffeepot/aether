@@ -29,14 +29,14 @@ use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
-use aether_actor::runtime;
-use aether_bloomery_kinds::{ClosureLimit, Detail, ReadArtifactResult, ReadClosureResult, StageResult};
+use aether_actor::{PathRefused, runtime};
+use aether_bloomery_kinds::{ClosureLimit, ReadArtifactResult, ReadClosureResult, StageResult};
 use aether_bloomery_tar::{Limits, LimitsError, Rules};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
 
-use crate::{Import, ImportResult, Refusal, Run, RunResult, StorageWake, WorkspaceCapability, WorkspaceConfig};
+use crate::{Import, ImportResult, Run, RunResult, StorageWake, WorkspaceCapability, WorkspaceConfig};
 use engine::{Endpoint, Engine};
 use import::Importer;
 use provision::{Amounts, Budget, CpuSet, Estimates, Headroom, RunQueue};
@@ -137,11 +137,12 @@ impl NativeActor for WorkspaceCapability {
     /// Import a digest-pinned image into a tree staged to its source.
     ///
     /// # Agent
-    /// Reply: `import_result`. Answers `Failed { detail }` at once when
-    /// `source` is not live. Otherwise pulls the image through the Docker
-    /// Engine API, decodes its exported filesystem under the userland rules,
-    /// stages the tree to `source` as it decodes, and answers `Ok { tree }`
-    /// once every stage is answered, or `Failed { detail }` with no container
+    /// Reply: `import_result`. Answers `Err(Source(..))` at once when
+    /// `source` did not prove or is not live. Otherwise pulls the image
+    /// through the Docker Engine API, decodes its exported filesystem under
+    /// the userland rules, stages the tree to `source` as it decodes, and
+    /// answers `Ok { tree }` once every stage is answered, or
+    /// `Err(Failed { detail })` with no container
     /// left behind; what a failed import staged is cited by nothing. The
     /// reply lands when the whole import is done.
     #[handler::request]
@@ -156,10 +157,7 @@ impl NativeActor for WorkspaceCapability {
             Err(error) => {
                 tracing::warn!(target: "aether_bloomery_workspace", image = image.as_str(), %error, "import source is not live");
                 let (pending, held) = ctx.hold::<ImportResult>();
-                held.answer(
-                    ctx,
-                    &ImportResult::Failed { detail: Detail::new(format!("the import's source: {error}")) },
-                );
+                held.answer(ctx, &ImportResult::from(PathRefused::from(error)));
                 pending
             }
         }
@@ -176,18 +174,18 @@ impl NativeActor for WorkspaceCapability {
     /// staging through the run's source.
     ///
     /// # Agent
-    /// Reply: `run_result`. Answers `Refused(SourceUnavailable)` at once when
-    /// `source` is not live. The actor provisions the run itself: it picks
+    /// Reply: `run_result`. Answers `Err(Refused(SourceUnavailable(..)))` at
+    /// once when `source` did not prove or is not live. The actor provisions the run itself: it picks
     /// the run's cores, memory, and deadline from its host budget and what
     /// it has seen of runs doing the same steps, and the run may wait, in
     /// arrival order, until they are free; it is never dropped. Runs each
     /// step in its own container over the tree at `/work`, under the sandbox
     /// pins and that allotment, and answers `Ok(Outcome)` with each step's
     /// exit code and stored stdout and stderr and the output tree minus
-    /// `scratch`; `Refused` when the run cannot start as asked;
-    /// `Exhausted(Time | Memory)` when a step outran the allotment, after
+    /// `scratch`; `Err(Refused)` when the run cannot start as asked;
+    /// `Err(Exhausted(Time | Memory))` when a step outran the allotment, after
     /// which a retry is given twice as much of it, up to the budget; or
-    /// `Failed { detail }` when the executor failed. No container or volume
+    /// `Err(Failed { detail })` when the executor failed. No container or volume
     /// is left behind. Every input is read from `source` and every output
     /// staged to it; an `Ok` answers only once every stage is answered, and
     /// what a run that ends any other way staged is cited by nothing. The
@@ -200,7 +198,7 @@ impl NativeActor for WorkspaceCapability {
             Err(error) => {
                 tracing::info!(target: "aether_bloomery_workspace", %error, "run refused: its source is not live");
                 let (pending, held) = ctx.hold::<RunResult>();
-                held.answer(ctx, &RunResult::Refused(Refusal::SourceUnavailable));
+                held.answer(ctx, &RunResult::from(PathRefused::from(error)));
                 pending
             }
         }

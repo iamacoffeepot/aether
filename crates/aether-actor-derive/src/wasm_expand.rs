@@ -17,7 +17,7 @@ use crate::manifest::{
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
     DeclaredLists, ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl,
-    declared_impl, position, reply_marker_impl, rows_list,
+    declared_impl, position, refusal_answer, reply_marker_impl, rows_list,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -955,23 +955,13 @@ fn build_dispatch_body(
         // carried by a statement attribute over the block — the arm names both
         // the kind type and the method, neither of which exists in a
         // configuration that strips the handler.
+        let decode_and_call = wasm_arm_body(k, refusal_answer(h.class, &h.reply, k).as_ref(), &call, &rc);
         let cfgs = &h.cfgs;
         quote! {
             #(#cfgs)*
             {
                 if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID {
-                    if let ::core::option::Option::Some(__aether_decoded) =
-                        __aether_mail.decode_kind::<#k>()
-                    {
-                        #call
-                        return #rc;
-                    }
-                    // A recognized kind id whose payload fails to decode falls
-                    // through to the tail (the `#[fallback]`, else
-                    // `DISPATCH_UNKNOWN_KIND`), mirroring the native arm's
-                    // `return Option::None` rather than reporting HANDLED for a
-                    // handler that never ran (iamacoffeepot/aether#2455). No later
-                    // arm matches, since the id already matched this one.
+                    #decode_and_call
                 }
             }
         }
@@ -1026,5 +1016,44 @@ fn build_dispatch_body(
         #( #arms )*
         #set_delegation
         #tail
+    }
+}
+
+/// One guest arm's decode, `call`, and `return rc`, shared by the `#[actor]`
+/// and `#[handler_set]` expansions. A recognized kind id whose payload fails
+/// to decode falls through to the tail (the `#[fallback]`, else
+/// `DISPATCH_UNKNOWN_KIND`) rather than reporting HANDLED for a handler that
+/// never ran (iamacoffeepot/aether#2455). ADR-0231 §3: a replying row passes
+/// the `answer` a refused typed path goes through, and answers it with its
+/// reply's `From<PathRefused>`, which frees the dispatch's reply handle.
+pub fn wasm_arm_body(
+    kind_ty: &Type,
+    answer: Option<&TokenStream2>,
+    call: &TokenStream2,
+    rc: &TokenStream2,
+) -> TokenStream2 {
+    let Some(answer) = answer else {
+        return quote! {
+            if let ::core::option::Option::Some(__aether_decoded) = __aether_mail.decode_kind::<#kind_ty>() {
+                #call
+                return #rc;
+            }
+        };
+    };
+    quote! {
+        match __aether_mail.__decode_kind_or_refused::<#kind_ty>() {
+            ::core::result::Result::Ok(__aether_decoded) => {
+                #call
+                return #rc;
+            }
+            ::core::result::Result::Err(__aether_error) => {
+                if let ::core::option::Option::Some(__aether_refused) =
+                    ::aether_actor::__macro_internals::refused_reply(__aether_error.as_ref(), #answer)
+                {
+                    ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_refused);
+                    return ::aether_actor::DISPATCH_HANDLED_RELEASE;
+                }
+            }
+        }
     }
 }

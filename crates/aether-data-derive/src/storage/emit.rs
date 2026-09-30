@@ -266,6 +266,8 @@ fn emit_validate_wire(name: &syn::Ident, inner: &Type) -> TokenStream2 {
         }
 
         impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
+            const PROVES_ROUTES: bool = <#inner as ::aether_data::__derive_runtime::WireDecode<'de>>::PROVES_ROUTES;
+
             fn decode(
                 cursor: &mut &'de [u8],
             ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {

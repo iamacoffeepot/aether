@@ -1,0 +1,36 @@
+error[E0277]: the trait bound `Registered: From<PathRefused>` is not satisfied
+  --> tests/ui/rejects_path_request_without_refused_reply.rs:35:79
+   |
+35 |     fn on_register(&mut self, _ctx: &mut WasmCtx<'_>, _register: Register) -> Registered {
+   |                                                                               ^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<PathRefused>` is not implemented for `Registered`
+  --> tests/ui/rejects_path_request_without_refused_reply.rs:22:1
+   |
+22 | struct Registered;
+   | ^^^^^^^^^^^^^^^^^
+help: the trait `aether_actor::__macro_internals::RefusalAnswer<O>` is implemented for `aether_actor::__macro_internals::Refusal<true>`
+  --> $WORKSPACE/crates/aether-actor/src/refusal_answer.rs
+   |
+   | impl<O: From<PathRefused>> RefusalAnswer<O> for Refusal<true> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `aether_actor::__macro_internals::Refusal<true>` to implement `aether_actor::__macro_internals::RefusalAnswer<Registered>`
+
+error[E0277]: the trait bound `Registered: From<PathRefused>` is not satisfied
+  --> tests/ui/rejects_path_request_without_refused_reply.rs:26:1
+   |
+26 | #[actor]
+   | ^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<PathRefused>` is not implemented for `Registered`
+  --> tests/ui/rejects_path_request_without_refused_reply.rs:22:1
+   |
+22 | struct Registered;
+   | ^^^^^^^^^^^^^^^^^
+help: the trait `aether_actor::__macro_internals::RefusalAnswer<O>` is implemented for `aether_actor::__macro_internals::Refusal<true>`
+  --> $WORKSPACE/crates/aether-actor/src/refusal_answer.rs
+   |
+   | impl<O: From<PathRefused>> RefusalAnswer<O> for Refusal<true> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `aether_actor::__macro_internals::Refusal<true>` to implement `aether_actor::__macro_internals::RefusalAnswer<Registered>`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

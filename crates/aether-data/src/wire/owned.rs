@@ -33,6 +33,15 @@ pub trait WireEncode {
 
 /// Reconstruct `Self` from the front of a borrowed-slice cursor.
 pub trait WireDecode<'de>: Sized {
+    /// Whether a decode of `Self` proves a `ProtocolPath` route through
+    /// [`Decoder::prove_route_covers`] anywhere it nests, so it can refuse on
+    /// engine state rather than on the bytes alone (ADR-0231 §3). A leaf
+    /// keeps `false`; `ProtocolPath` sets `true`; the container impls
+    /// forward their elements' value, and the derive ORs it over every field
+    /// of every variant. A request kind for which it is `true` replies with a
+    /// kind that answers the refusal.
+    const PROVES_ROUTES: bool = false;
+
     /// Pull one `Self` off the front of `cursor`, advancing it.
     ///
     /// # Errors

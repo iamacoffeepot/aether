@@ -408,6 +408,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_missing_rehydrate",
     "rejects_narrow_to_uncovered_protocol",
     "rejects_nonself_handler_wasm",
+    "rejects_path_request_without_refused_reply",
     "rejects_protocol_fallback_and_unchecked_rows",
     "rejects_protocol_reply_mismatch",
     "rejects_reference_narrow_to_uncovered_protocol",

@@ -103,6 +103,8 @@ impl<T: WireEncode + Clone> WireEncode for Cow<'_, [T]> {
 }
 
 impl<'de, T: WireDecode<'de> + Clone> WireDecode<'de> for Cow<'static, [T]> {
+    const PROVES_ROUTES: bool = T::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         Self::decode_from(cursor)
     }
@@ -123,6 +125,8 @@ impl<T: WireEncode> WireEncode for Vec<T> {
 }
 
 impl<'de, T: WireDecode<'de>> WireDecode<'de> for Vec<T> {
+    const PROVES_ROUTES: bool = T::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         Self::decode_from(cursor)
     }
@@ -152,6 +156,8 @@ impl<T: WireEncode> WireEncode for Option<T> {
 }
 
 impl<'de, T: WireDecode<'de>> WireDecode<'de> for Option<T> {
+    const PROVES_ROUTES: bool = T::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         Self::decode_from(cursor)
     }
@@ -179,6 +185,8 @@ impl<T: WireEncode, const N: usize> WireEncode for [T; N] {
 }
 
 impl<'de, T: WireDecode<'de>, const N: usize> WireDecode<'de> for [T; N] {
+    const PROVES_ROUTES: bool = T::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         Self::decode_from(cursor)
     }
@@ -203,6 +211,8 @@ impl<T: WireEncode> WireEncode for Box<T> {
 }
 
 impl<'de, T: WireDecode<'de>> WireDecode<'de> for Box<T> {
+    const PROVES_ROUTES: bool = T::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         T::decode(cursor).map(Self::new)
     }
@@ -240,6 +250,8 @@ impl<K: WireEncode + Ord, V: WireEncode> WireEncode for BTreeMap<K, V> {
 }
 
 impl<'de, K: WireDecode<'de> + Ord, V: WireDecode<'de>> WireDecode<'de> for BTreeMap<K, V> {
+    const PROVES_ROUTES: bool = K::PROVES_ROUTES || V::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
         Self::decode_from(cursor)
     }

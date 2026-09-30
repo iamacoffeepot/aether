@@ -223,6 +223,16 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // `decode_body` — a single `Sink::send` call site routes through
     // `Kind::encode_into_bytes`, picking cast or wire at the
     // kind's derive instead of at every send site.
+    // ADR-0231 §3: a structured kind reads its path marker off its own
+    // `WireDecode`; a `#[repr(C)]` kind holds no path and keeps the default.
+    let proves_routes = if has_repr_c {
+        TokenStream2::new()
+    } else {
+        quote! {
+            const PROVES_ROUTES: bool =
+                <Self as ::aether_data::__derive_runtime::WireDecode<'static>>::PROVES_ROUTES;
+        }
+    };
     let encode_body = if has_repr_c {
         quote! { ::aether_data::__derive_runtime::encode_cast::<Self>(self) }
     } else {
@@ -287,6 +297,8 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     ),
                 ),
             );
+
+            #proves_routes
 
             fn decode_with(
                 bytes: &[u8],
@@ -812,7 +824,20 @@ fn decode_expr(ty: &Type) -> TokenStream2 {
 /// emitted once, in `encode_to` / `decode_from`; `encode` / `decode`
 /// forward to it with the plain `Vec<u8>` / `&[u8]` hooks, so the plain path
 /// monomorphizes to a direct walk.
-fn wire_impls(name: &syn::Ident, encode_body: &TokenStream2, decode_body: &TokenStream2) -> TokenStream2 {
+fn wire_impls(
+    name: &syn::Ident,
+    field_types: &[&Type],
+    encode_body: &TokenStream2,
+    decode_body: &TokenStream2,
+) -> TokenStream2 {
+    // ADR-0231 §3: the type proves a route when any field does, wherever it
+    // nests. `Vec<u8>` keeps its memcpy arm but still answers `false`. The
+    // field types are echoed at the derive's call site, as `reach_impls`
+    // echoes them, so a qualified spelling is linted on the field alone.
+    let proves_routes = field_types.iter().map(|ty| {
+        let ty = call_site_tokens(ty.to_token_stream());
+        quote! { || <#ty as ::aether_data::__derive_runtime::WireDecode<'de>>::PROVES_ROUTES }
+    });
     quote! {
         impl ::aether_data::wire::WireEncode for #name {
             fn encode(
@@ -830,6 +855,8 @@ fn wire_impls(name: &syn::Ident, encode_body: &TokenStream2, decode_body: &Token
             }
         }
         impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
+            const PROVES_ROUTES: bool = false #(#proves_routes)*;
+
             fn decode(
                 cursor: &mut &'de [u8],
             ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
@@ -859,6 +886,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             });
             wire_impls(
                 name,
+                &named.named.iter().map(|field| &field.ty).collect::<Vec<_>>(),
                 &quote! {
                     #(#encodes)*
                     ::core::result::Result::Ok(())
@@ -874,6 +902,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             let decodes = unnamed.unnamed.iter().map(|field| decode_expr(&field.ty));
             wire_impls(
                 name,
+                &unnamed.unnamed.iter().map(|field| &field.ty).collect::<Vec<_>>(),
                 &quote! {
                     #(#encodes)*
                     ::core::result::Result::Ok(())
@@ -890,6 +919,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             };
             wire_impls(
                 name,
+                &[],
                 &quote! {
                     let _ = enc;
                     ::core::result::Result::Ok(())
@@ -971,8 +1001,11 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
             }
         }
     });
+    let field_types: Vec<&Type> =
+        data.variants.iter().flat_map(|variant| variant.fields.iter().map(|field| &field.ty)).collect();
     wire_impls(
         name,
+        &field_types,
         &quote! {
             match self {
                 #(#encode_arms)*

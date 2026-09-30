@@ -5,7 +5,7 @@ use super::{
     request_keeps_alive, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
     validate_ws_handshake,
 };
-use crate::kinds::{HttpHeader, HttpMethod};
+use crate::kinds::{HttpHeader, HttpMethod, RegisterRouteError};
 use crate::typed::route_matches;
 use aether_actor::ErasedActorRef;
 use aether_substrate::actor::native::PumpedSlot;
@@ -86,7 +86,7 @@ fn disabled_http_server_err_replies_to_register_route() {
 
     let result: RegisterRouteResult = decode_session_reply(&supervisor.egress);
     assert!(
-        matches!(&result, RegisterRouteResult::Err { error } if error.contains("disabled")),
+        matches!(&result, RegisterRouteResult::Err(RegisterRouteError::Rejected { error }) if error.contains("disabled")),
         "a disabled http server must fail fast on register_route, got {result:?}",
     );
     holder.shutdown();
@@ -384,7 +384,7 @@ mod route_registration {
         Arc, ErasedActorRef, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
         unregister_routes_all,
     };
-    use crate::kinds::{HttpMethod, HttpRouter};
+    use crate::kinds::{HttpMethod, HttpRouter, RegisterRouteError};
     use crate::server::tests::handlers::router_holders as holders;
     use aether_actor::ProtocolRef;
 
@@ -406,10 +406,10 @@ mod route_registration {
     #[track_caller]
     fn expect_err_containing(result: RegisterRouteResult, needle: &str) {
         match result {
-            RegisterRouteResult::Err { error } => {
+            RegisterRouteResult::Err(RegisterRouteError::Rejected { error }) => {
                 assert!(error.contains(needle), "error {error:?} does not contain {needle:?}");
             }
-            RegisterRouteResult::Ok => panic!("expected Err containing {needle:?}, got Ok"),
+            other => panic!("expected a rejection containing {needle:?}, got {other:?}"),
         }
     }
 

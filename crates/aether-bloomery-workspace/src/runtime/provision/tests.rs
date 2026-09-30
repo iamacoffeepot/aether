@@ -14,8 +14,8 @@ use super::key::RunKey;
 use super::queue::Admission;
 use crate::runtime::run::{Allotment, Observed};
 use crate::{
-    EnvVar, Mount, Mounts, Network, Outcome, Refusal, Resource, RunRequest, RunResult, Scratch, Step, Steps, ToolName,
-    TreePath,
+    EnvVar, Mount, Mounts, Network, Outcome, Refusal, Resource, RunError, RunRequest, RunResult, Scratch, Step, Steps,
+    ToolName, TreePath,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -183,7 +183,7 @@ fn exhausting_memory_doubles_the_next_allotment_up_to_the_budget() -> TestResult
 
     for _ in 0..4 {
         let given = allotment(&table.amounts(&build))?;
-        table.observe(&build, &given, &RunResult::Exhausted(Resource::Memory), &Observed::default());
+        table.observe(&build, &given, &RunResult::Err(RunError::Exhausted(Resource::Memory)), &Observed::default());
         grown.push(table.amounts(&build).memory_bytes.get());
     }
 
@@ -203,7 +203,7 @@ fn repeated_timeouts_double_the_deadline_until_the_ceiling_and_stop_there() -> T
 
     for _ in 0..4 {
         let given = allotment(&table.amounts(&build))?;
-        table.observe(&build, &given, &RunResult::Exhausted(Resource::Time), &Observed::default());
+        table.observe(&build, &given, &RunResult::Err(RunError::Exhausted(Resource::Time)), &Observed::default());
         grown.push(table.amounts(&build).deadline);
     }
 
@@ -235,8 +235,8 @@ fn refused_and_failed_runs_leave_the_estimate_as_it_was() -> TestResult {
     let given = allotment(&table.amounts(&build))?;
     let before = table.amounts(&build);
 
-    let refused = RunResult::Refused(Refusal::EnvironmentUnavailable);
-    let failed = RunResult::Failed { detail: Detail::new("the daemon hung up") };
+    let refused = RunResult::Err(RunError::Refused(Refusal::EnvironmentUnavailable));
+    let failed = RunResult::Err(RunError::Failed { detail: Detail::new("the daemon hung up") });
     table.observe(&build, &given, &refused, &seen(8 * GIB, 200 * MINUTE));
     table.observe(&build, &given, &failed, &seen(8 * GIB, 200 * MINUTE));
 
@@ -302,7 +302,7 @@ fn an_allotment_larger_than_the_whole_budget_is_clamped_and_admitted_on_an_idle_
     let given = admission.admit_now(build).ok_or("a clamped allotment fits an idle host")?;
     assert_eq!((given.allotment.cpus.docker_list(), given.allotment.memory_bytes), ("4-5".to_owned(), GIB));
 
-    admission.finish(&given, &RunResult::Exhausted(Resource::Memory), &Observed::default());
+    admission.finish(&given, &RunResult::Err(RunError::Exhausted(Resource::Memory)), &Observed::default());
     let again = admission.admit_now(build).ok_or("the retry, grown past the budget, is clamped and fits")?;
     assert_eq!(again.allotment.memory_bytes, GIB);
     Ok(())

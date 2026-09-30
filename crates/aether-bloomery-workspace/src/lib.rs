@@ -54,10 +54,10 @@ mod config;
 mod kinds;
 
 pub use kinds::{
-    EnvVar, EnvVarError, Environment, ImageRef, ImageRefError, Import, ImportResult, MAX_STEPS, Mount, Mounts,
-    MountsError, Network, Outcome, Platform, PlatformError, Provides, Refusal, Resource, Run, RunRequest, RunResult,
-    RustToolchain, RustToolchainError, Scratch, ScratchError, Step, StepOutcome, Steps, StepsError, StorageWake, Tool,
-    ToolName, ToolNameError, ToolRecord, Tools, ToolsError, TreePath, TreePathError,
+    EnvVar, EnvVarError, Environment, ImageRef, ImageRefError, Import, ImportError, ImportResult, MAX_STEPS, Mount,
+    Mounts, MountsError, Network, Outcome, Platform, PlatformError, Provides, Refusal, Resource, Run, RunError,
+    RunRequest, RunResult, RustToolchain, RustToolchainError, Scratch, ScratchError, Step, StepOutcome, Steps,
+    StepsError, StorageWake, Tool, ToolName, ToolNameError, ToolRecord, Tools, ToolsError, TreePath, TreePathError,
 };
 
 pub use config::{DEFAULT_ENDPOINT, WorkspaceConfig};

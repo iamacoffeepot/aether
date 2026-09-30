@@ -10,9 +10,9 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, ReplyMode};
-use aether_data::wire::DecodeCtx;
-use aether_data::{Kind, KindId, MailId, RequestId};
+use aether_actor::{ErasedActorRef, OutboundReply, PathRefused, ReplyMode, Unchecked};
+use aether_data::wire::{self, DecodeCtx};
+use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 use aether_kinds::DecodeRefused;
 
 use crate::actor::native::envelope::Envelope;
@@ -89,25 +89,38 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///   answers it.
     ///
     /// A refusal is logged once at warn, naming the kind and the error, and
-    /// answers `None`, the typed arm's miss: the handler does not run, so no
-    /// reply is sent. The reply target hears the refusal only when it opts in
-    /// (see `answer_decode_refusal`); no other sender does. The `#[actor]`
-    /// typed arms and native handler-set arms call it; a hand decoder of an
-    /// `&Envelope` is not affected. It decodes only the mail being handled,
-    /// so it grants nothing the handler does not already receive.
+    /// returned: the handler does not run. The `#[actor]` typed arms and
+    /// native handler-set arms call it and hand a refusal to
+    /// `__refuse_inbound` (a row that replies) or
+    /// `__refuse_inbound_unanswered` (a silent or unchecked row); a
+    /// hand decoder of an `&Envelope` is not affected. It decodes only the
+    /// mail being handled, so it grants nothing the handler does not already
+    /// receive.
+    ///
+    /// # Errors
+    ///
+    /// The [`wire::Error`] `K::decode_with` refused with.
     #[doc(hidden)]
-    #[must_use]
-    pub fn __decode_inbound<K: Kind>(&self, payload: &[u8]) -> Option<K> {
+    pub fn __decode_inbound<K: Kind>(&self, payload: &[u8]) -> Result<K, wire::Error> {
         let entries = self.inbound.as_ref().map_or(&[][..], Envelope::attachments);
         let mut blobs = AttachedEntries(entries);
         let mut ctx = DecodeCtx::empty().blobs(&mut blobs).routes(&**self.binding.mailer().registry());
 
-        K::decode_with(payload, &mut ctx)
-            .inspect_err(|error| {
-                tracing::warn!(target: "aether_substrate::mail", kind = K::NAME, %error, "decode refused");
-                self.answer_decode_refusal(K::ID, error);
-            })
-            .ok()
+        K::decode_with(payload, &mut ctx).inspect_err(|error| {
+            tracing::warn!(target: "aether_substrate::mail", kind = K::NAME, %error, "decode refused");
+        })
+    }
+
+    /// Drop a refused decode of a `K` payload: the typed arm's miss, so the
+    /// handler does not run and no reply is sent. The reply target hears the
+    /// refusal only when it opts in (see `answer_decode_refusal`); no other
+    /// sender does.
+    #[cold]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __refuse_inbound_unanswered<K: Kind>(&self, error: &wire::Error) -> Option<()> {
+        self.answer_decode_refusal(K::ID, error);
+        None
     }
 
     /// Answer a decode refusal of a `kind` payload to the reply target with a
@@ -172,7 +185,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The reply target for the mail currently being dispatched.
     /// Useful when a handler wants to inspect the originator (audit
     /// trails, multi-tenant routing) without going through
-    /// [`OutboundReply::reply`](aether_actor::OutboundReply::reply). `target == SourceAddr::None` means the
+    /// [`OutboundReply::reply`]. `target == SourceAddr::None` means the
     /// inbound was broadcast or peer-component mail with no reply
     /// destination.
     #[must_use]
@@ -275,5 +288,31 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the rule readable rather than a real disambiguation.
     fn held_chain(&self) -> Option<MailId> {
         self.in_flight_root.or(self.causing_chain)
+    }
+}
+
+impl<A> NativeCtx<'_, A, Unchecked> {
+    /// Settle a refused decode of a `K` request whose row replies `O`
+    /// (ADR-0231 §3). When `error` is a typed-path refusal and `answer`
+    /// yields a reply, which it does exactly when `K` carries a
+    /// `ProtocolPath`, the reply goes to the sender through
+    /// [`OutboundReply::reply`], joining the request's chain, and the arm
+    /// reports handled: the requester hears the refusal as its typed reply,
+    /// and no [`DecodeRefused`] follows, so an RPC caller gets exactly one
+    /// answer. A `Pending<O>` row is answered the same way, at once.
+    /// Otherwise the refusal is dropped as `__refuse_inbound_unanswered`
+    /// drops it.
+    #[cold]
+    #[doc(hidden)]
+    pub fn __refuse_inbound<K: Kind, O: ActorMail>(
+        &mut self,
+        error: &wire::Error,
+        answer: impl FnOnce(PathRefused) -> Option<O>,
+    ) -> Option<()> {
+        if let Some(reply) = PathRefused::from_wire(error).and_then(answer) {
+            OutboundReply::reply(self, &reply);
+            return Some(());
+        }
+        self.__refuse_inbound_unanswered::<K>(error)
     }
 }

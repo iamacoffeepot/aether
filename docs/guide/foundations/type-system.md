@@ -160,10 +160,13 @@ worth knowing beyond "it's a type tree":
   still starting, and
   `UncoveredProtocolPath` when that route does not publish every row of `P`.
   A path whose actor has closed decodes, and the receiver's `resolve`
-  answers that it is not live. A refused decode reaches no handler: the
-  mail is logged at warn and nothing is sent back, a request's reply
-  included. The plain shorthand, `decode_from_bytes`, decodes with an empty
-  context.
+  answers that it is not live. A refused decode reaches no handler and is
+  logged at warn. A request whose typed path refused is still answered: a
+  kind that carries a path sets `Kind::PROVES_ROUTES`, its reply implements
+  `From<PathRefused>` (the compiler refuses a replying handler whose reply
+  does not), and the dispatch answers `O::from(refused)`. A silent or
+  unchecked row has no reply, so nothing is sent back. The plain shorthand,
+  `decode_from_bytes`, decodes with an empty context.
   Serde carries no context, so `ProtocolPath<P>` has no `Deserialize`, and a
   kind carrying one is declared `#[aether_data::kind(.., no_serde)]`.
 
