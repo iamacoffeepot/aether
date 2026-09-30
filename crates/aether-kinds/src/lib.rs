@@ -391,7 +391,7 @@ mod engine {
     ///
     /// - `namespaces` — every exported actor's `Addressable::NAMESPACE`. A
     ///   single-actor module yields one; a multi-actor module
-    ///   (`export!(public = [A, B, …])`) yields one per type, the default type first.
+    ///   (`export!(public = [A, B, …])`) yields one per type, in export order.
     /// - `actors` — one [`ComponentActor`] per exported actor type, the
     ///   `module@actor` selector axis (ADR-0096 export selector).
     /// - `handled_kinds` — the union of every actor's handled `KindId`s
@@ -399,10 +399,6 @@ mod engine {
     /// - `fallback` — whether any exported actor declares a `#[fallback]`.
     /// - `provenance` — the wasm `producers` custom section rendered as a
     ///   short string (`"<tool> <version>; …"`), or empty when absent.
-    /// - `default_entry` — the bare-load default actor's namespace per
-    ///   ADR-0138; `None` for a defaultless multi-actor module (built with
-    ///   `export!(public = [A, B, …])`), `Some(ns)` for a single-actor module
-    ///   or a multi-actor module that opted in via `export!(default = A, …)`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct ComponentManifest {
         pub namespaces: Vec<String>,
@@ -410,8 +406,6 @@ mod engine {
         pub handled_kinds: Vec<aether_data::KindId>,
         pub fallback: bool,
         pub provenance: String,
-        #[serde(default)]
-        pub default_entry: Option<String>,
     }
 
     /// One exported actor type within a (possibly multi-actor) component
@@ -630,8 +624,7 @@ mod control_plane {
         /// single-actor module's sole export, or a multi-actor module's
         /// unique one. A multi-actor module that exports more than one
         /// non-boot type has no such type, so `None` against it is a clean
-        /// `LoadResult::Err` that names the exports (ADR-0138), whether or
-        /// not the module opts into an `export!(default = A, …)`. An export
+        /// `LoadResult::Err` that names the exports (ADR-0241 §9). An export
         /// that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
         pub export: Option<String>,

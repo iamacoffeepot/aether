@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aether_chassis::autoload::selectable_exports;
 use aether_chassis::encode_config_json;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::Metadata;
@@ -34,9 +35,12 @@ pub(super) enum ComponentSource {
 }
 
 /// The discover-everything dev sweep component set: build every
-/// structurally discovered component and read its wasm into an unnamed
-/// [`PackComponent`], loaded under its type's own name (a load names no key
-/// for a singleton, ADR-0241 §5). Stem-sorted so a rebuild of the same
+/// structurally discovered component and read its wasm into one unnamed
+/// [`PackComponent`] per selectable export, each naming that export's
+/// namespace (every spawn names its namespace, ADR-0241 §9) and loaded under
+/// its type's own name (a load names no key for a singleton, ADR-0241 §5).
+/// A module whose exports cannot be read fails the sweep naming the
+/// component. Stem-sorted so a rebuild of the same
 /// sources yields a byte-identical `pack/manifest`; each package builds in its own cargo
 /// invocation (never batch multiple `-p`, see `inventory::build_plans`).
 pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: Profile) -> Result<Vec<PackComponent>> {
@@ -50,14 +54,21 @@ pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: 
         build_component(&plan, profile)?;
     }
     let wasm_profile_dir = target_dir.join(WASM_TARGET).join(profile.as_str());
-    components
-        .iter()
-        .map(|component| {
-            let src = wasm_artifact_path(&wasm_profile_dir, component);
-            let wasm = fs::read(&src).with_context(|| format!("read component wasm {}", src.display()))?;
-            Ok(PackComponent { wasm, config: None, name: None, export: None, replicas: None })
-        })
-        .collect()
+    let mut swept = Vec::new();
+    for component in &components {
+        let src = wasm_artifact_path(&wasm_profile_dir, component);
+        let wasm = fs::read(&src).with_context(|| format!("read component wasm {}", src.display()))?;
+        let exports = selectable_exports(&wasm)
+            .map_err(|error| anyhow::anyhow!("read the exports of component {}: {error}", component.stem))?;
+        swept.extend(exports.into_iter().map(|export| PackComponent {
+            wasm: wasm.clone(),
+            config: None,
+            name: None,
+            export: Some(export),
+            replicas: None,
+        }));
+    }
+    Ok(swept)
 }
 
 /// Build (or locate) each planned component's wasm, in plan order, and read

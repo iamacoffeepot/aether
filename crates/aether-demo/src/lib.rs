@@ -56,4 +56,4 @@ impl WasmActor for Demo {
     }
 }
 
-aether_actor::export!(default = Demo);
+aether_actor::export!(public = [Demo]);

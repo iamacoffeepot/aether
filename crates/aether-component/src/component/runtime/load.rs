@@ -423,8 +423,9 @@ impl ComponentHostCapabilityState {
         } else {
             // ADR-0241 §9: every spawn names its namespace, so an unselected
             // load takes the module's one non-boot export and is refused,
-            // naming every export, when there is not exactly one; an
-            // `export!(default = …)` opt-in selects nothing here.
+            // naming every export, when there is not exactly one. A named
+            // group is constructed by its type tag, since a multi-actor
+            // module's untyped init constructs nothing.
             let boot_ns = manifest.boot();
             let selectable: Vec<_> = actors
                 .iter()
@@ -437,7 +438,8 @@ impl ComponentHostCapabilityState {
                      selector; exported types: {available:?}"
                 ));
             };
-            (sole.capabilities.clone(), sole.dependencies.clone(), None, sole.namespace.clone())
+            let tag = sole.namespace.as_deref().map(|namespace| aether_data::ActorId::singleton(namespace).0);
+            (sole.capabilities.clone(), sole.dependencies.clone(), tag, sole.namespace.clone())
         };
 
         let Some(namespace) = selected_namespace.or_else(|| manifest.namespace().map(str::to_owned)) else {

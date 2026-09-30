@@ -201,7 +201,6 @@ fn component_listing_names_kinds_omits_union_and_preserves_manifest_fields() {
                 handled_kinds: vec![Tick::ID, unknown],
                 fallback: true,
                 provenance: "rustc 1.test".to_owned(),
-                default_entry: Some("test.probe".to_owned()),
             },
         }],
         total_matched: 1,
@@ -589,7 +588,6 @@ fn resolved_module(exports: &[&str]) -> ResolveComponentResult {
             handled_kinds: Vec::new(),
             fallback: false,
             provenance: "rustc 1.test".to_owned(),
-            default_entry: None,
         },
         export: None,
         config_kind: None,
@@ -682,7 +680,7 @@ async fn load_component_with_replicas_publishes_once_then_spawns_counter_keyed()
 
 /// A load that names no type of a module exporting two is refused before
 /// any mail reaches the engine. The bug this catches is a silent pick of
-/// one export (the retired `default_entry` fallback).
+/// one export.
 #[tokio::test]
 async fn load_component_without_namespace_of_a_two_type_module_is_refused_before_mail() {
     let cells = FleetLocalCells::new();

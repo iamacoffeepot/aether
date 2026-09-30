@@ -1,4 +1,4 @@
-// Mixed ordinary actors + reactors: Probe stays default, sink stays an export,
+// Mixed ordinary actors + reactors: Probe and sink stay exports,
 // only Publisher/Witness become the cluster.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
@@ -60,8 +60,7 @@ impl Reactor for Witness {
 }
 
 export!(
-    default = Probe,
-    public = [Publisher, Witness, Sink],
+    public = [Probe, Publisher, Witness, Sink],
     generators = [aether_bloomery_bundle::bundle],
 );
 

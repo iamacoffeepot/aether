@@ -35,14 +35,19 @@ use crate::boot_manifest::{self, PackedComponent};
 
 use loader::{Autoloader, AutoloaderParams, LoadAnswer};
 
+/// The namespaces a boot entry with no `export` chooses among: its module's
+/// exported types, the boot type left out. The xtask dev sweep names each.
+pub use aether_substrate::actor::wasm::kind_manifest::read_selectable_exports_from_bytes as selectable_exports;
+
 /// A component to auto-load on boot: its wasm bytes, optional init-config
 /// bytes (ADR-0090; empty for none), the namespace of the exported type it
 /// spawns (the manifest's `export`), and the instance keys it spawns at. The
 /// package depot boot and the JSON boot-manifest reader both feed these to
 /// the chassis env's `autoload` list.
 ///
-/// With no `namespace` the loader spawns the module's default: the type its
-/// `aether.namespace` section names, else the sole type it publishes. `keys`
+/// With no `namespace` the loader spawns the module's one selectable export
+/// (its one non-boot type), and fails the entry naming every export, before
+/// anything publishes, when there is not exactly one (ADR-0241 §9). `keys`
 /// holds one key for an unreplicated entry (its `name`, or `None` for a
 /// singleton or a counter key), or N `None` keys, N counter-keyed instances,
 /// for `replicas: N`.

@@ -4,7 +4,7 @@
 //! envelope and collects the programs and reactors it names. Every misuse is
 //! a spanned compile error: the reserved root namespace, a duplicate program
 //! `NAME`, a non-literal or duplicate reactor `NAMESPACE`, a module with
-//! neither role, and a `boot` / `default` that names a program or reactor.
+//! neither role, and a `boot` that names a program or reactor.
 //! The returned [`Roles`] holds at least one role, so "neither role" cannot
 //! reach expansion.
 
@@ -62,7 +62,7 @@ impl Roles {
 ///
 /// A spanned error for the reserved root namespace, a duplicate program
 /// `NAME`, a non-literal or duplicate reactor `NAMESPACE`, a module with
-/// neither role, or a `boot` / `default` that names a program or reactor.
+/// neither role, or a `boot` that names a program or reactor.
 pub fn classify(input: &GenerateInput) -> syn::Result<Roles> {
     for entry in &input.actors {
         if let NamespaceTok::Lit(namespace) = &entry.namespace
@@ -126,30 +126,6 @@ pub fn classify(input: &GenerateInput) -> syn::Result<Roles> {
         }
         if roles.is_reactor(boot) {
             return Err(syn::Error::new_spanned(boot, "export! boot type cannot be a reactor"));
-        }
-    }
-    if let Some(default) = &input.default {
-        let kind = if roles.is_program(default) {
-            Some("program")
-        } else if roles.is_reactor(default) {
-            Some("reactor")
-        } else {
-            None
-        };
-        if let Some(kind) = kind {
-            let mixed = input.exports.iter().any(|ty| !roles.contains(ty));
-            return Err(syn::Error::new_spanned(
-                default,
-                if mixed {
-                    format!(
-                        "export! default cannot be a {kind} in a mixed module; name an ordinary actor or omit default"
-                    )
-                } else {
-                    format!(
-                        "export! default cannot be a {kind}; a bundle-only module exports the generated bundle root"
-                    )
-                },
-            ));
         }
     }
     Ok(roles)

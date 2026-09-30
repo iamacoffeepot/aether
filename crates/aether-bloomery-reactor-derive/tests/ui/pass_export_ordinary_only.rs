@@ -30,7 +30,7 @@ impl WasmActor for Sink {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 }
 
-export!(default = Probe, public = [Sink]);
+export!(public = [Probe, Sink]);
 
 fn main() {
     let _ = Probe;

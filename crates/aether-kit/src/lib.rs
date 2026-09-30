@@ -34,7 +34,7 @@
 //! in active use; git history holds them), so kit depends on none of them.
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
-//! module); it declares no default, so every load names its export, and the FFI
+//! module); it exports several actors, so every load names its export, and the FFI
 //! shims it emits are wasm32-only and inert in a host rlib, so the integration
 //! tests link the same artifact.
 

@@ -29,7 +29,7 @@ impl Reactor for Witness {
 macro_rules! InjectSentinel {
     (@aether_export_generate
         { remaining_generators: [$($next:path),*] }
-        { boot: $boot:tt, default: $default:tt, actors: [
+        { boot: $boot:tt, actors: [
             { ty: { $probe:ty } namespace: $probe_ns:tt extensions: [$($probe_ext:tt)*] }
             { ty: { $publisher:ty } namespace: $publisher_ns:tt extensions: [$($publisher_ext:tt)*] }
             { ty: { $witness:ty } namespace: $witness_ns:tt extensions: [$($witness_ext:tt)*] }
@@ -37,7 +37,7 @@ macro_rules! InjectSentinel {
     ) => {
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
-            boot: $boot default: $default
+            boot: $boot
             actors: [
                 { ty: { $probe } namespace: $probe_ns extensions: [$($probe_ext)* test_export_sentinel { probe }] }
                 { ty: { $publisher } namespace: $publisher_ns extensions: [$($publisher_ext)* test_export_sentinel { one }] }
@@ -52,7 +52,7 @@ macro_rules! InjectSentinel {
 macro_rules! RequireSentinel {
     (@aether_export_generate
         { remaining_generators: [$($next:path),*] }
-        { boot: $boot:tt, default: $default:tt, actors: [
+        { boot: $boot:tt, actors: [
             { ty: { $probe:ty } namespace: "test.bloomery.export.probe" extensions: [test_export_sentinel { probe }] }
             { ty: { $publisher:ty } namespace: "test.bloomery.export.publisher" extensions: [aether_bloomery_reactor {} test_export_sentinel { one }] }
             { ty: { $witness:ty } namespace: "test.bloomery.export.witness" extensions: [aether_bloomery_reactor {} test_export_sentinel { two }] }
@@ -69,7 +69,7 @@ macro_rules! RequireSentinel {
         };
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
-            boot: $boot default: $default
+            boot: $boot
             actors: [
                 { ty: { $probe } namespace: "test.bloomery.export.probe" extensions: [test_export_sentinel { probe }] }
                 { ty: { $publisher } namespace: "test.bloomery.export.publisher" extensions: [aether_bloomery_reactor {} test_export_sentinel { one }] }
@@ -83,8 +83,7 @@ macro_rules! RequireSentinel {
     ($($unexpected:tt)*) => { compile_error!("actor association, namespace, extension payload, or export selection changed"); };
 }
 export!(
-    default = Probe,
-    public = [Publisher, Witness],
+    public = [Probe, Publisher, Witness],
     generators = [InjectSentinel, aether_bloomery_bundle::bundle, RequireSentinel],
 );
 fn main() {}

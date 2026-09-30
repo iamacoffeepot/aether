@@ -1,7 +1,6 @@
 //! An unselected `LoadComponent` (ADR-0241 §9, superseding ADR-0138's
 //! default slot): it succeeds only when the module exports exactly one
-//! non-boot type, and is refused, naming every export, otherwise, whether or
-//! not the module declares an `export!(default = …)`.
+//! non-boot type, and is refused, naming every export, otherwise.
 
 use std::fs;
 
@@ -9,8 +8,8 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::LoadComponent;
 
-/// The bundle's opted-in default (ADR-0138), reachable only by naming it.
-const BUNDLE_DEFAULT_EXPORT: &str = "test.probe";
+/// One of the bundle fixture's exports, reachable only by naming it.
+const BUNDLE_PROBE_EXPORT: &str = "test.probe";
 /// The single-actor fixture's own namespace, the only type it exports.
 const SOLE_EXPORT_NAMESPACE: &str = "test.stateful.typed";
 
@@ -38,12 +37,11 @@ fn an_unselected_load_of_a_single_export_module_succeeds() {
     assert_eq!(path.to_string(), SOLE_EXPORT_NAMESPACE);
 }
 
-/// Catches a regression that resurrects the retired `export!(default =
-/// ...)` fallback: an unselected load of a module exporting more than one
-/// non-boot type must be refused, naming every export, never silently
-/// picking the opted-in default.
+/// Catches a regression that picks one export of a module exporting more
+/// than one non-boot type: an unselected load must be refused, naming every
+/// export, never silently picking one by list position.
 #[test]
-fn an_unselected_load_of_a_multi_export_module_with_a_default_is_refused() {
+fn an_unselected_load_of_a_multi_export_module_is_refused() {
     let Some((mut harness, wasm)) = fixture("aether_test_fixtures_bundle") else {
         return;
     };
@@ -52,7 +50,7 @@ fn an_unselected_load_of_a_multi_export_module_with_a_default_is_refused() {
     let Err(SubstrateHarnessError::Load(error)) = refused else {
         panic!("an unselected load of a multi-export module must be refused; got {refused:?}");
     };
-    assert!(error.contains(BUNDLE_DEFAULT_EXPORT), "the refusal names the module's exports: {error}");
+    assert!(error.contains(BUNDLE_PROBE_EXPORT), "the refusal names the module's exports: {error}");
     assert!(error.contains("export"), "the refusal names the missing export selector: {error}");
 }
 
@@ -65,7 +63,7 @@ fn a_named_export_of_a_multi_export_module_still_loads() {
     };
 
     let (_, path) = harness
-        .load_any(&load(&wasm, Some(BUNDLE_DEFAULT_EXPORT)))
+        .load_any(&load(&wasm, Some(BUNDLE_PROBE_EXPORT)))
         .unwrap_or_else(|error| panic!("a named export load must still succeed: {error}"));
-    assert_eq!(path.to_string(), BUNDLE_DEFAULT_EXPORT);
+    assert_eq!(path.to_string(), BUNDLE_PROBE_EXPORT);
 }

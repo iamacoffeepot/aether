@@ -531,14 +531,13 @@ pub mod guest_alloc;
 /// | Key | Takes | Meaning |
 /// |---|---|---|
 /// | `public = [A, B, …]` | one or more actor types | exported: loadable by an export selector and spawnable by runtime tag (ADR-0096) |
-/// | `default = A` | one actor type | exported, and the type a load with no selector instantiates (ADR-0138 / ADR-0147) |
 /// | `boot = B` | one actor type | exported, and instantiated once on every load of the module, whatever selector the caller names; never selectable (ADR-0147) |
 /// | `private = [C, …]` | one or more actor types | inline children the module rebuilds on a replace but does not export (ADR-0114 §5) |
 /// | `generators = [g, …]` | one or more generator macro paths | export generators, such as `aether_bloomery_bundle::bundle` (ADR-0224) |
 ///
-/// A `default` or `boot` type is not listed again under `public`. The
-/// exported set is `boot`, then `default`, then `public`, whatever the source
-/// order. A module that exports exactly one actor loads without a selector:
+/// A `boot` type is not listed again under `public`. The exported set is
+/// `boot`, then `public`, whatever the source order. A module that exports
+/// exactly one actor loads without a selector:
 ///
 /// ```ignore
 /// pub struct Hello { /* fields */ }
@@ -547,14 +546,13 @@ pub mod guest_alloc;
 /// ```
 ///
 /// A module that exports several actors routes through
-/// `__export_multi_internal!`. Without `default` it designates no default,
-/// so a load with no selector is refused with an error naming the exports:
+/// `__export_multi_internal!`. A load of it with no selector spawns its one
+/// non-boot export, and is refused with an error naming the exports when it
+/// has several:
 ///
 /// ```ignore
 /// aether_actor::export!(public = [Camera, CameraController, MeshViewer]);
-/// aether_actor::export!(default = Camera, public = [CameraController]);
 /// aether_actor::export!(boot = Registry, public = [WidgetA, WidgetB]);
-/// aether_actor::export!(boot = Registry, default = Camera, public = [CameraController]);
 /// ```
 ///
 /// A call that is not keyed is a compile error that shows the keyed spelling,
@@ -570,15 +568,15 @@ pub mod guest_alloc;
 /// (envelopes, intact for the pipeline) and `exports` (the types the final
 /// emitter will bind). A generator may rewrite `exports` and append envelopes
 /// without moving another actor's extensions. FFI emission stays in this
-/// macro: the pipeline ends in one keyed `export!` call.
+/// macro: the pipeline always finishes on the multi-actor emitter, so even a
+/// one-type generated set carries its `ActorBoundary`.
 ///
 /// `type Alias = T` is not followed; generators need a path that names the
 /// `#[actor]` / `#[program]` / `#[reactor]` type (or an import alias of it):
 ///
 /// ```ignore
 /// aether_actor::export!(
-///     default = Probe,
-///     public = [ProbeWithConfig, SourcePublisher, SourceWitness, ReactorOutputSink],
+///     public = [Probe, ProbeWithConfig, SourcePublisher, SourceWitness, ReactorOutputSink],
 ///     generators = [aether_bloomery_bundle::bundle],
 /// );
 /// ```
@@ -595,7 +593,7 @@ pub mod guest_alloc;
 /// other manifest section the host reads, and not spawnable by runtime tag.
 ///
 /// ```ignore
-/// aether_actor::export!(default = Parent, public = [Sibling], private = [Child]);
+/// aether_actor::export!(public = [Parent, Sibling], private = [Child]);
 /// ```
 ///
 /// Each `export!` declares a hidden, private module type whose
@@ -641,9 +639,6 @@ macro_rules! export {
     (boot = $($tt:tt)*) => {
         $crate::__export_parse!(@start boot = $($tt)*);
     };
-    (default = $($tt:tt)*) => {
-        $crate::__export_parse!(@start default = $($tt)*);
-    };
     (public = $($tt:tt)*) => {
         $crate::__export_parse!(@start public = $($tt)*);
     };
@@ -654,90 +649,81 @@ macro_rules! export {
         $crate::__export_parse!(@start generators = $($tt)*);
     };
     // Every call that does not start with a key: a bare type, a bare type
-    // list, a bare list followed by keys, and an empty call.
+    // list, a bare list followed by keys, an unknown leading key, and an
+    // empty call.
     ($($tt:tt)*) => {
         ::core::compile_error!(
             "export! takes keyed entries: `export!(public = [A, B])`, or \
-             `export!(default = A, public = [B], private = [C])`"
+             `export!(boot = B, public = [A], private = [C])`"
         );
     };
 }
 
-// The keyed `export!` muncher. Its state is `{ boot, default, public, private,
-// generators }`: `boot` / `default` are `none` or `{ T }`, `public` /
-// `private` are `[]` until their key fills them with `{ T }` entries, and
-// `generators` is `none` until read. Each key comes once, in any order. The
-// exported set is `boot`, then `default`, then `public`. With `generators`,
-// the finished state enters the generator pipeline; without, `@finish`
-// completes one of the fixed forms and dispatches straight to the internal
-// emitters.
+// The keyed `export!` muncher. Its state is `{ boot, public, private,
+// generators }`: `boot` is `none` or `{ T }`, `public` / `private` are `[]`
+// until their key fills them with `{ T }` entries, and `generators` is `none`
+// until read. Each key comes once, in any order. The exported set is `boot`,
+// then `public`. With `generators`, the finished state enters the generator
+// pipeline, which re-enters at `@generated`; without, `@finish` completes one
+// of the fixed forms and dispatches straight to the internal emitters.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_parse {
     (@start $($tt:tt)*) => {
         $crate::__export_parse!(
             @parse
-            { boot: none, default: none, public: [], private: [], generators: none }
+            { boot: none, public: [], private: [], generators: none }
             $($tt)*
         );
     };
 
-    (@parse { boot: none, default: $default:tt, public: $public:tt, private: $private:tt, generators: $generators:tt }
+    (@parse { boot: none, public: $public:tt, private: $private:tt, generators: $generators:tt }
      boot = $boot:ty $(, $($rest:tt)*)?) => {
         $crate::__export_parse!(
             @parse
-            { boot: { $boot }, default: $default, public: $public, private: $private, generators: $generators }
+            { boot: { $boot }, public: $public, private: $private, generators: $generators }
             $($($rest)*)?
         );
     };
 
-    (@parse { boot: $boot:tt, default: none, public: $public:tt, private: $private:tt, generators: $generators:tt }
-     default = $default:ty $(, $($rest:tt)*)?) => {
-        $crate::__export_parse!(
-            @parse
-            { boot: $boot, default: { $default }, public: $public, private: $private, generators: $generators }
-            $($($rest)*)?
-        );
-    };
-
-    (@parse { boot: $boot:tt, default: $default:tt, public: [], private: $private:tt, generators: $generators:tt }
+    (@parse { boot: $boot:tt, public: [], private: $private:tt, generators: $generators:tt }
      public = [$($p:ty),+ $(,)?] $(, $($rest:tt)*)?) => {
         $crate::__export_parse!(
             @parse
-            { boot: $boot, default: $default, public: [$({ $p })+], private: $private, generators: $generators }
+            { boot: $boot, public: [$({ $p })+], private: $private, generators: $generators }
             $($($rest)*)?
         );
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: [], private: $private:tt, generators: $generators:tt }
+    (@parse { boot: $boot:tt, public: [], private: $private:tt, generators: $generators:tt }
      public = [] $($rest:tt)*) => {
         ::core::compile_error!("export! `public` list must not be empty");
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: [], generators: $generators:tt }
+    (@parse { boot: $boot:tt, public: $public:tt, private: [], generators: $generators:tt }
      private = [$($p:ty),+ $(,)?] $(, $($rest:tt)*)?) => {
         $crate::__export_parse!(
             @parse
-            { boot: $boot, default: $default, public: $public, private: [$({ $p })+], generators: $generators }
+            { boot: $boot, public: $public, private: [$({ $p })+], generators: $generators }
             $($($rest)*)?
         );
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: [], generators: $generators:tt }
+    (@parse { boot: $boot:tt, public: $public:tt, private: [], generators: $generators:tt }
      private = [] $($rest:tt)*) => {
         ::core::compile_error!("export! `private` list must not be empty");
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: $private:tt, generators: none }
+    (@parse { boot: $boot:tt, public: $public:tt, private: $private:tt, generators: none }
      generators = [$($g:path),+ $(,)?] $(, $($rest:tt)*)?) => {
         $crate::__export_parse!(
             @parse
-            { boot: $boot, default: $default, public: $public, private: $private, generators: [$($g),+] }
+            { boot: $boot, public: $public, private: $private, generators: [$($g),+] }
             $($($rest)*)?
         );
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: $private:tt, generators: none }
+    (@parse { boot: $boot:tt, public: $public:tt, private: $private:tt, generators: none }
      generators = [] $($rest:tt)*) => {
         ::core::compile_error!("export! `generators` list must not be empty");
     };
@@ -746,16 +732,13 @@ macro_rules! __export_parse {
     (@parse { boot: { $($x:tt)* }, $($state:tt)* } boot = $($rest:tt)*) => {
         ::core::compile_error!("export! key `boot` is given twice");
     };
-    (@parse { boot: $boot:tt, default: { $($x:tt)* }, $($state:tt)* } default = $($rest:tt)*) => {
-        ::core::compile_error!("export! key `default` is given twice");
-    };
-    (@parse { boot: $boot:tt, default: $default:tt, public: [$($x:tt)+], $($state:tt)* } public = $($rest:tt)*) => {
+    (@parse { boot: $boot:tt, public: [$($x:tt)+], $($state:tt)* } public = $($rest:tt)*) => {
         ::core::compile_error!("export! key `public` is given twice");
     };
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: [$($x:tt)+], $($state:tt)* } private = $($rest:tt)*) => {
+    (@parse { boot: $boot:tt, public: $public:tt, private: [$($x:tt)+], $($state:tt)* } private = $($rest:tt)*) => {
         ::core::compile_error!("export! key `private` is given twice");
     };
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: $private:tt, generators: [$($x:tt)+] } generators = $($rest:tt)*) => {
+    (@parse { boot: $boot:tt, public: $public:tt, private: $private:tt, generators: [$($x:tt)+] } generators = $($rest:tt)*) => {
         ::core::compile_error!("export! key `generators` is given twice");
     };
 
@@ -764,13 +747,13 @@ macro_rules! __export_parse {
         $crate::__export_parse!(@malformed $key);
     };
 
-    (@parse { boot: $boot:tt, default: $default:tt, public: $public:tt, private: $private:tt, generators: $generators:tt }) => {
-        $crate::__export_parse!(@order { boot: $boot, default: $default, public: $public, private: $private, generators: $generators });
+    (@parse { boot: $boot:tt, public: $public:tt, private: $private:tt, generators: $generators:tt }) => {
+        $crate::__export_parse!(@order { boot: $boot, public: $public, private: $private, generators: $generators });
     };
 
     (@parse { $($state:tt)* } $bad:tt $($rest:tt)*) => {
         ::core::compile_error!(concat!(
-            "export! takes only keyed entries (boot, default, public, private, generators); `",
+            "export! takes only keyed entries (boot, public, private, generators); `",
             stringify!($bad),
             "` is not one; list exported actors under `public = [..]`"
         ));
@@ -778,9 +761,6 @@ macro_rules! __export_parse {
 
     (@malformed boot) => {
         ::core::compile_error!("export! `boot = B` takes one actor type");
-    };
-    (@malformed default) => {
-        ::core::compile_error!("export! `default = A` takes one actor type");
     };
     (@malformed public) => {
         ::core::compile_error!("export! `public = [A, B]` takes a bracketed list of actor types");
@@ -793,33 +773,26 @@ macro_rules! __export_parse {
     };
     (@malformed $bad:ident) => {
         ::core::compile_error!(concat!(
-            "export! takes only keyed entries (boot, default, public, private, generators); `",
+            "export! takes only keyed entries (boot, public, private, generators); `",
             stringify!($bad),
             "` is not one; list exported actors under `public = [..]`"
         ));
     };
 
-    // Every key read: the exported set is `boot`, then `default`, then
-    // `public`, whatever the source order.
-    (@order { boot: none, default: none, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
-        $crate::__export_parse!(@route { boot: none, default: none, all: [$($public)*], private: $private, generators: $generators });
+    // Every key read: the exported set is `boot`, then `public`, whatever the
+    // source order.
+    (@order { boot: none, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
+        $crate::__export_parse!(@route { boot: none, all: [$($public)*], private: $private, generators: $generators });
     };
-    (@order { boot: { $boot:ty }, default: none, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
-        $crate::__export_parse!(@route { boot: { $boot }, default: none, all: [{ $boot } $($public)*], private: $private, generators: $generators });
-    };
-    (@order { boot: none, default: { $default:ty }, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
-        $crate::__export_parse!(@route { boot: none, default: { $default }, all: [{ $default } $($public)*], private: $private, generators: $generators });
-    };
-    (@order { boot: { $boot:ty }, default: { $default:ty }, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
-        $crate::__export_parse!(@route { boot: { $boot }, default: { $default }, all: [{ $boot } { $default } $($public)*], private: $private, generators: $generators });
+    (@order { boot: { $boot:ty }, public: [$($public:tt)*], private: $private:tt, generators: $generators:tt }) => {
+        $crate::__export_parse!(@route { boot: { $boot }, all: [{ $boot } $($public)*], private: $private, generators: $generators });
     };
 
-    // With generators: hand the state to the pipeline, whose final `export!`
-    // emits the marker and the coverage check.
-    (@route { boot: $boot:tt, default: $default:tt, all: [$($all:tt)*], private: [$($private:tt)*], generators: [$($g:path),+] }) => {
+    // With generators: hand the state to the pipeline, which re-enters at
+    // `@generated`.
+    (@route { boot: $boot:tt, all: [$($all:tt)*], private: [$($private:tt)*], generators: [$($g:path),+] }) => {
         $crate::__export_with_generators!(
             boot: $boot,
-            default: $default,
             types: [$($all)*],
             private: [$($private)*],
             generators: [$($g),+]
@@ -827,54 +800,54 @@ macro_rules! __export_parse {
     };
 
     // No generators: the marked set is the exported set then the private one.
-    (@route { boot: $boot:tt, default: $default:tt, all: [$($all:tt)*], private: [$($private:tt)*], generators: none }) => {
+    (@route { boot: $boot:tt, all: [$($all:tt)*], private: [$($private:tt)*], generators: none }) => {
         $crate::__export_parse!(
             @finish
-            { boot: $boot, default: $default, all: [$($all)*], marked: [$($all)* $($private)*], private: [$($private)*] }
+            { boot: $boot, all: [$($all)*], marked: [$($all)* $($private)*], private: [$($private)*] }
         );
     };
 
-    (@finish { boot: none, default: none, all: [], marked: [$($marked:tt)*], private: [$($private:tt)*] }) => {
+    // The generator pipeline's finish (`__export_emit_classified`): the
+    // exported set, boot first, always takes the multi-actor emitter, so a
+    // one-type generated set still carries its `ActorBoundary` (ADR-0241 §3).
+    (@generated { boot: $boot:tt, all: [$($all:tt)+], private: [$($private:tt)*] }) => {
+        $crate::__export_parse!(
+            @finish_multi
+            { boot: $boot, all: [$($all)+], marked: [$($all)+ $($private)*], private: [$($private)*] }
+        );
+    };
+
+    (@finish { boot: none, all: [], marked: [$($marked:tt)*], private: [$($private:tt)*] }) => {
         ::core::compile_error!("export! needs at least one exported type");
     };
 
     (@finish
-        { boot: none, default: none, all: [{ $component:ty }], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
+        { boot: none, all: [{ $component:ty }], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
     ) => {
         $crate::__export_internal!(@listed $($m),*);
         $crate::__export_internal!($component ; private [$($p),*]);
     };
 
-    (@finish
-        { boot: none, default: none, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
-    ) => {
-        $crate::__export_internal!(@listed $($m),*);
-        $crate::__export_multi_internal!(@no_boot ; @no_default ; @all $($component),+ ; @private [$($p),*]);
+    (@finish { boot: $boot:tt, all: $all:tt, marked: $marked:tt, private: $private:tt }) => {
+        $crate::__export_parse!(@finish_multi { boot: $boot, all: $all, marked: $marked, private: $private });
     };
 
-    (@finish
-        { boot: none, default: { $default:ty }, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
+    (@finish_multi
+        { boot: none, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
     ) => {
         $crate::__export_internal!(@listed $($m),*);
-        $crate::__export_multi_internal!(@no_boot ; @default $default ; @all $($component),+ ; @private [$($p),*]);
+        $crate::__export_multi_internal!(@no_boot ; @all $($component),+ ; @private [$($p),*]);
     };
 
-    (@finish
-        { boot: { $boot:ty }, default: { $default:ty }, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
-    ) => {
-        $crate::__export_internal!(@listed $($m),*);
-        $crate::__export_multi_internal!(@boot $boot ; @default $default ; @all $($component),+ ; @private [$($p),*]);
-    };
-
-    (@finish { boot: { $boot:ty }, default: none, all: [{ $only:ty }], marked: [$($marked:tt)*], private: [$($private:tt)*] }) => {
+    (@finish_multi { boot: { $boot:ty }, all: [{ $only:ty }], marked: [$($marked:tt)*], private: [$($private:tt)*] }) => {
         ::core::compile_error!("export! boot-only modules need at least one non-boot export");
     };
 
-    (@finish
-        { boot: { $boot:ty }, default: none, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
+    (@finish_multi
+        { boot: { $boot:ty }, all: [$({ $component:ty })+], marked: [$({ $m:ty })*], private: [$({ $p:ty })*] }
     ) => {
         $crate::__export_internal!(@listed $($m),*);
-        $crate::__export_multi_internal!(@boot $boot ; @no_default ; @all $($component),+ ; @private [$($p),*]);
+        $crate::__export_multi_internal!(@boot $boot ; @all $($component),+ ; @private [$($p),*]);
     };
 }
 
@@ -883,14 +856,13 @@ macro_rules! __export_parse {
 macro_rules! __export_with_generators {
     (
         boot: $boot:tt,
-        default: $default:tt,
         types: [$($types:tt)*],
         private: [$($private:tt)*],
         generators: [$($g:path),+]
     ) => {
         $crate::__export_collect!(
             @start
-            { boot: $boot, default: $default, types: [$($types)*], private: [$($private)*], generators: [$($g),+] }
+            { boot: $boot, types: [$($types)*], private: [$($private)*], generators: [$($g),+] }
         );
     };
 }
@@ -898,13 +870,12 @@ macro_rules! __export_with_generators {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_collect {
-    (@start { boot: $boot:tt, default: $default:tt, types: [], private: $private:tt, generators: [$($g:path),+] }) => {
+    (@start { boot: $boot:tt, types: [], private: $private:tt, generators: [$($g:path),+] }) => {
         ::core::compile_error!("export! generators require at least one type");
     };
     (@start
         {
             boot: $boot:tt,
-            default: $default:tt,
             types: [ { $first:path } $($rest:tt)* ],
             private: $private:tt,
             generators: [$($g:path),+]
@@ -920,13 +891,12 @@ macro_rules! __export_collect {
                 exports: [ { $first } $($rest)* ]
                 private: $private
                 boot: $boot
-                default: $default
                 remaining_generators: [$($g),+]
             }
         }
     };
     (@start
-        { boot: $boot:tt, default: $default:tt, types: [ { $first:ty } $($rest:tt)* ], private: $private:tt, generators: [$($g:path),+] }
+        { boot: $boot:tt, types: [ { $first:ty } $($rest:tt)* ], private: $private:tt, generators: [$($g:path),+] }
     ) => {
         ::core::compile_error!(concat!(
             "export! generators require a simple type path with #[actor] or #[reactor] companion metadata; `type` aliases are not followed: ",
@@ -942,7 +912,6 @@ macro_rules! __export_collect {
             exports: [$($exports:tt)*]
             private: $private:tt
             boot: $boot:tt
-            default: $default:tt
             remaining_generators: [$($g:path),+]
         }
     ) => {
@@ -959,7 +928,6 @@ macro_rules! __export_collect {
                 exports: [$($exports)*]
                 private: $private
                 boot: $boot
-                default: $default
                 remaining_generators: [$($g),+]
             }
         }
@@ -973,7 +941,6 @@ macro_rules! __export_collect {
             exports: [$($exports:tt)*]
             private: $private:tt
             boot: $boot:tt
-            default: $default:tt
             remaining_generators: [$gen:path $(, $rest:path)*]
         }
     ) => {
@@ -982,7 +949,6 @@ macro_rules! __export_collect {
             { remaining_generators: [$($rest),*] }
             {
                 boot: $boot,
-                default: $default,
                 actors: [
                     $($actors)*
                     { ty: { $ty } namespace: $ns extensions: [ $($ext)* ] }
@@ -1012,14 +978,12 @@ macro_rules! __export_continue {
     (
         remaining_generators: []
         boot: $boot:tt
-        default: $default:tt
         actors: [$($actors:tt)*]
         exports: [$($exports:tt)*]
         private: [$($private:tt)*]
     ) => {
         $crate::__export_emit_classified! {
             boot: $boot
-            default: $default
             actors: [$($actors)*]
             exports: [$($exports)*]
             private: [$($private)*]
@@ -1028,7 +992,6 @@ macro_rules! __export_continue {
     (
         remaining_generators: [$next:path $(, $rest:path)*]
         boot: $boot:tt
-        default: $default:tt
         actors: [$($actors:tt)*]
         exports: [$($exports:tt)*]
         private: [$($private:tt)*]
@@ -1038,7 +1001,6 @@ macro_rules! __export_continue {
             { remaining_generators: [$($rest),*] }
             {
                 boot: $boot,
-                default: $default,
                 actors: [$($actors)*],
                 exports: [$($exports)*],
                 private: [$($private)*]
@@ -1797,20 +1759,20 @@ macro_rules! __export_internal {
     };
 }
 
-/// ADR-0096 / ADR-0138: FFI shims for a multi-actor module —
-/// `export!(default = A, public = [B, …])` or `export!(public = [A, B, …])`.
+/// ADR-0096: FFI shims for a multi-actor module — `export!(public = [A, B, …])`,
+/// with or without `boot`, and every generator pipeline's finish.
 ///
 /// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
-/// - `init_with_parent_p32` constructs the **default** type; the logical
-///   parent mailbox it receives is ignored. `init_with_config_p32` remains as an additive
-///   compatibility wrapper that supplies parent `0`. A defaultless module
-///   stages the same "module has no default" failure through both exports.
 /// - `init_typed_with_parent_p32` carries both logical parent and actor-type
 ///   tag. `init_typed_p32` remains as its parent-`0` compatibility wrapper.
 ///   Both match the tag against each exported type's
 ///   `ActorTypeTag::of::<A>()` and construct the selected one.
+/// - `init_with_parent_p32` / `init_with_config_p32` name no type, so they
+///   stage a "load a named export" failure — the guest-side backstop, since
+///   the host resolves every spawn to a namespace and constructs it through
+///   the typed init (ADR-0241 §9).
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
 /// route through the boxed `ErasedWasmActor`, so a multi-actor instance
@@ -1819,50 +1781,28 @@ macro_rules! __export_internal {
 /// exported type's records, each preceded by an `ActorBoundary`
 /// (ADR-0096), so the host can regroup per type and resolve an export
 /// selector to a tag.
-///
-/// ADR-0138: the two forms share one `@shared_body` rule (slot, inline
-/// registry, inputs section, `init` / `init_typed`, receive, dehydrate /
-/// rehydrate). They differ in exactly three items, emitted by the `@default`
-/// / `@no_default` wrapper rules: the default form emits the `aether.namespace`
-/// custom section naming the default type and an `init_with_config_p32` that
-/// constructs it; the no-default form omits `aether.namespace`, emits the
-/// `aether.no_default` marker section instead, and stages a failure from
-/// `init_with_config_p32`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_multi_internal {
     // ADR-0147: `@boot` wrapper — emit the `aether.boot` custom section naming
-    // `$boot`'s namespace, then re-dispatch to the bootless `@default` /
-    // `@no_default` arm for the `aether.namespace` / `aether.no_default`
-    // section, the init shim, and the shared body. Boot is otherwise an
+    // `$boot`'s namespace, then the bootless body. Boot is otherwise an
     // ordinary member of `@all`: its type tag, `aether.kinds.inputs`
     // `ActorBoundary`, and spawn-by-tag entry all come from the shared body, so
     // the host constructs the singleton through the same `init_typed_p32` path
-    // as any named export. The two marker dimensions (boot present/absent,
-    // default present/absent) compose rather than exploding the shared body.
-    (@boot $boot:ty ; @default $default:ty ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
+    // as any named export.
+    (@boot $boot:ty ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
         $crate::__export_multi_internal!(@boot_section $boot);
-        $crate::__export_multi_internal!(@default $default ; @all $($component),+ ; @private [$($private),*]);
+        $crate::__export_multi_internal!(@untyped_init ; @all $($component),+ ; @private [$($private),*]);
     };
-    (@boot $boot:ty ; @no_default ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
-        $crate::__export_multi_internal!(@boot_section $boot);
-        $crate::__export_multi_internal!(@no_default ; @all $($component),+ ; @private [$($private),*]);
-    };
-    // `@no_boot` wrapper — no boot section, a straight re-dispatch. Its
-    // presence makes the four boot × default combinations explicit at the
-    // `export!` call site instead of leaving the bootless forms to invoke
-    // `@default` / `@no_default` directly.
-    (@no_boot ; @default $default:ty ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
-        $crate::__export_multi_internal!(@default $default ; @all $($component),+ ; @private [$($private),*]);
-    };
-    (@no_boot ; @no_default ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
-        $crate::__export_multi_internal!(@no_default ; @all $($component),+ ; @private [$($private),*]);
+    // `@no_boot` wrapper — no boot section, a straight re-dispatch.
+    (@no_boot ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
+        $crate::__export_multi_internal!(@untyped_init ; @all $($component),+ ; @private [$($private),*]);
     };
     // The `aether.boot` custom section (ADR-0147) — a wasm-target-gated static
     // pinning `$boot`'s `Addressable::NAMESPACE` bytes, byte-for-byte the twin
-    // of the `aether.namespace` section the `@default` arm emits below. Its
-    // presence is what the host's `read_boot_namespace_from_bytes` reads to
-    // find the module's unconditional boot type.
+    // of the single-actor `aether.namespace` section. Its presence is what the
+    // host's `read_boot_namespace_from_bytes` reads to find the module's
+    // unconditional boot type.
     (@boot_section $boot:ty) => {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(link_section = "aether.boot")]
@@ -1877,87 +1817,14 @@ macro_rules! __export_multi_internal {
             out
         };
     };
-    // ADR-0138: multi-actor module WITH a default. Emits the
-    // `aether.namespace` section (naming `$default`) and parent-aware plus
-    // compatibility init exports that construct `$default`, then the shared body.
-    (@default $default:ty ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(link_section = "aether.namespace")]
-        static __AETHER_NAMESPACE_SECTION: [u8; <$default as $crate::Addressable>::NAMESPACE.len()] = {
-            let bytes = <$default as $crate::Addressable>::NAMESPACE.as_bytes();
-            let mut out = [0u8; <$default as $crate::Addressable>::NAMESPACE.len()];
-            let mut i = 0;
-            while i < bytes.len() {
-                out[i] = bytes[i];
-                i += 1;
-            }
-            out
-        };
 
+    // The untyped init exports stage a failure (the guest-side backstop — the
+    // host names a type for every multi-actor spawn), then the shared body.
+    (@untyped_init ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
         /// # Safety
-        /// Parent-aware init ABI; constructs the default (opted-in) export.
-        /// The parent mailbox is ignored (ADR-0241 §5).
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_parent_p32")]
-        pub unsafe extern "C" fn init_with_parent(
-            mailbox_id: u64,
-            _parent_mailbox_id: u64,
-            config_ptr: u32,
-            config_len: u32,
-        ) -> u32 {
-            $crate::wasm::install_guest_logging();
-            let config_bytes: &[u8] = if config_len == 0 {
-                &[]
-            } else {
-                // SAFETY: substrate wrote `config_len` bytes at `config_ptr` (ADR-0090).
-                unsafe {
-                    ::core::slice::from_raw_parts(config_ptr as usize as *const u8, config_len as usize)
-                }
-            };
-            // ADR-0114 addressing amendment: capture the real folded id as the
-            // cluster self-identity (correct at any lineage depth).
-            __AETHER_INLINE.set_self_id(mailbox_id);
-            // Issue 2692: install the by-tag inline-spawn resolver over the
-            // module's full exported set (default + rest), so any exported actor
-            // can `ctx.spawn_inline_child_by_tag(...)`.
-            __AETHER_INLINE.set_spawn_resolver(
-                $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
-            );
-            $crate::__export_multi_internal!(@construct $default, config_bytes)
-        }
-
-        /// # Safety
-        /// Existing config-bearing init ABI. Older substrates supply no
-        /// logical parent, so this forwards with mailbox id `0`.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_p32")]
-        pub unsafe extern "C" fn init_with_config(mailbox_id: u64, config_ptr: u32, config_len: u32) -> u32 {
-            unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
-        }
-
-        $crate::__export_multi_internal!(@shared_body $($component),+ ; @private [$($private),*]);
-    };
-
-    // ADR-0138: multi-actor module WITHOUT a default. Omits the
-    // `aether.namespace` section, emits the `aether.no_default` marker
-    // section, and stages a failure from both default-init exports
-    // (the guest-side backstop — the host rejects a bare, defaultless load
-    // before it ever reaches this shim). A named load still resolves
-    // through `init_typed_p32` in the shared body.
-    (@no_default ; @all $($component:ty),+ ; @private [$($private:ty),*]) => {
-        // The section-level no-default marker (ADR-0138): a single version
-        // byte in `aether.no_default`, wasm-target-gated exactly like the
-        // `aether.namespace` section the default form emits. Its presence is
-        // what lets the host distinguish a defaultless multi-actor module
-        // from a legacy single-actor module.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(link_section = "aether.no_default")]
-        static __AETHER_NO_DEFAULT_SECTION: [u8; 1] = [1u8];
-
-        /// # Safety
-        /// Parent-aware init ABI on a defaultless module: there is no default to
-        /// construct, so stage a failure and return non-zero. This is a
-        /// backstop — the host rejects a bare, defaultless load first.
+        /// Parent-aware init ABI on a multi-actor module: no type is named, so
+        /// stage a failure and return non-zero. This is a backstop — the host
+        /// spawns a multi-actor module through the typed init.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_parent_p32")]
         pub unsafe extern "C" fn init_with_parent(
@@ -1967,15 +1834,13 @@ macro_rules! __export_multi_internal {
             _config_len: u32,
         ) -> u32 {
             $crate::wasm::install_guest_logging();
-            $crate::wasm::stage_init_failure(
-                "guest init: module has no default entry (ADR-0138) — load a named export",
-            );
+            $crate::wasm::stage_init_failure("guest init: the module exports several actors — load a named export");
             1
         }
 
         /// # Safety
         /// Existing config-bearing init ABI. It preserves the same staged
-        /// no-default failure as the parent-aware export.
+        /// failure as the parent-aware export.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(mailbox_id: u64, config_ptr: u32, config_len: u32) -> u32 {
@@ -1985,9 +1850,7 @@ macro_rules! __export_multi_internal {
         $crate::__export_multi_internal!(@shared_body $($component),+ ; @private [$($private),*]);
     };
 
-    // ADR-0138: the body shared by `@default` and `@no_default` — everything
-    // except the `aether.namespace` / `aether.no_default` sections and the
-    // default-init shims, which the wrapper rules emit.
+    // Everything but the untyped init shims.
     (@shared_body $($component:ty),+ ; @private [$($private:ty),*]) => {
         static __AETHER_MULTI: $crate::Slot<
             $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>
@@ -2002,11 +1865,11 @@ macro_rules! __export_multi_internal {
             $crate::wasm::inline::Registry::new();
 
         // ADR-0096: per-actor `aether.kinds.inputs` section, one
-        // `ActorBoundary`-led group per exported type, the default type
-        // first, so the host's `read_actor_inputs_from_bytes` regroups the
+        // `ActorBoundary`-led group per exported type, in export order, so
+        // the host's `read_actor_inputs_from_bytes` regroups the
         // flat record stream into one capability set per type. A
-        // single-actor `export!` never reaches this arm, so the
-        // boundary-free single-actor layout stays byte-identical.
+        // one-type `export!` without generators never reaches this arm, so
+        // the boundary-free single-actor layout stays byte-identical.
         $crate::__export_internal!(
             @grouped_inputs __AETHER_MULTI_INPUTS_LEN, __AETHER_INPUTS_SECTION,
             "aether.kinds.inputs" ; $($component),+
@@ -2023,8 +1886,8 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// ADR-0090 legacy zero-config init; forwards to the 3-arg
-        /// `init_with_config` the wrapper rule (`@default` / `@no_default`)
-        /// emits — construct the default, or stage the no-default failure.
+        /// `init_with_config` the `@untyped_init` rule emits, which stages
+        /// the "load a named export" failure.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
@@ -2151,7 +2014,7 @@ macro_rules! __export_multi_internal {
             let mail =
                 unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
             // ADR-0114: same receive membrane as the single-actor arm —
-            // own id dispatches the default/boxed type, an inline-child
+            // own id dispatches the boxed type, an inline-child
             // alias dispatches the co-located child. ADR-0112: the boxed
             // `ErasedWasmActor` seam carries the `Manual` view; the
             // synthesized impl downgrades to `Single` per hook. The

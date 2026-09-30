@@ -1,7 +1,8 @@
 //! `export!` takes keyed entries only. A bare call, a bare list, a bare list
-//! followed by keys, and a bare entry after a key are compile errors that show
-//! the keyed spelling or name the offending token; a repeated key and an
-//! unknown key (the retired `foreign`) are refused by name.
+//! followed by keys, a bare entry after a key, and the retired `default` key
+//! are compile errors that show the keyed spelling or name the offending
+//! token; a repeated key and an unknown key (the retired `foreign`) are
+//! refused by name.
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 
@@ -48,7 +49,11 @@ mod bare_then_key {
 }
 
 mod bare_after_key {
-    aether_actor::export!(default = super::A, super::B);
+    aether_actor::export!(public = [super::A], super::B);
+}
+
+mod default_key {
+    aether_actor::export!(default = super::A);
 }
 
 mod repeated_key {

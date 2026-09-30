@@ -3,9 +3,9 @@
 //! [`generate`] parses the `export!` pipeline state, classifies the exports
 //! into the roles the root must serve, emits the root plus each present
 //! role's items, and continues the pipeline with every program and reactor
-//! replaced by the root once, at the first one's position. When `export!`
-//! names no `default`, the root becomes the default, so the multi-actor arm
-//! emits the boundary the host matches. With programs present, the
+//! replaced by the root once, at the first one's position. The pipeline
+//! finishes on the multi-actor arm, so the root carries the boundary the host
+//! matches even when it is the only export. With programs present, the
 //! invocation actor the root spawns inline joins the `private` list.
 
 use proc_macro::TokenStream;
@@ -34,7 +34,7 @@ pub fn generate(input: TokenStream) -> TokenStream {
 
 fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let roles = classify(&input)?;
-    let GenerateInput { remaining_generators, boot, default, actors, exports, private } = input;
+    let GenerateInput { remaining_generators, boot, actors, exports, private } = input;
     let root = format_ident!("{ROOT_IDENT}");
     let pieces = match &roles {
         Roles::Programs(programs) => vec![programs::pieces(&root, programs)],
@@ -45,7 +45,6 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     };
     let bundle = root::expand_root(&root, &pieces);
     let boot_tokens = optional_type_tokens(boot.as_ref());
-    let default_tokens = default.as_ref().map_or_else(|| quote! { { #root } }, |ty| quote! { { #ty } });
     let actor_tokens = actors.iter().map(envelope_tokens);
     let export_tokens = rewritten_exports(&exports, &roles, &root);
     let private_tokens = listed_private(&private, &roles);
@@ -55,7 +54,6 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
         ::aether_actor::__export_continue! {
             remaining_generators: [ #(#rest),* ]
             boot: #boot_tokens
-            default: #default_tokens
             actors: [
                 #(#actor_tokens)*
                 { ty: { #root } namespace: #BUNDLE_NAMESPACE extensions: [] }

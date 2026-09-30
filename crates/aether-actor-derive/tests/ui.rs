@@ -382,7 +382,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_bare_handler_wasm",
     "rejects_bare_mail_variant_native",
     "rejects_contract_row_for_unhandled_kind",
-    "rejects_default_listed_public",
     "rejects_duplicate_actor_depends",
     "rejects_duplicate_actor_lineage",
     "rejects_duplicate_handler_kind_native",
