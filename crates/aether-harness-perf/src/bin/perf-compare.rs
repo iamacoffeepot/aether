@@ -331,9 +331,9 @@ fn main() -> ExitCode {
     }
 
     // The stderr summary uses the same gate-signal rollup the headline
-    // does — the light `latency` section + throughput, excluding the
-    // suppressed-verdict heavy / real tiers (ADR-0085 amendment), so the two
-    // never report different counts.
+    // does — the light `latency` section, throughput, and the bloomery
+    // sections, excluding the suppressed-verdict heavy / real tiers (ADR-0085
+    // amendment), so the two never report different counts.
     let (improved, stable, regressed) = headline_counts(&report);
     eprintln!("perf-compare: {improved} improved, {stable} stable, {regressed} regressed (informational)");
     ExitCode::SUCCESS

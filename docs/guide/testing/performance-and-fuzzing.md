@@ -78,6 +78,14 @@ Real-tier keep-up uses actor-owned offered/completed counters and paced elapsed
 time. This remains meaningful even when a very wide topology overwhelms the
 per-mail trace ring.
 
+Bloomery runs report two sections of their own. `bloomery.steps` carries each
+program step's p50, p90, and p99 wall time keyed by concurrent sessions,
+workload shape, and step, compared lower-is-better per percentile.
+`bloomery.session` carries sessions per second, compared higher-is-better,
+beside journal bytes per session and peak memory, which render as a trend with
+no verdict. A run that could not measure its session rate keeps its row: the
+rate reads unmeasured and the journal and memory trend still show.
+
 ## Running the tools
 
 The binaries live in `aether-harness-perf`:

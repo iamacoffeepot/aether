@@ -3,12 +3,29 @@
 //! K-trial side are common to several of them, so they sit here rather than
 //! being rebuilt per module.
 
+use super::bloomery_session::{SessionCell, SessionComparison};
+use super::bloomery_steps::StepCell;
 use super::comparison::{ComparisonReport, SectionReport, Verdict};
 use super::keep_up::{KeepUpCell, KeepUpSection};
 use super::latency::LatencySection;
 use super::metric::{CellJson, Metric};
 use super::throughput::{ThroughputCell, ThroughputSection};
 use super::trial::{RawSection, TRIAL_SCHEMA, TrialReport};
+
+/// One step cell at `4` sessions of the `small` shape with the given `p50`
+/// (p90 / p99 / max derived ×1.2 / ×1.5 / ×4, as [`cell_json`] does).
+fn step_cell(step: &str, p50: u64) -> StepCell {
+    StepCell {
+        sessions: 4,
+        shape: "small".to_owned(),
+        step: step.to_owned(),
+        p50,
+        p90: p50 * 6 / 5,
+        p99: p50 * 3 / 2,
+        max: p50 * 4,
+        n: 64,
+    }
+}
 
 /// One drain cell at `topo @ 11w` with the given `p50` (p90 / p99 / max
 /// derived ×1.2 / ×1.5 / ×4 so the cell is well-formed; tests assert on
@@ -192,4 +209,62 @@ pub(super) fn keepup_side(elapsed_nanos: &[u64]) -> Vec<TrialReport> {
             single_section_trial(KeepUpSection::NAME, KeepUpSection::VERSION, body)
         })
         .collect()
+}
+
+/// Build a K-trial bloomery side whose `invoke` step follows `p50s` while its
+/// `append` step, in the same (sessions, shape), holds at a fixed 50µs.
+pub(super) fn steps_side(p50s: &[u64]) -> Vec<TrialReport> {
+    p50s.iter()
+        .map(|&p50| {
+            TrialReport::from_bloomery(vec![step_cell("invoke", p50), step_cell("append", 50_000)], vec![], None)
+        })
+        .collect()
+}
+
+/// The p50 verdict of the named step in a comparison report.
+pub(super) fn step_p50_verdict(rep: &ComparisonReport, step: &str) -> Verdict {
+    rep.sections
+        .iter()
+        .find_map(|s| match s {
+            SectionReport::BloomeryStepsCompared { cells, .. } => {
+                cells.iter().find(|c| c.step == step && c.percentile == "p50").map(|c| c.verdict)
+            }
+            _ => None,
+        })
+        .expect("compared step p50 cell present")
+}
+
+/// Build a K-trial bloomery side carrying one session cell (`4` sessions of
+/// the `small` shape) whose rate follows `rates`, with fixed journal growth
+/// and peak memory.
+pub(super) fn session_side(rates: &[Option<f64>]) -> Vec<TrialReport> {
+    rates
+        .iter()
+        .map(|&sessions_per_sec| {
+            let cell = SessionCell {
+                sessions: 4,
+                shape: "small".to_owned(),
+                sessions_per_sec,
+                journal_bytes_per_session: 8192,
+                peak_rss_bytes: Some(64 << 20),
+            };
+            TrialReport::from_bloomery(vec![], vec![cell], None)
+        })
+        .collect()
+}
+
+/// The compared `bloomery.session` section of a comparison report.
+pub(super) fn session_section(rep: &ComparisonReport) -> &SectionReport {
+    rep.sections
+        .iter()
+        .find(|s| matches!(s, SectionReport::BloomerySessionCompared { .. }))
+        .expect("compared session section present")
+}
+
+/// The single compared session row of a comparison report.
+pub(super) fn session_row(rep: &ComparisonReport) -> &SessionComparison {
+    let SectionReport::BloomerySessionCompared { cells, .. } = session_section(rep) else {
+        panic!("session section not compared");
+    };
+    cells.first().expect("compared session row present")
 }

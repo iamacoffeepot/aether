@@ -44,6 +44,8 @@
 //! than serde-hard-failing the decode of the sections that *can* be
 //! read.
 
+mod bloomery_session;
+mod bloomery_steps;
 mod comparison;
 #[cfg(test)]
 mod fixture;
@@ -54,7 +56,11 @@ mod render;
 mod throughput;
 mod trial;
 
-pub use comparison::{CompareConfig, ComparisonReport, Direction, SectionReport, UncomparedReason, Verdict, compare};
+pub use bloomery_session::{SessionCell, SessionComparison, SessionSection};
+pub use bloomery_steps::{StepCell, StepComparison, StepsSection};
+pub use comparison::{
+    CompareConfig, ComparisonReport, Direction, PairedStats, SectionReport, UncomparedReason, Verdict, compare,
+};
 pub use keep_up::{KeepUpCell, KeepUpComparison, KeepUpSection};
 pub use latency::{CellComparison, LatencySection, is_latency_section};
 pub use metric::{CellJson, Metric};

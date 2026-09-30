@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::perf::harness::CellResult;
 
+use super::bloomery_session::{SessionCell, SessionSection};
+use super::bloomery_steps::{StepCell, StepsSection};
 use super::keep_up::{KeepUpCell, KeepUpSection};
 use super::latency::LatencySection;
 use super::metric::{CellJson, Metric};
@@ -176,6 +178,29 @@ impl TrialReport {
                 body,
             }],
         }
+    }
+
+    /// Build a bloomery trial report from its per-step and per-session cells,
+    /// emitting the `bloomery.steps` and `bloomery.session` sections each only
+    /// when it has cells. A bloomery run advances no frames and is not paced.
+    #[must_use]
+    pub fn from_bloomery(steps: Vec<StepCell>, sessions: Vec<SessionCell>, git_sha: Option<String>) -> Self {
+        let mut sections = Vec::new();
+        if !steps.is_empty() {
+            sections.push(RawSection {
+                name: StepsSection::NAME.to_owned(),
+                version: StepsSection::VERSION.to_owned(),
+                body: serde_json::to_value(StepsSection { cells: steps }).unwrap_or(serde_json::Value::Null),
+            });
+        }
+        if !sessions.is_empty() {
+            sections.push(RawSection {
+                name: SessionSection::NAME.to_owned(),
+                version: SessionSection::VERSION.to_owned(),
+                body: serde_json::to_value(SessionSection { cells: sessions }).unwrap_or(serde_json::Value::Null),
+            });
+        }
+        Self { schema: TRIAL_SCHEMA.to_owned(), git_sha, pace_hz: None, frames: 0, sections }
     }
 
     /// The section with the given name, if present.

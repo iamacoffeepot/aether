@@ -5,17 +5,31 @@
 //! it. The shared table scaffolding and the number formatting live here so a
 //! section module only decides its columns.
 
+mod bloomery_session;
+mod bloomery_steps;
 mod keep_up;
 mod latency;
 mod throughput;
 
 use super::comparison::{ComparisonReport, SectionReport, Verdict};
 use super::latency::latency_section_renders_verdict;
+use bloomery_session::push_session_section;
+use bloomery_steps::push_steps_section;
 use keep_up::push_keepup_section;
 use latency::push_latency_section;
 use throughput::push_throughput_section;
 
 pub use latency::PLOT_ANCHOR_PREFIX;
+
+/// A verdict's word in a rendered verdict column.
+pub(super) const fn verdict_label(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Improved => "improved",
+        Verdict::Stable => "stable",
+        Verdict::Regressed => "regressed",
+        Verdict::Bistable => "bistable",
+    }
+}
 
 pub(super) fn us(ns: f64) -> String {
     format!("{:.2}", ns / 1000.0)
@@ -41,8 +55,11 @@ pub const STICKY_MARKER: &str = "<!-- aether-perf-report -->";
 
 /// The headline `N improved · N stable · N regressed` rollup — the
 /// **gate-signal** count, so it sums **only** the verdict-carrying sections
-/// (ADR-0085 amendment): the light tier's `latency` section and the
-/// throughput section. Heavy / real latency sections are characterisation —
+/// (ADR-0085 amendment): the light tier's `latency` section, the
+/// throughput section, and the two bloomery sections (`bloomery.steps`, and
+/// the `bloomery.session` rows that carry a rate verdict). A bloomery trial
+/// carries only bloomery sections, so its headline never mixes with dispatch
+/// cells. Heavy / real latency sections are characterisation —
 /// `compare_latency` still populates their improved/regressed counts (the
 /// numbers are wanted), but their verdict is suppressed at render time, so
 /// summing them into the headline would leak a no-verdict tier into the
@@ -54,7 +71,9 @@ pub fn headline_counts(report: &ComparisonReport) -> (usize, usize, usize) {
         SectionReport::Compared { name, improved, stable, regressed, .. } if latency_section_renders_verdict(name) => {
             (i + improved, s + stable, r + regressed)
         }
-        SectionReport::ThroughputCompared { improved, stable, regressed, .. } => {
+        SectionReport::ThroughputCompared { improved, stable, regressed, .. }
+        | SectionReport::BloomeryStepsCompared { improved, stable, regressed, .. }
+        | SectionReport::BloomerySessionCompared { improved, stable, regressed, .. } => {
             (i + improved, s + stable, r + regressed)
         }
         // A non-light latency section is compared (it carries counts)
@@ -132,6 +151,12 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
             }
             SectionReport::KeepUpCompared { name, cells } => {
                 push_keepup_section(&mut s, name, cells);
+            }
+            SectionReport::BloomeryStepsCompared { name, cells, .. } => {
+                push_steps_section(&mut s, name, cells);
+            }
+            SectionReport::BloomerySessionCompared { name, cells, .. } => {
+                push_session_section(&mut s, name, cells);
             }
             SectionReport::Uncompared { name, .. } => {
                 s.push_str(&format!("_{name}: new this run — no baseline to compare_\n\n"));

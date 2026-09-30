@@ -4,7 +4,7 @@
 
 use super::super::comparison::Verdict;
 use super::super::latency::{CellComparison, latency_section_renders_verdict};
-use super::{paired_delta_us, push_section_tables, us};
+use super::{paired_delta_us, push_section_tables, us, verdict_label};
 
 /// Render a latency section. The renderer learns its tier from the section
 /// name (ADR-0085 amendment): the light tier (`latency`) renders the full
@@ -48,12 +48,6 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
     let header = "| topology | w | metric | pct | base µs | this µs | paired Δ µs | verdict |\n\
          |---|--:|---|---|--:|--:|--:|---|\n";
     let row = |c: &CellComparison| -> String {
-        let verdict = match c.verdict {
-            Verdict::Improved => "improved",
-            Verdict::Stable => "stable",
-            Verdict::Regressed => "regressed",
-            Verdict::Bistable => "bistable",
-        };
         format!(
             "| {} | {} | {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
             c.topo,
@@ -65,7 +59,7 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
             us(c.cand_median),
             us(c.cand_iqr),
             paired_delta_us(c.delta_median, c.delta_pct),
-            verdict,
+            verdict_label(c.verdict),
         )
     };
 

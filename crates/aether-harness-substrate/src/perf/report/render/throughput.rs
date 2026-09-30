@@ -3,7 +3,7 @@
 
 use super::super::comparison::Verdict;
 use super::super::throughput::ThroughputComparison;
-use super::push_section_tables;
+use super::{push_section_tables, verdict_label};
 
 /// [`paired_delta_us`](super::paired_delta_us)'s throughput sibling — same reasoning, thousands of
 /// mails/sec, matching [`kps`]'s precision.
@@ -19,12 +19,6 @@ fn paired_delta_kps(delta_median_mps: f64, delta_pct: f64) -> String {
 pub(super) fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputComparison]) {
     let header = "| topology | w | base k/s | this k/s | paired Δ k/s | verdict |\n|---|--:|--:|--:|--:|---|\n";
     let row = |c: &ThroughputComparison| -> String {
-        let verdict = match c.verdict {
-            Verdict::Improved => "improved",
-            Verdict::Stable => "stable",
-            Verdict::Regressed => "regressed",
-            Verdict::Bistable => "bistable",
-        };
         format!(
             "| {} | {} | {} ±{} | {} ±{} | {} | {} |\n",
             c.topo,
@@ -34,7 +28,7 @@ pub(super) fn push_throughput_section(s: &mut String, name: &str, cells: &[Throu
             kps(c.cand_median),
             kps(c.cand_iqr),
             paired_delta_kps(c.delta_median, c.delta_pct),
-            verdict,
+            verdict_label(c.verdict),
         )
     };
 
