@@ -95,7 +95,7 @@ impl Reactor for Publisher {
 
     #[rule]
     fn publish(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHeads {
-        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
+        SetHeads::new(vec![HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 
@@ -107,7 +107,7 @@ impl Reactor for Witness {
 
     #[rule]
     fn note(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHeads {
-        SetHeads::new(vec![aether_bloomery_kinds::HeadChange::new(&PUBLISHED, None, change.to())])
+        SetHeads::new(vec![HeadChange::new(&PUBLISHED, None, change.to())])
     }
 }
 

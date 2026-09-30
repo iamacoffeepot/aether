@@ -421,16 +421,16 @@ fn read_cited_entries(conn: &Connection, since: Seq, limit: usize) -> Result<Vec
     let rows = stmt.query_map(params![sqlite_i64(first.seq.0)?, sqlite_i64(last.seq.0)?], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
-    let mut cited: HashMap<u64, Vec<Digest>> = HashMap::new();
+    let mut by_seq: HashMap<u64, Vec<Digest>> = HashMap::new();
     for row in rows {
         let (seq, to) = row?;
         let digest = Digest::from_bytes(to.try_into().map_err(|_| JournalError::CorruptCitation)?);
-        cited.entry(from_sqlite_i64(seq)?).or_default().push(digest);
+        by_seq.entry(from_sqlite_i64(seq)?).or_default().push(digest);
     }
     Ok(entries
         .into_iter()
         .map(|entry| {
-            let cites = cited.remove(&entry.seq.0).unwrap_or_default();
+            let cites = by_seq.remove(&entry.seq.0).unwrap_or_default();
             (entry, cites)
         })
         .collect())

@@ -15,13 +15,14 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
 use aether_bloomery_driver::{
-    CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
+    ArtifactsTicket, CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
 };
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
     Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
-    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadArtifactsResult, ReadClosure, ReadClosureResult, ReadEvents,
-    ReadEventsResult, RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult, artifact_digest,
+    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, ReadClosure,
+    ReadClosureResult, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult,
+    artifact_digest,
 };
 use aether_data::{Kind, KindId, Storage, StorageData};
 use reactor::Reactor;
@@ -226,12 +227,7 @@ impl World {
                 let result = self.artifact(&request);
                 Step::More(self.core.on_artifact(ticket, result))
             }
-            Command::ReadArtifacts { ticket, request } => {
-                let digests = request.digests.as_slice().to_vec();
-                let result = self.artifacts_read(&digests);
-                self.artifact_batches.push(digests);
-                Step::More(self.core.on_artifacts(ticket, result))
-            }
+            Command::ReadArtifacts { ticket, request } => self.read_artifacts(ticket, &request),
             Command::ReadClosure { ticket, request } => {
                 self.closures_seen.push(request.root);
                 let result = self.closure(&request);
@@ -316,6 +312,14 @@ impl World {
                 Step::Manual(command)
             }
         }
+    }
+
+    /// Answer one batched cited-artifact read and record the digests it asked for.
+    fn read_artifacts(&mut self, ticket: ArtifactsTicket, request: &ReadArtifacts) -> Step {
+        let digests = request.digests.as_slice().to_vec();
+        let result = self.artifacts_read(&digests);
+        self.artifact_batches.push(digests);
+        Step::More(self.core.on_artifacts(ticket, result))
     }
 
     /// Answer one load: `Adopted` for a root the engine already holds live,

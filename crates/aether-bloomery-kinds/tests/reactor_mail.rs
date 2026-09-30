@@ -71,7 +71,7 @@ fn reactor_protocol_kind_ids_are_pinned() {
     assert_eq!(Status::ID, TRIPWIRE_STATUS);
 }
 
-const TRIPWIRE_WARM: KindId = KindId(0x2ff5_d120_60f2_d51e);
+const TRIPWIRE_WARM: KindId = KindId(0x2ab0_47ad_e6ab_bdc4);
 const TRIPWIRE_WARMED: KindId = KindId(0x2e92_8abc_d04c_43a0);
 const TRIPWIRE_EVENT: KindId = KindId(0x241b_bd4d_0535_3f94);
 const TRIPWIRE_EVALUATED: KindId = KindId(0x2381_9f0f_18d4_93d3);
