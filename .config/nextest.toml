@@ -24,7 +24,7 @@ retries = 1
 # bundle's 180s cap: `widget_render_interaction` (aether-widget) cold-loads
 # the widget wasm plus a font and runs multi-capture verdicts. The default 60s
 # class cap would be a silent tightening under CI's software-rasterizer
-# contention; widen it to the same 300s backstop as `fleetharness_replace`
+# contention; widen it to the same 300s backstop as `fleetharness_republish`
 # below.
 [[profile.ci.overrides]]
 filter = "package(=aether-widget) & binary(widget_render_interaction)"
@@ -53,7 +53,7 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-subscribe-ui-tests) & binary(subscribe_bounds)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# The fleetharness replace binary also cold-loads `aether_kit.wasm` and
+# The fleetharness republish binary (formerly `fleetharness_replace`) also cold-loads `aether_kit.wasm` and
 # was measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary. This override
 # used to sit near the end of the file, below the package-wide `kind(test)`
@@ -61,7 +61,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # ran on 180s with ~23s of headroom; hoisting it here is what makes its 300s
 # real.
 [[profile.ci.overrides]]
-filter = "package(=aether-component) & binary(fleetharness_replace)"
+filter = "package(=aether-component) & binary(fleetharness_republish)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-component` integration binaries mix two rehomed slow classes:

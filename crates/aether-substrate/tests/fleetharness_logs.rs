@@ -6,10 +6,10 @@
 //! confirm it does not re-yield the seen entry.
 
 mod tests {
-    use aether_kinds::LogTailResult;
+    use aether_kinds::{LoadComponent, LogTailResult};
     use aether_test_fixtures_kinds::LogMarker;
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
@@ -28,7 +28,17 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
+        let addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.quiet_probe".to_owned()),
+                },
+            )
+            .addr;
 
         harness.send(engine, &addr, &LogMarker);
         let reply = harness.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));

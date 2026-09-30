@@ -202,9 +202,11 @@ reference, for a fixture actor the test cannot name, which the test types with
 `ReplaceComponent { wasm, configs }`, and moves every live instance of the
 module's namespaces (ADR-0241 §7), so a test that swaps identical code builds a
 new hash with `aether_substrate::testing::successor_wasm(&wasm, generation)`.
-FleetHarness returns the same path as text — `Loaded { addr, capabilities }` —
-and its `replace(engine, stem)` / `replace_by_selector(engine, selector)`
-republish by stem or selector and return the republished types.
+FleetHarness sends the same kinds over the wire: `load(engine, &LoadComponent)`
+returns the path as text — `Loaded { addr, capabilities }` —
+`publish(engine, wasm)` returns the published types, and `spawn(engine, &Spawn)`
+returns `SpawnResult::Spawned` or `SpawnResult::Live`; `component_wasm(selector)`
+resolves a registry selector to its bytes and `@actor` export first.
 
 `with_pumped_component_host()` composes the component host as a pumped actor:
 every harness wait drains it, and between waits it holds still.
