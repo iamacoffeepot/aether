@@ -44,8 +44,10 @@
 #
 # The CI verdict is the `CI pass` aggregator's conclusion — the required merge
 # gate. The loop in `--wait` mode exits only when `CI pass` is completed AND no
-# check-run is still pending, so a subset-registered matrix (only `Detect
-# changes` up) can't produce a false green.
+# check-run in its own check suite is still pending, so a subset-registered
+# matrix (only `Detect changes` up) can't produce a false green. Runs of other
+# workflows are not counted: `Perf compare` is informational (ADR-0085 §4) and
+# can run long after `CI pass` concludes.
 
 set -euo pipefail
 
@@ -75,6 +77,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The number of check-runs in the `CI pass` aggregator's own check suite that
+# are not completed, or 0 when the aggregator has not registered yet (the
+# caller already treats a missing aggregator as pending).
+ci_suite_pending() {
+    jq '([.[] | select(.name == "CI pass") | .check_suite.id] | first) as $suite
+        | [.[] | select(.check_suite.id == $suite and .status != "completed")] | length'
+}
+
 # Fetch a PR's `CI pass` aggregator verdict from check-runs.
 # Returns: "success" | "failure" | "cancelled" | "neutral" | "pending" | "none"
 ci_verdict() {
@@ -83,7 +93,7 @@ ci_verdict() {
     runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { echo "none"; return 0; }
     local agg_conclusion pending
     agg_conclusion=$(echo "$runs" | jq -r '[.[] | select(.name == "CI pass" and .status == "completed")] | first | .conclusion // empty')
-    pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+    pending=$(echo "$runs" | ci_suite_pending)
     if [[ -z "$agg_conclusion" ]]; then
         echo "pending"
         return 0
@@ -185,7 +195,7 @@ if [[ $WAIT_MODE -eq 1 ]]; then
             exit 1
         fi
         agg_done=$(echo "$runs" | jq '[.[] | select(.name == "CI pass" and .status == "completed")] | length')
-        pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+        pending=$(echo "$runs" | ci_suite_pending)
         if [[ "$agg_done" = "1" && "$pending" = "0" ]]; then
             verdict=$(echo "$runs" | jq -r '.[] | select(.name == "CI pass") | .conclusion')
             echo "[wave-status] CI pass: $verdict"
