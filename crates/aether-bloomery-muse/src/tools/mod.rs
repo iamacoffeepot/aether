@@ -3,17 +3,24 @@
 //! Every tool's input is `Tooled<A>`: the session's current tree, which the
 //! loop binds, and the arguments `A` the model writes. [`offered`] is the
 //! set `muse.session.open` accepts: `tree.edit` and `tree.write`, which read
-//! only the tree nodes and blobs they touch and return an `Edited` tree, and
-//! `muse.echo`, a value-only fixture.
+//! only the tree nodes and blobs they touch and return an `Edited` tree;
+//! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
+//! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
+//! marked; and `muse.echo`, a value-only fixture.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
-//! path that names nothing usable, or a text over the cap return the tree
-//! unchanged with a summary saying why, since a refused run is a fault and
-//! ends the session. Only a tree node or blob the store cannot give refuses.
+//! path that names nothing usable, a pattern that does not compile, or a
+//! text over the cap return a result saying why (an edit returns the tree
+//! unchanged), since a refused run is a fault and ends the session. Only a
+//! tree node or blob the store cannot give refuses.
 
 mod echo;
 mod edit;
+mod grep;
+mod list;
+mod read;
 mod spine;
+mod view;
 mod write;
 
 use std::iter;
@@ -24,6 +31,10 @@ use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
+pub use grep::{GrepArgs, TreeGrep};
+pub use list::{ListArgs, TreeList};
+pub use read::{ReadArgs, TreeRead};
+pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 
 use crate::input::{OfferedTool, OfferedTools};
@@ -42,8 +53,16 @@ pub const MAX_TEXT_BYTES: usize = 1 << 20;
 /// which holds or fails the same way on every call.
 #[must_use]
 pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
-    let (tools, artifacts): (Vec<_>, Vec<_>) =
-        [bound::<Echo>(), bound::<TreeEdit>(), bound::<TreeWrite>()].into_iter().unzip();
+    let (tools, artifacts): (Vec<_>, Vec<_>) = [
+        bound::<Echo>(),
+        bound::<TreeEdit>(),
+        bound::<TreeWrite>(),
+        bound::<TreeList>(),
+        bound::<TreeRead>(),
+        bound::<TreeGrep>(),
+    ]
+    .into_iter()
+    .unzip();
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts.concat())
 }
 
@@ -61,7 +80,8 @@ where
     (tool, iter::once(EncodedArtifact::text(&definition)).chain(schemas).collect())
 }
 
-/// A tool's arguments, or the summary of why they are invalid.
+/// A tool's arguments, or the sentence, without its closing stop, on why
+/// they are invalid.
 ///
 /// `muse.turn` decodes the model's JSON by schema alone, so the arguments
 /// reach the tool without their `#[storage(validate)]` rules checked; the
@@ -74,5 +94,5 @@ async fn read_args<A: Storage>(env: &mut Env<Async>, args: Ref<A>) -> Result<Res
     let payload = env.read_payload(args.erase()).await?;
     Ok(A::decode_storage(&payload)
         .map(|data| data.value)
-        .map_err(|error| format!("The arguments are invalid ({error}), so nothing changed.")))
+        .map_err(|error| format!("The arguments are invalid ({error})")))
 }

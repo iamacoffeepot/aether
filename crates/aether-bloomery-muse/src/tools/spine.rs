@@ -22,13 +22,19 @@ pub enum Blocked {
 }
 
 impl Blocked {
+    /// The sentence a read-only tool returns when the path is blocked.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Missing { at } => format!("Nothing is at {at}."),
+            Self::NotADirectory { at } => format!("{at} is not a directory."),
+        }
+    }
+
     /// The sentence a tool returns when the path is blocked and nothing
     /// changed.
     pub fn summary(&self) -> String {
-        match self {
-            Self::Missing { at } => format!("Nothing is at {at}, so nothing changed."),
-            Self::NotADirectory { at } => format!("{at} is not a directory, so nothing changed."),
-        }
+        let described = self.describe();
+        format!("{}, so nothing changed.", described.strip_suffix('.').unwrap_or(&described))
     }
 }
 
@@ -89,6 +95,30 @@ pub async fn leaf(env: &mut Env<Async>, root: Ref<Tree>, path: &TreePath) -> Res
         let (dir, name) = spine.parent();
         dir.entries().get(name).cloned().ok_or_else(|| Blocked::Missing { at: path.as_str().into() })
     }))
+}
+
+/// The directory `path` names in `root`, or `root` itself when `path` is
+/// `None`, with the path it is shown under: empty for the root. A path that
+/// is blocked or names no directory is a message.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory on the way that the store cannot read.
+pub async fn directory(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    path: Option<&TreePath>,
+) -> Result<Result<(String, Tree), String>, Refusal> {
+    let Some(path) = path else {
+        return Ok(Ok((String::new(), env.read(root).await?)));
+    };
+    let shown = path.as_str();
+    Ok(match leaf(env, root, path).await? {
+        Ok(Node::Directory(dir)) => Ok((shown.into(), env.read(dir).await?)),
+        Ok(Node::File(_) | Node::Executable(_)) => Err(format!("{shown} is a file; use tree.read.")),
+        Ok(Node::Symlink(target)) => Err(format!("{shown} is a symlink to {}.", target.as_str())),
+        Err(blocked) => Err(blocked.describe()),
+    })
 }
 
 /// The root of `root` with `node` at `path`, replacing any entry there,
