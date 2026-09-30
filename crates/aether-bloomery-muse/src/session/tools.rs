@@ -1,8 +1,10 @@
 //! The programs a session binds as tools, and how the loop calls a program.
 //!
-//! A `#[reactor]` rule triggers on a concrete `Ran<P>`, so every bound tool is
-//! a program this crate links. `Echo` is the first: a value-only fixture that
-//! stands in until `tree.read` replaces it.
+//! The loop runs a call by the program name and decoded input the call
+//! recorded, and folds any program's run as that call's output, so it links
+//! no tool's types. [`offered`] is the set `muse.session.open` accepts: for
+//! now only `Echo`, a value-only fixture that stands in until `tree.read`
+//! replaces it.
 
 use std::iter;
 
@@ -95,7 +97,8 @@ where
     (tool, iter::once(EncodedArtifact::text(&definition)).chain(schemas).collect())
 }
 
-/// A call to `P` in the bundle [`MUSE`] resolves to, over `input`.
+/// A call to the loop's own program `P` in the bundle [`MUSE`] resolves to,
+/// over `input`.
 pub fn call<P: Program>(input: CallInput) -> CallProgram {
     CallProgram { program: MUSE, name: program_name::<P>(), input }
 }

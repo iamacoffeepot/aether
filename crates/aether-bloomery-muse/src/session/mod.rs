@@ -11,7 +11,8 @@
 //! - `call` runs the first call a turn asked for over the input `muse.turn`
 //!   decoded for it. A call whose arguments did not decode is answered with
 //!   the stored refusal and skipped.
-//! - `resume` records a call's output and runs the next call, or, when every
+//! - `resume`, on any program's run that answers the call the loop ran,
+//!   records its result as the call's output and runs the next call, or, when every
 //!   call has its output, sends `muse.turn` again with the previous input's
 //!   items plus the turn's text, its calls, and their outputs, so each turn's
 //!   conversation begins with exactly what the previous one sent.
@@ -35,7 +36,7 @@ mod replay;
 mod state;
 mod tools;
 
-use aether_bloomery_kinds::{CallInput, CallProgram, SetHeads};
+use aether_bloomery_kinds::{CallInput, CallProgram, SetHeads, Transition};
 use aether_bloomery_program::{At, Guard, Ran, reactor};
 
 pub use continue_::{ContinueInput, SessionContinue};
@@ -61,11 +62,11 @@ impl Guard<Ran<MuseTurn>> for Step {
     }
 }
 
-impl Guard<Ran<Echo>> for Step {
+impl Guard<Transition> for Step {
     type Views = Conversations;
 
-    fn resolve(_run: &Ran<Echo>, at: At, conversations: &Conversations) -> Option<Self> {
-        conversations.step(at).map(Self)
+    fn resolve(_run: &Transition, at: At, conversations: &Conversations) -> Option<Self> {
+        conversations.resume(at).map(Self)
     }
 }
 
@@ -140,7 +141,7 @@ impl Reactor for MuseSession {
     }
 
     #[rule]
-    fn resume(&self, _run: Ran<Echo>, step: Step) -> CallProgram {
+    fn resume(&self, _run: Transition, step: Step) -> CallProgram {
         step.0
     }
 

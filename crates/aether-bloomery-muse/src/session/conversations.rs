@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
     CallInput, CallProgram, Digest, EncodedArtifact, ErasedRef, Fault, HeadChange, HeadMoved, ProgramName,
-    ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Utf8Text,
+    ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Utf8Text,
 };
 use aether_bloomery_program::{At, Cited, CitedError, Ran, Reactor, ViewCursor, view};
 
@@ -25,7 +25,7 @@ use crate::session::open::SessionOpen;
 use crate::session::record::{CallAnswer, RecordInput, SessionRecord};
 use crate::session::replay::replay;
 use crate::session::state::{Session, SessionKey, TurnLimit};
-use crate::session::tools::{Echo, MUSE, call};
+use crate::session::tools::{MUSE, call};
 
 /// Every live session and the journal entries linked to them.
 #[derive(Default)]
@@ -47,6 +47,8 @@ struct Conversation {
     turns: u32,
     /// The turn whose calls are running, if one asked for calls.
     waiting: Option<Waiting>,
+    /// The seq of the tool run answered last.
+    answered: Option<Seq>,
     /// What the loop runs next.
     next: Option<Next>,
 }
@@ -75,7 +77,7 @@ enum Next {
 
 impl Conversation {
     const fn new(limit: TurnLimit) -> Self {
-        Self { limit, turns: 0, waiting: None, next: None }
+        Self { limit, turns: 0, waiting: None, answered: None, next: None }
     }
 
     /// Answer every refused call up to the next decoded one, and set what runs
@@ -102,18 +104,20 @@ impl Conversation {
         Some(())
     }
 
-    /// Record the result `result` of the program `program` that ran over
-    /// `input` as the output of the next call. `None` when that call did not
-    /// ask for this run.
-    fn answer(&mut self, program: &ProgramName, input: Digest, result: ErasedRef) -> Option<()> {
+    /// Whether `run` is the run of the call the loop runs next.
+    fn awaits(&self, run: &Transition) -> bool {
+        matches!(&self.next, Some(Next::Call { program, input }) if program == run.program.name() && *input == run.input)
+    }
+
+    /// Record `result`, the result of the tool run at `seq`, as the output of
+    /// the call the loop ran, citing the result schema its turn offered.
+    /// `None` when the turn offered no such tool.
+    fn answer(&mut self, result: ErasedRef, seq: Seq) -> Option<()> {
         let waiting = self.waiting.as_mut()?;
         let call = waiting.calls.as_slice().get(waiting.outputs.len())?;
-        let decoded = matches!(call.input(), ToolInput::Decoded(decoded) if decoded.digest() == input);
-        if !decoded || call.program() != program {
-            return None;
-        }
-        let schema = waiting.input.tools().iter().find(|tool| tool.program() == program)?.result();
+        let schema = waiting.input.tools().iter().find(|tool| tool.program() == call.program())?.result();
         waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Result { schema, result }));
+        self.answered = Some(seq);
         Some(())
     }
 }
@@ -130,6 +134,12 @@ impl Conversations {
             Next::Limit(record) => Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?))),
             Next::Rest(_) => None,
         }
+    }
+
+    /// The call the loop makes after the tool run at `at`.
+    pub fn resume(&self, at: At) -> Option<CallProgram> {
+        let session = self.sessions.get(self.links.get(&at.seq)?)?;
+        session.answered.filter(|answered| *answered == at.seq).and_then(|_| self.step(at))
     }
 
     /// The record the loop makes after the turn at `at`, when that turn rested
@@ -225,14 +235,23 @@ impl View for Conversations {
         Ok(())
     }
 
+    /// Any program's run: the output of a tool call when the run answers the
+    /// `Requested` the loop recorded for the call it runs next. Every other
+    /// run, `muse.turn` and the session programs included, is left to its own
+    /// fold.
     #[fold]
-    fn echoed(&mut self, run: Ran<Echo>, at: At) {
-        let Some((key, mut conversation)) = self.take(at.cause) else {
-            return;
-        };
-        if conversation.answer(run.program().name(), run.input().digest(), run.result().erase()).is_some() {
+    fn ran(&mut self, run: Transition, cited: &Cited, at: At) -> Result<(), CitedError> {
+        let linked = at.cause.and_then(|cause| self.sessions.get(self.links.get(&cause)?));
+        if !linked.is_some_and(|conversation| conversation.awaits(&run)) {
+            return Ok(());
+        }
+        let result = ErasedRef::new(cited.kind(run.result)?, run.result);
+        if let Some((key, mut conversation)) = self.take(at.cause)
+            && conversation.answer(result, at.seq).is_some()
+        {
             self.advance(key, conversation, at.seq);
         }
+        Ok(())
     }
 
     #[fold]

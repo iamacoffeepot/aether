@@ -356,6 +356,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     assert_eq!(opening.name.as_str(), MuseTurn::NAME);
     assert_eq!(opening.input, CallInput::Stored(first_input), "the opened turn runs over the open's result");
     let first_turn = driver.follow(opened);
+    assert_eq!(driver.intent(first_turn).rule().as_str(), "call", "a turn's run is not also a tool's output");
 
     let (text, calls) = called(&driver.result(first_turn));
     let [call_a, call_b] = calls.as_slice() else {
@@ -368,6 +369,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
         assert_eq!(asked.name.as_str(), Echo::NAME);
         assert_eq!(asked.input, CallInput::Stored(decoded(call)), "{:?} runs over its input", call.call_id());
         trigger = driver.follow(trigger);
+        assert_eq!(driver.intent(trigger).rule().as_str(), "resume", "a tool's run resumes the loop");
         let result = ErasedRef::new(EchoResult::ID, driver.transition(trigger).result);
         let output = ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result };
         outputs.push(TurnItem::CallOutput { call_id: call.call_id().clone(), output });
