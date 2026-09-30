@@ -877,6 +877,24 @@ impl SubstrateHarness {
         self.passive.child::<P, C>(*parent, key).map_err(SubstrateHarnessError::ChildRefused)
     }
 
+    /// `reference`'s canonical lineage path, read from the registry (ADR-0230
+    /// §2): a readable name for diagnostics and capture recipients, never a
+    /// sendable address. The typed component doors — [`Self::load`],
+    /// [`Self::spawn`], [`Self::spawn_keyed`], [`Self::spawn_child`] — prove
+    /// only the reference; call this when a test needs the path too.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the registry retains no path for `reference`. A minted
+    /// reference always names a route whose proven canonical name the
+    /// registry keeps for the session, so this should never fire in practice.
+    #[must_use]
+    pub fn actor_path<R: Addressable>(&self, reference: &ActorRef<R>) -> ErasedActorPath {
+        self.passive
+            .actor_path((*reference).erase())
+            .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
+    }
+
     /// Whether `actor` would dispatch `kind`: a declared handler or a `#[fallback]` (ADR-0033),
     /// as the capability registry reflects after load / replace / drop.
     /// Consumers: `aether-substrate/tests/cap_registry.rs`.

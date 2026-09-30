@@ -95,7 +95,7 @@ fn demo_loads_the_subject_and_the_seed_frames_it() {
     let mut demo: Option<ActorRef<Demo>> = None;
     for ManifestEntry { wasm, export, config } in entries {
         if export == Demo::NAMESPACE {
-            let (loaded, _) = harness
+            let loaded = harness
                 .load::<Demo>(LoadComponent { wasm, name: None, config, export: Some(export.clone()) })
                 .unwrap_or_else(|error| panic!("load {export}: {error}"));
             demo = Some(loaded);

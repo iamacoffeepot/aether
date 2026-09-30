@@ -56,7 +56,6 @@ fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Cam
             export: Some("aether.kit.camera".to_owned()),
         })
         .unwrap_or_else(|error| panic!("load_component: {error}"))
-        .0
 }
 
 #[test]

@@ -50,7 +50,7 @@ fn key(text: &str) -> LoadName {
 /// whether `Needy` stands once the registry owner has applied every batch
 /// the load staged.
 fn holder_spawn(harness: &mut SubstrateHarness, wasm: &[u8]) -> (SpawnOutcome, bool) {
-    let (holder, _) =
+    let holder =
         harness.load::<Holder>(component(wasm)).unwrap_or_else(|error| panic!("the holder must load: {error}"));
 
     let result = harness
@@ -102,7 +102,7 @@ fn a_private_inline_child_with_an_unmet_dependency_is_refused_at_spawn() {
     };
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (parent, _) = harness
+    let parent = harness
         .load::<InlineFsDemuxParent>(component(&wasm))
         .unwrap_or_else(|error| panic!("the parent loads without fs: {error}"));
 

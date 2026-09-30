@@ -32,7 +32,6 @@ fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ActorRef<FsDe
     harness
         .load::<FsDemux>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component test.fs_demux: {error}"))
-        .0
 }
 
 #[test]

@@ -104,7 +104,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> ActorRef<WidgetPan
 
 /// Load the `WidgetPanel` root under the name `panel` with `config`.
 fn load_configured_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &PanelConfig) -> ActorRef<WidgetPanel> {
-    let (panel, path) = harness
+    let panel = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -112,6 +112,7 @@ fn load_configured_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &P
             export: Some("aether.widget.panel".to_owned()),
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    let path = harness.actor_path(&panel);
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
     panel
 }

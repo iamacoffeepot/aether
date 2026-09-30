@@ -246,7 +246,7 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
     // v1's own cdylib-only `Gate`: the probes below name `GateProbe`, a row
     // only the winning successor publishes, and the harness's adopt checks
     // only that the route is `Live` and a component trampoline.
-    let (gate, _) = harness
+    let gate = harness
         .load::<ProbeGate>(LoadComponent {
             wasm: fixtures.v1.clone(),
             name: Some("a".to_owned()),
@@ -304,7 +304,7 @@ fn an_abort_gives_each_ready_member_its_dehydrated_state_back() {
         return;
     };
     let mut harness = pooled();
-    let (keeper, _) = harness
+    let keeper = harness
         .load::<Keeper>(LoadComponent { wasm: fixtures.v1.clone(), name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
     let _refuser = load_export(&mut harness, &fixtures.v1, REFUSER, None);
@@ -331,7 +331,7 @@ fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
         return;
     };
     let mut harness = pooled();
-    let (keeper, _) = harness
+    let keeper = harness
         .load::<Keeper>(LoadComponent { wasm: fixtures.v1.clone(), name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
     let first = harness.send_deferred_to(&keeper, &HeldRequest { tag: 7 }).expect("send the first held request");

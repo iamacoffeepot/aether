@@ -112,7 +112,7 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let mut harness = harness();
 
-    let (stateful_parent, _) = harness
+    let stateful_parent = harness
         .load::<InlineStatefulParent>(load_request(wasm.clone()))
         .unwrap_or_else(|error| panic!("the stateful parent must load: {error}"));
     let stateful_child = await_child::<InlineStatefulParent, InlineStatefulChild>(&harness, stateful_parent, "widget");
@@ -125,7 +125,7 @@ fn an_inline_child_alias_publishes_its_own_type_contract() {
         )),
     );
 
-    let (private_parent, _) = harness
+    let private_parent = harness
         .load::<InlineParent>(load_request(wasm))
         .unwrap_or_else(|error| panic!("the private-child parent must load: {error}"));
     let private_child = await_child::<InlineParent, InlineChild>(&harness, private_parent, "widget");

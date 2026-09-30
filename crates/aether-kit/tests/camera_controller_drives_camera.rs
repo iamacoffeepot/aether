@@ -57,9 +57,10 @@ fn load_kit_export<R: Addressable>(
     config: Vec<u8>,
 ) -> (ActorRef<R>, ErasedActorPath) {
     let name = R::NAMESPACE;
-    let (actor, path) = harness
+    let actor = harness
         .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config, export: None })
         .unwrap_or_else(|error| panic!("load {name}: {error}"));
+    let path = harness.actor_path(&actor);
     assert_eq!(path.to_string(), name, "singleton export {name} should register at its own namespace");
     (actor, path)
 }

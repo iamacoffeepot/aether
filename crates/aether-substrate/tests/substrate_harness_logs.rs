@@ -35,7 +35,7 @@ mod tests {
         let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
-        let (probe, _) = harness
+        let probe = harness
             .load::<QuietProbe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
             .expect("load probe");
 

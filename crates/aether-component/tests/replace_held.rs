@@ -87,16 +87,15 @@ fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, PublishResult
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
 
     let component = |wasm: &[u8]| LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None };
-    let (reply_holder, _) =
+    let reply_holder =
         harness.load::<CarryReplyHolder>(component(&wasm)).unwrap_or_else(|error| panic!("load {HOLDER}: {error}"));
     let _ = harness
         .load_any(&LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: Some(RELAY.to_owned()) })
         .unwrap_or_else(|error| panic!("load {RELAY}: {error}"));
-    let (keeper, _) =
-        harness.load::<HeldKeeper>(component(&wasm)).unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
-    let (forgetter, _) =
+    let keeper = harness.load::<HeldKeeper>(component(&wasm)).unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
+    let forgetter =
         harness.load::<HeldForgetter>(component(&wasm)).unwrap_or_else(|error| panic!("load {FORGETTER}: {error}"));
-    let (requester, _) =
+    let requester =
         harness.load::<HeldRequester>(component(&wasm)).unwrap_or_else(|error| panic!("load {REQUESTER}: {error}"));
 
     let release = match holder {
@@ -204,7 +203,7 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
     };
     let v1 = fs::read(v1_path).expect("read republish_carry_v1");
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
-    let (reply_holder, _) = harness
+    let reply_holder = harness
         .load::<ReplyHolder>(LoadComponent { wasm: v1.clone(), name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {}: {error}", ReplyHolder::NAMESPACE));
 

@@ -63,7 +63,7 @@ fn session_source_returns_none() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (reader, _) = harness
+    let reader = harness
         .load::<SourceObserver>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component test.source_observer: {error}"));
 
@@ -91,9 +91,10 @@ fn component_source_returns_sender_mailbox() {
     // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
     let (_, reader_path) = load_fixture(&mut harness, wasm.clone(), "test.source_observer");
-    let (sender, sender_path) = harness
+    let sender = harness
         .load::<SourceForwarder>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component test.source_forwarder: {error}"));
+    let sender_path = harness.actor_path(&sender);
 
     // `send_and_settle`: the whole chain (forwarder → reader → forwarder)
     // settles before `execute` returns, so the log entry is already in the ring.
