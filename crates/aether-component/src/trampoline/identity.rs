@@ -13,7 +13,7 @@
 //! the empty `Declared` lists `NativeActor` requires, and one `HandlesKind`,
 //! `Replies`, and `Contract` row per mail handler of the `#[runtime]` impl, in
 //! its declaration order. A drift-guard test beside that impl compares
-//! [`Contracts::CONTRACTS`](aether_actor::Contracts::CONTRACTS) with its
+//! [`aether_actor::Contracts::CONTRACTS`] with its
 //! dispatch table.
 
 use aether_actor::{
