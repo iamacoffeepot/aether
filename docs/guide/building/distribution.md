@@ -82,7 +82,8 @@ A depot ships release artifacts, so `--profile` defaults to release.
 
 With no `--components` and no `--spec`, `package` runs the discover-everything
 dev sweep: every structurally discovered component, the desktop chassis, and
-default settings, with names mirroring the `dist` wasm stems.
+default settings, with names mirroring the `dist` wasm stems. The sweep spawns
+only the exports that declare `root` and prints each one it skips.
 
 For a real product, name the chassis and the components:
 

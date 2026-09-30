@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_chassis::autoload::selectable_exports;
+use aether_chassis::autoload::{actor_lineage, selectable_exports};
 use aether_chassis::encode_config_json;
+use aether_data::ActorLineageRecord;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::Metadata;
 
@@ -36,13 +37,15 @@ pub(super) enum ComponentSource {
 
 /// The discover-everything dev sweep component set: build every
 /// structurally discovered component and read its wasm into one unnamed
-/// [`PackComponent`] per selectable export, each naming that export's
-/// namespace (every spawn names its namespace, ADR-0241 §9) and loaded under
-/// its type's own name (a load names no key for a singleton, ADR-0241 §5).
-/// A module whose exports cannot be read fails the sweep naming the
-/// component. Stem-sorted so a rebuild of the same
-/// sources yields a byte-identical `pack/manifest`; each package builds in its own cargo
-/// invocation (never batch multiple `-p`, see `inventory::build_plans`).
+/// [`PackComponent`] per selectable export that declares `root`, each naming
+/// that export's namespace (every spawn names its namespace, ADR-0241 §9) and
+/// loaded under its type's own name (a load names no key for a singleton,
+/// ADR-0241 §5). An export the lineage does not root would be refused at the
+/// root, so the sweep prints each one it skips by namespace. A module whose
+/// exports or lineage cannot be read fails the sweep naming the component.
+/// Stem-sorted so a rebuild of the same sources yields a byte-identical
+/// `pack/manifest`; each package builds in its own cargo invocation (never
+/// batch multiple `-p`, see `inventory::build_plans`).
 pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: Profile) -> Result<Vec<PackComponent>> {
     let mut components = discover_components(metadata);
     if components.is_empty() {
@@ -60,7 +63,16 @@ pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: 
         let wasm = fs::read(&src).with_context(|| format!("read component wasm {}", src.display()))?;
         let exports = selectable_exports(&wasm)
             .map_err(|error| anyhow::anyhow!("read the exports of component {}: {error}", component.stem))?;
-        swept.extend(exports.into_iter().map(|export| PackComponent {
+        let lineage = actor_lineage(&wasm)
+            .map_err(|error| anyhow::anyhow!("read the placement lineage of component {}: {error}", component.stem))?;
+        let (rooted, skipped): (Vec<_>, Vec<_>) =
+            exports.into_iter().partition(|export| declares_root(&lineage, export));
+
+        for export in &skipped {
+            println!("package: sweep skips {export} ({}): it does not declare `root`", component.stem);
+        }
+
+        swept.extend(rooted.into_iter().map(|export| PackComponent {
             wasm: wasm.clone(),
             config: None,
             name: None,
@@ -69,6 +81,11 @@ pub(super) fn sweep_components(metadata: &Metadata, target_dir: &Path, profile: 
         }));
     }
     Ok(swept)
+}
+
+/// Whether the lineage records `export` as placeable at the root (ADR-0241 §5).
+fn declares_root(lineage: &[ActorLineageRecord], export: &str) -> bool {
+    lineage.iter().any(|record| matches!(record, ActorLineageRecord::Root { namespace, .. } if namespace == export))
 }
 
 /// Build (or locate) each planned component's wasm, in plan order, and read
@@ -126,4 +143,23 @@ pub(super) fn build_planned_components(
         });
     }
     Ok(components)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declares_root_needs_its_own_root_record() {
+        let root = |namespace: &'static str| ActorLineageRecord::Root { actor: 1, namespace: namespace.into() };
+        let child = ActorLineageRecord::Child {
+            parent: 1,
+            child: 2,
+            parent_namespace: "aether.test.parent".into(),
+            child_namespace: "aether.test.leaf".into(),
+        };
+
+        assert!(!declares_root(&[root("aether.test.other"), child.clone()], "aether.test.leaf"));
+        assert!(declares_root(&[child, root("aether.test.leaf")], "aether.test.leaf"));
+    }
 }
