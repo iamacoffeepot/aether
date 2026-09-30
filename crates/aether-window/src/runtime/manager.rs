@@ -1,7 +1,7 @@
 //! Root-command routing: the command view a manager retains of each window
 //! child, and the forward of a root-addressed command to the sole window.
 
-use aether_actor::{Manual, Protocol, ProtocolRef, RowAt, protocol};
+use aether_actor::{Protocol, ProtocolRef, ReplyMode, RowAt, protocol};
 use aether_data::{ActorMail, ErasedActorPath};
 use aether_substrate::actor::native::NativeCtx;
 
@@ -50,9 +50,9 @@ pub struct RoutableWindow {
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-pub(super) fn route_to_sole_window<K: ActorMail, A, I>(
+pub(super) fn route_to_sole_window<K: ActorMail, A, I, M: ReplyMode>(
     windows: &[RoutableWindow],
-    ctx: &mut NativeCtx<'_, A, Manual>,
+    ctx: &mut NativeCtx<'_, A, M>,
     mail: &K,
 ) -> Result<(), String>
 where

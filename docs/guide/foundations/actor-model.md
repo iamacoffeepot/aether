@@ -320,7 +320,9 @@ The **single** class (`#[handler::single]`) answers 0-or-1 through
 its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
 **manual** class (`#[handler::manual]`) takes a `Manual` ctx and issues its own
 replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
-turn.
+turn. Manual is for a handler that replies more than once, replies from outside
+the actor, or relays a request; it is never a default — a handler that never
+replies to its own inbound mail is `#[handler::single]` with a silent `-> ()`.
 
 A single handler that answers one exact kind in a later turn returns
 `-> Pending<R>`. The offload dispatch calls mint that receipt for work a worker

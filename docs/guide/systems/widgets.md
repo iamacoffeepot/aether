@@ -662,8 +662,8 @@ divide the list's rectangle by its visible row count itself, which names the
 right item only while every item is realized. The list says it instead:
 
 ```rust
-#[handler::manual]
-fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: VirtualListHover) {
+#[handler::single]
+fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: VirtualListHover) {
     // `hover.index` is into the config's `items`, or `None` once the pointer
     // has left the rows; `hover.frame` is that row's plate.
 }
@@ -978,8 +978,8 @@ only redo this widget's geometry, and gets it wrong the moment an arrow key
 scrolls the realized window. The dropdown says it instead:
 
 ```rust
-#[handler::manual]
-fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: DropdownHover) {
+#[handler::single]
+fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: DropdownHover) {
     // `hover.index` indexes the config's `options`; `hover.frame` is that
     // row's rectangle in window pixels.
 }

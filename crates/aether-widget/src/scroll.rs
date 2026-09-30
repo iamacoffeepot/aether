@@ -13,7 +13,7 @@
 //! painting and hit testing from drifting under non-zero panel origins or
 //! ancestor offsets.
 
-use aether_actor::{ActorInitError, Erased, ErasedActorRef, Manual, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, ErasedActorRef, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
 
@@ -400,8 +400,8 @@ impl WasmActor for ScrollWidget {
         self.drive_frame(ctx);
     }
 
-    #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, list: WidgetDrawList) {
+    #[handler::single]
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
@@ -435,8 +435,8 @@ impl WasmActor for ScrollWidget {
         }
     }
 
-    #[handler::manual]
-    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
+    #[handler::single]
+    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased>, outcome: ScrollOutcome) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll outcome from non-child source");
             return;
@@ -446,8 +446,8 @@ impl WasmActor for ScrollWidget {
         }
     }
 
-    #[handler::manual]
-    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, residual: ScrollResidual) {
+    #[handler::single]
+    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased>, residual: ScrollResidual) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll residual from non-child source");
             return;

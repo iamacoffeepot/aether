@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, ReplyMode,
-    Sends, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, ModuleChild, ReplyMode, Sends,
+    Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -1055,8 +1055,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _tick: Tick) {
+    #[handler::single]
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -1076,8 +1076,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, list: WidgetDrawList) {
+    #[handler::single]
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
@@ -1223,8 +1223,8 @@ impl WasmActor for WidgetPanel {
 
     /// Keep dynamic routing availability synchronized with the external state
     /// a child actually adopted. Source attribution identifies the panel slot.
-    #[handler::manual]
-    fn on_widget_state_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: WidgetStateChanged) {
+    #[handler::single]
+    fn on_widget_state_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetStateChanged) {
         let Some(source) = ctx.sender() else {
             return;
         };
@@ -1234,12 +1234,8 @@ impl WasmActor for WidgetPanel {
 
     /// Keep content-derived pointer/keyboard eligibility synchronized. Source
     /// attribution identifies the panel slot the event came from.
-    #[handler::manual]
-    fn on_widget_eligibility_changed(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Erased, Manual>,
-        changed: WidgetEligibilityChanged,
-    ) {
+    #[handler::single]
+    fn on_widget_eligibility_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetEligibilityChanged) {
         let Some(source) = ctx.sender() else {
             return;
         };
@@ -1252,8 +1248,8 @@ impl WasmActor for WidgetPanel {
     /// Observe one descendant scroll container's exact typed outcome. The
     /// owner is the direct child `widget` names, `relays` scroll hops inward:
     /// each intermediate scroll that relays the event adds one.
-    #[handler::manual]
-    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
+    #[handler::single]
+    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased>, outcome: ScrollOutcome) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1270,8 +1266,8 @@ impl WasmActor for WidgetPanel {
 
     /// The root is the terminal residual sink. Log every named axis field and
     /// drop the remainder; no second wheel-sign conversion occurs here.
-    #[handler::manual]
-    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, residual: ScrollResidual) {
+    #[handler::single]
+    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased>, residual: ScrollResidual) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1286,8 +1282,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: SliderChanged) {
+    #[handler::single]
+    fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: SliderChanged) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1301,8 +1297,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, committed: TextCommitted) {
+    #[handler::single]
+    fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_, Erased>, committed: TextCommitted) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1315,8 +1311,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: RadioSelected) {
+    #[handler::single]
+    fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: RadioSelected) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1329,8 +1325,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: VirtualListSelected) {
+    #[handler::single]
+    fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: VirtualListSelected) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1346,8 +1342,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, action: VirtualListActivated) {
+    #[handler::single]
+    fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, action: VirtualListActivated) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1364,8 +1360,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: VirtualListHover) {
+    #[handler::single]
+    fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: VirtualListHover) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1383,8 +1379,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: DropdownHover) {
+    #[handler::single]
+    fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: DropdownHover) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1397,8 +1393,8 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _clicked: ButtonActivated) {
+    #[handler::single]
+    fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, _clicked: ButtonActivated) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1407,8 +1403,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A toggle value-up. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: ToggleChanged) {
+    #[handler::single]
+    fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: ToggleChanged) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1418,8 +1414,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A segmented selection. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: SegmentedSelected) {
+    #[handler::single]
+    fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: SegmentedSelected) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1429,8 +1425,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A dropdown's choice. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: DropdownSelected) {
+    #[handler::single]
+    fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: DropdownSelected) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1446,8 +1442,8 @@ impl WasmActor for WidgetPanel {
     /// itself. One handler for every overlay-bearing widget, because the
     /// handshake does not vary by widget and a root that implemented it for
     /// one kind and not the next left that one open with no grab.
-    #[handler::manual]
-    fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: WidgetOpenChanged) {
+    #[handler::single]
+    fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetOpenChanged) {
         let Some(source) = ctx.sender() else {
             return;
         };
@@ -1459,8 +1455,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A menu item's activation. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, activated: MenuBarActivated) {
+    #[handler::single]
+    fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, activated: MenuBarActivated) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1471,8 +1467,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A tab strip's selection. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: TabStripSelected) {
+    #[handler::single]
+    fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: TabStripSelected) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),
@@ -1482,8 +1478,8 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A numeric preview or commit. The map-editor seam; the reference logs it.
-    #[handler::manual]
-    fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: NumericChanged) {
+    #[handler::single]
+    fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: NumericChanged) {
         tracing::info!(
             target: "aether_widget",
             widget = self.child_name(ctx.sender()),

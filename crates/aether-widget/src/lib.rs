@@ -120,7 +120,7 @@ aether_actor::export!(
 );
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Manual, ReplyMode, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, DependsOn, ReplyMode, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
@@ -1443,8 +1443,8 @@ impl WasmActor for Widget {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _tick: Tick) {
+    #[handler::single]
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.drive_frame(ctx);
     }
 
@@ -1467,8 +1467,8 @@ impl WasmActor for Widget {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, list: WidgetDrawList) {
+    #[handler::single]
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }

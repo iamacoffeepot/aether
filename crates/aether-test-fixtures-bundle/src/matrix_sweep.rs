@@ -47,8 +47,8 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, Manual, RelativeMailbox, Subname, WasmActor,
-    WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, RelativeMailbox, Subname, WasmActor, WasmCtx,
+    WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
@@ -219,8 +219,8 @@ impl WasmActor for MatrixParent {
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
     /// cell with whether the parent's sender is its proof of child\[a\] (the
     /// membrane's own-id path).
-    #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
+    #[handler::single]
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased>, ping: MatrixPing) {
         let expected = ctx.child_as::<MatrixChild>("a").map(InlineChild::erase);
         record_cell(ping.cell, sender_matches(ctx.sender(), expected));
     }
@@ -260,8 +260,8 @@ impl WasmActor for MatrixChild {
     /// for the sibling and self pings — then, when the ping is the fan-out ping
     /// (parent → child\[a\]), drive the child-origin cells and the
     /// cross-cluster send, all in place.
-    #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
+    #[handler::single]
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased>, ping: MatrixPing) {
         let expected = match ping.cell {
             MATRIX_CELL_PARENT_TO_CHILD => ctx.parent().as_ref().map(RelativeMailbox::reference),
             MATRIX_CELL_CHILD_TO_SIBLING | MATRIX_CELL_CHILD_TO_SELF => {
