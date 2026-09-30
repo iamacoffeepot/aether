@@ -39,6 +39,10 @@ use loader::{Autoloader, AutoloaderParams, LoadAnswer};
 /// exported types, the boot type left out. The xtask dev sweep names each.
 pub use aether_substrate::actor::wasm::kind_manifest::read_selectable_exports_from_bytes as selectable_exports;
 
+/// The placement facts a module records (`aether.actor.lineage`). The xtask dev
+/// sweep reads it to keep only the exports that declare `root` (ADR-0241 §5).
+pub use aether_substrate::actor::wasm::kind_manifest::read_actor_lineage_from_bytes as actor_lineage;
+
 /// A component to auto-load on boot: its wasm bytes, optional init-config
 /// bytes (ADR-0090; empty for none), the namespace of the exported type it
 /// spawns (the manifest's `export`), and the instance keys it spawns at. The
