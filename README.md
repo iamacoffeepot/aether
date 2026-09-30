@@ -241,7 +241,7 @@ aether_actor::export!(default = Console, public = [Inspector, Worker]);
 
 Without `default =`, a multi-actor module is defaultless and every load must select
 an export. Build for `wasm32-unknown-unknown`, call `upload_component` with the
-artifact path, then call `load_component`/`replace_component` with the returned
+artifact path, then call `publish`/`load_component` with the returned
 registry selector—not a host wasm path.
 
 See [Writing a component](docs/guide/recipes/writing-a-component.md) and

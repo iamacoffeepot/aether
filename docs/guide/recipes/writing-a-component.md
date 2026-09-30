@@ -112,7 +112,7 @@ command when validating packaging/discovery.
 ### Use the watched development loop
 
 When an engine is already running, `dev-component` owns the repetitive
-build/upload/load-or-replace loop:
+build/upload/load-or-republish loop:
 
 ```sh
 cargo xtask dev-component \
@@ -131,17 +131,18 @@ because `upload_component.staged_path` is read there.
 
 Without an existing instance, the first successful pass uploads and loads the
 component. The command prints and retains the loaded component's canonical
-`address`; later passes upload and replace the component at that address. For a
-defaultless multi-actor module, select the actor namespace on that first load:
+`address`; later passes upload and `publish` each new build, which republishes
+the component at that address. For a module exporting several types, select the
+type's namespace on that first load:
 
 ```sh
 cargo xtask dev-component \
   --package my-component \
   --engine-id <engine UUID> \
-  --export example.alpha
+  --namespace example.alpha
 ```
 
-`--export` applies only to the initial load. Later replacements reuse the actor
+`--namespace` applies only to the initial load. Later replacements reuse the actor
 already hosted by the component. To replace an existing instance from the first
 pass, supply its address as `load_component` returned it:
 
@@ -153,9 +154,9 @@ cargo xtask dev-component \
 ```
 
 The flag takes an actor path; a malformed path is rejected before the watcher
-starts, and a tagged `mbx-…` id is not accepted. A replace names no instance: it
+starts, and a tagged `mbx-…` id is not accepted. A publish names no instance: it
 republishes the module, and every live instance of its namespaces, this one
-among them, moves to the new build. `--address` and `--export` conflict because
+among them, moves to the new build. `--address` and `--namespace` conflict because
 replace-first mode already has a hosted actor.
 
 The package root is watched recursively and generated target output is ignored.

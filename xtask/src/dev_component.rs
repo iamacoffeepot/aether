@@ -1,4 +1,4 @@
-//! Serialized build/upload/load-or-replace loop for one selected component.
+//! Serialized build/upload/load-or-republish loop for one selected component.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ pub struct DevComponentArgs {
     /// Workspace package containing the component to build.
     #[arg(long)]
     package: String,
-    /// Existing engine UUID to load into or replace within.
+    /// Existing engine UUID to load into or republish within.
     #[arg(long)]
     engine_id: String,
     /// Component artifact stem. Required when the package exposes more than one component.
@@ -39,18 +39,19 @@ pub struct DevComponentArgs {
     /// Existing component address (its published name: `NS`, `NS:key`, or `parent/NS:key`): its module is republished on the first pass.
     #[arg(long, value_parser = parse_address)]
     address: Option<String>,
-    /// Actor namespace to select on the first load. Conflicts with `--address`.
+    /// Exported type to spawn on the first load, by its actor namespace. Conflicts with `--address`.
     #[arg(long, conflicts_with = "address")]
-    export: Option<String>,
+    namespace: Option<String>,
     /// Streamable-HTTP MCP endpoint on a host that can read the built artifact at the same absolute path.
     #[arg(long, default_value = DEFAULT_MCP_ENDPOINT)]
     mcp_endpoint: String,
 }
 
 /// The live component the loop replaces: the canonical lineage the load
-/// handed back, or the address `--address` supplied. A replace names no
-/// instance: it republishes the module, and every live instance of its
-/// namespaces, this one among them, moves to the new build (ADR-0241 §7).
+/// handed back, or the address `--address` supplied. A publish of the new
+/// build names no instance: it republishes the module, and every live
+/// instance of its namespaces, this one among them, moves to the new build
+/// (ADR-0241 §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveBinding {
     address: String,
@@ -147,7 +148,7 @@ pub fn run(args: &DevComponentArgs) -> Result<()> {
         CargoArtifactBuilder { plan, component, wasm_profile_dir },
         McpToolCaller { endpoint: args.mcp_endpoint.clone() },
         &args.engine_id,
-        args.export.as_deref(),
+        args.namespace.as_deref(),
         &package_root,
         &generated_target,
         &mut binding,
@@ -193,7 +194,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
     mut builder: B,
     mut caller: C,
     engine_id: &str,
-    export: Option<&str>,
+    namespace: Option<&str>,
     package_root: &Path,
     generated_target: &Path,
     binding: &mut Option<LiveBinding>,
@@ -210,7 +211,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
     let stop = ctrl_c();
     tokio::pin!(stop);
     tokio::select! {
-        result = run_pass(&mut builder, &mut caller, engine_id, export, binding) => report_pass(result),
+        result = run_pass(&mut builder, &mut caller, engine_id, namespace, binding) => report_pass(result),
         signal = &mut stop => {
             signal.context("install Ctrl-C handler")?;
             return Ok(());
@@ -225,7 +226,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
             }
         }
         tokio::select! {
-            result = run_pass(&mut builder, &mut caller, engine_id, export, binding) => report_pass(result),
+            result = run_pass(&mut builder, &mut caller, engine_id, namespace, binding) => report_pass(result),
             signal = &mut stop => {
                 signal.context("install Ctrl-C handler")?;
                 return Ok(());
@@ -245,7 +246,7 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
     builder: &mut B,
     caller: &mut C,
     engine_id: &str,
-    export: Option<&str>,
+    namespace: Option<&str>,
     binding: &mut Option<LiveBinding>,
 ) -> Result<String> {
     let artifact = builder.build().context("build selected component")?;
@@ -261,23 +262,23 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
     if let Some(current) = binding.as_ref() {
         caller
             .call(
-                "replace_component",
+                "publish",
                 json!({
                     "engine_id": engine_id,
                     "selector": uploaded.hash,
                 }),
             )
             .await
-            .context("replace live component")?;
+            .context("republish live component")?;
         return Ok(format!("replaced {}", current.address));
     }
 
     let mut load_arguments = json!({ "engine_id": engine_id, "selector": uploaded.hash });
-    if let Some(export) = export {
+    if let Some(namespace) = namespace {
         load_arguments
             .as_object_mut()
             .expect("load arguments are an object")
-            .insert("export".to_string(), Value::String(export.to_string()));
+            .insert("namespace".to_string(), Value::String(namespace.to_string()));
     }
     let loaded: LoadReply = serde_json::from_value(
         caller.call("load_component", load_arguments).await.context("load component into engine")?,
@@ -458,9 +459,9 @@ mod tests {
     }
 
     #[test]
-    fn export_help_is_visible_and_conflicts_with_replace_first() {
+    fn namespace_help_is_visible_and_conflicts_with_replace_first() {
         let help = ArgsHarness::command().render_long_help().to_string();
-        assert!(help.contains("--export <EXPORT>"));
+        assert!(help.contains("--namespace <NAMESPACE>"));
         assert!(help.contains("same absolute path"));
 
         let error = ArgsHarness::try_parse_from([
@@ -471,10 +472,10 @@ mod tests {
             "engine",
             "--address",
             "aether.component/:echo",
-            "--export",
+            "--namespace",
             "example.alpha",
         ])
-        .expect_err("export and replace-first must conflict");
+        .expect_err("namespace and replace-first must conflict");
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
@@ -513,14 +514,14 @@ mod tests {
         let calls = calls.lock().expect("calls mutex").clone();
         assert_eq!(
             calls.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
-            ["upload_component", "load_component", "upload_component", "replace_component"]
+            ["upload_component", "load_component", "upload_component", "publish"]
         );
-        assert_eq!(calls[1].1["export"], "example.echo");
+        assert_eq!(calls[1].1["namespace"], "example.echo");
         assert_eq!(calls[3].1["selector"], "hash-2");
-        assert!(calls[3].1.get("export").is_none());
+        assert!(calls[3].1.get("namespace").is_none());
     }
 
-    /// The dev loop's replace request and the MCP tool's `ReplaceComponentArgs`
+    /// The dev loop's republish request and the MCP tool's `PublishArgs`
     /// sit in different crates, and `aether-mcp` publishes no library target, so
     /// nothing holds the two shapes together at compile time. Issue 5864 was
     /// exactly that drift: the loop kept sending the retired `mailbox_id` field
@@ -528,7 +529,7 @@ mod tests {
     /// refused while the build and upload steps still reported success. Read the
     /// field set out of the tool's own source and hold the request against it.
     #[tokio::test]
-    async fn the_replace_request_carries_the_field_set_the_mcp_tool_declares() {
+    async fn the_republish_request_carries_the_field_set_the_mcp_tool_declares() {
         let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
         let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({ "capabilities": [] }))]);
         let calls = caller.calls.clone();
@@ -537,18 +538,18 @@ mod tests {
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
         let (tool, request) = calls.lock().expect("calls mutex")[1].clone();
-        assert_eq!(tool, "replace_component");
+        assert_eq!(tool, "publish");
         let sent: BTreeSet<String> = request.as_object().expect("a request object").keys().cloned().collect();
-        let (declared, required) = replace_component_fields();
-        assert!(required.is_subset(&sent), "replace_component requires {required:?}; the dev loop sends {sent:?}");
-        assert!(sent.is_subset(&declared), "the dev loop sends {sent:?}; replace_component declares {declared:?}");
+        let (declared, required) = publish_fields();
+        assert!(required.is_subset(&sent), "publish requires {required:?}; the dev loop sends {sent:?}");
+        assert!(sent.is_subset(&declared), "the dev loop sends {sent:?}; publish declares {declared:?}");
     }
 
     /// The declared and required field names of `aether-mcp`'s
-    /// `ReplaceComponentArgs`, read from its source. Required is every field
+    /// `PublishArgs`, read from its source. Required is every field
     /// serde cannot fill in, so an omitted one is a refused call rather than a
     /// default.
-    fn replace_component_fields() -> (BTreeSet<String>, BTreeSet<String>) {
+    fn publish_fields() -> (BTreeSet<String>, BTreeSet<String>) {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/aether-mcp/src/args.rs");
         let source = fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let args = parse_file(&source)
@@ -556,10 +557,10 @@ mod tests {
             .items
             .into_iter()
             .find_map(|item| match item {
-                Item::Struct(item) if item.ident == "ReplaceComponentArgs" => Some(item),
+                Item::Struct(item) if item.ident == "PublishArgs" => Some(item),
                 _ => None,
             })
-            .expect("aether-mcp declares ReplaceComponentArgs");
+            .expect("aether-mcp declares PublishArgs");
 
         let mut declared = BTreeSet::new();
         let mut required = BTreeSet::new();
@@ -591,7 +592,7 @@ mod tests {
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
         let calls = calls.lock().expect("calls mutex").clone();
-        assert_eq!(calls[1].0, "replace_component", "a supplied address marks the component live");
+        assert_eq!(calls[1].0, "publish", "a supplied address marks the component live");
         assert_eq!(binding, Some(original));
     }
 
