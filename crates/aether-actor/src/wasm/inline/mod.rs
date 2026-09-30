@@ -204,6 +204,25 @@ pub(crate) enum ChainMode {
     Detached,
 }
 
+/// Hand one send to the host, threading `sender` as its `from` (issue 1987)
+/// and keeping the held values its bytes name alive for the whole host call,
+/// whose resolve on send attaches their entries (ADR-0238 decision 3). The
+/// remote arm of [`Registry::route_or_enqueue`], and the route every tracked
+/// send takes even to a cluster member, so the host mints the correlation its
+/// reply comes back on (ADR-0139).
+pub(crate) fn send_through_host(
+    recipient: u64,
+    kind: u64,
+    payload: EncodedGuestMail,
+    count: u32,
+    mode: ChainMode,
+    sender: u64,
+) {
+    let EncodedGuestMail { bytes, keep } = payload;
+    mail::send_mail(recipient, kind, &bytes, count, matches!(mode, ChainMode::Detached), sender);
+    drop(keep);
+}
+
 /// The `export!`-installed resolver a
 /// [`WasmCtx::spawn_inline_child_by_tag`] call routes through (issue 2692).
 /// A plain `fn` pointer, not a boxed closure: the resolver is a
@@ -752,19 +771,16 @@ impl Registry {
         mode: ChainMode,
         sender: u64,
     ) {
-        let EncodedGuestMail { bytes, keep } = payload;
         match self.route_decision(recipient) {
             RouteDecision::Local => {
+                let EncodedGuestMail { bytes, keep } = payload;
                 // SAFETY: see [`Self::insert_child`] — the queue borrow is
                 // taken fresh and released before return, never spanning a
                 // dispatch (the drain re-borrows per item).
                 let queue = unsafe { &mut *self.queue.get() };
                 queue.push_back(QueuedMail { recipient, kind, bytes, keep, count, sender });
             }
-            RouteDecision::Remote => {
-                mail::send_mail(recipient, kind, &bytes, count, matches!(mode, ChainMode::Detached), sender);
-                drop(keep);
-            }
+            RouteDecision::Remote => send_through_host(recipient, kind, payload, count, mode, sender),
         }
     }
 
