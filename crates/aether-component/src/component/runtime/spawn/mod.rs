@@ -9,12 +9,15 @@
 //! spent (§8). A spawn of a namespace a republish holds waits until the
 //! republish answers, then runs against the code that won (§7).
 //!
-//! Only a guest type is spawned here: a namespace no module publishes,
-//! native ones included, is refused.
+//! Only a published guest type is spawned here. A native namespace is
+//! refused: native types are composed by their chassis or parent, and
+//! spawning one by mail is not supported yet. A namespace no module
+//! publishes is refused until its code is published.
 
 use std::sync::Arc;
 
 use aether_actor::ReplyMode;
+use aether_data::name_inventory::native_type_entries;
 use aether_kinds::{Spawn, SpawnResult};
 use aether_substrate::actor::native::Held;
 
@@ -44,9 +47,14 @@ impl ComponentHostCapabilityState {
     /// its namespace, placed beneath its proven parent when it names one.
     fn prepare_spawn<M: ReplyMode>(ctx: &HostCtx<'_, M>, payload: Spawn) -> Result<Arc<PreparedLoad>, String> {
         let Spawn { namespace, key, parent, config } = payload;
-        let module = ctx.published_module(&namespace).ok_or_else(|| {
-            format!("no module publishes {namespace}: publish its code first (a native type is not spawned by mail)")
-        })?;
+        if native_type_entries().any(|entry| entry.namespace == namespace) {
+            return Err(format!(
+                "{namespace} is a native type: native types are composed by their chassis or parent; spawning one by mail is not supported yet"
+            ));
+        }
+        let module = ctx
+            .published_module(&namespace)
+            .ok_or_else(|| format!("no module publishes {namespace}: publish its code first"))?;
         let declared = declared_name(&module, &namespace).expect("a module publishes only the types it exports");
         let placement = match parent {
             None => LoadPlacement::Root,

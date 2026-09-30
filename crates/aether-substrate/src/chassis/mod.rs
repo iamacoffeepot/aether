@@ -563,8 +563,9 @@ mod prelude_tests {
         }
     }
 
-    /// A chassis whose delta borrows the boot authority, the way headless does
-    /// to register its `aether.audio` inline sink.
+    /// A chassis whose delta borrows the boot authority, the way the
+    /// `SubstrateHarness` does to register its observer sink
+    /// (`SubstrateBoot::register_inline`).
     struct AuthorityChassis;
 
     impl Chassis for AuthorityChassis {
@@ -615,7 +616,8 @@ mod prelude_tests {
     #[test]
     fn a_delta_borrows_the_authority_only_while_it_composes() {
         // Tripwire: the window a delta gets is exactly its own call. `compose`
-        // must see the token (headless registers its audio sink through it), and
+        // must see the token (the SubstrateHarness registers its observer sink
+        // through it), and
         // `composed` must have taken it back by the time the builder is returned
         // — the builder goes on to `build`, which installs the seal.
         let mut boot = SubstrateBoot::build().expect("substrate boot");

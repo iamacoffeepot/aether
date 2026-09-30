@@ -456,8 +456,8 @@ impl SubstrateHarnessBuilder {
     }
 
     /// Compose an arbitrary capability into this harness. The harness boots
-    /// its basics (trace dispatch, the harness cap, lifecycle, fail-fast
-    /// headless window) and each scenario composes exactly the caps it
+    /// its basics (trace dispatch, the harness cap, lifecycle, synthetic
+    /// window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
     /// cap without boot-internal wiring — `harness.with_actor::<TextCapability>(())`,
     /// a scenario-local `NativeActor`, and so on. Applied to the chassis builder

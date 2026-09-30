@@ -35,7 +35,7 @@ pub use self::config::ComponentHostParams;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, LoadComponentUnder, Publish, PublishResult, ReplaceComponent, ReplaceResult, Spawn, SpawnResult,
+    LoadComponent, Publish, PublishResult, Spawn, SpawnResult,
 };
 
 pub use aether_actor::Manual;
@@ -93,12 +93,12 @@ pub struct ComponentHostCapabilityState {
     pub last_egressed_inventory: Option<(u64, u64)>,
     /// The engine's one module cache (ADR-0240 D5, ADR-0241 §2), built here
     /// on the engine every load instantiates against and handed to every
-    /// trampoline, so a load, a boot and a replace of the same bytes all
+    /// trampoline, so a load, a boot and a republish of the same bytes all
     /// share one compiled, parsed entry per content hash — a
     /// burst of loads of one artifact (`replicas: N`, a boot manifest naming
     /// several of its exports) pays cranelift once instead of once per load.
     /// Nothing is evicted by count or capacity — an entry lives only as long
-    /// as some trampoline, in-flight load or replace, or staged boot plan
+    /// as some trampoline, in-flight load or republish, or staged boot plan
     /// still holds its `Module`.
     pub modules: ModuleCache,
     /// ADR-0147: the content hash (the ADR-0238 BLAKE3 hash of the wasm
@@ -260,22 +260,6 @@ impl NativeActor for ComponentHostCapability {
         pending
     }
 
-    /// Load a component beneath a live parent, at `parent/NS:key`. The
-    /// selected type must declare `child_of` the parent's type (ADR-0241
-    /// §5); any other placement is refused before the module publishes.
-    /// Its `LoadResult` is held and answered the same way `on_load_component`'s is.
-    /// An adapter over the load, until its callers move to `Spawn` (#7163).
-    #[handler::single]
-    fn on_load_component_under(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: LoadComponentUnder,
-    ) -> Pending<LoadResult> {
-        let (pending, held) = ctx.hold::<LoadResult>();
-        state.begin_load_under(ctx, held, payload);
-        pending
-    }
-
     /// A module publish settled (ADR-0241 §3): a load's commit continues to
     /// the module boot and the requested guest, a `Publish`'s spawns the
     /// module's boot and answers, and a republish's commit sends every
@@ -324,8 +308,8 @@ impl NativeActor for ComponentHostCapability {
     /// from every sibling cap's fan-out / routing table — each cap monitors
     /// its registrants and drops its own rows on the notice, so the host
     /// mails no cap anything at drop time. A drop of an instance whose
-    /// module is republishing waits until the replace answers, then runs
-    /// against the instance the replace left (§7).
+    /// module is republishing waits until the republish answers, then runs
+    /// against the instance the republish left (§7).
     ///
     /// # Agent
     /// `DropComponent { target }`. The `target` is the component's actor
@@ -340,35 +324,6 @@ impl NativeActor for ComponentHostCapability {
     ) -> Pending<DropResult> {
         let (pending, held) = ctx.hold::<DropResult>();
         state.begin_drop(ctx, held, payload);
-        pending
-    }
-
-    /// Republish a module (ADR-0241 §7, §9): every live instance of every
-    /// namespace it republishes moves to the successor as one group, or none
-    /// does. An adapter over `Publish` that answers as a replace, until its
-    /// callers move to `Publish` (#7163).
-    ///
-    /// # Agent
-    /// `ReplaceComponent { wasm, configs }`. `wasm` must succeed the module
-    /// that publishes its namespaces: it exports each of them, keeps each
-    /// one's handler rows and fallback, and declares no boot. Identical
-    /// bytes answer `Ok` with no swap. `configs` lists `{ path, config }`
-    /// for an instance whose type's config kind changed, which needs one;
-    /// every other instance keeps its stored config. The host checks
-    /// everything it can first and refuses the whole replace, naming each
-    /// instance a check refuses; then every instance prepares, the module
-    /// publishes, and every instance commits. A failure while preparing or
-    /// publishing leaves every instance on its old code. The reply is
-    /// `ReplaceResult::Ok { types }`, each republished type with its
-    /// capabilities, once every commit's chain has settled.
-    #[handler::single]
-    fn on_replace_component(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: ReplaceComponent,
-    ) -> Pending<ReplaceResult> {
-        let (pending, held) = ctx.hold::<ReplaceResult>();
-        state.begin_replace(ctx, held, payload);
         pending
     }
 

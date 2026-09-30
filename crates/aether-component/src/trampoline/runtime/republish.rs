@@ -155,8 +155,8 @@ impl WasmTrampolineState {
         drop(old);
         self.module = module;
         // ADR-0096: track the actor type this trampoline now hosts, so a
-        // later bare (`export: None`) replace reuses the *current* type
-        // rather than reverting to the original load's.
+        // later republish with no explicit type override reuses the
+        // *current* type rather than reverting to the original load's.
         self.type_tag = type_tag;
         self.capabilities = capabilities;
         self.config = config;

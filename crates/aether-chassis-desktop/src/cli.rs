@@ -30,8 +30,8 @@ pub struct DesktopCli {
     pub audio: AudioOverlay,
     /// Render cap tuning (desktop composes the wgpu render cap):
     /// `--render-vertex-buffer-bytes`, shadowing `AETHER_RENDER_VERTEX_BUFFER_BYTES`
-    /// (issue 3882 flattened its overlay here; headless composes the nop render cap,
-    /// which resolves no `RenderTuningConfig`, so it carries no render flag).
+    /// (issue 3882 flattened its overlay here; headless composes no render actor,
+    /// so it resolves no `RenderTuningConfig` and carries no render flag).
     #[command(flatten)]
     pub render: RenderTuningOverlay,
     /// Desktop window knobs: `--window-mode`, `--window-title`.

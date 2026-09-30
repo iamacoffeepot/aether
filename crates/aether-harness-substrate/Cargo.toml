@@ -7,7 +7,7 @@ publish = false
 
 # `SubstrateHarness` — the in-process harness harness (ADR-0067, issue #3765).
 # Boots a substrate-harness chassis (basics only: trace dispatch, the harness
-# cap, lifecycle, fail-fast headless window, the observer mailbox) over a
+# cap, lifecycle, synthetic window, the observer mailbox) over a
 # `RecordingBackend` loopback; each test composes the caps its scenario
 # needs via the builder (issue #3764). Render/GPU capture support is the
 # sibling `aether-harness-substrate-capture` crate behind the
