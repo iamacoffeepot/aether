@@ -5,8 +5,10 @@
 //! and is never rewritten. A write goes through `blobs/tmp/`, which the
 //! journal sweeps at open while it holds the root's lock.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem;
 use std::path::{Path, PathBuf};
 
 use aether_data::KindId;
@@ -52,21 +54,28 @@ impl BlobDir {
         Ok(())
     }
 
-    /// Store `bytes` under `digest` unless its file already exists: temp file
-    /// in `blobs/tmp/`, fsync, rename to the digest name, fsync the shard
-    /// directory. The caller commits the artifact row only after this returns.
-    ///
-    /// An existing file may be one an interrupted earlier store renamed but
-    /// never made durable, so its shard directory is fsynced before reuse.
-    pub fn store(&self, digest: &Digest, bytes: &[u8]) -> Result<(), JournalError> {
+    /// Store `bytes` under `digest` unless its file already exists, as
+    /// [`BlobDir::place`] does, recording the directories to fsync in
+    /// `pending`. The caller flushes `pending` with
+    /// [`BlobDir::sync_pending`] before it commits the artifact row.
+    pub fn store(&self, digest: &Digest, bytes: &[u8], pending: &mut PendingSyncs) -> Result<(), JournalError> {
         let (shard, path) = self.locate(digest);
         if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
-            return sync_dir(&shard);
+            pending.shards.insert(shard);
+            return Ok(());
         }
 
         let mut staged = self.temp_file()?;
         staged.write_all(bytes).map_err(|error| JournalError::io(staged.path(), error))?;
-        self.place(digest, staged)
+        self.place(digest, staged, pending)
+    }
+
+    /// [`BlobDir::store`] for a blob that stands alone: its directories are
+    /// fsynced before this returns, so the caller may commit its row at once.
+    pub fn store_synced(&self, digest: &Digest, bytes: &[u8]) -> Result<(), JournalError> {
+        let mut pending = PendingSyncs::default();
+        self.store(digest, bytes, &mut pending)?;
+        self.sync_pending(&mut pending)
     }
 
     /// A new temp file in `blobs/tmp/`, deleted when it drops unplaced.
@@ -76,21 +85,47 @@ impl BlobDir {
     }
 
     /// Make `staged`, a temp file holding exactly the bytes `digest` hashes,
-    /// the file stored under `digest`: fsync it, rename it to the digest name,
-    /// fsync the shard directory. When the digest name already exists the temp
-    /// file is deleted instead and the shard directory is fsynced, as
-    /// [`BlobDir::store`] does. The caller commits the artifact row only
-    /// after this returns.
-    pub fn place(&self, digest: &Digest, staged: NamedTempFile) -> Result<(), JournalError> {
+    /// the file stored under `digest`: fsync it, create its shard directory
+    /// when missing, rename it to the digest name, and record `blobs/` and
+    /// the shard in `pending`. When the digest name already exists the temp
+    /// file is deleted instead and only the shard is recorded, since the file
+    /// may be one an interrupted earlier placement renamed but never made
+    /// durable. The file's name is durable once `pending` is flushed with
+    /// [`BlobDir::sync_pending`], which the caller does before it commits
+    /// the artifact row.
+    pub fn place(
+        &self,
+        digest: &Digest,
+        staged: NamedTempFile,
+        pending: &mut PendingSyncs,
+    ) -> Result<(), JournalError> {
         let (shard, path) = self.locate(digest);
         if path.try_exists().map_err(|error| JournalError::io(&path, error))? {
-            return sync_dir(&shard);
+            pending.shards.insert(shard);
+            return Ok(());
         }
         staged.as_file().sync_all().map_err(|error| JournalError::io(staged.path(), error))?;
 
-        create_synced(&shard)?;
+        create_unsynced(&shard)?;
+        pending.blobs_dir = true;
         staged.persist(&path).map_err(|error| JournalError::io(&path, error.error))?;
-        sync_dir(&shard)
+        pending.shards.insert(shard);
+        Ok(())
+    }
+
+    /// Flush every directory `pending` recorded, then clear it: `blobs/`
+    /// once, so every shard created since is durable, then each recorded
+    /// shard once, so every file renamed into it is. Every placement
+    /// recorded in `pending` is durable once this returns.
+    pub fn sync_pending(&self, pending: &mut PendingSyncs) -> Result<(), JournalError> {
+        if pending.blobs_dir {
+            sync_dir(&self.dir)?;
+            pending.blobs_dir = false;
+        }
+        for shard in mem::take(&mut pending.shards) {
+            sync_dir(&shard)?;
+        }
+        Ok(())
     }
 
     /// The whole file stored under `digest`, which must be `size_bytes` long.
@@ -181,6 +216,18 @@ impl BlobDir {
     }
 }
 
+/// The directories a run of placements renamed into or relied on, not yet
+/// fsynced. A batch of placements records into one, and
+/// [`BlobDir::sync_pending`] fsyncs each directory once before the batch's
+/// rows commit, so a batch of n new blobs costs n file fsyncs plus one per
+/// touched shard plus one for `blobs/`, never three per blob (ADR-0220).
+#[derive(Default)]
+pub struct PendingSyncs {
+    /// `blobs/` gained or may have gained a shard entry.
+    blobs_dir: bool,
+    shards: HashSet<PathBuf>,
+}
+
 /// The payload length of a stored artifact `size_bytes` long: everything
 /// after its eight-byte kind prefix. A `size_bytes` under eight is
 /// [`JournalError::CorruptArtifact`], and a payload length that does not fit
@@ -205,6 +252,16 @@ pub fn create_synced(path: &Path) -> Result<(), JournalError> {
     match fs::create_dir(path) {
         Ok(()) => sync_dir(parent_of(path)),
         Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => sync_dir(parent_of(path)),
+        Err(error) => Err(JournalError::io(path, error)),
+    }
+}
+
+/// Create the directory `path` when it is missing, fsyncing nothing: the
+/// caller records its parent to fsync before anything inside it is relied on.
+fn create_unsynced(path: &Path) -> Result<(), JournalError> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
         Err(error) => Err(JournalError::io(path, error)),
     }
 }

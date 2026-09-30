@@ -18,7 +18,7 @@ use rusqlite::{Connection, Statement, Transaction, TransactionBehavior, params, 
 
 use crate::runtime::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::runtime::batch::Batch;
-use crate::runtime::blobs::{BlobDir, create_synced};
+use crate::runtime::blobs::{BlobDir, PendingSyncs, create_synced};
 use crate::runtime::clock::{Clock, SystemClock};
 use crate::runtime::closure::{Closure, plan_closure, read_each};
 use crate::runtime::draft::Draft;
@@ -463,7 +463,7 @@ fn seed_empty_tree(conn: &mut Connection, blobs: &BlobDir, recorded_at_millis: u
     {
         let mut rows = ArtifactRows::prepare(&tx, recorded_at_millis)?;
         if !rows.is_stored(&digest)? {
-            blobs.store(&digest, &bytes)?;
+            blobs.store_synced(&digest, &bytes)?;
             let size_bytes = u64::try_from(bytes.len()).map_err(|_| JournalError::IntegerRange)?;
             rows.insert(&digest, size_bytes, &[])?;
         }
@@ -472,9 +472,11 @@ fn seed_empty_tree(conn: &mut Connection, blobs: &BlobDir, recorded_at_millis: u
     Ok(())
 }
 
-/// Store each staged blob whose row is absent: its file lands through
-/// [`BlobDir::store`] before its row and citation edges are inserted, so a
-/// committed row always names a complete file. A refusal later in the
+/// Store each staged blob whose row is absent: its file is fsynced and
+/// renamed through [`BlobDir::store`] before its row and citation edges are
+/// inserted, and every directory the placements touched is fsynced once
+/// after the last of them, before this returns and so before `append`
+/// commits. A committed row always names a complete, durable file. A refusal later in the
 /// append rolls the rows back and leaves any renamed file as a harmless
 /// orphan, since the same content has the same name.
 fn insert_staged(
@@ -487,15 +489,16 @@ fn insert_staged(
         return Ok(());
     }
     let mut rows = ArtifactRows::prepare(tx, recorded_at_millis)?;
+    let mut pending = PendingSyncs::default();
     for staged in &batch.staged {
         if rows.is_stored(&staged.digest)? {
             continue;
         }
-        blobs.store(&staged.digest, &staged.bytes)?;
+        blobs.store(&staged.digest, &staged.bytes, &mut pending)?;
         let size_bytes = u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?;
         rows.insert(&staged.digest, size_bytes, &staged.citations)?;
     }
-    Ok(())
+    blobs.sync_pending(&mut pending)
 }
 
 /// The row-and-edges insert both write doors share: [`Journal::append`] and

@@ -82,16 +82,17 @@ impl<'batch> BlobFile<'batch> {
         Ok(())
     }
 
-    /// Make the blob durable under its digest name and record its row in the
-    /// batch: fsync the temp file, rename it to the digest name, fsync the
-    /// shard directory. When the digest name already exists the temp file is
-    /// deleted instead and the shard directory is fsynced.
+    /// Place the blob under its digest name and record its row in the batch:
+    /// fsync the temp file and rename it to the digest name. When the digest
+    /// name already exists the temp file is deleted instead. Either way the
+    /// shard directory is fsynced at [`ArtifactBatch::commit`], once per
+    /// batch, before the row is inserted.
     ///
     /// # Errors
     ///
     /// [`JournalError::BlobLength`] when fewer payload bytes were written than
     /// the blob was opened with; the temp file is deleted. [`JournalError::Io`]
-    /// when the sync or rename fails, or when a chunk's write failed.
+    /// when the file sync or rename fails, or when a chunk's write failed.
     pub fn finish(self) -> Result<Ref<OpaqueBytes>, JournalError> {
         self.place().map(Ref::from_digest)
     }
@@ -105,7 +106,7 @@ impl<'batch> BlobFile<'batch> {
             return Err(JournalError::BlobLength { expected_bytes, actual_bytes: written_bytes });
         }
         let digest = hasher.finish();
-        batch.blobs.place(&digest, staged)?;
+        batch.blobs.place(&digest, staged, &mut batch.syncs)?;
         batch.record(digest, PREFIX_BYTES.checked_add(written_bytes).ok_or(JournalError::IntegerRange)?, citations);
         Ok(digest)
     }
