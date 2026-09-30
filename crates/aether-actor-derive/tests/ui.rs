@@ -415,6 +415,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_repeated_child_of",
     "rejects_replies_on_silent_handler",
     "rejects_replies_on_unchecked_handler",
+    "rejects_single_handler",
     "rejects_slice_handler_wasm",
     "rejects_spawns_without_child_of",
     "rejects_state_with_manual_hook",
