@@ -506,10 +506,16 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
         quote! { #program::__macro_internals::MODE_PURE }
     };
     let apis = &entry.meta.apis;
+    let doc = quote! { <#ty as #program::Program>::DOC.as_bytes() };
+    let input_docs = quote! {
+        #program::__macro_internals::StaticSchema::<<#ty as #program::Program>::Input>::DOC_NODE
+    };
     quote! {
         const #len_ident: usize = #program::__macro_internals::program_record_len(
             #name.as_bytes(),
             #intent.as_bytes(),
+            #doc,
+            #input_docs,
         );
         const #bytes_ident: [u8; #len_ident] = #program::__macro_internals::write_program_record::<#len_ident>(
             #name.as_bytes(),
@@ -518,6 +524,8 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
             #mode,
             #program::__macro_internals::api_mask(&[#(#program::kinds::ProgramApi::#apis),*]),
             #intent.as_bytes(),
+            #doc,
+            #input_docs,
         );
         const _: &[u8] = &#bytes_ident;
         #[cfg(target_family = "wasm")]

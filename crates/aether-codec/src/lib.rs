@@ -18,6 +18,10 @@
 //! every path out of the process carries (ADR-0238 decisions 3 and 5), and
 //! [`blob_hashes`] lists those hashes for the sender-side resolve.
 //!
+//! [`json_schema`] renders the JSON Schema of the JSON [`encode_schema`]
+//! accepts for a schema, with a type's field docs attached, for a caller that
+//! offers a typed input to a model.
+//!
 //! [`frame`] is the second layer, length-prefixed framing for serde-derived
 //! message types: a four-byte little-endian body length followed by an
 //! `aether_data::wire` body (ADR-0118). `aether-rpc` and the fleet harness are
@@ -32,6 +36,7 @@ mod decode;
 mod encode;
 pub mod frame;
 mod inline;
+mod json_schema;
 #[cfg(test)]
 mod proptest_roundtrip;
 #[cfg(test)]
@@ -40,3 +45,4 @@ mod test_fixtures;
 pub use decode::{DecodeError, decode_schema, decode_schema_strict};
 pub use encode::{EncodeError, encode_schema};
 pub use inline::{InlineError, MAX_SCHEMA_DEPTH, blob_hashes, inline_blobs};
+pub use json_schema::{JsonSchemaError, json_schema};

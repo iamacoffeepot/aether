@@ -18,6 +18,9 @@
 //! [`Workspace`] run that exhausts its allotment or fails in the executor
 //! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
 //!
+//! [`tool_definition`] renders a declared program as a responses-API function
+//! tool: its `///` doc, and its input's JSON Schema with every field's doc.
+//!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
 #![no_std]
@@ -30,6 +33,7 @@ mod env;
 mod invoke;
 mod root;
 mod section;
+mod tool;
 
 pub use aether_bloomery_kinds as kinds;
 pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
@@ -41,10 +45,11 @@ pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCa
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{Declaration, DeclarationsError, declarations};
+pub use tool::{MAX_FUNCTION_NAME_BYTES, ToolDefinitionError, function_name, program_name, tool_definition};
 
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::{Kind, KindId, MailboxId, RequestId};
+    pub use aether_data::{Kind, KindId, MailboxId, RequestId, Schema, StaticSchema, require_documented};
     pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;

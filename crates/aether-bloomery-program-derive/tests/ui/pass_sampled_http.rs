@@ -5,6 +5,7 @@ use aether_http::{Fetch, HttpMethod};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.sampled.http.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -16,6 +17,7 @@ struct Out {
 
 struct SampledHttp;
 
+/// A test program.
 #[program]
 impl Program for SampledHttp {
     const NAME: &'static str = "test.program.sampled.http";

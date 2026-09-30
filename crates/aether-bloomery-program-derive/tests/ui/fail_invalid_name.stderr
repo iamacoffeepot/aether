@@ -1,7 +1,7 @@
 error: #[program] NAME `Test.Program` is not a valid ProgramName: bad-segment
-  --> tests/ui/fail_invalid_name.rs:21:32
+  --> tests/ui/fail_invalid_name.rs:23:32
    |
-21 |     const NAME: &'static str = "Test.Program";
+23 |     const NAME: &'static str = "Test.Program";
    |                                ^^^^^^^^^^^^^^
 
 warning: unused imports: `Mode` and `Refusal`

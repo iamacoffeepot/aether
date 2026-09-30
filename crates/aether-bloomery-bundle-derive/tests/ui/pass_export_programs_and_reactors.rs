@@ -24,6 +24,7 @@ impl WasmActor for Probe {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.pass.one.input")]
 struct OneIn {
+    /// A test value.
     n: u32,
 }
 
@@ -35,6 +36,7 @@ struct OneOut {
 
 struct One;
 
+/// A test program.
 #[program]
 impl Program for One {
     const NAME: &'static str = "test.program.one";

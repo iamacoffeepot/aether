@@ -1,7 +1,7 @@
 error: `async fn run` must return `Result<Self::Result, Refusal>`
-  --> tests/ui/fail_async_run_no_return.rs:26:5
+  --> tests/ui/fail_async_run_no_return.rs:28:5
    |
-26 |     async fn run(input: Self::Input, _env: &mut Env<Async>) {
+28 |     async fn run(input: Self::Input, _env: &mut Env<Async>) {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `aether_bloomery_kinds::Mode`

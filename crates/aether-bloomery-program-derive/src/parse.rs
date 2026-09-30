@@ -2,7 +2,7 @@
 
 use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
-use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
+use syn::{Attribute, Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Meta, Type};
 
 use crate::check::{ApiBinding, pair_run_with_env, reject_run_receiver, require_async_return, trailing_apis};
 
@@ -11,6 +11,10 @@ pub struct ProgramDef {
     pub self_ty: Type,
     pub name: LitStr,
     pub intent: LitStr,
+    /// The impl's `///` doc: the program's tool description.
+    pub doc: String,
+    /// The `type Input` the author wrote.
+    pub input: Type,
     pub async_run: bool,
     pub sampled: bool,
     pub apis: Vec<ApiBinding>,
@@ -32,7 +36,7 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let mut name = None;
     let mut intent = None;
     let mut sampled = None;
-    let mut has_input = false;
+    let mut input = None;
     let mut has_result = false;
     let mut async_run = None;
     let mut apis = Vec::new();
@@ -58,10 +62,10 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                 sampled = Some(parse_mode(konst)?);
             }
             ImplItem::Type(alias) if alias.ident == "Input" => {
-                if has_input {
+                if input.is_some() {
                     return Err(syn::Error::new_spanned(&alias.ident, "`type Input` is given twice"));
                 }
-                has_input = true;
+                input = Some(alias.ty.clone());
             }
             ImplItem::Type(alias) if alias.ident == "Result" => {
                 if has_result {
@@ -100,9 +104,7 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let sampled = sampled.ok_or_else(|| {
         syn::Error::new(item.self_ty.span(), "#[program] requires `const MODE: Mode = Mode::Pure` or `Mode::Sampled`")
     })?;
-    if !has_input {
-        return Err(syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"));
-    }
+    let input = input.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"))?;
     if !has_result {
         return Err(syn::Error::new(item.self_ty.span(), "#[program] requires `type Result`"));
     }
@@ -112,7 +114,49 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
         return Err(syn::Error::new(item.self_ty.span(), "#[program] Mode::Sampled requires async fn run"));
     }
 
-    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, async_run, sampled, apis, item })
+    let doc = program_doc(&item)?;
+
+    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, doc, input, async_run, sampled, apis, item })
+}
+
+/// The impl's `///` doc, which `#[program]` writes as `const DOC`: required,
+/// and never declared by hand.
+fn program_doc(item: &ItemImpl) -> syn::Result<String> {
+    let authored = item.items.iter().find_map(|impl_item| match impl_item {
+        ImplItem::Const(konst) if konst.ident == "DOC" => Some(konst),
+        _ => None,
+    });
+    if let Some(konst) = authored {
+        return Err(syn::Error::new_spanned(
+            &konst.ident,
+            "#[program] writes `const DOC` from the impl's `///` doc; do not declare it",
+        ));
+    }
+    doc_text(&item.attrs).ok_or_else(|| {
+        syn::Error::new(
+            item.self_ty.span(),
+            "#[program] needs a `///` doc on the impl: it is the program's tool description",
+        )
+    })
+}
+
+/// The joined text of `attrs`' `///` lines, each with one leading space
+/// stripped, trimmed; `None` when blank.
+fn doc_text(attrs: &[Attribute]) -> Option<String> {
+    let lines: Vec<String> = attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .filter_map(|attr| match &attr.meta {
+            Meta::NameValue(pair) => match &pair.value {
+                Expr::Lit(ExprLit { lit: Lit::Str(text), .. }) => Some(text.value()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .map(|line| line.strip_prefix(' ').map(str::to_owned).unwrap_or(line))
+        .collect();
+    let text = lines.join("\n").trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 fn string_literal(konst: &ImplItemConst, ident: &str) -> syn::Result<LitStr> {

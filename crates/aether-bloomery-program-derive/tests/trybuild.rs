@@ -16,4 +16,7 @@ fn ui() {
     t.compile_fail("tests/ui/fail_binding_on_sync.rs");
     t.compile_fail("tests/ui/fail_unknown_api.rs");
     t.compile_fail("tests/ui/fail_api_target_mismatch.rs");
+    t.compile_fail("tests/ui/fail_undocumented_input_field.rs");
+    t.compile_fail("tests/ui/fail_undocumented_nested_variant.rs");
+    t.compile_fail("tests/ui/fail_undocumented_program.rs");
 }

@@ -4,6 +4,7 @@ use aether_bloomery_program::{Env, Http, Program, Sync, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.http.sync.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -15,6 +16,7 @@ struct Out {
 
 struct SyncHttp;
 
+/// A test program.
 #[program]
 impl Program for SyncHttp {
     const NAME: &'static str = "test.program.http.sync";

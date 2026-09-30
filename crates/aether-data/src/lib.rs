@@ -48,6 +48,7 @@ pub mod name_inventory;
 mod reach;
 pub mod reference;
 pub mod schema;
+pub mod schema_docs;
 pub mod storage;
 pub mod tag_bits;
 pub mod tagged_id;
@@ -78,6 +79,7 @@ pub use reference::{
     ActorPathError, ActorPathForm, ErasedActorPath, LoadName, LoadNameError, Namespace, PathSegment, SegmentFault,
 };
 pub use schema::*;
+pub use schema_docs::{Doc, DocCell, DocNode, FieldDoc, MAX_DOC_DEPTH, StaticSchema, VariantDoc, require_documented};
 pub use storage::{
     Citation, Citations, Cites, Invariant, Storage, StorageData, StorageError, StorageLeaves, UnknownField,
 };
@@ -386,10 +388,16 @@ impl<K, V> CastEligible for BTreeMap<K, V> {
 /// all carry `LABEL = None` — the containers have no nominal
 /// identity and primitives are uniquely determined by their
 /// `SchemaType::Scalar(_)` tag.
+///
+/// `DOC_NODE` is the parallel tree of field and variant docs
+/// ([`DocNode`]), outside the hashed schema bytes like `LABEL_NODE`. The
+/// derives emit it from `///` docs; a hand-written impl keeps the
+/// [`DocNode::Opaque`] default.
 pub trait Schema {
     const SCHEMA: SchemaType;
     const LABEL: Option<&'static str>;
     const LABEL_NODE: LabelNode;
+    const DOC_NODE: DocNode = DocNode::Opaque;
 }
 
 mod schema_impls {
@@ -398,6 +406,7 @@ mod schema_impls {
     use alloc::vec::Vec;
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
+    use crate::schema_docs::{DocCell, DocNode};
     use crate::{CrossesActors, CrossesWire, DagId, KindId, MailboxId, Schema, ThreadId, TransformId};
     use alloc::collections::BTreeMap;
 
@@ -473,6 +482,7 @@ mod schema_impls {
         const SCHEMA: SchemaType = SchemaType::Vec(SchemaCell::Static(&T::SCHEMA));
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Vec(LabelCell::Static(&T::LABEL_NODE));
+        const DOC_NODE: DocNode = DocNode::Vec(DocCell::Static(&T::DOC_NODE));
     }
 
     impl<T: CrossesActors> CrossesActors for Vec<T> {}
@@ -482,6 +492,7 @@ mod schema_impls {
         const SCHEMA: SchemaType = SchemaType::Option(SchemaCell::Static(&T::SCHEMA));
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Option(LabelCell::Static(&T::LABEL_NODE));
+        const DOC_NODE: DocNode = DocNode::Option(DocCell::Static(&T::DOC_NODE));
     }
 
     impl<T: CrossesActors> CrossesActors for Option<T> {}
@@ -507,6 +518,7 @@ mod schema_impls {
         const SCHEMA: SchemaType = T::SCHEMA;
         const LABEL: Option<&'static str> = T::LABEL;
         const LABEL_NODE: LabelNode = T::LABEL_NODE;
+        const DOC_NODE: DocNode = T::DOC_NODE;
     }
 
     impl<T: CrossesActors> CrossesActors for Box<T> {}
@@ -524,6 +536,7 @@ mod schema_impls {
         };
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
+        const DOC_NODE: DocNode = DocNode::Array(DocCell::Static(&T::DOC_NODE));
     }
 
     impl<T: CrossesActors, const N: usize> CrossesActors for [T; N] {}
@@ -586,6 +599,8 @@ mod schema_impls {
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode =
             LabelNode::Map { key: LabelCell::Static(&K::LABEL_NODE), value: LabelCell::Static(&V::LABEL_NODE) };
+        const DOC_NODE: DocNode =
+            DocNode::Map { key: DocCell::Static(&K::DOC_NODE), value: DocCell::Static(&V::DOC_NODE) };
     }
 
     impl<K: CrossesActors, V: CrossesActors> CrossesActors for BTreeMap<K, V> {}
@@ -638,6 +653,7 @@ pub mod __derive_runtime {
     pub use crate::canonical;
     pub use crate::hash::{fnv1a_64_fold, storage_kind_id_from_name};
     pub use crate::schema::{EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel};
+    pub use crate::schema_docs::{Doc, DocCell, DocNode, FieldDoc, VariantDoc};
     pub use crate::storage::{
         BYTES_SCHEMA, Citations, Cites, RecordReader, RecordWriter, Storage, StorageData, StorageElement, StorageError,
         StorageLeaves, U64_SCHEMA, UNIT_SCHEMA, UnknownField, VARIANT_LEAF, assemble_bytes,

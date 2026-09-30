@@ -1,7 +1,7 @@
 error: #[program] env is the second argument; cap bindings follow env
-  --> tests/ui/fail_binding_before_env.rs:26:45
+  --> tests/ui/fail_binding_before_env.rs:28:45
    |
-26 |     async fn run(input: Self::Input, _http: Http, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+28 |     async fn run(input: Self::Input, _http: Http, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
    |                                             ^^^^
 
 warning: unused imports: `Mode` and `Refusal`

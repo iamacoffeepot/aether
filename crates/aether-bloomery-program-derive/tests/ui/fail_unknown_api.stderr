@@ -1,7 +1,7 @@
 error: #[program] cap bindings are `Http`, `Process`, or `Workspace`
-  --> tests/ui/fail_unknown_api.rs:28:69
+  --> tests/ui/fail_unknown_api.rs:30:69
    |
-28 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _other: Other) -> Result<Self::Result, Refusal> {
+30 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _other: Other) -> Result<Self::Result, Refusal> {
    |                                                                     ^^^^^
 
 warning: unused imports: `Mode` and `Refusal`

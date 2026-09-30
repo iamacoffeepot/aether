@@ -4,6 +4,7 @@ use aether_bloomery_program::{Async, Env, Http, Program, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.http.pure.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -15,6 +16,7 @@ struct Out {
 
 struct PureHttp;
 
+/// A test program.
 #[program]
 impl Program for PureHttp {
     const NAME: &'static str = "test.program.http.pure";

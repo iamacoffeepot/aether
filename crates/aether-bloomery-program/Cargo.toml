@@ -14,6 +14,8 @@ aether-data = { path = "../aether-data" }
 aether-http = { path = "../aether-http", default-features = false }
 aether-process = { path = "../aether-process", default-features = false }
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
+aether-codec = { path = "../aether-codec" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 aether-component = { path = "../aether-component" }

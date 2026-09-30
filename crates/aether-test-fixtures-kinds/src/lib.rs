@@ -561,6 +561,7 @@ pub const REACTOR_FOLD_FAIL_KIND: aether_data::KindId =
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.summarize.input")]
 pub struct SummarizeInput {
+    /// The text to summarize.
     pub text: Ref<Utf8Text>,
 }
 

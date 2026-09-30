@@ -176,6 +176,8 @@ fn emit_validate_schema(name: &syn::Ident, inner: &Type) -> TokenStream2 {
             );
             const LABEL_NODE: ::aether_data::__derive_runtime::LabelNode =
                 <#inner as ::aether_data::Schema>::LABEL_NODE;
+            const DOC_NODE: ::aether_data::__derive_runtime::DocNode =
+                <#inner as ::aether_data::Schema>::DOC_NODE;
         }
     }
 }

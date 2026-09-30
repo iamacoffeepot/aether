@@ -17,10 +17,18 @@ pub use limits::{
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.turn.input")]
 pub struct TurnInput {
+    /// The absolute `https://` or `http://` URL of the responses endpoint the
+    /// turn posts to.
     endpoint: Endpoint,
+    /// The model that answers: 1 to 128 bytes matching `[a-z0-9][a-z0-9._-]*`.
     model: ModelName,
+    /// The whole conversation in order, from 1 to 4096 items, ending on a user
+    /// item.
     items: TurnItems,
+    /// The most output tokens, reasoning included, the turn may produce.
+    /// Never zero.
     max_output_tokens: OutputBudget,
+    /// How much the model reasons before it answers.
     reasoning: ReasoningEffort,
 }
 

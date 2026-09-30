@@ -28,12 +28,13 @@ use aether_bloomery_workspace::StepOutcome;
 pub use input::ClippyInput;
 pub use result::ClippyResult;
 
+/// The `proof.clippy` program.
+pub struct ClippyProof;
+
 /// Runs clippy over a source tree in an environment and records the verdict.
 ///
 /// Sampled: the verdict depends on the executor's run, not only on the cited
 /// trees.
-pub struct ClippyProof;
-
 #[program]
 impl Program for ClippyProof {
     const NAME: &'static str = "proof.clippy";
