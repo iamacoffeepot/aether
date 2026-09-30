@@ -16,6 +16,7 @@
 
 use alloc::borrow::Cow;
 
+use crate::canonical::canonical_schema_bytes;
 use crate::hash::{FIELD_DOMAIN, VARIANT_DOMAIN, fnv1a_64_fold, fnv1a_64_prefixed};
 use crate::schema::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -139,6 +140,22 @@ pub const fn fold_dotted_path(mut carry: u64, path: &str) -> u64 {
 pub const fn variant_hash(name: &str, body: &SchemaType) -> u64 {
     let hash = fnv1a_64_prefixed(VARIANT_DOMAIN, name.as_bytes());
     fold_canonical_schema(fnv1a_64_fold(hash, &[PATH_TERMINATOR]), body, 0)
+}
+
+/// Runtime sibling of [`terminate_field_hash`] for a schema built or
+/// decoded at runtime, whose `Owned` cells the const fold refuses. Same
+/// preimage, so the same hash for the same schema.
+#[must_use]
+pub fn terminate_field_hash_runtime(carry: u64, schema: &SchemaType) -> u64 {
+    fnv1a_64_fold(fnv1a_64_fold(carry, &[PATH_TERMINATOR]), &canonical_schema_bytes(schema))
+}
+
+/// Runtime sibling of [`variant_hash`], for the reason
+/// [`terminate_field_hash_runtime`] gives.
+#[must_use]
+pub fn variant_hash_runtime(name: &str, body: &SchemaType) -> u64 {
+    let hash = fnv1a_64_prefixed(VARIANT_DOMAIN, name.as_bytes());
+    fnv1a_64_fold(fnv1a_64_fold(hash, &[PATH_TERMINATOR]), &canonical_schema_bytes(body))
 }
 
 /// Fold the canonical schema encoding of `schema` onto `hash`. The

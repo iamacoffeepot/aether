@@ -196,6 +196,20 @@ pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> Vec<u8> {
     wire::to_vec(&shape).expect("canonical KindShape serialization is infallible")
 }
 
+/// Runtime sibling of `canonical_serialize_schema`: the canonical bytes of
+/// `schema` alone, for a schema whose cells may be `Owned` (a schema decoded
+/// off the wire or out of storage), where the const path panics. The bytes
+/// are the aether-wire body of its `SchemaShape`, the tail
+/// [`canonical_kind_bytes`] writes after the name.
+///
+/// # Panics
+/// Panics if wire encoding of the `SchemaShape` fails, for the reason
+/// [`canonical_kind_bytes`] gives.
+#[must_use]
+pub fn canonical_schema_bytes(schema: &SchemaType) -> Vec<u8> {
+    wire::to_vec(&schema_to_shape(schema)).expect("canonical SchemaShape serialization is infallible")
+}
+
 fn schema_to_shape(s: &SchemaType) -> SchemaShape {
     use crate::schema::SchemaShape;
     match s {

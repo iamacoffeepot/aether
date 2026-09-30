@@ -175,7 +175,7 @@ fn encode_byte_array(value: &Value, path: &str, out: &mut Vec<u8>) -> Result<(),
 // Splitting the arms into helpers would force per-arm context structs
 // without saving readability.
 #[allow(clippy::too_many_lines)]
-fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+pub fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     match schema {
         SchemaType::Unit => Ok(()),
         SchemaType::Bool => {
@@ -347,7 +347,7 @@ fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, 
 /// makes most of these unreachable, but the codec rejects them
 /// defensively. The caller sorts by the encoded key bytes (the
 /// `wire` canonical map order), so no separate sortable form is needed.
-fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, EncodeError> {
+pub fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, EncodeError> {
     match schema {
         SchemaType::String => Ok(Value::String(k_str.to_owned())),
         SchemaType::Bool => match k_str {
@@ -455,7 +455,7 @@ fn write_count(out: &mut Vec<u8>, len: usize, name: &str) -> Result<(), EncodeEr
 ///   - `"Variant"` (string) — unit variant.
 ///   - `{"Variant": body}` — single-key object — tuple or struct
 ///     variant. Body is whatever the variant's schema expects.
-fn decode_enum_tag<'a>(value: &'a Value, path: &str) -> Result<(&'a str, &'a Value), EncodeError> {
+pub fn decode_enum_tag<'a>(value: &'a Value, path: &str) -> Result<(&'a str, &'a Value), EncodeError> {
     if let Some(s) = value.as_str() {
         return Ok((s, &Value::Null));
     }
