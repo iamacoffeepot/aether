@@ -123,7 +123,7 @@ fn import_then_run() -> TestResult {
     writeln!(io::stdout(), "BENCH import_millis={import_millis} import_peak_over_start_bytes={}", peak_over(base)?)?;
     let tree = match answer {
         ImportResult::Ok { tree } => tree,
-        ImportResult::Failed { detail } => return Err(format!("the import failed: {}", detail.as_str()).into()),
+        ImportResult::Err(error) => return Err(format!("the import failed: {error:?}").into()),
     };
 
     let import_only = option_env!("AETHER_BENCH_PHASE") == Some("import");
