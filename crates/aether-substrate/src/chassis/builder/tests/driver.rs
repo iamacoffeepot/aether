@@ -124,8 +124,8 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
     let init_count = Arc::new(AtomicU32::new(0));
 
     // Inline sink registered directly on the shared registry — the
-    // headless chassis's `aether.audio` fail-fast sink takes this path,
-    // outside the `with_actor` chain.
+    // SubstrateHarness's observer sink (`SubstrateBoot::register_inline`)
+    // takes this path, outside the `with_actor` chain.
     registry.register_inline(
         &boot_authority(),
         "test.claim_only.inline_sink",

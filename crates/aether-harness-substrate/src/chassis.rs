@@ -265,7 +265,7 @@ pub struct SubstrateHarnessEnv {
     pub component_host: ComponentHostMode,
     /// Caller-supplied capability composition, applied to the chassis
     /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
-    /// lifecycle, headless window) in push order. The harness gives the
+    /// lifecycle, synthetic window) in push order. The harness gives the
     /// basics; each embedder composes exactly the caps its scenario
     /// needs (issue #3764).
     pub compose: Vec<ComposeFn>,

@@ -14,8 +14,8 @@ use clap::Parser;
 #[derive(Parser, Debug, Default, Clone, aether_substrate::StageArgv)]
 #[command(
     name = "aether-headless",
-    about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.",
-    long_about = "Headless chassis — std-timer tick driver, nop render. ADR-0035 / ADR-0090.\n\n\
+    about = "Headless chassis — std-timer tick driver, no render. ADR-0035 / ADR-0090.",
+    long_about = "Headless chassis — std-timer tick driver, no render. ADR-0035 / ADR-0090.\n\n\
         Each flag below carries its resolved env key and default in brackets; unset flags fall \
         through to env then the default. For the full source-resolved value of every knob use \
         --print-config, and for this binary's linked caps and build provenance use --describe.",

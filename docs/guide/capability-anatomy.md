@@ -344,7 +344,7 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 
 - Light single-file runtime: `fs/`, `clipboard/`
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
-- Neutral identity with desktop/headless/synthetic runtimes: `window/`
+- Neutral identity with desktop/synthetic backends: `window/`
 - Multi-actor cluster: `fleet/`, `http/`, `tcp/`
 - Split test support: `rpc/server/test_echo.rs`
 

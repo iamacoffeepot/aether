@@ -40,7 +40,7 @@ The [operating chapter](operating/component-registry.md) covers that lifecycle.
 | [HTTP server](systems/http-server.md) | inbound routes, streaming and websockets |
 | [TCP](systems/tcp.md) | framed listeners and session actors |
 | [RPC](systems/rpc.md) | hub/engine process transport |
-| [Clipboard](systems/clipboard.md) | text clipboard with deterministic/headless backends |
+| [Clipboard](systems/clipboard.md) | text clipboard with system / in-memory backends |
 | [Content generation](systems/content-generation.md) | the provider-component pattern, the `aether.process` CLI edge, and staged media |
 
 These all cross trust or blocking boundaries. Read [Platform and network I/O](systems/platform-io.md)

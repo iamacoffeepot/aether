@@ -19,11 +19,11 @@ pub struct ActorOpts {
     pub runtime_feature: Option<String>,
     /// ADR-0123: the runtime module the struct-hosted `#[actor]` reads off
     /// disk, from a bare positional module path — `#[actor(singleton, other)]`
-    /// reads `other.rs`; `#[actor(singleton, runtime::headless)]` reads
-    /// `runtime/headless.rs`, the headless-companion convention. Resolved
-    /// relative to the invoking file. `None` ⇒ the conventional sibling
-    /// `runtime`. Only consulted on the struct-hosted path; the impl-hosted
-    /// path ignores it.
+    /// reads `other.rs`; `#[actor(instanced, runtime::instance)]` reads
+    /// `runtime/instance.rs`, as `aether_window::WindowInstance` declares.
+    /// Resolved relative to the invoking file. `None` ⇒ the conventional
+    /// sibling `runtime`. Only consulted on the struct-hosted path; the
+    /// impl-hosted path ignores it.
     pub runtime_module: Option<syn::Path>,
     /// ADR-0166: this actor may be placed at the actor-tree root. On a wasm
     /// actor (ADR-0241 §5) it is a host-placement permission recorded as a
@@ -146,7 +146,7 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else if !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional module path names the runtime module
             // the struct-hosted `#[actor]` reads off disk (default `runtime`) —
-            // a lone ident for a sibling file, `runtime::headless` for a nested
+            // a lone ident for a sibling file, `runtime::instance` for a nested
             // one. The path locates a file relative to the invocation, so a
             // leading `::` (crate-absolute) has no meaning here.
             if meta.path.leading_colon.is_some() {

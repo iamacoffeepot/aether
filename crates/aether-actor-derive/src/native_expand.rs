@@ -1359,7 +1359,7 @@ fn emit_native_type_entry(self_ty: &Type, generics: &syn::Generics) -> Option<To
 /// ADR-0123 struct-hosted `#[actor]`: `#[actor(<cardinality>[, <module>])]` on
 /// the capability *struct*. It reads the runtime module off disk — a module
 /// path resolved relative to the invoking file, default the sibling `runtime`,
-/// nested for a headless companion (`runtime::headless`) — lifts the native
+/// nested for an instanced sibling (`runtime::instance`) — lifts the native
 /// cap's identity out of the
 /// `#[handler]`-bearing `impl NativeActor` there, and emits the always-on
 /// addressing markers against the struct — passing the struct itself through
@@ -1543,8 +1543,8 @@ struct HarvestedRuntime {
 /// evaluate `cfg`, so the identity is harvested even when `mod runtime` is
 /// stripped from the build. `module_segments` is the `::`-split module path
 /// resolved relative to the invoking file — `["runtime"]` reads the sibling
-/// `runtime.rs` / `runtime/mod.rs`, `["runtime", "headless"]` reads
-/// `runtime/headless.rs` / `runtime/headless/mod.rs`. `module_span` both
+/// `runtime.rs` / `runtime/mod.rs`, `["runtime", "instance"]` reads
+/// `runtime/instance.rs` / `runtime/instance/mod.rs`. `module_span` both
 /// resolves the on-disk path (`Span::local_file`) and anchors every diagnostic
 /// back at the `#[actor]` invocation rather than into the parsed (span-less)
 /// runtime file.

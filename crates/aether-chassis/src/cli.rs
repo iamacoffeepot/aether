@@ -46,7 +46,7 @@
 //! them — `ActorRingOverlay` / `SchedulerTuningOverlay` / `SettlementOverlay`
 //! into the shared `CommonOverlay` (both full-stack chassis) and `HubCli` (which
 //! hosts its own registry actors), plus `RenderTuningOverlay` into `DesktopCli`
-//! alone (headless composes the nop render cap, which resolves no
+//! alone (headless composes no render actor, so it resolves no
 //! `RenderTuningConfig`). The knobs that legitimately stay env-only — the
 //! `RuntimeConfig` log/panic-hook directives (the panic hook reads env directly,
 //! below the config layer) and the `FrameSizeConfig` wire cap — are rendered into
