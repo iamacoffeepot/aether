@@ -1,8 +1,9 @@
 //! Issue 7154: `Spawn` asks for an instance of a published type to exist
 //! (ADR-0241 §9), and the name it would take decides the answer: an absent
 //! name stands the instance up, a live one answers with itself and is not
-//! re-initialised, a dropped one is spent (§8), and a namespace no module
-//! publishes is refused. A `parent` places the instance at `parent/NS:key`.
+//! re-initialised, a dropped one is spent (§8), a namespace no module
+//! publishes is refused, and a native namespace is refused as composed by its
+//! chassis or parent. A `parent` places the instance at `parent/NS:key`.
 //!
 //! The group fixture's `test.republish.gate` is instanced and counts each run
 //! of its `wire`. The bundle's `test.matrix.child` declares `child_of` the
@@ -12,7 +13,7 @@
 
 use std::fs;
 
-use aether_actor::{HandlesKind, HeldReply, actor};
+use aether_actor::{Addressable, HandlesKind, HeldReply, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{Blob, ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -220,6 +221,24 @@ fn a_spawn_of_an_unpublished_namespace_is_refused() {
         panic!("an unpublished namespace is refused: {refused:?}");
     };
     assert!(error.contains(GATE), "the refusal names the namespace: {error}");
+}
+
+#[test]
+fn a_spawn_of_a_native_namespace_is_refused_as_composed() {
+    // Catches: a native namespace answered as unpublished (telling the caller
+    // to publish code the binary links), or a composed singleton answered
+    // `Live`.
+    let mut harness = harness();
+
+    let spawn =
+        Spawn { namespace: DepartureWatcher::NAMESPACE.to_owned(), key: None, parent: None, config: Vec::new() };
+    let refused: SpawnResult = host_call(&mut harness, &spawn);
+
+    let SpawnResult::Err { error } = refused else {
+        panic!("a native namespace is refused: {refused:?}");
+    };
+    assert!(error.contains(DepartureWatcher::NAMESPACE), "the refusal names the namespace: {error}");
+    assert!(error.contains("composed"), "the refusal says native types are composed: {error}");
 }
 
 #[test]

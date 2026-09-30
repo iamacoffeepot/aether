@@ -926,7 +926,9 @@ mod control_plane {
     /// refused, because it is spent (§8). A singleton names no key; an
     /// instanced type takes `key`, or a counter when it is `None`. A spawn of
     /// a namespace whose module is republishing waits until the republish
-    /// answers (§7). Reply: [`SpawnResult`].
+    /// answers (§7). A namespace native code implements is refused, since
+    /// native types are composed by their chassis or parent and are not
+    /// spawned by mail yet. Reply: [`SpawnResult`].
     #[aether_data::kind(name = "aether.component.spawn")]
     pub struct Spawn {
         pub namespace: String,
