@@ -86,7 +86,8 @@ program is tested without spending money.
      input, result }`, no program twice. `program` is a `ProgramName`;
      `definition` is a `Ref<Utf8Text>` citing the function definition sent
      for it; `input` and `result` are `Ref<ToolSchema>`s citing the schemas
-     of the program's input and result. An empty list offers nothing and the
+     of the program's arguments (the `A` of its `Tooled<A>` input) and of
+     its result. An empty list offers nothing and the
      request sends no `tools` field (decision 9).
    - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
      one of three arms:
@@ -204,13 +205,19 @@ program is tested without spending money.
    the model asks for.** A tool is a program to run. The caller chooses
    the programs offered: nothing defaults to every program a bundle or unit
    declares.
+   - A tool is a program whose input is `Tooled<A> { tree, args }`
+     (`bloomery.program.tooled`): the tree the call works on, which the loop
+     that runs the call binds, and the arguments `A`, which the model
+     writes. The model sees only `A`.
    - `muse.turn` cannot read another bundle's declarations or link a
      program's types, so the caller renders each offered program with
      `aether_bloomery_program::tool_definition` (a responses-API function
      object whose `name` is `function_name(program)`, the program name with
-     its dots mapped to dashes), stages the JSON as a `Utf8Text`, and cites
-     it in `tools`. The caller also stages `ToolSchema::of` the program's
-     input and of its result (`bloomery.program.tool_schema`: the storage
+     its dots mapped to dashes, and whose parameters are the schema of the
+     arguments `A`, never the envelope), stages the JSON as a `Utf8Text`,
+     and cites it in `tools`. The caller also stages `ToolSchema::of` the
+     program's arguments, the `A` of its `Tooled<A>` input, and of its
+     result (`bloomery.program.tool_schema`: the storage
      kind's name and its `SchemaType` as data) and cites both. The closure
      walk injects each definition and schema like any cited artifact, so
      the journal holds exactly what was sent and what it was read with.
@@ -232,25 +239,26 @@ program is tested without spending money.
      than 256 bytes, or more than 128 calls make the reply `Unreadable`,
      and the body stays on the record; the program never keeps a partial
      list.
-   - `muse.turn` decodes each call's arguments against its offered input
-     schema with `aether-codec`'s storage codec (`encode_storage_schema`)
-     and stages either the payload under the input's kind or a refusal
-     text: a fixed sentence naming the kind plus the parser's or codec's
-     message. The recorded `ToolCall` cites which. A loop above the program
-     then builds the next turn from references only: it runs a decoded
-     input, and replays a refusal as the call's `ToolOutput::Refused`.
+   - `muse.turn` decodes each call's arguments against its offered
+     arguments schema with `aether-codec`'s storage codec
+     (`encode_storage_schema`) and stages either the payload under the
+     arguments' kind or a refusal text: a fixed sentence naming the kind
+     plus the parser's or codec's message. The recorded `ToolCall` cites
+     which. A loop above the program runs decoded arguments as a
+     `Tooled<A>` over its current tree, and replays a refusal as the call's
+     `ToolOutput::Refused`.
    - When it builds the request, `muse.turn` renders each cited
      `ToolOutput::Result` with `decode_storage_schema` under a fixed value
      ceiling and serializes it with `serde_json`, whose maps sort their
      keys, so the request bytes are a function of the cited input alone. A
      result not stored under its schema's kind, or one its schema cannot
      decode, refuses the run before any fetch, like a misnamed definition.
-   - Two limits are accepted. A decoded input carries no citations, since
-     a `SchemaType` does not mark a `Ref` field: a tool whose input cites
-     artifacts reads them by fetching. And a tool input's
-     `#[storage(validate)]` invariant is not checked by the schema walk: a
-     violating input surfaces in the tool's own run as an `InputDecode`
-     fault.
+   - Two limits are accepted. Decoded arguments carry no citations, since
+     a `SchemaType` does not mark a `Ref` field: a tool whose arguments
+     cite artifacts reads them by fetching. And a tool's arguments'
+     `#[storage(validate)]` invariants are not checked by the schema walk:
+     violating arguments surface in the tool's own run, when it decodes
+     them.
    - `muse.turn` never runs a call. Running the calls, and any loop that
      feeds their outputs into the next turn, live above the program.
 

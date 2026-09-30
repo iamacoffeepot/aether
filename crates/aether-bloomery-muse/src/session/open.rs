@@ -1,14 +1,14 @@
 //! `muse.session.open`: the one way a session starts.
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree, Utf8Text};
 use aether_bloomery_program::{Env, Program, Sync, program};
 
 use crate::input::TurnInput;
 use crate::session::state::{TurnLimit, TurnSettings};
-use crate::session::tools::offered;
+use crate::tools::offered;
 
-/// A session to open: what every turn sends, the first user message, and how
-/// many turns it may make before it rests.
+/// A session to open: what every turn sends, the first user message, how
+/// many turns it may make before it rests, and the tree its tools work on.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session.open.input")]
 pub struct OpenInput {
@@ -19,20 +19,29 @@ pub struct OpenInput {
     user: Ref<Utf8Text>,
     /// The most turns the session may make before it rests.
     max_turns: TurnLimit,
+    /// The tree the session's tools start from. Each call works on the
+    /// latest tree, and each record holds it.
+    tree: Ref<Tree>,
 }
 
 impl OpenInput {
-    /// Open a session with `settings`, starting from the user message `user`,
-    /// that makes at most `max_turns` turns before it rests.
+    /// Open a session with `settings` on `tree`, starting from the user
+    /// message `user`, that makes at most `max_turns` turns before it rests.
     #[must_use]
-    pub const fn new(settings: TurnSettings, user: Ref<Utf8Text>, max_turns: TurnLimit) -> Self {
-        Self { settings, user, max_turns }
+    pub const fn new(settings: TurnSettings, user: Ref<Utf8Text>, max_turns: TurnLimit, tree: Ref<Tree>) -> Self {
+        Self { settings, user, max_turns, tree }
     }
 
     /// The most turns the session may make before it rests.
     #[must_use]
     pub const fn max_turns(&self) -> TurnLimit {
         self.max_turns
+    }
+
+    /// The tree the session's tools start from.
+    #[must_use]
+    pub const fn tree(&self) -> Ref<Tree> {
+        self.tree
     }
 }
 
@@ -63,14 +72,14 @@ impl Program for SessionOpen {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref, Refusal};
+    use aether_bloomery_kinds::{ProgramName, Ref, Refusal, Tree};
 
     use super::{OpenInput, SessionOpen};
     use crate::input::tests::offered_tool;
     use crate::input::{OfferedTool, OfferedTools, Role, TurnItem};
     use crate::session::fixture::{run, settings};
     use crate::session::state::TurnLimit;
-    use crate::session::tools::offered;
+    use crate::tools::offered;
 
     #[test]
     fn an_open_is_the_settings_and_the_user_message_over_bound_tools_only() {
@@ -79,8 +88,9 @@ mod tests {
         let (bound, _) = offered();
         let user = Ref::of_text("hi");
         let limit = TurnLimit::new(4).expect("limit");
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
 
-        let first = run::<SessionOpen>(&OpenInput::new(settings(bound.clone()), user, limit), Vec::new())
+        let first = run::<SessionOpen>(&OpenInput::new(settings(bound.clone()), user, limit, tree), Vec::new())
             .expect("bound tools open");
         assert_eq!(first.settings(), settings(bound.clone()));
         assert_eq!(first.items(), [TurnItem::message(Role::User, user)]);
@@ -90,7 +100,7 @@ mod tests {
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
         for tool in [redefined, unbound] {
             let tools = OfferedTools::new(vec![tool]).expect("tools");
-            let refused = run::<SessionOpen>(&OpenInput::new(settings(tools), user, limit), Vec::new());
+            let refused = run::<SessionOpen>(&OpenInput::new(settings(tools), user, limit, tree), Vec::new());
             assert!(matches!(refused, Err(Refusal::Refused { .. })), "{refused:?}");
         }
     }

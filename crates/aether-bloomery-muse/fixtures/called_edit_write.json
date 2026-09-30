@@ -1,0 +1,52 @@
+{
+  "id": "resp_0020",
+  "object": "response",
+  "created_at": 1790000400,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "msg_0020",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Renaming the function and writing a note.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc_00200",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_edit",
+      "name": "tree-edit",
+      "arguments": "{\"path\": \"src/lib.rs\", \"old\": \"smelt\", \"new\": \"smelt_iron\"}"
+    },
+    {
+      "id": "fc_00201",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_write",
+      "name": "tree-write",
+      "arguments": "{\"path\": \"docs/notes.md\", \"text\": \"Iron blooms.\\n\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 80,
+    "output_tokens_details": {
+      "reasoning_tokens": 20
+    },
+    "total_tokens": 1280
+  }
+}

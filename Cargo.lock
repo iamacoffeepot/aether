@@ -177,6 +177,7 @@ dependencies = [
  "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
+ "aether-bloomery-workspace",
  "aether-codec",
  "aether-data",
  "aether-http",
