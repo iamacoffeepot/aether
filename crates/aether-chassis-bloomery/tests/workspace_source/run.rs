@@ -25,7 +25,7 @@ const TOOL: &[u8] = b"#!tool\n";
 const LOGS: &[(u8, &[u8])] = &[(1, b"checked\n"), (2, b"warning: unused\n")];
 
 /// The workspace every run scenario boots: two cores, both given to each run, 1 GiB per step, and 64 processes.
-const FLAGS: &[&str] = &[
+pub const FLAGS: &[&str] = &[
     "--workspace-cpuset",
     "2-3",
     "--workspace-run-cores",
@@ -38,14 +38,14 @@ const FLAGS: &[&str] = &[
 
 /// A seed holding an environment whose root holds `usr/bin/tool` (executable) and `usr/bin/text` (not), providing
 /// Rust 1.97.1 with clippy, and a run tree of `src/main.rs` plus its extra root files.
-struct Inputs {
+pub struct Inputs {
     batch: Batch,
     environment: Ref<Environment>,
     tree: Ref<Tree>,
 }
 
 impl Inputs {
-    fn new(extra: Vec<(&str, &[u8])>) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(extra: Vec<(&str, &[u8])>) -> Result<Self, Box<dyn Error>> {
         let mut batch = Batch::new();
         let tool_file = batch.stage_bytes(TOOL);
         let text_file = batch.stage_bytes(b"x");
@@ -71,7 +71,7 @@ impl Inputs {
     }
 
     /// A one-step run of `tool` over the seed's tree, with `scratch` left out of its output.
-    fn request(&self, tool: &str, scratch: &str) -> Result<RunRequest, Box<dyn Error>> {
+    pub(crate) fn request(&self, tool: &str, scratch: &str) -> Result<RunRequest, Box<dyn Error>> {
         let step = Step { tool: ToolName::new(tool)?, args: vec!["--check".to_owned()], env: Vec::new(), stdin: None };
         Ok(RunRequest {
             tree: self.tree,
@@ -84,18 +84,18 @@ impl Inputs {
     }
 
     /// The environment digest in hex, which the image label carries.
-    fn hex(&self) -> String {
+    pub(crate) fn hex(&self) -> String {
         self.environment.digest().to_string()
     }
 
     /// Boot over the seed with the workspace dialing `stub`.
-    fn boot(self, stub: &StubDaemon, flags: &[&str]) -> Result<BloomeryHarness, Box<dyn Error>> {
+    pub(crate) fn boot(self, stub: &StubDaemon, flags: &[&str]) -> Result<BloomeryHarness, Box<dyn Error>> {
         boot(vec![self.batch], &stub.endpoint(), flags)
     }
 }
 
 /// `request` over the harness's unit journal.
-fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
+pub fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
     Run { source: harness.source(), request }
 }
 
@@ -105,7 +105,7 @@ fn tool(name: &str, path: &str) -> Result<Tool, Box<dyn Error>> {
 
 /// `/work` as the daemon archives it after a step that wrote `out.txt`: the input, the new file, and the `target`
 /// tmpfs as an empty directory.
-fn built_work() -> Vec<u8> {
+pub fn built_work() -> Vec<u8> {
     TarWriter::new()
         .directory("work/")
         .file("work/out.txt", b"built\n")
@@ -115,7 +115,7 @@ fn built_work() -> Vec<u8> {
         .finish()
 }
 
-fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
+pub fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
     RunScript { environment, logs: LOGS, exit_code: 0, output }
 }
 
@@ -134,7 +134,7 @@ fn run_against(
     Ok((answer, requests, harness))
 }
 
-fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
+pub fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
     match answer {
         RunResult::Ok(outcome) => Ok(outcome),
         other @ RunResult::Err(_) => Err(format!("expected an outcome, got {other:?}").into()),

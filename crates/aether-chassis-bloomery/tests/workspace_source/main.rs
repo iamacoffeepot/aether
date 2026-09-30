@@ -3,6 +3,8 @@
 //! mail (ADR-0240 D7), so these scenarios drive the workspace the way a unit's driver and bootstrap do.
 #![cfg(unix)]
 
+#[cfg(target_os = "linux")]
+mod bench;
 mod import;
 mod run;
 mod support;

@@ -378,8 +378,19 @@ impl BloomeryHarness {
     /// Panics when no reply arrives within thirty seconds, when the sink has
     /// gone, or when the reply is not the kind the request is answered by.
     pub fn wait<K: Answer>(&mut self, pending: Pending<K>) -> K {
+        self.wait_within(pending, REPLY_TIMEOUT)
+    }
+
+    /// [`wait`](Self::wait) with a caller-chosen hang bound, for a request that
+    /// legitimately runs past the default thirty seconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no reply arrives within `guard`, when the sink has gone, or
+    /// when the reply is not the kind the request is answered by.
+    pub fn wait_within<K: Answer>(&mut self, pending: Pending<K>, guard: Duration) -> K {
         let Pending { correlation, request, .. } = pending;
-        let reply = self.early.remove(&correlation).unwrap_or_else(|| self.receive(correlation, &request));
+        let reply = self.early.remove(&correlation).unwrap_or_else(|| self.receive(correlation, &request, guard));
         K::take(reply).unwrap_or_else(|other| panic!("{request} (correlation {correlation}) was answered by {other:?}"))
     }
 
@@ -415,18 +426,17 @@ impl BloomeryHarness {
 
     /// Receive arrivals until the reply to `request` under `correlation`,
     /// keeping the others.
-    fn receive(&mut self, correlation: u64, request: &str) -> Reply {
-        let deadline = Instant::now() + REPLY_TIMEOUT;
+    fn receive(&mut self, correlation: u64, request: &str, guard: Duration) -> Reply {
+        let deadline = Instant::now() + guard;
         loop {
             match self.arrivals.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok((arrived, reply)) if arrived == correlation => return reply,
                 Ok((arrived, reply)) => {
                     self.early.insert(arrived, reply);
                 }
-                Err(RecvTimeoutError::Timeout) => panic!(
-                    "no reply to {request} (correlation {correlation}) within {} seconds",
-                    REPLY_TIMEOUT.as_secs()
-                ),
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("no reply to {request} (correlation {correlation}) within {} seconds", guard.as_secs())
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     panic!("the reply sink went away before {request} (correlation {correlation}) was answered")
                 }
