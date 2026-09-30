@@ -1,6 +1,6 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_actor::{HeldReply, ProtocolPath, Subscriber};
+use aether_actor::{HeldReply, PathRefused, ProtocolPath, Subscriber};
 use aether_data::{ErasedActorPath, KindId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -388,10 +388,10 @@ published_window_kinds!(subscription);
 
 /// Subscribe an explicitly named actor to one published kind for a window
 /// selector. `subscription` names the kind and the subscriber's canonical
-/// path; the manager proves it live at receipt and replies `Err` naming it
-/// when its actor has closed. A path no actor has stood at, or whose actor
-/// does not handle the kind silently, is refused at decode with a warn and
-/// gets no reply.
+/// path; the manager proves it live at receipt. A path no actor has stood
+/// at, one whose actor does not handle the kind silently, and one whose actor
+/// has closed are all answered `Err(SubscribeWindowError::Subscriber(..))`
+/// naming the path and why.
 #[aether_data::kind(name = "aether.window.subscribe", no_serde, eq)]
 pub struct SubscribeWindow {
     pub selector: WindowSelector,
@@ -423,11 +423,39 @@ pub struct UnsubscribeWindowSelf {
     pub kind: KindId,
 }
 
-/// Reply shared by the subscribe and unsubscribe request families.
+/// Reply shared by the subscribe and unsubscribe request families. `Err`
+/// names why the request failed ([`SubscribeWindowError`]).
 #[aether_data::kind(name = "aether.window.subscribe_result", eq)]
 pub enum SubscribeWindowResult {
     Ok,
-    Err { error: String },
+    Err(SubscribeWindowError),
+}
+
+/// Why a window subscription request failed.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeWindowError {
+    /// The explicit subscriber path did not prove (ADR-0231 §3): no actor has
+    /// stood at it, its actor does not handle the kind silently, or it is no
+    /// longer live.
+    Subscriber(PathRefused),
+    /// The manager refused the request: a `_self` request from a sender with
+    /// no local mailbox or one that does not handle the kind, or a selector
+    /// or kind it does not serve.
+    Rejected { error: String },
+}
+
+impl SubscribeWindowResult {
+    /// The manager's refusal, naming why.
+    #[must_use]
+    pub fn rejected(error: impl Into<String>) -> Self {
+        Self::Err(SubscribeWindowError::Rejected { error: error.into() })
+    }
+}
+
+impl From<PathRefused> for SubscribeWindowResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(SubscribeWindowError::Subscriber(refused))
+    }
 }
 
 /// Raw, already-encoded window event injected through the synthetic runtime.

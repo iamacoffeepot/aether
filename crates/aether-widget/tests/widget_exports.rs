@@ -1,7 +1,7 @@
 //! Export and replace-reconstruct coverage for the widget module's `export!`
 //! lists (issue 5538, issue 7206).
 //!
-//! The widget wasm build is a grab-bag defaultless module (ADR-0138). Only its
+//! The widget wasm build is a grab-bag module with no unselected entry (ADR-0241 §9). Only its
 //! roots are `public`; the set widgets are `private`, because a root-loaded
 //! one has no in-cluster parent to send its draw list to. ADR-0114 §5
 //! reconstructs inline children from both lists — so a panel-spawned
@@ -165,7 +165,7 @@ fn panel_config() -> PanelConfig {
     }
 }
 
-/// ADR-0138: a bare load of this grab-bag must error and name every public
+/// ADR-0241 §9: an unselected load of this grab-bag must error and name every public
 /// root a caller can select, and no set widget, which is listed only so a
 /// replace rebuilds it.
 fn assert_selectors(wasm: &[u8], stem: &str) {

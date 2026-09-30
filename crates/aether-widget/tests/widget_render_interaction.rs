@@ -291,19 +291,6 @@ fn load_editor_region(
     let path = harness.actor_path(&region);
     assert!(path.to_string().ends_with(":panel"), "the editor region should register under :panel; got {path}");
 
-    // The region spawns its panel in `wire`, which runs after the load reply.
-    // Its first mail dispatches only once `wire` returns, so settling one relay
-    // orders the child lookup after the spawn.
-    harness
-        .execute(vec![(
-            "region-wired",
-            HarnessOp::send_and_settle(
-                &region,
-                &Modifiers { window: test_window(), shift: false, ctrl: false, alt: false, meta: false },
-            ),
-        )])
-        .expect("the editor region wires");
-
     harness
         .child::<EditorRegion, WidgetPanel>(&region, LoadName::new("panel").expect("a valid child subname"))
         .unwrap_or_else(|error| panic!("the editor region's panel is live: {error}"))

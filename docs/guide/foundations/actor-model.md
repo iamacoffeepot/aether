@@ -439,8 +439,13 @@ an `ActorPath<R>` also refuses a path whose leaf namespace is not
 for the route at its path, live or closed: the decode refuses a path no route
 has stood at, one still starting, or one whose route does not publish every
 row of `P`, so a `ProtocolPath<P>` that exists names an actor, live or closed,
-covering `P`. A refused decode reaches no handler, and nothing is sent back. Native dispatch decodes with the registry;
-a guest's decode has none, so a guest refuses a `ProtocolPath<P>` until
+covering `P`. A refused decode reaches no handler. A request whose path did not
+prove is still answered: its reply kind implements `From<PathRefused>`, and the
+dispatch answers `O::from(refused)` naming the path and why, while a silent or
+unchecked row drops the refusal with a warn. A request kind carrying a path
+whose reply lacks `From<PathRefused>` does not compile. Native dispatch decodes
+with the registry; a guest's decode has none, so a guest refuses a
+`ProtocolPath<P>` as `Unchecked` until
 [ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md).
 Neither path grants a send: a closed actor's path decodes, since names are
 never reused, and the route can leave after the decode, so its receiver's

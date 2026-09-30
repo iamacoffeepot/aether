@@ -55,6 +55,9 @@ use aether_bloomery_tar::{DecodeError, EncodeError, Limits, encode};
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
 use super::provision::CpuSet;
 use super::storage::{StorageError, StorageSession};
+// The reply's error enum, named apart from this module's own `RunError`,
+// the executor fault it carries the cause of.
+use crate::RunError as Unran;
 use crate::{Outcome, Refusal, Resource, RunRequest, RunResult};
 use cleanup::{Cleanup, CleanupError};
 use resolve::Resolved;
@@ -198,15 +201,15 @@ fn answer(ended: Result<Outcome, Stop>) -> RunResult {
         }
         Err(Stop::Refused(refusal)) => {
             tracing::info!(target: "aether_bloomery_workspace", ?refusal, "run refused");
-            RunResult::Refused(*refusal)
+            RunResult::Err(Unran::Refused(*refusal))
         }
         Err(Stop::Exhausted(resource)) => {
             tracing::info!(target: "aether_bloomery_workspace", ?resource, "run exhausted its allotment");
-            RunResult::Exhausted(resource)
+            RunResult::Err(Unran::Exhausted(resource))
         }
         Err(Stop::Failed(error)) => {
             tracing::warn!(target: "aether_bloomery_workspace", %error, "run failed");
-            RunResult::Failed { detail: RunError::cause(&error) }
+            RunResult::Err(Unran::Failed { detail: RunError::cause(&error) })
         }
     }
 }

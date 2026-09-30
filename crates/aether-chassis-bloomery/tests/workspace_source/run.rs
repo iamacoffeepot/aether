@@ -1,17 +1,20 @@
 //! `Run` over the unit's journal: the Engine API sequence, the sandbox, provisioning, refusals, and the output tree.
 
 use std::error::Error;
+use std::fs;
 use std::thread;
 
 use aether_bloomery_journal::Batch;
-use aether_bloomery_kinds::{Digest, Node, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Node, OpaqueBytes, ReadArtifacts, Ref, Tree, artifact_blob};
 use aether_bloomery_workspace::testing::{
     RUN_CONTAINER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
 };
 use aether_bloomery_workspace::{
     EnvVar, Environment, ImageRef, Import, ImportResult, Mounts, Network, Outcome, Platform, Provides, Refusal,
-    Resource, Run, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools, TreePath,
+    Resource, Run, RunError, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools,
+    TreePath,
 };
+use aether_data::Kind;
 use aether_data::wire::encode_to_vec;
 use aether_harness_bloomery::BloomeryHarness;
 
@@ -24,7 +27,7 @@ const TOOL: &[u8] = b"#!tool\n";
 const LOGS: &[(u8, &[u8])] = &[(1, b"checked\n"), (2, b"warning: unused\n")];
 
 /// The workspace every run scenario boots: two cores, both given to each run, 1 GiB per step, and 64 processes.
-const FLAGS: &[&str] = &[
+pub const FLAGS: &[&str] = &[
     "--workspace-cpuset",
     "2-3",
     "--workspace-run-cores",
@@ -37,14 +40,14 @@ const FLAGS: &[&str] = &[
 
 /// A seed holding an environment whose root holds `usr/bin/tool` (executable) and `usr/bin/text` (not), providing
 /// Rust 1.97.1 with clippy, and a run tree of `src/main.rs` plus its extra root files.
-struct Inputs {
+pub struct Inputs {
     batch: Batch,
     environment: Ref<Environment>,
     tree: Ref<Tree>,
 }
 
 impl Inputs {
-    fn new(extra: Vec<(&str, &[u8])>) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn new(extra: Vec<(&str, &[u8])>) -> Result<Self, Box<dyn Error>> {
         let mut batch = Batch::new();
         let tool_file = batch.stage_bytes(TOOL);
         let text_file = batch.stage_bytes(b"x");
@@ -70,7 +73,7 @@ impl Inputs {
     }
 
     /// A one-step run of `tool` over the seed's tree, with `scratch` left out of its output.
-    fn request(&self, tool: &str, scratch: &str) -> Result<RunRequest, Box<dyn Error>> {
+    pub(crate) fn request(&self, tool: &str, scratch: &str) -> Result<RunRequest, Box<dyn Error>> {
         let step = Step { tool: ToolName::new(tool)?, args: vec!["--check".to_owned()], env: Vec::new(), stdin: None };
         Ok(RunRequest {
             tree: self.tree,
@@ -83,18 +86,18 @@ impl Inputs {
     }
 
     /// The environment digest in hex, which the image label carries.
-    fn hex(&self) -> String {
+    pub(crate) fn hex(&self) -> String {
         self.environment.digest().to_string()
     }
 
     /// Boot over the seed with the workspace dialing `stub`.
-    fn boot(self, stub: &StubDaemon, flags: &[&str]) -> Result<BloomeryHarness, Box<dyn Error>> {
+    pub(crate) fn boot(self, stub: &StubDaemon, flags: &[&str]) -> Result<BloomeryHarness, Box<dyn Error>> {
         boot(vec![self.batch], &stub.endpoint(), flags)
     }
 }
 
 /// `request` over the harness's unit journal.
-fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
+pub fn over(harness: &BloomeryHarness, request: RunRequest) -> Run {
     Run { source: harness.source(), request }
 }
 
@@ -104,7 +107,7 @@ fn tool(name: &str, path: &str) -> Result<Tool, Box<dyn Error>> {
 
 /// `/work` as the daemon archives it after a step that wrote `out.txt`: the input, the new file, and the `target`
 /// tmpfs as an empty directory.
-fn built_work() -> Vec<u8> {
+pub fn built_work() -> Vec<u8> {
     TarWriter::new()
         .directory("work/")
         .file("work/out.txt", b"built\n")
@@ -114,7 +117,7 @@ fn built_work() -> Vec<u8> {
         .finish()
 }
 
-fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
+pub fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
     RunScript { environment, logs: LOGS, exit_code: 0, output }
 }
 
@@ -133,16 +136,16 @@ fn run_against(
     Ok((answer, requests, harness))
 }
 
-fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
+pub fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
     match answer {
         RunResult::Ok(outcome) => Ok(outcome),
-        other => Err(format!("expected an outcome, got {other:?}").into()),
+        other @ RunResult::Err(_) => Err(format!("expected an outcome, got {other:?}").into()),
     }
 }
 
 fn detail(answer: &RunResult) -> Result<&str, Box<dyn Error>> {
     match answer {
-        RunResult::Failed { detail } => Ok(detail.as_str()),
+        RunResult::Err(RunError::Failed { detail }) => Ok(detail.as_str()),
         other => Err(format!("expected Failed, got {other:?}").into()),
     }
 }
@@ -233,7 +236,10 @@ fn a_retry_after_an_out_of_memory_kill_gets_twice_the_memory() -> TestResult {
 
     let (answers, requests) = serving(stub, both, || [harness.run(&run), harness.run(&run)])?;
 
-    assert!(answers.iter().all(|answer| *answer == RunResult::Exhausted(Resource::Memory)), "{answers:?}");
+    assert!(
+        answers.iter().all(|answer| *answer == RunResult::Err(RunError::Exhausted(Resource::Memory))),
+        "{answers:?}"
+    );
     let memory = |request: &StubRequest| -> Result<serde_json::Value, Box<dyn Error>> {
         let spec: serde_json::Value = serde_json::from_slice(&request.body)?;
         Ok(spec["HostConfig"]["Memory"].clone())
@@ -319,6 +325,42 @@ fn a_transport_failure_mid_run_still_removes_everything_and_answers_failed_namin
 }
 
 #[test]
+fn a_stored_blob_forged_on_disk_fails_the_run_before_any_step_starts_and_still_cleans_up() -> TestResult {
+    // Catches a change that drops the workspace's own check on the blobs it streams into `/work`, believing the
+    // journal checked them: the journal answers the stored file under the digest it was read by, unhashed, so only
+    // the workspace's check stands between a forged file and a container.
+    let inputs = Inputs::new(vec![("forged.txt", b"original bytes")])?;
+    let (hex, request) = (inputs.hex(), inputs.request("tool", "target")?);
+    let forged = Ref::of_bytes(b"original bytes").digest().to_string();
+    let mut replies = script(&hex, &[]).replies();
+    replies.truncate(5);
+    replies.extend([StubReply::with_length(204, ""), StubReply::with_length(204, "")]);
+    let stub = StubDaemon::bind()?;
+    let mut harness = inputs.boot(&stub, FLAGS)?;
+    // Same length and kind prefix as the original, so only a digest check over the bytes catches it.
+    fs::write(
+        harness.journal_path().join("blobs").join(&forged[..2]).join(&forged),
+        artifact_blob(OpaqueBytes::ID, b"modified bytes"),
+    )?;
+
+    let run = over(&harness, request);
+    let (answer, requests) = serving(stub, replies, || harness.run(&run))?;
+
+    let detail = detail(&answer)?;
+    assert!(detail.contains("reading a blob failed"), "{detail}");
+    assert_eq!(
+        lines(&requests[4..]),
+        [
+            format!("PUT /v1.44/containers/{RUN_CONTAINER}/archive?path=/work"),
+            format!("DELETE /v1.44/containers/{RUN_CONTAINER}?force=true&v=true"),
+            format!("DELETE /v1.44/volumes/{RUN_VOLUME}?force=true"),
+        ],
+        "no step started, and cleanup still removed the container and its volume"
+    );
+    Ok(())
+}
+
+#[test]
 fn a_step_past_the_deadline_is_killed_and_answers_exhausted_time() -> TestResult {
     // Catches a wait with no deadline (the scenario would hang on the held response), a timed-out step left running,
     // and a timeout reported as a failure or an outcome.
@@ -336,7 +378,7 @@ fn a_step_past_the_deadline_is_killed_and_answers_exhausted_time() -> TestResult
 
     let (answer, requests, _) = run_against(inputs, request, replies, &flags)?;
 
-    assert_eq!(answer, RunResult::Exhausted(Resource::Time));
+    assert_eq!(answer, RunResult::Err(RunError::Exhausted(Resource::Time)));
     assert_eq!(
         lines(&requests[7..]),
         [
@@ -362,7 +404,7 @@ fn an_image_labelled_for_another_environment_is_refused_before_anything_is_creat
 
     let (answer, requests, _) = run_against(inputs, request, replies, FLAGS)?;
 
-    assert_eq!(answer, RunResult::Refused(Refusal::EnvironmentUnavailable));
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::EnvironmentUnavailable)));
     assert_eq!(requests.len(), 2, "{:?}", lines(&requests));
     Ok(())
 }
@@ -387,7 +429,10 @@ fn a_toolchain_file_asking_for_more_than_the_environment_provides_is_refused_wit
     let tree_wants = RustToolchain::new("1.97.1", vec!["clippy".to_owned(), "rustfmt".to_owned()], Vec::new())?;
     assert_eq!(
         answer,
-        RunResult::Refused(Refusal::ToolchainMismatch { tree_wants, environment_provides: Some(provided) })
+        RunResult::Err(RunError::Refused(Refusal::ToolchainMismatch {
+            tree_wants,
+            environment_provides: Some(provided)
+        }))
     );
     assert!(detail(&neighbour)?.starts_with("reading the daemon's platform:"), "{neighbour:?}");
     Ok(())
@@ -404,8 +449,8 @@ fn a_tool_that_is_not_an_executable_in_the_root_is_unknown() -> TestResult {
     let plain = harness.run(&over(&harness, plain));
     let absent = harness.run(&over(&harness, absent));
 
-    assert_eq!(plain, RunResult::Refused(Refusal::UnknownTool(ToolName::new("text")?)));
-    assert_eq!(absent, RunResult::Refused(Refusal::UnknownTool(ToolName::new("cargo")?)));
+    assert_eq!(plain, RunResult::Err(RunError::Refused(Refusal::UnknownTool(ToolName::new("text")?))));
+    assert_eq!(absent, RunResult::Err(RunError::Refused(Refusal::UnknownTool(ToolName::new("cargo")?))));
     Ok(())
 }
 
@@ -420,7 +465,7 @@ fn an_environment_the_journal_lacks_is_input_missing() -> TestResult {
 
     let answer = harness.run(&over(&harness, request));
 
-    assert_eq!(answer, RunResult::Refused(Refusal::InputMissing(absent)));
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::InputMissing(absent))));
     Ok(())
 }
 
@@ -586,10 +631,23 @@ fn nested_tree(batch: &mut Batch) -> Result<Ref<Tree>, Box<dyn Error>> {
     )
 }
 
-/// The `/work` archive a run over a nested tree writes into its first container, booted with `flags`.
-fn work_archive(flags: &[&str]) -> Result<Vec<u8>, Box<dyn Error>> {
+/// A tree holding one directory of one more distinct small file than one batched read may name, so its blobs take
+/// two batches.
+fn wide_tree(batch: &mut Batch) -> Result<Ref<Tree>, Box<dyn Error>> {
+    let names = (0..=ReadArtifacts::MAX_ARTIFACTS).map(|index| format!("f{index:05}")).collect::<Vec<_>>();
+    let files =
+        names.iter().map(|name| (name.as_str(), Node::File(batch.stage_bytes(name.as_bytes())))).collect::<Vec<_>>();
+    let wide = directory(batch, files)?;
+    directory(batch, vec![("wide", Node::Directory(wide))])
+}
+
+/// Stages a run's tree into a seed batch.
+type StageTree = fn(&mut Batch) -> Result<Ref<Tree>, Box<dyn Error>>;
+
+/// The `/work` archive a run over the tree `tree` stages writes into its first container, booted with `flags`.
+fn work_archive(tree: StageTree, flags: &[&str]) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut inputs = Inputs::new(Vec::new())?;
-    inputs.tree = nested_tree(&mut inputs.batch)?;
+    inputs.tree = tree(&mut inputs.batch)?;
     let (hex, request) = (inputs.hex(), inputs.request("tool", "target")?);
     let output = built_work();
 
@@ -604,11 +662,22 @@ fn a_tree_over_the_prefetch_budget_writes_the_same_archive_as_one_that_fits() ->
     // Catches a descend path that skips or reorders members: under an eight-byte budget no closure fits, so every
     // directory is read on its own and every blob on demand, and the archive must still be byte-equal to the one the
     // one-request closure read writes.
-    let fitting = work_archive(FLAGS)?;
-    let descended = work_archive(&[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
+    let fitting = work_archive(nested_tree, FLAGS)?;
+    let descended = work_archive(nested_tree, &[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
 
     assert!(fitting.len() > large_payload().len(), "the archive holds the large file");
     assert!(fitting == descended, "the descended archive differs from the fitting one");
+    Ok(())
+}
+
+#[test]
+fn a_directory_wider_than_one_batched_read_writes_the_same_archive_as_one_that_fits() -> TestResult {
+    // Catches a second batched read that skips or repeats the first batch's last member: under an eight-byte budget
+    // the wide directory's blobs are read in batches as the archive reaches them, and one batch cannot name them all.
+    let fitting = work_archive(wide_tree, FLAGS)?;
+    let batched = work_archive(wide_tree, &[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
+
+    assert!(fitting == batched, "the batched archive differs from the fitting one");
     Ok(())
 }
 
@@ -637,7 +706,7 @@ fn an_imported_tree_written_into_a_container_imports_back_to_the_same_tree() -> 
         let imported = harness.import(&import);
         let tree = match &imported {
             ImportResult::Ok { tree } => *tree,
-            ImportResult::Failed { .. } => return (imported, None),
+            ImportResult::Err(_) => return (imported, None),
         };
         (imported, Some(harness.run(&over(&harness, RunRequest { tree, ..template }))))
     })?;

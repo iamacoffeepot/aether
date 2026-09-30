@@ -82,17 +82,17 @@ impl<'batch> BlobFile<'batch> {
         Ok(())
     }
 
-    /// Place the blob under its digest name and record its row in the batch:
-    /// fsync the temp file and rename it to the digest name. When the digest
-    /// name already exists the temp file is deleted instead. Either way the
-    /// shard directory is fsynced at [`ArtifactBatch::commit`], once per
-    /// batch, before the row is inserted.
+    /// Close the blob's temp file and record it and its row in the batch.
+    /// [`ArtifactBatch::commit`] fsyncs it, renames it to its digest name,
+    /// and fsyncs its shard directory, once per batch, before the row is
+    /// inserted. When the digest name already exists, or the same digest is
+    /// already placed in this batch, the temp file is deleted instead.
     ///
     /// # Errors
     ///
     /// [`JournalError::BlobLength`] when fewer payload bytes were written than
     /// the blob was opened with; the temp file is deleted. [`JournalError::Io`]
-    /// when the file sync or rename fails, or when a chunk's write failed.
+    /// when a chunk's write failed or the digest name cannot be checked.
     pub fn finish(self) -> Result<Ref<OpaqueBytes>, JournalError> {
         self.place().map(Ref::from_digest)
     }

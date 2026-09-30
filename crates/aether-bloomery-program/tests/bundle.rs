@@ -1,5 +1,6 @@
 //! Bundle root: load by digest, invoke named programs, despawn the seq child.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fs;
 
@@ -9,7 +10,7 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_program::declarations;
 use aether_component::ComponentHostCapability;
-use aether_data::{Cites, Kind, Storage};
+use aether_data::{Cites, Doc, DocNode, Kind, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent};
@@ -64,6 +65,12 @@ fn assert_fixture_section(wasm: &[u8]) {
     assert_eq!(summarize.program.result, SummarizeResult::ID);
     assert_eq!(summarize.program.mode, Mode::Pure);
     assert!(summarize.apis.is_empty(), "summarize binds no API, got {:?}", summarize.apis);
+    assert_eq!(summarize.doc, "Read cited text and stage a summary derived from it.");
+    let DocNode::Struct { fields } = &summarize.input_docs else {
+        panic!("summarize's input docs are a struct tree, got {:?}", summarize.input_docs);
+    };
+    assert_eq!(fields.len(), 1, "one doc per input field");
+    assert_eq!(fields[0].doc, Doc::Written(Cow::Borrowed("The text to summarize.")));
     let refuse = find("test.program.refuse").expect("refuse declaration");
     assert_eq!(refuse.program.input, RefuseInput::ID);
     assert_eq!(refuse.program.mode, Mode::Pure);

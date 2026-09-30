@@ -73,7 +73,12 @@ Bloomery rewrite has not been deployed.
    `aether.bloomery.programs` custom section. The driver reads that
    section from the artifact bytes to check that a program name exists
    and that its input kind matches, before loading anything. A separate
-   declaration artifact is not stored.
+   declaration artifact is not stored. Beside the declaration, each
+   record carries the program's doc, the `///` doc `#[program]` requires
+   on its impl, and its input's doc tree, a `///` doc for every field and
+   variant the input exposes. Together they describe the program as a
+   tool a model can call. The docs never enter a kind id: they travel
+   beside the schema, as the kind labels do.
 
 5. **Addressing.** The driver loads each bundle once per engine with
    `aether.component.load` (`LoadComponent`), using `name` set to the

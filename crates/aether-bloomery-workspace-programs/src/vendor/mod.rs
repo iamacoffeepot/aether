@@ -36,13 +36,14 @@ use aether_bloomery_workspace::Outcome;
 pub use input::VendorInput;
 pub use result::VendorResult;
 
+/// The `vendor.cargo` program.
+pub struct CargoVendor;
+
 /// Vendors a source tree's locked crate sources in an environment and records
 /// the vendor tree.
 ///
 /// Sampled: the tree depends on registry state and the executor, not only on
 /// the cited trees.
-pub struct CargoVendor;
-
 #[program]
 impl Program for CargoVendor {
     const NAME: &'static str = "vendor.cargo";

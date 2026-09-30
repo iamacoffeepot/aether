@@ -45,8 +45,8 @@ use std::fs;
 use std::path::Path;
 
 /// Load `aether-kit`'s pre-built wasm into the harness selecting
-/// the `aether.kit.bundle` export (ADR-0096; the kit is defaultless per
-/// ADR-0138, so the selector is required), await `LoadResult`, and return
+/// the `aether.kit.bundle` export (ADR-0096; the kit has no unselected entry
+/// (ADR-0241 §9), so the selector is required), await `LoadResult`, and return
 /// the loaded component's mailbox id so a test can drop it. The bundle
 /// takes no config. Panics on load failure so the test surfaces the
 /// error message.

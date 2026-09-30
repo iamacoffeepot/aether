@@ -83,6 +83,7 @@ use syn::{
     PathArguments, ReturnType, Token, Type, parse_macro_input, token,
 };
 
+mod docs;
 mod kind_attr;
 mod storage;
 
@@ -223,6 +224,16 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // `decode_body` — a single `Sink::send` call site routes through
     // `Kind::encode_into_bytes`, picking cast or wire at the
     // kind's derive instead of at every send site.
+    // ADR-0231 §3: a structured kind reads its path marker off its own
+    // `WireDecode`; a `#[repr(C)]` kind holds no path and keeps the default.
+    let proves_routes = if has_repr_c {
+        TokenStream2::new()
+    } else {
+        quote! {
+            const PROVES_ROUTES: bool =
+                <Self as ::aether_data::__derive_runtime::WireDecode<'static>>::PROVES_ROUTES;
+        }
+    };
     let encode_body = if has_repr_c {
         quote! { ::aether_data::__derive_runtime::encode_cast::<Self>(self) }
     } else {
@@ -287,6 +298,8 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     ),
                 ),
             );
+
+            #proves_routes
 
             fn decode_with(
                 bytes: &[u8],
@@ -426,17 +439,23 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
     reject_skipped_wire_fields(&input.data)?;
     let name = &input.ident;
     let name_str = name.to_string();
-    let (body, label_node_body, cast_eligible_expr) = match &input.data {
+    let (body, label_node_body, doc_node_body, cast_eligible_expr) = match &input.data {
         Data::Struct(_) => {
             let fields = struct_fields(input)?;
             let has_repr_c = struct_has_repr_c(&input.attrs);
             (
                 expand_schema_struct(&fields)?,
                 expand_label_node_struct(&name_str, &fields),
+                docs::doc_node_struct(&name_str, &fields),
                 cast_eligible_expr_for_struct(has_repr_c, &fields),
             )
         }
-        Data::Enum(e) => (expand_schema_enum(e)?, expand_label_node_enum(&name_str, e), quote! { false }),
+        Data::Enum(e) => (
+            expand_schema_enum(e)?,
+            expand_label_node_enum(&name_str, e),
+            docs::doc_node_enum(&name_str, e),
+            quote! { false },
+        ),
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(u.union_token, "Schema derive does not support unions"));
         }
@@ -450,6 +469,7 @@ pub(crate) fn expand_schema_core(input: &DeriveInput) -> syn::Result<TokenStream
                 ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
             );
             const LABEL_NODE: ::aether_data::__derive_runtime::LabelNode = #label_node_body;
+            const DOC_NODE: ::aether_data::__derive_runtime::DocNode = #doc_node_body;
         }
 
         impl ::aether_data::CastEligible for #name {
@@ -812,7 +832,20 @@ fn decode_expr(ty: &Type) -> TokenStream2 {
 /// emitted once, in `encode_to` / `decode_from`; `encode` / `decode`
 /// forward to it with the plain `Vec<u8>` / `&[u8]` hooks, so the plain path
 /// monomorphizes to a direct walk.
-fn wire_impls(name: &syn::Ident, encode_body: &TokenStream2, decode_body: &TokenStream2) -> TokenStream2 {
+fn wire_impls(
+    name: &syn::Ident,
+    field_types: &[&Type],
+    encode_body: &TokenStream2,
+    decode_body: &TokenStream2,
+) -> TokenStream2 {
+    // ADR-0231 §3: the type proves a route when any field does, wherever it
+    // nests. `Vec<u8>` keeps its memcpy arm but still answers `false`. The
+    // field types are echoed at the derive's call site, as `reach_impls`
+    // echoes them, so a qualified spelling is linted on the field alone.
+    let proves_routes = field_types.iter().map(|ty| {
+        let ty = call_site_tokens(ty.to_token_stream());
+        quote! { || <#ty as ::aether_data::__derive_runtime::WireDecode<'de>>::PROVES_ROUTES }
+    });
     quote! {
         impl ::aether_data::wire::WireEncode for #name {
             fn encode(
@@ -830,6 +863,8 @@ fn wire_impls(name: &syn::Ident, encode_body: &TokenStream2, decode_body: &Token
             }
         }
         impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
+            const PROVES_ROUTES: bool = false #(#proves_routes)*;
+
             fn decode(
                 cursor: &mut &'de [u8],
             ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
@@ -859,6 +894,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             });
             wire_impls(
                 name,
+                &named.named.iter().map(|field| &field.ty).collect::<Vec<_>>(),
                 &quote! {
                     #(#encodes)*
                     ::core::result::Result::Ok(())
@@ -874,6 +910,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             let decodes = unnamed.unnamed.iter().map(|field| decode_expr(&field.ty));
             wire_impls(
                 name,
+                &unnamed.unnamed.iter().map(|field| &field.ty).collect::<Vec<_>>(),
                 &quote! {
                     #(#encodes)*
                     ::core::result::Result::Ok(())
@@ -890,6 +927,7 @@ fn expand_wire_struct(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
             };
             wire_impls(
                 name,
+                &[],
                 &quote! {
                     let _ = enc;
                     ::core::result::Result::Ok(())
@@ -971,8 +1009,11 @@ fn expand_wire_enum(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
             }
         }
     });
+    let field_types: Vec<&Type> =
+        data.variants.iter().flat_map(|variant| variant.fields.iter().map(|field| &field.ty)).collect();
     wire_impls(
         name,
+        &field_types,
         &quote! {
             match self {
                 #(#encode_arms)*
@@ -1190,12 +1231,16 @@ pub(crate) fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> 
         return Err(syn::Error::new_spanned(&input.ident, "expected struct"));
     };
     Ok(match fields {
-        Fields::Named(named) => {
-            named.named.iter().map(|f| FieldInfo { ident: f.ident.clone(), ty: f.ty.clone() }).collect()
-        }
-        Fields::Unnamed(unnamed) => {
-            unnamed.unnamed.iter().map(|f| FieldInfo { ident: None, ty: f.ty.clone() }).collect()
-        }
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .map(|f| FieldInfo { ident: f.ident.clone(), ty: f.ty.clone(), attrs: f.attrs.clone() })
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .map(|f| FieldInfo { ident: None, ty: f.ty.clone(), attrs: f.attrs.clone() })
+            .collect(),
         Fields::Unit => Vec::new(),
     })
 }
@@ -1203,6 +1248,7 @@ pub(crate) fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> 
 pub(crate) struct FieldInfo {
     pub(crate) ident: Option<syn::Ident>,
     pub(crate) ty: Type,
+    pub(crate) attrs: Vec<Attribute>,
 }
 
 pub(crate) fn to_screaming_snake_case(s: &str) -> String {

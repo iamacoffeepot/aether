@@ -5,9 +5,10 @@
 //! A root is a directory holding `journal.sqlite` (the event log and one
 //! row per stored artifact) and `blobs/<first two hex>/<digest hex>`, one
 //! file per artifact holding exactly the bytes its digest hashes. Each blob
-//! file is written to a temp file, fsynced, and renamed, and each directory
-//! a batch's renames touched is fsynced once, all before the row that names
-//! the file commits. [`Journal::open`] takes an exclusive lock on the
+//! file is written to a temp file as it streams; at commit a batch fsyncs its
+//! files side by side, renames each to its digest name, and fsyncs each
+//! directory the renames touched once, all before the row that names the
+//! file commits. [`Journal::open`] takes an exclusive lock on the
 //! root, so a second open fails in any process, and sweeps `blobs/tmp/`.
 //! [`Journal::open`] also stores the empty [`aether_bloomery_kinds::Tree`],
 //! with no event, so a program can cite it without staging it.
@@ -50,20 +51,26 @@
 //! `MoveHead` / `Publish` carry no cause, and `AppendRecords` is the one
 //! write that does. It also answers [`WatchHead`], a
 //! bounded long poll that is answered once a committed write moves the head
-//! past `after`, and [`ReadClosure`], a read of an
-//! artifact's transitive closure under a validated byte limit.
-//! [`ReadArtifact`] and `ReadClosure` both run off the
-//! actor's thread, each on its own task queue (ADR-0093), so a large artifact
-//! or closure never holds up the actor's other requests. Both reuse members
-//! the journal still holds, under the [`ReadCacheBudget`], and read only the
-//! misses.
+//! past `after`, [`ReadClosure`], a read of an
+//! artifact's transitive closure under a validated byte limit, and
+//! [`ReadArtifacts`], a read of several named artifacts that answers the
+//! prefix fitting its byte limit. [`ReadArtifact`], `ReadClosure`, and
+//! `ReadArtifacts` all run off the actor's thread, each on its own task
+//! queue (ADR-0093), so a large artifact, closure, or batch never holds up
+//! the actor's other requests. All three reuse members the journal still
+//! holds, under the [`ReadCacheBudget`], and read only the misses. None of
+//! them hashes a member: each answers it claiming the digest it was stored
+//! under, and the receiver verifies the bytes before relying on them
+//! (ADR-0238 decision 11), so a stored file whose bytes do not hash to its
+//! digest is answered and fails at the receiver's check.
 //!
 //! [`Stage`] is the one unfenced write: it stores encoded artifacts
 //! content-addressed, with no event and no head move, through an
 //! [`ArtifactBatch`] on a worker thread of its own task queue, streaming each
 //! payload from its [`aether_data::Blob`] into its file. The answer lands
 //! after the batch commits, and a dangling citation refuses the whole stage.
-//! Those three rows, `ReadArtifact`, `ReadClosure`, and `Stage`, are the
+//! Those four rows, `ReadArtifact`, `ReadArtifacts`, `ReadClosure`, and
+//! `Stage`, are the
 //! [`aether_bloomery_kinds::ArtifactStorage`] protocol the owner covers.
 //!
 //! A blob stored for the first time records its citation edges in the
@@ -101,9 +108,9 @@ use std::ops::Range;
 use aether_actor::runtime;
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, ClosureArtifact, ClosureLimit, DriverRecord, EncodedArtifact, JournalEntry,
-    MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult,
-    ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, Stage, StageResult, WatchHead,
-    WatchHeadResult,
+    MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadArtifacts,
+    ReadArtifactsResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
+    RecordedHeadMove, Seq, Stage, StageResult, WatchHead, WatchHeadResult,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
@@ -111,6 +118,7 @@ use aether_substrate::chassis::error::BootError;
 use crate::{Digest, JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
 use cache::ReadCache;
 use watch::Watchers;
+use worker::ReadPrefix;
 
 /// Maximum number of closure walks running on worker threads at once. Each
 /// walk can hold up to [`ClosureLimit::MAX_BYTES`] of checked-in members
@@ -124,6 +132,13 @@ const MAX_CLOSURE_READS_IN_FLIGHT: usize = 2;
 /// a small fetch never waits behind closure walks that can each pin
 /// [`ClosureLimit::MAX_BYTES`].
 const MAX_ARTIFACT_READS_IN_FLIGHT: usize = 4;
+
+/// Maximum number of batched artifact reads running on worker threads at
+/// once. Each can hold its byte limit of checked-in members resident until
+/// its reply is sent, so this bounds that memory; a batch over the bound
+/// waits its turn in arrival order. Separate from the closure and single-read
+/// queues so a batch neither waits behind them nor holds them up.
+const MAX_BATCH_READS_IN_FLIGHT: usize = 2;
 
 /// Maximum number of stages writing on worker threads at once, bounding
 /// worker threads and the fsyncs competing for the root; a stage over the
@@ -145,6 +160,7 @@ pub struct JournalActorState {
     watchers: Watchers,
     closures: TaskQueue<ReadClosureResult>,
     artifacts: TaskQueue<ReadArtifactResult>,
+    batches: TaskQueue<ReadArtifactsResult>,
     stages: TaskQueue<StageResult>,
     cache: ReadCache,
 }
@@ -169,6 +185,7 @@ impl NativeActor for JournalActor {
             watchers: Watchers::new(),
             closures: TaskQueue::new(MAX_CLOSURE_READS_IN_FLIGHT),
             artifacts: TaskQueue::new(MAX_ARTIFACT_READS_IN_FLIGHT),
+            batches: TaskQueue::new(MAX_BATCH_READS_IN_FLIGHT),
             stages: TaskQueue::new(MAX_STAGES_IN_FLIGHT),
             cache: ReadCache::with_budget(budget),
         })
@@ -233,6 +250,38 @@ impl NativeActor for JournalActor {
     #[handler(task)]
     fn on_read_artifact_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadArtifactResult>) {
         state.artifacts.complete(ctx, done);
+    }
+
+    /// Read several named artifacts in request order, answering the prefix
+    /// whose stored length fits the requested byte limit, and always the
+    /// first. A plain read: writes nothing and wakes no watcher.
+    ///
+    /// The read runs on a worker thread through the actor's batch task queue
+    /// (ADR-0093), on one read-only connection, and checks the members the
+    /// read cache misses into the engine blob store there as one slab, as a
+    /// closure walk does. Every other request keeps being answered meanwhile.
+    /// The connection opens after every write this actor committed before the
+    /// request was handled, so the read sees them all.
+    #[handler::request]
+    fn on_read_artifacts(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        request: ReadArtifacts,
+    ) -> Pending<ReadArtifactsResult> {
+        let ReadArtifacts { digests, limit_bytes } = request;
+        let reader = state.journal.worker_reader();
+        let check_in = ctx.blob_check_in();
+        let cache = state.cache.clone();
+        state
+            .batches
+            .submit(ctx, move || batch_reply(reader.read_artifacts(digests.as_slice(), limit_bytes, &check_in, &cache)))
+    }
+
+    /// Completion of a batched read: the queue answers the request's own
+    /// caller, then starts the next queued batch in the freed slot.
+    #[handler(task)]
+    fn on_read_artifacts_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadArtifactsResult>) {
+        state.batches.complete(ctx, done);
     }
 
     /// Read an artifact's transitive closure under the requested byte limit.
@@ -429,12 +478,17 @@ impl JournalActorState {
 fn artifact_reply(digest: Digest, outcome: Result<Option<ClosureArtifact>, JournalError>) -> ReadArtifactResult {
     match outcome {
         Ok(Some(artifact)) => ReadArtifactResult::Found { artifact },
-        Err(JournalError::ArtifactDigestMismatch(_)) => ReadArtifactResult::Err {
-            digest,
-            message: "stored artifact bytes do not match the requested digest".into(),
-        },
         Ok(None) => ReadArtifactResult::Missing { digest },
         Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
+    }
+}
+
+/// The reply a finished batched read answers with.
+fn batch_reply(outcome: Result<ReadPrefix, JournalError>) -> ReadArtifactsResult {
+    match outcome {
+        Ok(ReadPrefix::Found(artifacts)) => ReadArtifactsResult::Found { artifacts },
+        Ok(ReadPrefix::Missing(digest)) => ReadArtifactsResult::Missing { digest },
+        Err(error) => ReadArtifactsResult::Err { message: error.to_string() },
     }
 }
 

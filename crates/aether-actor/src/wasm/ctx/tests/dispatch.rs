@@ -5,11 +5,11 @@
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::ctx::{Erased, Single, Unchecked};
-use crate::model::{Addressable, HandlesKind, One, Resolve};
+use crate::model::{Addressable, One};
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
-use aether_data::{Kind, MailboxId, Source};
+use aether_data::{Kind, MailboxId};
 use alloc::string::String;
 use core::mem::{self, align_of, size_of};
 
@@ -18,26 +18,6 @@ struct RootPeer;
 impl Addressable for RootPeer {
     const NAMESPACE: &'static str = "test.wasm.root_peer";
     type Resolver = One;
-}
-
-impl HandlesKind<()> for RootPeer {}
-
-/// Types the ctx that sends to [`RootPeer`]: the flat typed verbs exist
-/// only on a ctx whose actor declares its recipient.
-struct PeerDependent;
-
-#[crate::actor(depends(RootPeer))]
-impl crate::WasmActor for PeerDependent {
-    const NAMESPACE: &'static str = "test.wasm.peer_dependent";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self)
-    }
-
-    #[fallback]
-    fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {
-        let _ = self;
-    }
 }
 
 #[aether_data::kind(name = "test.wasm.deferred_ask")]
@@ -230,28 +210,4 @@ fn ctx_parent_resolves_and_routes_in_place() {
     );
     parent.send(&());
     assert_eq!(registry.queued_len(), 1, "a send to the parent enqueues locally — no scheduler hop");
-}
-
-/// A tracked send to a resident cluster member never leaves the guest, so it
-/// enqueues in place and returns the no-correlation sentinel instead of a
-/// stale host correlation. Owned logic: the local branch of the tracked-send
-/// routing.
-#[test]
-fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
-    let registry = Registry::new();
-    let root = 0x7100_u64;
-    registry.set_self_id(root);
-    let peer = One::resolve(0, RootPeer::NAMESPACE, ());
-    install_inline_child::<SucceedingChild>(
-        &registry,
-        peer,
-        ChildRecord { full_subname: String::from("peer"), parent: root, ..ChildRecord::default() },
-        (),
-    )
-    .expect("install inline child");
-
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
-    let request = ctx.__for_actor::<PeerDependent>().send_tracked::<RootPeer>(&());
-    assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
-    assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");
 }

@@ -18,7 +18,7 @@ use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 use crate::reply_markers::{
     DeclaredLists, ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl,
-    contract_rows_expr, contracts_impl, declared_impl, native_reply_contract, owned_reason, position,
+    contract_rows_expr, contracts_impl, declared_impl, native_reply_contract, owned_reason, position, refusal_answer,
     reply_marker_impl, rows_list, static_reason,
 };
 
@@ -506,16 +506,39 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 #self_ty::#method_ident(__aether_state, __aether_ctx #erase, __aether_decoded);
             },
         };
-        let decode = if h.is_slice {
+        let decode_and_call = if h.is_slice {
             // Slice handler — payload is `count * size_of::<K>()`
             // contiguous bytes (ADR-0019 batch wire). Cast to `&[K]`
             // for the handler. Only meaningful for cast-shape kinds;
             // structured kinds have no batched wire shape.
-            quote! { ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload) }
+            quote! {
+                if let Some(__aether_decoded) =
+                    ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload)
+                {
+                    #call
+                    return ::core::option::Option::Some(());
+                }
+                return ::core::option::Option::None;
+            }
         } else {
             // ADR-0238 decision 3: decode against the inbound envelope's
             // attachments, so a tag-1 `Blob` field yields a shared value.
-            quote! { __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) }
+            // ADR-0231 §3: a replying row answers a refused typed path with
+            // its reply's `From<PathRefused>`; a silent or unchecked row drops
+            // the refusal.
+            let refuse = refusal_answer(h.class, &h.reply, kind_ty).map_or_else(
+                || quote! { __aether_ctx.__refuse_inbound_unanswered::<#kind_ty>(&__aether_error) },
+                |answer| quote! { __aether_ctx.__refuse_inbound::<#kind_ty, _>(&__aether_error, #answer) },
+            );
+            quote! {
+                match __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) {
+                    ::core::result::Result::Ok(__aether_decoded) => {
+                        #call
+                        return ::core::option::Option::Some(());
+                    }
+                    ::core::result::Result::Err(__aether_error) => return #refuse,
+                }
+            }
         };
         // iamacoffeepot/aether#4811: the arm rides the handler's own `#[cfg]`s. A
         // statement attribute is what carries them — the arm names both the kind
@@ -526,11 +549,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             #(#cfgs)*
             {
                 if __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 {
-                    if let Some(__aether_decoded) = #decode {
-                        #call
-                        return ::core::option::Option::Some(());
-                    }
-                    return ::core::option::Option::None;
+                    #decode_and_call
                 }
             }
         }

@@ -1,7 +1,7 @@
 error: #[program] trailing cap bindings require async fn run after Env<Async>
-  --> tests/ui/fail_binding_on_sync.rs:26:5
+  --> tests/ui/fail_binding_on_sync.rs:28:5
    |
-26 |     fn run(input: Self::Input, _env: &mut Env<Sync>, _http: Http) -> Result<Self::Result, Refusal> {
+28 |     fn run(input: Self::Input, _env: &mut Env<Sync>, _http: Http) -> Result<Self::Result, Refusal> {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `Mode` and `Refusal`

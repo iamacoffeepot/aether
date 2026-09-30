@@ -143,8 +143,9 @@ use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
     ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
     contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, owned_reason, position_past,
-    reply_marker_impl, row_entry, static_reason,
+    refusal_answer, reply_marker_impl, row_entry, static_reason,
 };
+use crate::wasm_expand::wasm_arm_body;
 
 /// Which actor transport a set's handlers are written against, read off the
 /// ctx parameter's type name the same way `expand_handlers` reads the trait
@@ -198,20 +199,55 @@ impl SetTransport {
         }
     }
 
-    /// One arm's kind-id test and payload decode, spelled the way the matching
-    /// `#[actor]` expansion spells them on that transport.
-    fn arm_terms(self, kind_ty: &Type) -> (TokenStream2, TokenStream2) {
+    /// One arm's kind-id test, and its decode, `call`, and `return rc`,
+    /// spelled the way the matching `#[actor]` expansion spells them on that
+    /// transport. A replying row passes the `answer` its refused typed path
+    /// goes through (ADR-0231 §3); a row without one, or a refusal the answer
+    /// does not cover, falls through to the next arm as a miss.
+    fn arm_terms(
+        self,
+        kind_ty: &Type,
+        answer: Option<&TokenStream2>,
+        call: &TokenStream2,
+        rc: &TokenStream2,
+    ) -> (TokenStream2, TokenStream2) {
         match self {
-            Self::Wasm => (
-                quote! { __aether_kind == <#kind_ty as ::aether_actor::__macro_internals::Kind>::ID },
-                quote! { __aether_mail.decode_kind::<#kind_ty>() },
-            ),
-            Self::Native => (
-                quote! { __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 },
+            Self::Wasm => {
+                let matches_kind =
+                    quote! { __aether_kind == <#kind_ty as ::aether_actor::__macro_internals::Kind>::ID };
+                (matches_kind, wasm_arm_body(kind_ty, answer, call, rc))
+            }
+            Self::Native => {
+                let matches_kind = quote! { __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 };
                 // ADR-0238 decision 3: resolve tag-1 `Blob` fields against the
                 // inbound envelope's attachments, as the `#[actor]` arm does.
-                quote! { __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) },
-            ),
+                let refuse = answer.map_or_else(
+                    || {
+                        quote! {
+                            let _ = __aether_ctx.__refuse_inbound_unanswered::<#kind_ty>(&__aether_error);
+                        }
+                    },
+                    |answer| {
+                        quote! {
+                            if __aether_ctx.__refuse_inbound::<#kind_ty, _>(&__aether_error, #answer).is_some() {
+                                return ::aether_actor::DISPATCH_HANDLED;
+                            }
+                        }
+                    },
+                );
+                let body = quote! {
+                    match __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) {
+                        ::core::result::Result::Ok(__aether_decoded) => {
+                            #call
+                            return #rc;
+                        }
+                        ::core::result::Result::Err(__aether_error) => {
+                            #refuse
+                        }
+                    }
+                };
+                (matches_kind, body)
+            }
         }
     }
 }
@@ -786,7 +822,8 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
                 Self::#method(#receiver, __aether_ctx #erase, __aether_decoded);
             },
         };
-        let (matches_kind, decode) = transport.arm_terms(k);
+        let answer = refusal_answer(h.class, &h.reply, k);
+        let (matches_kind, body) = transport.arm_terms(k, answer.as_ref(), &call, &rc);
         // ADR-0183: the arm rides the handler's own `#[cfg]`s the way
         // `build_dispatch_body` carries them on both `#[actor]` paths — the arm
         // names both the kind type and the method, neither of which exists in a
@@ -798,10 +835,7 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
         quote! {
             #(#cfgs)*
             if #matches_kind {
-                if let ::core::option::Option::Some(__aether_decoded) = #decode {
-                    #call
-                    return #rc;
-                }
+                #body
             }
         }
     });

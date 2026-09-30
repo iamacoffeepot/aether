@@ -476,9 +476,18 @@ pub trait ArtifactStorage {
     /// member of an artifact's closure as one slab of `Blob`s, `TooLarge`,
     /// `Missing`, or `Err`.
     fn read_closure(mail: ReadClosure) -> ReadClosureResult;
+    /// `aether.bloomery.journal.read_artifacts`: the named artifacts in
+    /// request order while their stored length fits the limit, and always
+    /// the first, as one slab of `Blob`s; `Missing`, or `Err`.
+    fn read_many(mail: ReadArtifacts) -> ReadArtifactsResult;
     /// New, beside it in `aether-bloomery-kinds`.
     fn stage(mail: Stage) -> StageResult;
 }
+
+/// Read these artifacts, in order, up to a byte limit. The answer is a
+/// non-empty prefix by contract; the caller asks again for the rest.
+#[aether_data::kind(name = "aether.bloomery.journal.read_artifacts", no_serde)]
+pub struct ReadArtifacts { digests: ArtifactDigests, limit_bytes: ClosureLimit }
 
 /// Store these artifacts: content-addressed, unfenced, no event, no head move.
 /// Each carries its kind, its bytes as a `Blob`, and its citations.
@@ -492,9 +501,15 @@ pub enum StageResult { Staged, Err { message: String } }
 `read_closure` is in the protocol so a tree whose closure fits the reader's
 budget is one request rather than one per node and blob; the journal already
 answers it off its thread and from its read cache, so the row costs it
-nothing new.
+nothing new. `read_many` serves what a closure over the budget leaves out:
+the workspace reads the blobs of such a directory as its archive reaches
+them, and one request names a blob and the later files of its listing the
+reader does not hold, up to 64 MiB and 4,096 artifacts, instead of one
+`ReadArtifact` each. Its answer is a prefix rather than all or nothing,
+since the caller knows what it asked for, and it is never charged to the
+read budget.
 
-`JournalActor` handles `ReadArtifact` and `ReadClosure` today and gains `Stage`, so
+`JournalActor` handles `ReadArtifact` and `ReadClosure` today and gains `ReadArtifacts` and `Stage`, so
 `ArtifactStorage: CoveredBy<JournalActor>` holds and the journal stays the
 only writer (ADR-0237 open question 1). `Stage` is the write the journal's
 in-process `ArtifactStore` does for the workspace today, as mail. `Publish`

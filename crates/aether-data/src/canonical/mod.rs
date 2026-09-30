@@ -27,6 +27,8 @@
 //!     runtime `kind_id_from_parts` sibling used by the substrate.
 //!   - `labels`: `KindLabels` sidecar serializer.
 //!   - `inputs`: `InputsRecord` record encoders (ADR-0033).
+//!   - `docs`: `DocNode` doc-tree serializer, for records that carry a
+//!     type's field docs beside its kind id.
 
 // clippy's `ptr_arg` rightly recommends `&[T]` / `&str` over
 // `&Cow<[T]>` / `&Cow<str>` in most APIs — deref coercion makes
@@ -37,11 +39,13 @@
 // propagates to every child submodule.
 #![allow(clippy::ptr_arg)]
 
+mod docs;
 mod inputs;
 mod labels;
-mod primitives;
+pub(crate) mod primitives;
 mod schema;
 
+pub use docs::{canonical_len_docs, canonical_serialize_docs, canonical_write_docs};
 pub use inputs::{
     inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_dependency_len, inputs_fallback_len,
     inputs_handler_len, inputs_instanced_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component,

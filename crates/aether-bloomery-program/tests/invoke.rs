@@ -67,6 +67,7 @@ impl Program for Cite {
     const NAME: &'static str = "cite.child";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Read a closure child and stage cited text.";
+    const DOC: &'static str = "Read a closure child and stage cited text.";
     type Input = CiteInput;
     type Result = CiteResult;
 }
@@ -84,6 +85,7 @@ impl Program for MissingInput {
     const NAME: &'static str = "missing.input";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Never runs; the input is absent.";
+    const DOC: &'static str = "Never runs; the input is absent.";
     type Input = Child;
     type Result = Child;
 }
@@ -100,6 +102,7 @@ impl Program for MissingRead {
     const NAME: &'static str = "missing.read";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Read a digest the closure does not carry.";
+    const DOC: &'static str = "Read a digest the closure does not carry.";
     type Input = Child;
     type Result = Child;
 }
@@ -123,6 +126,7 @@ impl Program for Orphan {
     const NAME: &'static str = "stage.orphan";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Stage a blob the result does not cite.";
+    const DOC: &'static str = "Stage a blob the result does not cite.";
     type Input = Child;
     type Result = Pair;
 }
@@ -141,6 +145,7 @@ impl Program for Dedupe {
     const NAME: &'static str = "stage.dedupe";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Stage the same bytes twice.";
+    const DOC: &'static str = "Stage the same bytes twice.";
     type Input = Child;
     type Result = Pair;
 }
@@ -160,6 +165,7 @@ impl Program for EchoText {
     const NAME: &'static str = "echo.text";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Read cited text and stage it back.";
+    const DOC: &'static str = "Read cited text and stage it back.";
     type Input = CiteResult;
     type Result = CiteResult;
 }
@@ -303,6 +309,7 @@ impl Program for AsyncSummarize {
     const NAME: &'static str = "async.summarize";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Fetch cited text and stage a derived summary.";
+    const DOC: &'static str = "Fetch cited text and stage a derived summary.";
     type Input = SummarizeInput;
     type Result = SummarizeResult;
 }
@@ -398,6 +405,7 @@ impl Program for SampledHttp {
     const NAME: &'static str = "sampled.http";
     const MODE: Mode = Mode::Sampled;
     const INTENT: &'static str = "Fetch and stage the response body.";
+    const DOC: &'static str = "Fetch and stage the response body.";
     type Input = HttpInput;
     type Result = HttpResult;
 }
@@ -481,6 +489,7 @@ impl Program for SampledProcess {
     const NAME: &'static str = "sampled.process";
     const MODE: Mode = Mode::Sampled;
     const INTENT: &'static str = "Run a binary and stage stdout.";
+    const DOC: &'static str = "Run a binary and stage stdout.";
     type Input = ProcessInput;
     type Result = ProcessOut;
 }
@@ -566,6 +575,7 @@ impl Program for SampledWorkspace {
     const NAME: &'static str = "sampled.workspace";
     const MODE: Mode = Mode::Sampled;
     const INTENT: &'static str = "Run one step and cite its stdout.";
+    const DOC: &'static str = "Run one step and cite its stdout.";
     type Input = WorkspaceInput;
     type Result = WorkspaceOut;
 }
@@ -659,7 +669,9 @@ fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_re
     assert_eq!((result, staged), (expected.digest(), vec![expected]), "the result cites stdout without staging it");
 
     let unknown = aether_bloomery_workspace::Refusal::UnknownTool(aether_bloomery_workspace::ToolName::new("tool")?);
-    let (refused, after_await) = answer_workspace(&aether_bloomery_workspace::RunResult::Refused(unknown))?;
+    let (refused, after_await) = answer_workspace(&aether_bloomery_workspace::RunResult::Err(
+        aether_bloomery_workspace::RunError::Refused(unknown),
+    ))?;
     let PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } }) = refused else {
         return Err(format!("expected the program's own refusal, got {refused:?}").into());
     };
@@ -676,15 +688,21 @@ fn an_exhausted_or_failed_run_ends_the_invocation_unseen_by_the_program() -> Res
     let detail = Detail::new("starting container c1: the Docker daemon answered 500");
     let cases = [
         (
-            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Time),
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Exhausted(
+                aether_bloomery_workspace::Resource::Time,
+            )),
             ExecutorFault::TimedOut,
         ),
         (
-            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Memory),
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Exhausted(
+                aether_bloomery_workspace::Resource::Memory,
+            )),
             ExecutorFault::ResourceExhausted,
         ),
         (
-            aether_bloomery_workspace::RunResult::Failed { detail: detail.clone() },
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Failed {
+                detail: detail.clone(),
+            }),
             ExecutorFault::Failed { reason: detail },
         ),
     ];

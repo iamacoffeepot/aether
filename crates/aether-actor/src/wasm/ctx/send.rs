@@ -2,7 +2,7 @@
 //! declared dependency, and through a held reference) and the
 //! [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
-use aether_data::{ActorMail, Kind, RequestId, Source};
+use aether_data::{ActorMail, Kind, RequestId};
 
 use super::WasmCtx;
 use crate::blob::guest::{EncodedGuestMail, encode_guest};
@@ -13,7 +13,7 @@ use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{Addressable, CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
 use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
-use crate::wasm::inline::{ChainMode, RouteDecision};
+use crate::wasm::inline::{ChainMode, send_through_host};
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Issue 1987: send `payload` through a held reference, threading this
@@ -69,8 +69,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 
     /// Send a request to the declared dependency `R` and return the
     /// correlation id the host minted for it, inheriting the handler's causal
-    /// chain like [`Self::send`]. An inline-cluster local route has no host
-    /// correlation, so it warn-logs and returns the no-correlation sentinel.
+    /// chain like [`Self::send`]. A tracked send always goes through the host,
+    /// even to a member of this actor's own inline cluster, so the id is always
+    /// a real correlation its reply comes back on (ADR-0139).
     ///
     /// Its consumer is the fs demux fixture, which matches two
     /// indistinguishable `aether.fs.read` replies by these ids.
@@ -90,9 +91,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// The context moves into the table (ADR-0243 §4), so it may carry a
     /// [`Held`](crate::Held) reply: storing parks the ticket, and the reply
-    /// handler's take claims it back. An inline-cluster local route mints no
-    /// correlation, so nothing is stored and the context is dropped; a live
-    /// `Held` in it then panics as an unanswered drop.
+    /// handler's take claims it back. The send goes through the host even to
+    /// a member of this actor's own inline cluster, so the id is always a real
+    /// correlation and the context always reaches its reply.
     ///
     /// Its consumer is the fs demux fixture's context flow, whose two reads
     /// carry distinct typed contexts.
@@ -107,11 +108,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         R::Resolver: DependencyResolver,
     {
         let request = self.push_tracked(self.actor_ref::<R>(), payload);
-        if request.0 == Source::NO_CORRELATION {
-            drop(context);
-        } else {
-            self.inline.insert_request_context(request, context);
-        }
+        self.inline.insert_request_context(request, context);
         request
     }
 
@@ -164,27 +161,14 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     }
 
     /// [`Self::push`] with the chain inherited, returning the correlation id
-    /// the host minted for the send. An inline-cluster local send never
-    /// leaves the guest, so no host correlation exists for it: that path
-    /// warn-logs and returns the no-correlation sentinel rather than reading
-    /// a stale `prev_correlation_p32` value. The warning names the recipient
-    /// by `R`'s namespace, which the caller's type already states.
+    /// the host minted for the send. It skips the inline registry's in-place
+    /// route: a cluster-member recipient would drain with no correlation and
+    /// no reply handle, so its answer could never come back. Through the host
+    /// the reply arrives as a correlated top-level dispatch (ADR-0114
+    /// addressing amendment, ADR-0139).
     fn push_tracked<R: Addressable, K: ActorMail>(&self, recipient: ActorRef<R>, payload: &K) -> RequestId {
-        match self.inline.route_decision(recipient.id().0) {
-            RouteDecision::Local => {
-                self.push(recipient.erase(), payload, ChainMode::Inherit);
-                tracing::warn!(
-                    kind = <K as Kind>::NAME,
-                    recipient = R::NAMESPACE,
-                    "send_tracked on an inline-cluster local route has no host correlation",
-                );
-                RequestId(Source::NO_CORRELATION)
-            }
-            RouteDecision::Remote => {
-                self.push(recipient.erase(), payload, ChainMode::Inherit);
-                RequestId(mail::prev_correlation())
-            }
-        }
+        send_through_host(recipient.id().0, K::ID.0, encode_guest(payload), 1, ChainMode::Inherit, self.mailbox);
+        RequestId(mail::prev_correlation())
     }
 }
 
@@ -192,9 +176,10 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 // id then routes through the inline registry's `route_or_enqueue`, so a send
 // to a cluster member (own id or a resident inline-child alias) dispatches in
 // place through the membrane (queue + drain) and only a cross-cluster
-// recipient hits the host. For a childless component with no captured
-// `self_id` match the recipient is always `Remote`, so the path is identical
-// to a bare `mail::send_mail`.
+// recipient hits the host. A tracked send is the exception: `push_tracked`
+// always goes through the host so its reply carries a correlation. For a
+// childless component with no captured `self_id` match the recipient is
+// always `Remote`, so the path is identical to a bare `mail::send_mail`.
 impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()

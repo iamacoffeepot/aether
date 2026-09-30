@@ -4,6 +4,7 @@ use aether_bloomery_program::{Async, Env, Program, program};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.async.noreturn.input")]
 struct In {
+    /// A test value.
     n: u32,
 }
 
@@ -15,6 +16,7 @@ struct Out {
 
 struct NoReturn;
 
+/// A test program.
 #[program]
 impl Program for NoReturn {
     const NAME: &'static str = "test.program.async.noreturn";

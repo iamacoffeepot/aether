@@ -291,6 +291,9 @@ sends through the `ProtocolRef<P>`.
 A loaded wasm component's reference comes from the load itself:
 `SubstrateHarness::load::<R>` types the reply's stamped sender as the export
 `R`, and `load_any` returns it erased for a fixture that ships only as wasm.
+The load returns only after its chain settles, so the routes the component's
+`wire` staged, its inline children included, are live and `child::<P, C>`
+finds them.
 `load_any` also returns the canonical lineage path the host reported; a typed
 reference's path comes from `SubstrateHarness::actor_path`, for an assertion
 against it or a `CaptureWithMails` bundle recipient:

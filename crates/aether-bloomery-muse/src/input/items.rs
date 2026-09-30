@@ -1,39 +1,63 @@
 //! The conversation a turn resends: a flat, ordered list of role-tagged texts.
 
+use std::collections::BTreeSet;
+
 use aether_bloomery_kinds::{Ref, Utf8Text};
+
+use super::tools::{CallId, ToolCall};
 
 /// Who spoke an item. System-style instructions are a leading `Developer` item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 pub enum Role {
+    /// Instructions to the model, above the conversation.
     Developer,
+    /// The person the model answers.
     User,
+    /// The model's own earlier reply.
     Assistant,
 }
 
-/// One item of the conversation: its speaker and the cited text it said.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
-pub struct TurnItem {
-    role: Role,
-    text: Ref<Utf8Text>,
+/// One item of the conversation: a message, or a call and its output
+/// replayed from an earlier turn.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub enum TurnItem {
+    /// A message: its speaker and the cited text it said.
+    Message {
+        /// Who spoke the message.
+        role: Role,
+        /// The cited text of the message.
+        text: Ref<Utf8Text>,
+    },
+    /// A call the model asked for in an earlier turn, replayed as a
+    /// `function_call` item.
+    Call(ToolCall),
+    /// The output of an earlier call, replayed as a `function_call_output`
+    /// item.
+    CallOutput {
+        /// The id of the earlier call this is the output of.
+        call_id: CallId,
+        /// The cited output text: the program's result, or the reason its
+        /// arguments did not decode.
+        output: Ref<Utf8Text>,
+    },
 }
 
 impl TurnItem {
-    /// One item citing `text` as spoken by `role`.
+    /// One message citing `text` as spoken by `role`.
     #[must_use]
-    pub const fn new(role: Role, text: Ref<Utf8Text>) -> Self {
-        Self { role, text }
+    pub const fn message(role: Role, text: Ref<Utf8Text>) -> Self {
+        Self::Message { role, text }
     }
 
-    /// Who spoke the item.
-    #[must_use]
-    pub const fn role(&self) -> Role {
-        self.role
-    }
-
-    /// The cited text of the item.
+    /// The cited text the item carries: a message's text, a call's
+    /// arguments, or a call's output.
     #[must_use]
     pub const fn text(&self) -> Ref<Utf8Text> {
-        self.text
+        match self {
+            Self::Message { text, .. } => *text,
+            Self::Call(call) => call.arguments(),
+            Self::CallOutput { output, .. } => *output,
+        }
     }
 }
 
@@ -44,8 +68,12 @@ pub enum TurnItemsError {
     Empty,
     /// More than [`TurnItems::MAX_ITEMS`] items.
     TooMany,
-    /// The last item was not spoken by [`Role::User`].
+    /// The last item was neither a [`Role::User`] message nor a call output.
     LastNotUser,
+    /// A call output named no earlier call.
+    OrphanOutput,
+    /// Two calls shared one call id.
+    DuplicateCall,
 }
 
 impl TurnItemsError {
@@ -54,11 +82,15 @@ impl TurnItemsError {
             Self::Empty => "empty",
             Self::TooMany => "too-many",
             Self::LastNotUser => "last-not-user",
+            Self::OrphanOutput => "orphan-output",
+            Self::DuplicateCall => "duplicate-call",
         }
     }
 }
 
-/// The whole conversation, in order: never empty, and it ends on a user item.
+/// The whole conversation, in order: never empty, ending on a user message
+/// or a call output, with every call output after the call it answers and no
+/// call id twice.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[storage(validate)]
 pub struct TurnItems(Vec<TurnItem>);
@@ -67,7 +99,7 @@ impl TurnItems {
     /// Most items one turn may carry.
     pub const MAX_ITEMS: usize = 4096;
 
-    /// Accept a conversation that ends on a user item.
+    /// Accept a conversation that keeps every rule on [`TurnItems`].
     ///
     /// # Errors
     ///
@@ -90,8 +122,24 @@ impl TurnItems {
         if items.len() > Self::MAX_ITEMS {
             return Err(TurnItemsError::TooMany);
         }
-        if last.role != Role::User {
+        if !matches!(last, TurnItem::Message { role: Role::User, .. } | TurnItem::CallOutput { .. }) {
             return Err(TurnItemsError::LastNotUser);
+        }
+        let mut calls = BTreeSet::new();
+        for item in items {
+            match item {
+                TurnItem::Message { .. } => {}
+                TurnItem::Call(call) => {
+                    if !calls.insert(call.call_id()) {
+                        return Err(TurnItemsError::DuplicateCall);
+                    }
+                }
+                TurnItem::CallOutput { call_id, .. } => {
+                    if !calls.contains(call_id) {
+                        return Err(TurnItemsError::OrphanOutput);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -101,18 +149,20 @@ invariant_errors!(TurnItemsError);
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Ref, Utf8Text};
+    use aether_bloomery_kinds::{ProgramName, Ref, Utf8Text};
     use aether_data::{Storage, StorageData};
 
     use super::{Role, TurnItem, TurnItems};
+    use crate::input::tools::{CallId, OfferedTool, OfferedTools};
     use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, TurnInput};
 
     #[test]
     fn a_stored_input_that_breaks_a_rule_refuses_on_decode() {
         // Catches a dropped `#[storage(validate)]`, which would let an invalid input in through the journal.
-        let with_items = |items: TurnItems| TurnInput {
+        let input = |tools: OfferedTools, items: TurnItems| TurnInput {
             endpoint: Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
             model: ModelName::new("muse-spark-1.3").expect("model"),
+            tools,
             items,
             max_output_tokens: OutputBudget::new(64).expect("budget"),
             reasoning: ReasoningEffort::Low,
@@ -120,12 +170,20 @@ mod tests {
         let stored = |input: TurnInput| TurnInput::encode_storage(&StorageData::from_value(input)).expect("encode");
         let decoded = |bytes: &[u8]| TurnInput::decode_storage(bytes).map(|data| data.value);
 
-        let user = TurnItem::new(Role::User, Ref::<Utf8Text>::of_text("hello"));
-        let valid = with_items(TurnItems::new(vec![user]).expect("one user item"));
+        let user = TurnItem::message(Role::User, Ref::<Utf8Text>::of_text("hello"));
+        let tool = OfferedTool::new(ProgramName::new("muse.turn").expect("program"), Ref::of_text("{}"));
+        let tools = OfferedTools::new(vec![tool]).expect("one tool");
+        let valid = input(tools, TurnItems::new(vec![user.clone()]).expect("one user item"));
         assert_eq!(decoded(&stored(valid.clone())).ok(), Some(valid), "a valid input decodes");
 
-        assert!(decoded(&stored(with_items(TurnItems(Vec::new())))).is_err(), "an empty list refuses");
-        let assistant_last = TurnItems(vec![user, TurnItem::new(Role::Assistant, Ref::of_text("hi"))]);
-        assert!(decoded(&stored(with_items(assistant_last))).is_err(), "an assistant-last list refuses");
+        let no_tools = OfferedTools::default;
+        assert!(decoded(&stored(input(no_tools(), TurnItems(Vec::new())))).is_err(), "an empty list refuses");
+        let assistant_last = TurnItems(vec![user, TurnItem::message(Role::Assistant, Ref::of_text("hi"))]);
+        assert!(decoded(&stored(input(no_tools(), assistant_last))).is_err(), "an assistant-last list refuses");
+        let orphan = TurnItems(vec![TurnItem::CallOutput {
+            call_id: CallId::new("call_1").expect("call id"),
+            output: Ref::of_text("done"),
+        }]);
+        assert!(decoded(&stored(input(no_tools(), orphan))).is_err(), "an orphan call output refuses");
     }
 }

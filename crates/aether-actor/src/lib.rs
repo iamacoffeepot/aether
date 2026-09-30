@@ -44,6 +44,7 @@ pub mod mail;
 pub mod model;
 mod path;
 pub mod reference;
+mod refusal_answer;
 pub mod request_context;
 pub mod trace;
 pub mod wasm;
@@ -64,7 +65,7 @@ pub use model::{
     Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
     validate_namespace_segment,
 };
-pub use path::{ActorPath, ProtocolPath, ResolveError};
+pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError};
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref};
 pub use reference::{ActorRef, Direct, ErasedActorRef, HandsOff, ProtocolRef, Target};
@@ -155,6 +156,10 @@ pub mod __macro_internals {
     // ADR-0231 §4: `#[protocol]` opts each protocol into the guard cast's
     // protocol arm with this marker.
     pub use crate::model::ProtocolCast;
+    // ADR-0231 §3: a dispatch arm answers a refused typed path through the
+    // row's reply with this selector, which refuses to compile when a
+    // path-carrying request's reply cannot say so.
+    pub use crate::refusal_answer::{Refusal, RefusalAnswer, refused_reply};
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, CrossesActors, Kind, KindId, ReplyContract, Schema};

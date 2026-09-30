@@ -193,8 +193,11 @@ impl OutputBudget {
 /// How much reasoning the model spends before it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 pub enum ReasoningEffort {
+    /// Reason briefly: the fastest and cheapest answer.
     Low,
+    /// Reason a moderate amount.
     Medium,
+    /// Reason at length before answering.
     High,
 }
 

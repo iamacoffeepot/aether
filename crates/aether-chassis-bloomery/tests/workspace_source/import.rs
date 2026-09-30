@@ -3,11 +3,11 @@
 use std::error::Error;
 use std::thread;
 
-use aether_actor::ActorPath;
+use aether_actor::{ActorPath, PathRefusal, PathRefused};
 use aether_bloomery_journal::{JournalActor, JournalReader};
 use aether_bloomery_kinds::{Node, Path, Ref, Tree, UnitKey};
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
-use aether_bloomery_workspace::{ImageRef, Import, ImportResult};
+use aether_bloomery_workspace::{ImageRef, Import, ImportError, ImportResult};
 use aether_harness_bloomery::BloomeryHarness;
 
 use crate::support::{CONTAINER, IMAGE, TestResult, boot, child, large_payload, lines, serving, stored, tree_of};
@@ -53,14 +53,14 @@ fn userland_export() -> Vec<u8> {
 fn tree_of_answer(answer: ImportResult) -> Result<Ref<Tree>, Box<dyn Error>> {
     match answer {
         ImportResult::Ok { tree } => Ok(tree),
-        ImportResult::Failed { detail } => Err(format!("the import failed: {}", detail.as_str()).into()),
+        ImportResult::Err(error) => Err(format!("the import failed: {error:?}").into()),
     }
 }
 
 fn failed(answer: &ImportResult) -> Result<&str, Box<dyn Error>> {
     match answer {
-        ImportResult::Failed { detail } => Ok(detail.as_str()),
-        ImportResult::Ok { tree } => Err(format!("expected Failed, got the tree {}", tree.digest()).into()),
+        ImportResult::Err(ImportError::Failed { detail }) => Ok(detail.as_str()),
+        other => Err(format!("expected Failed, got {other:?}").into()),
     }
 }
 
@@ -276,21 +276,25 @@ fn an_export_of_more_files_than_one_stage_batch_holds_stages_every_blob_its_tree
 }
 
 #[test]
-fn a_request_naming_a_unit_with_no_journal_reaches_no_daemon() -> TestResult {
-    // Catches a source that is not proven when the request decodes: an import naming storage no journal stands at
-    // would pull, create, and export into nothing. The refused import gets no reply, so the import after it proves
-    // the workspace handled it first, and the stub serves that second import's requests alone.
+fn a_request_naming_a_unit_with_no_journal_is_answered_and_reaches_no_daemon() -> TestResult {
+    // Catches a source that is not proven when the request decodes, and a refusal that goes unanswered: an import
+    // naming storage no journal stands at would pull, create, and export into nothing, and one dropped at decode
+    // would leave its requester waiting forever. The refused import is answered naming the path before the import
+    // after it, and the stub serves that second import's requests alone.
     let stub = StubDaemon::bind()?;
     let mut harness = boot(Vec::new(), &stub.endpoint(), &[])?;
     let elsewhere = ActorPath::<JournalActor>::instance(UnitKey::new("elsewhere")?.as_load_name());
     let unhoused = Import { image: ImageRef::new(IMAGE)?, source: elsewhere.narrow() };
     let request = import(&harness)?;
 
-    let (answer, requests) = serving(stub, StubReply::import_script(IMAGE, CONTAINER, &userland_export()), || {
-        let _refused = harness.send_import(&unhoused);
-        harness.import(&request)
-    })?;
+    let ((refused, answer), requests) =
+        serving(stub, StubReply::import_script(IMAGE, CONTAINER, &userland_export()), || {
+            let refused = harness.import(&unhoused);
+            (refused, harness.import(&request))
+        })?;
 
+    let expected = PathRefused { path: unhoused.source.as_erased().clone(), reason: PathRefusal::Unpublished };
+    assert_eq!(refused, ImportResult::Err(ImportError::Source(expected)));
     tree_of_answer(answer)?;
     assert_eq!(requests.len(), 5, "one import reached the daemon: {:?}", lines(&requests));
     Ok(())

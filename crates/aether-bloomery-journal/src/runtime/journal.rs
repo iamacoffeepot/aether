@@ -472,13 +472,14 @@ fn seed_empty_tree(conn: &mut Connection, blobs: &BlobDir, recorded_at_millis: u
     Ok(())
 }
 
-/// Store each staged blob whose row is absent: its file is fsynced and
-/// renamed through [`BlobDir::store`] before its row and citation edges are
-/// inserted, and every directory the placements touched is fsynced once
-/// after the last of them, before this returns and so before `append`
-/// commits. A committed row always names a complete, durable file. A refusal later in the
-/// append rolls the rows back and leaves any renamed file as a harmless
-/// orphan, since the same content has the same name.
+/// Store each staged blob whose row is absent: its file is written through
+/// [`BlobDir::store`] and its row and citation edges inserted, then
+/// [`BlobDir::flush`] makes every file durable, renames each to its digest
+/// name, and fsyncs every directory the renames touched, before this returns
+/// and so before `append` commits. A committed row always names a complete,
+/// durable file. A refusal later in the append rolls the rows back and leaves
+/// any renamed file as a harmless orphan, since the same content has the
+/// same name.
 fn insert_staged(
     tx: &Transaction<'_>,
     blobs: &BlobDir,
@@ -498,7 +499,7 @@ fn insert_staged(
         let size_bytes = u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?;
         rows.insert(&staged.digest, size_bytes, &staged.citations)?;
     }
-    blobs.sync_pending(&mut pending)
+    blobs.flush(&mut pending)
 }
 
 /// The row-and-edges insert both write doors share: [`Journal::append`] and

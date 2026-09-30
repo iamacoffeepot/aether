@@ -1,7 +1,7 @@
 error: #[program] run must not take a receiver; Program::run is associated
-  --> tests/ui/fail_run_receiver.rs:26:12
+  --> tests/ui/fail_run_receiver.rs:28:12
    |
-26 |     fn run(&self, input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+28 |     fn run(&self, input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
    |            ^^^^^
 
 warning: unused imports: `Mode` and `Refusal`

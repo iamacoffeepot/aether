@@ -7,7 +7,8 @@
 //! and select an in-bundle actor with `export: Some("<NAMESPACE>")`.
 //!
 //! The `InlineChild` / `InlineDespawnChild` inline children ride in
-//! `inline_child` under the `export!` call's `private = [..]` key: each
+//! `inline_child`, and `InlineContextAsker` in `inline_context`, under the
+//! `export!` call's `private = [..]` key: each
 //! parent constructs its child in-process and a replace rebuilds it, but the
 //! host never instantiates it by selector (issue 6136). The typed↔reshaped
 //! replace pair is *not* here: a cross-module `replace_component` needs two
@@ -23,6 +24,7 @@ mod editor_region_probe;
 mod held_carry;
 mod http_handler;
 mod inline_child;
+mod inline_context;
 mod mat4_source;
 mod matrix_sweep;
 mod multi_actor;
@@ -50,6 +52,7 @@ pub use inline_child::{
     InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedLineageChild, NestedLineageLeaf,
     NestedLineageParent,
 };
+pub use inline_context::{InlineContextAsker, InlineContextHost};
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
@@ -100,6 +103,7 @@ aether_actor::export!(
         NestedLineageChild,
         NestedLineageLeaf,
         InlineTagParent,
+        InlineContextHost,
         Counter,
         Sidecar,
         RehydrateTrap,
@@ -117,7 +121,7 @@ aether_actor::export!(
         ContractExtended,
         ContractFallback,
     ],
-    private = [InlineChild, InlineDespawnChild],
+    private = [InlineChild, InlineDespawnChild, InlineContextAsker],
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

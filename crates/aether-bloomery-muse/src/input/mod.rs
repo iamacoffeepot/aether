@@ -1,26 +1,42 @@
 //! `muse.turn.input`: everything one turn sends except the credential.
 //!
-//! The input plus every text its items cite is the recorded closure, so the
-//! journal holds the whole request. Every field is a validated type, and each
+//! The input plus every text its items and offered tools cite is the recorded
+//! closure, so the journal holds the whole request. Every field is a validated type, and each
 //! validated newtype re-checks on decode.
 
 mod items;
 mod limits;
+mod tools;
 
 pub use items::{Role, TurnItem, TurnItems, TurnItemsError};
 pub use limits::{
     Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, ReasoningEffort,
 };
+pub use tools::{
+    CallId, CallIdError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall, ToolCalls, ToolCallsError,
+};
 
-/// One stateless turn: where it goes, which model answers, the whole
-/// conversation, the output budget, and the reasoning effort.
+/// One stateless turn: where it goes, which model answers, the programs it
+/// offers as tools, the whole conversation, the output budget, and the
+/// reasoning effort.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.turn.input")]
 pub struct TurnInput {
+    /// The absolute `https://` or `http://` URL of the responses endpoint the
+    /// turn posts to.
     endpoint: Endpoint,
+    /// The model that answers: 1 to 128 bytes matching `[a-z0-9][a-z0-9._-]*`.
     model: ModelName,
+    /// The programs offered to the model as tools, each with the definition
+    /// sent for it: at most 128, no program twice. Empty offers none.
+    tools: OfferedTools,
+    /// The whole conversation in order, from 1 to 4096 items, ending on a user
+    /// message or a call output.
     items: TurnItems,
+    /// The most output tokens, reasoning included, the turn may produce.
+    /// Never zero.
     max_output_tokens: OutputBudget,
+    /// How much the model reasons before it answers.
     reasoning: ReasoningEffort,
 }
 
@@ -30,11 +46,12 @@ impl TurnInput {
     pub const fn new(
         endpoint: Endpoint,
         model: ModelName,
+        tools: OfferedTools,
         items: TurnItems,
         max_output_tokens: OutputBudget,
         reasoning: ReasoningEffort,
     ) -> Self {
-        Self { endpoint, model, items, max_output_tokens, reasoning }
+        Self { endpoint, model, tools, items, max_output_tokens, reasoning }
     }
 
     /// The URL the turn posts to.
@@ -47,6 +64,12 @@ impl TurnInput {
     #[must_use]
     pub const fn model(&self) -> &ModelName {
         &self.model
+    }
+
+    /// The programs offered as tools, in the order sent.
+    #[must_use]
+    pub fn tools(&self) -> &[OfferedTool] {
+        self.tools.as_slice()
     }
 
     /// The whole conversation, in order.
@@ -70,11 +93,11 @@ impl TurnInput {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::Ref;
+    use aether_bloomery_kinds::{ProgramName, Ref};
 
     use super::{
-        Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, Role, TurnItem, TurnItems,
-        TurnItemsError,
+        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, Role, ToolCall,
+        TurnItem, TurnItems, TurnItemsError,
     };
 
     #[test]
@@ -115,13 +138,45 @@ mod tests {
         assert_eq!(OutputBudget::new(0), Err(OutputBudgetError::Zero));
         assert_eq!(OutputBudget::new(1).map(OutputBudget::get), Ok(1));
 
-        let item = |role| TurnItem::new(role, Ref::of_text("text"));
+        let call = |id: &str| {
+            ToolCall::new(
+                CallId::new(id).expect("call id"),
+                ProgramName::new("muse.turn").expect("program"),
+                Ref::of_text("{}"),
+            )
+        };
+        let item = |role| TurnItem::message(role, Ref::of_text("text"));
         let user = item(Role::User);
+        let output =
+            |id: &str| TurnItem::CallOutput { call_id: CallId::new(id).expect("call id"), output: Ref::of_text("ok") };
         let items = [
-            (Vec::new(), TurnItemsError::Empty, vec![user]),
-            (vec![user; TurnItems::MAX_ITEMS + 1], TurnItemsError::TooMany, vec![user; TurnItems::MAX_ITEMS]),
-            (vec![user, item(Role::Assistant)], TurnItemsError::LastNotUser, vec![item(Role::Assistant), user]),
-            (vec![item(Role::Developer)], TurnItemsError::LastNotUser, vec![item(Role::Developer), user]),
+            (Vec::new(), TurnItemsError::Empty, vec![user.clone()]),
+            (
+                vec![user.clone(); TurnItems::MAX_ITEMS + 1],
+                TurnItemsError::TooMany,
+                vec![user.clone(); TurnItems::MAX_ITEMS],
+            ),
+            (
+                vec![user.clone(), item(Role::Assistant)],
+                TurnItemsError::LastNotUser,
+                vec![item(Role::Assistant), user.clone()],
+            ),
+            (vec![item(Role::Developer)], TurnItemsError::LastNotUser, vec![item(Role::Developer), user.clone()]),
+            (
+                vec![user.clone(), TurnItem::Call(call("a")), output("b")],
+                TurnItemsError::OrphanOutput,
+                vec![user.clone(), TurnItem::Call(call("a")), output("a")],
+            ),
+            (
+                vec![user.clone(), output("a"), TurnItem::Call(call("a")), output("a")],
+                TurnItemsError::OrphanOutput,
+                vec![user.clone(), TurnItem::Call(call("a")), output("a")],
+            ),
+            (
+                vec![user.clone(), TurnItem::Call(call("a")), TurnItem::Call(call("a")), output("a")],
+                TurnItemsError::DuplicateCall,
+                vec![user, TurnItem::Call(call("a")), TurnItem::Call(call("b")), output("a"), output("b")],
+            ),
         ];
         for (reject, error, accept) in items {
             assert_eq!(TurnItems::new(reject), Err(error));

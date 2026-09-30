@@ -18,6 +18,7 @@ impl Program for First {
     const NAME: &'static str = "test.root.first";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Echo the count.";
+    const DOC: &'static str = "Echo the count.";
     type Input = Count;
     type Result = Count;
 }
@@ -34,6 +35,7 @@ impl Program for Second {
     const NAME: &'static str = "test.root.second";
     const MODE: Mode = Mode::Pure;
     const INTENT: &'static str = "Bump the count.";
+    const DOC: &'static str = "Bump the count.";
     type Input = Count;
     type Result = Count;
 }

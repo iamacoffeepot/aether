@@ -17,8 +17,11 @@ mod parse;
 
 /// Outer attribute on `impl Program for Name`.
 ///
-/// Takes no arguments. The impl must declare `NAME`, `INTENT`, `MODE` (`Pure`
-/// or `Sampled`), `Input`, and `Result`. `run` is an associated function: no
+/// Takes no arguments. The impl must carry a `///` doc, the program's tool
+/// description, which `#[program]` writes as `const DOC`, and must declare
+/// `NAME`, `INTENT`, `MODE` (`Pure` or `Sampled`), `Input`, and `Result`.
+/// `Input` must be a struct with a `///` doc on every field and variant it
+/// exposes; the first gap is a compile error naming it. `run` is an associated function: no
 /// receiver. `fn run` pairs with `Env<Sync>`; `async fn run` pairs with
 /// `Env<Async>`. Optional cap bindings follow `env`, each an `Http`, a
 /// `Process`, or a `Workspace` in whatever path the author writes it; each is

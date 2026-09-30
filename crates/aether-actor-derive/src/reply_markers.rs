@@ -108,6 +108,25 @@ pub fn contract_reply_ty(class: HandlerClass, reply: &HandlerReply) -> TokenStre
     }
 }
 
+/// The function a replying row's dispatch arm answers a refused typed path
+/// through (ADR-0231 §3): `<Refusal<{ K::PROVES_ROUTES }> as
+/// RefusalAnswer<O>>::answer`, over the row's concrete request kind `K` and
+/// reply `O`. A kind that carries no `ProtocolPath` selects the impl that
+/// answers nothing; one that carries a path selects the impl bounded by
+/// `O: From<PathRefused>`, so a reply that cannot name the refusal fails to
+/// compile at the handler's return type. `None` for a silent or unchecked
+/// row, which keeps the warn-drop.
+pub fn refusal_answer(class: HandlerClass, reply: &HandlerReply, kind_ty: &Type) -> Option<TokenStream2> {
+    let (HandlerClass::Single, Some(reply_ty)) = (class, reply.manifest_kind()) else {
+        return None;
+    };
+    Some(quote_spanned! {reply_ty.span()=>
+        <::aether_actor::__macro_internals::Refusal<{
+            <#kind_ty as ::aether_actor::__macro_internals::Kind>::PROVES_ROUTES
+        }> as ::aether_actor::__macro_internals::RefusalAnswer<#reply_ty>>::answer
+    })
+}
+
 /// Emit one handler's `Contract<K>` row onto the site's impl header, gated by
 /// the site's `#[cfg]`s, naming `index` as the row's position in the actor's
 /// `Contracts::Rows` list (ADR-0231 §10).

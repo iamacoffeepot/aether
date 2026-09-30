@@ -39,8 +39,8 @@ use std::sync::mpsc;
 
 use aether_actor::{ProtocolRef, ReplyMode};
 use aether_bloomery_kinds::{
-    ArtifactStorage, ClosureLimit, Digest, DigestMismatch, ReadArtifact, ReadArtifactResult, ReadClosure,
-    ReadClosureResult, Stage, StageResult,
+    ArtifactStorage, ClosureLimit, Digest, DigestMismatch, ReadArtifact, ReadArtifactResult, ReadArtifacts,
+    ReadArtifactsResult, ReadClosure, ReadClosureResult, Stage, StageResult,
 };
 use aether_substrate::actor::native::{BlobCheckIn, NativeCtx, SelfWake};
 
@@ -54,6 +54,7 @@ use source::Fetched;
 /// One request a worker asks its actor to send through its task's source.
 pub enum StorageCall {
     Read(ReadArtifact),
+    ReadMany(ReadArtifacts),
     ReadClosure(ReadClosure),
     Stage(Stage),
 }
@@ -61,6 +62,7 @@ pub enum StorageCall {
 /// The source's answer to one [`StorageCall`], as the actor received it.
 pub enum StorageAnswer {
     Read(ReadArtifactResult),
+    ReadMany(ReadArtifactsResult),
     ReadClosure(ReadClosureResult),
     Stage(StageResult),
 }
@@ -144,6 +146,7 @@ impl StorageDesk {
             let context = StorageTicket { ticket, seq };
             let _ = match call {
                 StorageCall::Read(request) => ctx.send_detached_to_with_context(open.source, &request, context),
+                StorageCall::ReadMany(request) => ctx.send_detached_to_with_context(open.source, &request, context),
                 StorageCall::ReadClosure(request) => ctx.send_detached_to_with_context(open.source, &request, context),
                 StorageCall::Stage(request) => ctx.send_detached_to_with_context(open.source, &request, context),
             };
