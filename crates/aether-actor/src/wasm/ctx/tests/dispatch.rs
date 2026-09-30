@@ -2,7 +2,7 @@
 //! source, the reply correlation, the reply-mode views' layout, and the
 //! typed parent door's in-place routing.
 
-use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
+use super::{ActorTypeTag, NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::ctx::{Erased, Single, Unchecked};
 use crate::model::{Addressable, One};
@@ -186,7 +186,12 @@ fn ctx_parent_resolves_and_routes_in_place() {
     install_inline_child::<SucceedingChild>(
         &registry,
         widget,
-        ChildRecord { full_subname: String::from("widget"), parent: root, ..ChildRecord::default() },
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<SucceedingChild>().0,
+            full_subname: String::from("widget"),
+            parent: root,
+            ..ChildRecord::default()
+        },
         (),
     )
     .expect("a succeeding init installs the inline child");

@@ -74,8 +74,7 @@ impl RadioGroupWidget {
 
     /// Emit the current selection up to the panel root.
     fn emit(&self, ctx: &WasmCtx<'_, Self>) {
-        #[allow(clippy::cast_possible_truncation)]
-        let index = self.selected as u32;
+        let index = u32::try_from(self.selected).unwrap_or(u32::MAX);
         ctx.parent().send(&RadioSelected { index });
     }
 

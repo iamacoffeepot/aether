@@ -271,8 +271,7 @@ impl TabStripWidget {
     }
 
     fn emit(ctx: &WasmCtx<'_, Self>, selected: usize) {
-        #[allow(clippy::cast_possible_truncation)]
-        let index = selected as u32;
+        let index = u32::try_from(selected).unwrap_or(u32::MAX);
         ctx.parent().send(&TabStripSelected { index });
     }
 }
