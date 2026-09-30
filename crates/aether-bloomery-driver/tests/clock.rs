@@ -138,6 +138,11 @@ fn a_rule_waits_on_the_clock_and_fires_on_its_recorded_run() {
         })
         .expect("the rule's wait is requested");
     assert_eq!(requested.program, clock_program());
+    assert!(
+        matches!(requested.source, RequestSource::Reaction { bundle, .. } if bundle == reactor),
+        "the request's source is the rule's own bundle: {:?}",
+        requested.source
+    );
     let input = EncodedArtifact::new(&until).expect("encode until").digest();
     assert_eq!(requested.input, input);
 

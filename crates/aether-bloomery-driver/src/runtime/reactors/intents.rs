@@ -75,10 +75,10 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
             let Some(call) = decode_call_program(kind, &bytes) else {
                 return failed(Detail::new("undecodable call_program intent"));
             };
-            let Some(bundle) = program_bundle(heads, &call.program) else {
+            let Some(resolved) = program_bundle(heads, &call.program) else {
                 return failed(Detail::new("program head unbound"));
             };
-            let program = ProgramRef::new(bundle, call.name);
+            let program = ProgramRef::new(resolved, call.name);
             let source = RequestSource::Reaction { bundle, reactor, rule, ordinal };
             match call.input {
                 CallInput::Stored(input) => PlannedIntent::Ready(DriverRecord::Requested {
