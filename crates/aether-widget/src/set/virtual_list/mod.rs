@@ -245,8 +245,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, Theme};
 use crate::{
-    Collect, HoverLost, SetSelection, SetWidgetState, VirtualListConfig, VirtualListRow, WidgetControlState,
-    WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    Collect, HoverLost, ScrollWidget, SetSelection, SetWidgetState, VirtualListConfig, VirtualListRow,
+    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetPanel,
 };
 
 use actions::RowActionIndex;
@@ -451,7 +451,7 @@ impl WidgetDefaults for VirtualListWidget {
 /// for a figure derived from the one above it, `with_space_before` to open a
 /// block, `with_rule_above` for the hairline over that space. Any of them
 /// makes every row of the list as tall as what it holds.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
     const NAMESPACE: &'static str = "aether.widget.virtual_list";

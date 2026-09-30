@@ -16,7 +16,7 @@ impl Addressable for SecondParent {
 
 struct PlacedActor;
 
-#[actor(instanced, child_of(FirstParent), child_of(SecondParent))]
+#[actor(instanced, child_of(FirstParent, SecondParent))]
 impl WasmActor for PlacedActor {
     const NAMESPACE: &'static str = "test.lineage.placed";
 

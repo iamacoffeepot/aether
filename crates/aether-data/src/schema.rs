@@ -903,9 +903,6 @@ pub enum ActorLineageRecord {
     Root { actor: u64, namespace: Cow<'static, str> },
     /// The child may be placed directly beneath the parent.
     Child { parent: u64, child: u64, parent_namespace: Cow<'static, str>, child_namespace: Cow<'static, str> },
-    /// The instanced Wasm actor may be placed beneath any Wasm parent in the
-    /// same resident module.
-    ModuleChild { child: u64, child_namespace: Cow<'static, str> },
 }
 
 /// Custom-section name for anonymous actor placement facts (ADR-0166).
@@ -919,10 +916,14 @@ pub const ACTOR_LINEAGE_SECTION: &str = "aether.actor.lineage";
 pub const CONTENT_ADDRESSED_SECTION: &str = "aether.content_addressed";
 
 /// Version byte prefixing every [`ActorLineageRecord`] in the
-/// `aether.actor.lineage` custom section. v0x02 adds the
-/// [`ActorLineageRecord::ModuleChild`] variant; older readers must reject the
-/// new framing rather than interpret an unknown selector under v0x01.
-pub const ACTOR_LINEAGE_SECTION_VERSION: u8 = 0x02;
+/// `aether.actor.lineage` custom section. v0x02 added a module-child record
+/// (selector 2) that let an instanced Wasm actor sit beneath any parent its
+/// module exports; v0x03 (issue 7210) retires it, because every child now
+/// names its parents in one `child_of(..)` list and so carries only `Root`
+/// and `Child` records. The bump is a rebuild boundary: the host refuses a
+/// module built before it by this byte instead of misreading selector 2, so
+/// every such module fails to load until it is rebuilt.
+pub const ACTOR_LINEAGE_SECTION_VERSION: u8 = 0x03;
 
 const fn actor_lineage_str_len(value: &str) -> usize {
     4 + value.len()
@@ -1003,23 +1004,6 @@ pub const fn write_actor_lineage_child<const N: usize>(
     pos = actor_lineage_write_u64(parent, &mut out, pos);
     pos = actor_lineage_write_u64(child, &mut out, pos);
     pos = actor_lineage_write_str(parent_namespace, &mut out, pos);
-    pos = actor_lineage_write_str(child_namespace, &mut out, pos);
-    let _ = pos;
-    out
-}
-
-/// Byte length of an aether-wire [`ActorLineageRecord::ModuleChild`] body.
-#[must_use]
-pub const fn actor_lineage_module_child_len(_child: u64, child_namespace: &str) -> usize {
-    4 + 8 + actor_lineage_str_len(child_namespace)
-}
-
-/// Const-encode an aether-wire [`ActorLineageRecord::ModuleChild`] body.
-#[must_use]
-pub const fn write_actor_lineage_module_child<const N: usize>(child: u64, child_namespace: &str) -> [u8; N] {
-    let mut out = [0u8; N];
-    let mut pos = actor_lineage_write_u32(2, &mut out, 0);
-    pos = actor_lineage_write_u64(child, &mut out, pos);
     pos = actor_lineage_write_str(child_namespace, &mut out, pos);
     let _ = pos;
     out

@@ -299,7 +299,7 @@ pub const CONFIGURED_CHILD_INITIAL: u32 = 100;
 
 /// Issue 2692 by-tag inline-spawn fixture driver. Sent to the tag-parent's
 /// own address; the parent replies a [`TagSpawnReport`] covering the accepted
-/// composable spawn plus wrong-parent, non-instanced, and unknown-tag
+/// tag spawn plus wrong-parent, non-instanced, and unknown-tag
 /// rejections. Structured-shaped unit struct.
 #[aether_data::kind(name = "aether.test_fixtures.tag_spawn_query", default)]
 pub struct TagSpawnQuery;
@@ -309,7 +309,7 @@ pub struct TagSpawnQuery;
 #[aether_data::kind(name = "aether.test_fixtures.tag_spawn_report", eq)]
 #[allow(clippy::struct_excessive_bools)] // one observable result per independent placement guard
 pub struct TagSpawnReport {
-    pub composable_spawned: bool,
+    pub tag_spawned: bool,
     pub wrong_parent_rejected: bool,
     pub non_instanced_rejected: bool,
     pub unknown_tag_rejected: bool,

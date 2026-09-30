@@ -236,22 +236,6 @@ pub trait WasmActor:
     }
 }
 
-/// Placement permission for a reusable instanced Wasm actor that may appear
-/// beneath any [`WasmActor`] parent exported from the same resident module
-/// (ADR-0166).
-///
-/// This is a logical module-local composition permission. It does not permit
-/// native placement or cross-module loading, and it carries no ownership,
-/// supervision, liveness, or isolation semantics.
-pub trait ModuleChild: WasmActor + crate::Instanced {}
-
-impl<P, C> crate::ChildOf<P> for C
-where
-    P: WasmActor,
-    C: ModuleChild,
-{
-}
-
 /// The list of types a module's `export!` lists, exported and private, in
 /// listing order, as a type-level list `(T1, (T2, (…, ())))` (ADR-0231 §10).
 ///
@@ -300,13 +284,16 @@ pub trait Rebuildable<M: ListedModule> {
 }
 
 /// The spawner `Self` declares `C` as an inline child in
-/// `#[actor(spawns(C, …))]` (ADR-0114 §5).
+/// `#[actor(spawns(C, …))]` (ADR-0114 §5), and `C` lists `Self` in its
+/// `#[actor(child_of(..))]`.
 ///
 /// `#[actor]` emits it for each declared child. The typed inline spawn verbs
 /// [`WasmCtx::spawn_inline_child`] and [`WasmCtx::spawn_inline`] require it
 /// of the spawning actor, and every `export!` that lists the spawner checks
-/// that it also lists each declared child ([`Rebuildable`]). A generic helper
-/// that forwards to either verb repeats the bound.
+/// that it also lists each declared child ([`Rebuildable`]). So `spawns(..)`
+/// is the rebuild manifest, and `C`'s `child_of(..)` is the placement set. A
+/// generic helper that forwards to either verb repeats the bound, which
+/// carries both proofs.
 ///
 /// A hand-written impl does not compile (ADR-0231 §10): the one
 /// [`Declared`] impl lists the declared children as [`Declared::Spawns`],
@@ -314,17 +301,25 @@ pub trait Rebuildable<M: ListedModule> {
 /// names `C`'s position there as [`Index`](Spawns::Index). An impl for an
 /// undeclared child either repeats an emitted impl (`E0119`) or names a
 /// position that holds another child or none (`E0277`), so no spawn skips
-/// the check.
+/// the check. Each impl also names `Self`'s position in `C`'s
+/// [`Declared::Parents`] as [`Placement`](Spawns::Placement), so a
+/// `spawns(C)` whose `C` does not list the spawner fails to compile at the
+/// declaration.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` spawns `{C}` inline but does not declare it",
     label = "`{C}` is not in `{Self}`'s `spawns(..)`",
-    note = "add `{C}` to `spawns(..)` in `{Self}`'s `#[actor(..)]`"
+    note = "add `{C}` to `spawns(..)` in `{Self}`'s `#[actor(..)]`, and `{Self}` to `child_of(..)` in `{C}`'s"
 )]
-pub trait Spawns<C>: Declared {
+pub trait Spawns<C: Declared>: Declared {
     /// `C`'s position in [`Declared::Spawns`](crate::Declared::Spawns),
     /// written by the expansion that declared it.
     #[doc(hidden)]
     type Index: ListIndex<<Self as Declared>::Spawns, C>;
+    /// This spawner's position in `C`'s
+    /// [`Declared::Parents`](crate::Declared::Parents): the proof that `C`
+    /// may be placed beneath it.
+    #[doc(hidden)]
+    type Placement: ListIndex<<C as Declared>::Parents, Self>;
 }
 
 mod listed_sealed {
@@ -363,8 +358,6 @@ impl<M: ListedModule, C: Rebuildable<M>, Tail: ListedIn<M>> ListedIn<M> for (C, 
 pub struct WasmPlacementFacts {
     /// Whether the generated resolver gives the actor instanced cardinality.
     pub is_instanced: bool,
-    /// Whether the actor carries the module-local [`ModuleChild`] permission.
-    pub module_child: bool,
     /// Exact declared parent actor tags from `child_of(...)`.
     pub exact_parent_tags: &'static [ActorTypeTag],
 }
@@ -451,8 +444,8 @@ pub fn install_guest_logging() {
 
 /// Validate an export-selected inline actor before its alias is allocated.
 /// Membership is established by the generated resolver branch that calls
-/// this helper; cardinality and exact-or-module-child placement come from the
-/// selected actor's generated [`WasmPlacementFacts`].
+/// this helper; cardinality and exact-parent placement come from the selected
+/// actor's generated [`WasmPlacementFacts`].
 #[doc(hidden)]
 pub fn __validate_inline_child_placement(
     registry: &inline::Registry,
@@ -466,7 +459,7 @@ pub fn __validate_inline_child_placement(
     if !facts.is_instanced {
         return Err(SpawnError::ActorNotInstanced(child));
     }
-    if !facts.module_child && !facts.exact_parent_tags.contains(&parent) {
+    if !facts.exact_parent_tags.contains(&parent) {
         return Err(SpawnError::PlacementDenied { parent, child });
     }
     Ok(())

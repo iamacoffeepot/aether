@@ -90,6 +90,7 @@ impl aether_actor::Lifecycle<Self> for RingRelay {
 impl aether_actor::Declared for RingRelay {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for RingRelay {
     type State = Self;
@@ -182,6 +183,7 @@ impl aether_actor::Lifecycle<Self> for HoldRelay {
 impl aether_actor::Declared for HoldRelay {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for HoldRelay {
     type State = Self;

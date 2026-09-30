@@ -274,8 +274,8 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
 /// `inline_child` bundle via `export: Some("test.inline.tag_parent")`; the
 /// parent's `wire` spawns `InlineStatefulChild` **by tag** (not the typed
 /// verb) under `Named("tagged")` and also attempts a bogus tag. The scenario
-/// asserts (1) a composable instanced child spawns, while a wrong exact
-/// parent, an exported non-instanced actor, and a bogus tag are rejected,
+/// asserts (1) an instanced child that lists the parent spawns, while a
+/// wrong exact parent, an exported non-instanced actor, and a bogus tag are rejected,
 /// (2) the tag-spawned child is live and stateful — its counter climbs to 2
 /// through its own alias — and (3) after a
 /// `replace_component` swap the child's count is still 2, i.e. the by-tag
@@ -303,8 +303,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         })
         .unwrap_or_else(|error| panic!("inline_child_tag load failed: {error}"));
 
-    // (1) Assert the generated resolver accepted only the composable child
-    // and rejected wrong-parent, non-instanced, and unknown selections before
+    // (1) Assert the generated resolver accepted only the child that lists
+    // this parent and rejected wrong-parent, non-instanced, and unknown selections before
     // allocation. (2) The accepted child is live and stateful — bump it to 2
     // through its own alias and read it back, once that alias resolves. The
     // parent spawns it under the `Named("tagged")` subname in `wire`.
@@ -320,7 +320,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     assert_eq!(
         pre.reply::<TagSpawnReport>("tag_report").expect("decode TagSpawnReport"),
         TagSpawnReport {
-            composable_spawned: true,
+            tag_spawned: true,
             wrong_parent_rejected: true,
             non_instanced_rejected: true,
             unknown_tag_rejected: true,

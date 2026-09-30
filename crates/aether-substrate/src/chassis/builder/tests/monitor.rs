@@ -78,6 +78,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl aether_actor::Declared for Watcher {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for Watcher {
         type State = Self;
@@ -204,6 +205,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl aether_actor::Declared for Target {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for Target {
         type State = Self;
@@ -246,6 +248,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl aether_actor::Declared for Watcher {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for Watcher {
         type State = Self;

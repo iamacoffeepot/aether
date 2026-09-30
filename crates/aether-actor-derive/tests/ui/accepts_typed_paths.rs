@@ -5,7 +5,7 @@
 //! kind fields. The struct-hosted `Unit` reads the sibling `rt_ok.rs`, whose
 //! `Ping` handler answers `Pong`, so it covers `Pinging`.
 
-use aether_actor::{ActorPath, Addressable, ChildOf, Many, ProtocolPath, actor, protocol};
+use aether_actor::{ActorPath, Addressable, ChildOf, Declared, Here, Many, ProtocolPath, actor, protocol};
 use aether_data::LoadName;
 
 #[repr(C)]
@@ -37,7 +37,15 @@ impl Addressable for Member {
     type Resolver = Many;
 }
 
-impl ChildOf<Unit> for Member {}
+impl Declared for Member {
+    type Depends = ();
+    type Spawns = ();
+    type Parents = (Unit, ());
+}
+
+impl ChildOf<Unit> for Member {
+    type Index = Here;
+}
 
 #[aether_data::kind(name = "test.typed_paths.paths", no_serde)]
 struct Paths {

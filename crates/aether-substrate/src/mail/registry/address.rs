@@ -571,8 +571,7 @@ impl AddressIndex {
 ///
 /// - **Cardinality:** each exported and private group's `instanced`.
 /// - **Roots:** a `Root` record, for an exported namespace only.
-/// - **Edges:** a `Child` record is one edge; a `ModuleChild` record is one
-///   edge from every namespace the module declares, exported or private.
+/// - **Edges:** a `Child` record is one edge.
 ///
 /// A namespace a native actor declares contributes nothing from a module, so
 /// a module can neither switch off nor reshape a native short path. Every
@@ -620,13 +619,6 @@ impl<'a> GuestFacts<'a> {
                             native.contains(parent_namespace.as_ref()) || guest_namespace_is_valid(parent_namespace);
                         if parent_valid && usable(child_namespace) {
                             facts.edges.push(ChildFact::between(parent_namespace, child_namespace));
-                        }
-                    }
-                    ActorLineageRecord::ModuleChild { child_namespace, .. } => {
-                        if usable(child_namespace) {
-                            facts.edges.extend(
-                                declared.iter().map(|&(parent, _)| ChildFact::between(parent, child_namespace)),
-                            );
                         }
                     }
                 }

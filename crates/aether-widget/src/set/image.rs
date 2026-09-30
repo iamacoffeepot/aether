@@ -19,7 +19,7 @@ use aether_render::{QuadBlend, ShapeTexture};
 use crate::set::{apply_static_control_state, picture};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::{SetTheme, Theme};
-use crate::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawList, WidgetFrame};
+use crate::{Collect, ImageConfig, ImageFit, ScrollWidget, SetWidgetState, WidgetDrawList, WidgetFrame, WidgetPanel};
 
 /// Pure fit output. Destination fields are widget-local pixels; UV fields are
 /// normalized texture coordinates. Keeping each semantic named avoids the
@@ -245,7 +245,7 @@ fn finite_f32(value: f64) -> Option<f32> {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ImageConfig` again to replace texture or presentation in place.
-#[actor(instanced, root, composable)]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget))]
 impl WasmActor for ImageWidget {
     type Config = ImageConfig;
     const NAMESPACE: &'static str = "aether.widget.image";

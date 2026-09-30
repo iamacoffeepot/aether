@@ -329,16 +329,29 @@ pub fn contracts_impl(
     }
 }
 
-/// Emit an actor's one `Declared` impl (ADR-0231 §10): its `depends(..)` and
-/// `spawns(..)` lists, each a type-level list in declaration order.
-pub fn declared_impl(site: &ReplyMarkerSite<'_>, depends: &[syn::TypePath], spawns: &[syn::TypePath]) -> TokenStream2 {
+/// Emit an actor's one `Declared` impl (ADR-0231 §10): its `depends(..)`,
+/// `spawns(..)`, and `child_of(..)` lists, each a type-level list in
+/// declaration order.
+pub fn declared_impl(site: &ReplyMarkerSite<'_>, lists: DeclaredLists<'_>) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, .. } = site;
-    let depends_list = declaration_list(depends.iter().map(|target| quote! { #target }), quote! { () });
-    let spawns_list = declaration_list(spawns.iter().map(|child| quote! { #child }), quote! { () });
+    let list =
+        |entries: &[syn::TypePath]| declaration_list(entries.iter().map(|entry| quote! { #entry }), quote! { () });
+    let depends_list = list(lists.depends);
+    let spawns_list = list(lists.spawns);
+    let parents_list = list(lists.parents);
     quote! {
         impl #impl_generics ::aether_actor::Declared for #self_ty #where_clause {
             type Depends = #depends_list;
             type Spawns = #spawns_list;
+            type Parents = #parents_list;
         }
     }
+}
+
+/// The three declaration lists one `Declared` impl carries.
+#[derive(Clone, Copy)]
+pub struct DeclaredLists<'a> {
+    pub depends: &'a [syn::TypePath],
+    pub spawns: &'a [syn::TypePath],
+    pub parents: &'a [syn::TypePath],
 }

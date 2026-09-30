@@ -24,8 +24,8 @@ use crate::set::{push_control_outlines, quad, reply_if_hidden};
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, SetValue, SetWidgetState, SliderChanged, SliderConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, ScrollWidget, SetValue, SetWidgetState, SliderChanged, SliderConfig, WidgetControlState, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// The `min..=max` a slider actually runs over, normalised once from the raw
@@ -192,7 +192,7 @@ impl WidgetDefaults for SliderWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `SliderConfig` again to reconfigure the range or theme in place.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SliderWidget {
     type Config = SliderConfig;
     const NAMESPACE: &'static str = "aether.widget.slider";

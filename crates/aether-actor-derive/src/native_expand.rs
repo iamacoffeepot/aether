@@ -17,9 +17,9 @@ use crate::handler_parse::{
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 use crate::reply_markers::{
-    ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl, contract_rows_expr,
-    contracts_impl, declared_impl, native_reply_contract, owned_reason, position, reply_marker_impl, rows_list,
-    static_reason,
+    DeclaredLists, ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl,
+    contract_rows_expr, contracts_impl, declared_impl, native_reply_contract, owned_reason, position,
+    reply_marker_impl, rows_list, static_reason,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,12 +68,6 @@ fn validate_native_placement(target: &impl quote::ToTokens, opts: &ActorOpts) ->
 #[allow(clippy::too_many_lines)]
 pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeEmit) -> syn::Result<TokenStream2> {
     if emit == NativeEmit::Full {
-        if opts.composable {
-            return Err(syn::Error::new_spanned(
-                &item.self_ty,
-                "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
-            ));
-        }
         if !opts.spawns.is_empty() {
             return Err(syn::Error::new_spanned(
                 &item.self_ty,
@@ -1123,16 +1117,20 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
             impl #impl_generics ::aether_actor::Root for #self_ty #where_clause {}
         }
     });
-    let child_impls = opts.child_of.iter().map(|parent| {
+    // ADR-0166 (issue 7210): each `ChildOf<P>` impl names `P`'s position in
+    // the `Declared::Parents` list.
+    let child_impls = opts.child_of.iter().enumerate().map(|(index, parent)| {
+        let index = position(index);
         quote! {
-            impl #impl_generics ::aether_actor::ChildOf<#parent>
-                for #self_ty #where_clause {}
+            impl #impl_generics ::aether_actor::ChildOf<#parent> for #self_ty #where_clause {
+                type Index = #index;
+            }
         }
     });
     // ADR-0230 / ADR-0231 §10: the one `Declared` impl lists the dependencies,
-    // which the birth sites check before `init`, and each `DependsOn<R>` impl
-    // names `R`'s position in it. A native actor declares no inline children,
-    // so its `Spawns` list is empty.
+    // which the birth sites check before `init`, and the parents, and each
+    // `DependsOn<R>` / `ChildOf<P>` impl names its entry's position there. A
+    // native actor declares no inline children, so its `Spawns` list is empty.
     let impl_generics_ts = quote! { #impl_generics };
     let self_ty_ts = quote! { #self_ty };
     let where_clause_ts = quote! { #where_clause };
@@ -1143,8 +1141,7 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
             where_clause: &where_clause_ts,
             cfgs: &[],
         },
-        &opts.depends,
-        &[],
+        DeclaredLists { depends: &opts.depends, spawns: &[], parents: &opts.child_of },
     );
     let depends_impls = opts.depends.iter().enumerate().map(|(index, target)| {
         let index = position(index);
@@ -1392,12 +1389,6 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
                  use #[runtime(handler_set({}))]",
                 quote!(#handler_set),
             ),
-        ));
-    }
-    if opts.composable {
-        return Err(syn::Error::new_spanned(
-            &item.ident,
-            "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
         ));
     }
     if !opts.spawns.is_empty() {

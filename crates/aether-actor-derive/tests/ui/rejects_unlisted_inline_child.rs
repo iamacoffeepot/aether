@@ -8,7 +8,7 @@ use aether_actor::{ActorInitError, Mail, Subname, WasmActor, WasmCtx, WasmInitCt
 
 struct Parent;
 
-#[actor(spawns(Exact, Composable))]
+#[actor(spawns(Exact, Sibling))]
 impl WasmActor for Parent {
     const NAMESPACE: &'static str = "test.unlisted_inline.parent";
 
@@ -34,11 +34,11 @@ impl WasmActor for Exact {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
 }
 
-struct Composable;
+struct Sibling;
 
-#[actor(instanced, composable)]
-impl WasmActor for Composable {
-    const NAMESPACE: &'static str = "test.unlisted_inline.composable";
+#[actor(instanced, child_of(Parent))]
+impl WasmActor for Sibling {
+    const NAMESPACE: &'static str = "test.unlisted_inline.sibling";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
@@ -50,7 +50,7 @@ impl WasmActor for Composable {
 
 fn spawn_declared(ctx: &mut WasmCtx<'_, Parent>) {
     let _ = ctx.spawn_inline_child::<Parent, Exact>(Subname::Named("exact"), &());
-    let _ = ctx.spawn_inline::<Composable>(Subname::Named("composable"), &());
+    let _ = ctx.spawn_inline::<Sibling>(Subname::Named("sibling"), &());
 }
 
 fn main() {

@@ -203,8 +203,8 @@ The host reads the permission from the module's `aether.actor.lineage` section: 
 load whose selected type or boot type has no `Root` record, and a republish whose
 successor module's boot type has none, answer `Err` naming the type and the
 placements it does declare, before the module publishes or anything is staged. A
-type whose only placement is a parent — `child_of(P)` or `composable` — is reached
-through that parent, never loaded at the host.
+type whose only placement is a parent — `child_of(..)` — is reached through that
+parent, never loaded at the host.
 
 A drop closes the instance's trampoline entirely — nothing resident is left at
 that lineage — and its name tombstones for the engine's lifetime
@@ -289,18 +289,21 @@ fresh load, as an **inline child** ([ADR-0114](https://github.com/iamacoffeepot/
 parent's wasm instance, slot, and run-token, yet is addressed and mailed like any
 actor. Where a native capability spawns any permitted `Instanced` actor with
 `ctx.spawn_child`, a component spawns one of the `Instanced` types its `export!`
-lists. The child declares either an exact `child_of(Parent)` edge or `composable`
-module-local placement:
+lists. The spawner declares the child in `spawns(..)`, and the child lists every
+parent it may sit beneath in one `child_of(..)` list:
 
 ```rust
-#[handler::single]
-fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
-    // -> Result<InlineChild<Panel>, SpawnError>: the child's `init` has run by the time this returns
-    let _ = ctx.spawn_inline_child::<RootManager, Panel>(
-        Subname::Counter,
-        &PanelConfig { /* … */ },
-    );
+#[actor(root, spawns(Panel))]
+impl WasmActor for RootManager {
+    #[handler::single]
+    fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
+        // -> Result<InlineChild<Panel>, SpawnError>: the child's `init` has run by the time this returns
+        let _ = ctx.spawn_inline::<Panel>(Subname::Counter, &PanelConfig { /* … */ });
+    }
 }
+
+#[actor(instanced, child_of(RootManager))]
+impl WasmActor for Panel { /* … */ }
 ```
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
@@ -308,25 +311,26 @@ A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
-The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
-At runtime the ctx also verifies that its actual registry actor tag is
-`RootManager` before it allocates the child's alias. A child type whose
+The one bound `RootManager: Spawns<Panel>` carries both proofs the spawn needs.
+`spawns(..)` is the rebuild manifest: every `export!` that lists the spawner
+must list each declared child. The emitted `Spawns<Panel>` impl also names
+`RootManager`'s position in `Panel`'s `child_of(..)` list as its `Placement`,
+so a `spawns(Panel)` whose `Panel` does not list the spawner fails to compile at
+the declaration. The ctx reads its parent from its registry actor tag and
+returns `SpawnError::ParentIdentityUnavailable` when it has none. A child type whose
 declared dependency has no `Live` route is refused before its alias is
 allocated, as `SpawnError::DependencyNotLive`. The child's `init` runs
 in-process during the call, so an `init` failure comes back as
 `SpawnError::InitFailed`, and the returned `InlineChild<Panel>` checks later
 sends against `Panel`'s handlers.
 
-The composable form spells it `ctx.spawn_inline::<Panel>(subname, &config)` —
-the child type and nothing else, because a `composable` module child may sit
-beneath any parent its module exports, and the ctx already knows which one is
-running. Use `spawn_inline_child::<RootManager, Panel>(...)` for the
-`child_of(Parent)` edge, where the declared placement really does name one
-parent and checking it against the ctx is the point. The dynamic
-`spawn_inline_child_by_tag` form remains available for data-driven assembly,
-but its generated export resolver rejects unknown exports, non-instanced
-actors, and actors without an exact-or-`composable` relationship to the actual
-runtime parent before allocating an alias.
+An erased or wire ctx does not know its actor, so it spells the spawn
+`spawn_inline_child::<RootManager, Panel>(...)`, naming the parent, and the SDK
+checks that name against the ctx's registry actor tag before it allocates the
+alias. The dynamic `spawn_inline_child_by_tag` form remains available for
+data-driven assembly, but its generated export resolver rejects unknown
+exports, non-instanced actors, and actors whose `child_of(..)` does not name
+the actual runtime parent before allocating an alias.
 
 A spawner declares the children it spawns through the typed inline verbs in
 `#[actor(spawns(..))]`, and every `export!` that lists the spawner must list

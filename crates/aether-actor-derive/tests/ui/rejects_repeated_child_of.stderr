@@ -1,0 +1,11 @@
+error: `child_of` is written once, as a list — merge this into the first `child_of(...)`: `child_of(A, B)`
+  --> tests/ui/rejects_repeated_child_of.rs:10:26
+   |
+10 | #[actor(child_of(First), child_of(Second))]
+   |                          ^^^^^^^^
+
+error: duplicate identical `child_of` entry in #[actor]
+  --> tests/ui/rejects_repeated_child_of.rs:13:25
+   |
+13 | #[actor(child_of(First, First))]
+   |                         ^^^^^

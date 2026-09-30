@@ -52,7 +52,7 @@ pub struct SubjectHelper {
     bumps: u32,
 }
 
-#[actor(instanced, composable)]
+#[actor(instanced, child_of(Subject))]
 impl WasmActor for SubjectHelper {
     const NAMESPACE: &'static str = "test.republish.subject_helper";
 

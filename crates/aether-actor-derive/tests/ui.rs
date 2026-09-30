@@ -6,7 +6,6 @@
 //! `rejects_struct_ambiguous_runtime.rs:8`, `rejects_struct_no_handler.rs:6`,
 //! `rejects_struct_no_namespace.rs:7`,
 //! `rejects_actor_child_of_cardinality_native.rs:10`,
-//! `rejects_actor_composable_native.rs:8`,
 //! `rejects_generic_native_lineage_struct.rs:6`, `accepts_typed_paths.rs:30`,
 //! and `rejects_narrow_to_uncovered_protocol.rs:36`. Those files are read off
 //! disk by the struct-hosted harvest rather than compiled as cases; the `rt_`
@@ -344,7 +343,6 @@ fn a_fixture_with_a_stderr_sibling_is_compile_fail() {
 }
 
 const HAND_LIST_FIXTURES: &[&str] = &[
-    "accepts_actor_composable_wasm",
     "accepts_actor_lineage_wasm",
     "accepts_actor_root_wasm",
     "accepts_actor_runtime_feature",
@@ -373,9 +371,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_accessor_without_state",
     "rejects_actor_child_of_cardinality_native",
     "rejects_actor_child_of_cardinality_wasm",
-    "rejects_actor_composable_cardinality",
-    "rejects_actor_composable_child_of",
-    "rejects_actor_composable_native",
     "rejects_actor_reach_handler",
     "rejects_actor_unknown_arg",
     "rejects_bare_handler_native",
@@ -383,7 +378,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_bare_mail_variant_native",
     "rejects_contract_row_for_unhandled_kind",
     "rejects_duplicate_actor_depends",
-    "rejects_duplicate_actor_lineage",
     "rejects_duplicate_handler_kind_native",
     "rejects_duplicate_handler_kind_wasm",
     "rejects_duplicate_native_init",
@@ -404,8 +398,6 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_hands_off_to_a_different_reply",
     "rejects_hands_off_to_erased_ref",
     "rejects_inline_child_send_unhandled_kind",
-    "rejects_malformed_actor_composable",
-    "rejects_malformed_actor_lineage",
     "rejects_malformed_export",
     "rejects_malformed_protocol",
     "rejects_missing_namespace_native",
@@ -417,9 +409,11 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_protocol_reply_mismatch",
     "rejects_reference_narrow_to_uncovered_protocol",
     "rejects_repeated_actor_depends",
+    "rejects_repeated_child_of",
     "rejects_replies_on_silent_handler",
     "rejects_replies_on_unchecked_handler",
     "rejects_slice_handler_wasm",
+    "rejects_spawns_without_child_of",
     "rejects_state_with_manual_hook",
     "rejects_stray_const_native",
     "rejects_stray_const_wasm",

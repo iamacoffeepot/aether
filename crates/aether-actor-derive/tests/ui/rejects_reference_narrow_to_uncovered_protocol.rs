@@ -4,7 +4,7 @@
 //! `Uncovered`; a bound loosened to `P: Protocol` would let a holder keep a
 //! reference that sends `Unhandled` to an actor that only warn-drops it.
 
-use aether_actor::{ActorInitError, ActorRef, InlineChild, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+use aether_actor::{ActorInitError, ActorRef, InlineChild, Mail, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -31,9 +31,23 @@ trait Uncovered {
     fn unhandled(mail: Unhandled);
 }
 
+struct Parent;
+
+#[actor]
+impl WasmActor for Parent {
+    const NAMESPACE: &'static str = "test.reference_narrow.parent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+}
+
 struct Child;
 
-#[actor(instanced, composable)]
+#[actor(instanced, child_of(Parent))]
 impl WasmActor for Child {
     const NAMESPACE: &'static str = "test.reference_narrow.child";
 

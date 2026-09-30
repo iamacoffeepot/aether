@@ -1,0 +1,15 @@
+error[E0277]: `Child` does not declare `Spawner` as a parent
+  --> tests/ui/rejects_spawns_without_child_of.rs:10:1
+   |
+10 | #[actor(spawns(Child))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^ `Spawner` is not in `Child`'s `child_of(..)`
+   |
+   = note: add `Spawner` to the `child_of(..)` list on `Child`'s `#[actor(..)]`
+help: the trait `ChildOf<Spawner>` is not implemented for `Child`
+      but trait `ChildOf<Elsewhere>` is implemented for it
+  --> tests/ui/rejects_spawns_without_child_of.rs:38:1
+   |
+38 | #[actor(instanced, child_of(Elsewhere))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Elsewhere`, found `Spawner`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

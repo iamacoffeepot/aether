@@ -104,8 +104,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{TextRole, Theme};
 use crate::{
-    Collect, SetWidgetState, TooltipConfig, TooltipIcon, TooltipSection, TooltipShed, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, ScrollWidget, SetWidgetState, TooltipConfig, TooltipIcon, TooltipSection, TooltipShed, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// The `[width, height]` `icon` is drawn at on a line set at `size_pixels`:
@@ -466,7 +466,7 @@ impl WidgetDefaults for TooltipWidget {
 /// Hide it with `aether.widget.set_state`. A line's `icon` is a texture id
 /// the host got from `aether.render.create_texture`; register the image first
 /// and pass the texture's own pixel size, not the size you want it drawn at.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TooltipWidget {
     type Config = TooltipConfig;
     const NAMESPACE: &'static str = "aether.widget.tooltip";

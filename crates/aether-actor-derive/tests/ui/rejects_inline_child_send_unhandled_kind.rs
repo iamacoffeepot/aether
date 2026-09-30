@@ -42,7 +42,7 @@ impl WasmActor for Parent {
 
 struct Child;
 
-#[actor(instanced, composable)]
+#[actor(instanced, child_of(Parent))]
 impl WasmActor for Child {
     const NAMESPACE: &'static str = "test.inline_child.child";
 

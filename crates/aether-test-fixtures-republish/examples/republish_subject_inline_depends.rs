@@ -55,7 +55,7 @@ pub struct SubjectHelper {
     bumps: u32,
 }
 
-#[actor(instanced, composable, depends(ClipboardCapability))]
+#[actor(instanced, child_of(Subject), depends(ClipboardCapability))]
 impl WasmActor for SubjectHelper {
     const NAMESPACE: &'static str = "test.republish.subject_helper";
 

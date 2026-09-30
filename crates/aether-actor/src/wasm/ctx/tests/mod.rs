@@ -23,7 +23,7 @@ use crate::wasm::{
     __validate_inline_child_placement, ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx,
     WasmPlacementFacts,
 };
-use crate::{Addressable, ChildOf, HandlesKind, ModuleChild};
+use crate::{Addressable, ChildOf, HandlesKind};
 use aether_data::{Kind, MailboxId};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -56,6 +56,7 @@ impl crate::Lifecycle<Self> for FailingChild {
 impl crate::Declared for FailingChild {
     type Depends = ();
     type Spawns = ();
+    type Parents = (NestingParent, ());
 }
 impl WasmActor for FailingChild {
     type State = Self;
@@ -115,17 +116,26 @@ impl crate::Lifecycle<Self> for SucceedingChild {
 impl crate::Declared for SucceedingChild {
     type Depends = ();
     type Spawns = ();
+    type Parents = (NestingParent, (LifecycleProbe, ()));
 }
 impl WasmActor for SucceedingChild {
     type State = Self;
     type Persist = ();
 }
 
-impl ModuleChild for SucceedingChild {}
+impl ChildOf<NestingParent> for SucceedingChild {
+    type Index = crate::Here;
+}
+
+impl ChildOf<LifecycleProbe> for SucceedingChild {
+    type Index = crate::There<crate::Here>;
+}
 
 impl SucceedingChild {
-    const __AETHER_PLACEMENT: WasmPlacementFacts =
-        WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] };
+    const __AETHER_PLACEMENT: WasmPlacementFacts = WasmPlacementFacts {
+        is_instanced: true,
+        exact_parent_tags: &[ActorTypeTag::of::<NestingParent>(), ActorTypeTag::of::<LifecycleProbe>()],
+    };
 }
 
 impl crate::WasmDispatch<Self> for SucceedingChild {
@@ -196,6 +206,7 @@ impl crate::Lifecycle<Self> for StubChild {
 impl crate::Declared for StubChild {
     type Depends = ();
     type Spawns = ();
+    type Parents = (NestingParent, ());
 }
 impl WasmActor for StubChild {
     type State = Self;
@@ -203,11 +214,8 @@ impl WasmActor for StubChild {
 }
 
 impl StubChild {
-    const __AETHER_PLACEMENT: WasmPlacementFacts = WasmPlacementFacts {
-        is_instanced: true,
-        module_child: false,
-        exact_parent_tags: &[ActorTypeTag::of::<NestingParent>()],
-    };
+    const __AETHER_PLACEMENT: WasmPlacementFacts =
+        WasmPlacementFacts { is_instanced: true, exact_parent_tags: &[ActorTypeTag::of::<NestingParent>()] };
 }
 
 impl crate::WasmDispatch<Self> for StubChild {
@@ -365,32 +373,44 @@ impl WasmActor for NestingParent {
     type Persist = ();
 }
 
-impl ChildOf<NestingParent> for FailingChild {}
-impl ChildOf<NestingParent> for StubChild {}
+impl ChildOf<NestingParent> for FailingChild {
+    type Index = crate::Here;
+}
 
-// The host unit tests stand in for `#[actor(spawns(..))]`, which emits these
-// declarations for the typed inline spawn verbs: the one `Declared` list per
-// spawner and each `Spawns` impl at its child's position in it.
+impl ChildOf<NestingParent> for StubChild {
+    type Index = crate::Here;
+}
+
+// The host unit tests stand in for `#[actor(spawns(..))]` and
+// `#[actor(child_of(..))]`, which emit these declarations for the typed inline
+// spawn verbs: the one `Declared` list per actor, each `Spawns` impl at its
+// child's position in the spawner's list, and its `Placement` at the
+// spawner's position in the child's.
 impl crate::Declared for NestingParent {
     type Depends = ();
     type Spawns = (FailingChild, (SucceedingChild, ()));
+    type Parents = ();
 }
 
 impl crate::Spawns<FailingChild> for NestingParent {
     type Index = crate::Here;
+    type Placement = <FailingChild as ChildOf<Self>>::Index;
 }
 
 impl crate::Spawns<SucceedingChild> for NestingParent {
     type Index = crate::There<crate::Here>;
+    type Placement = <SucceedingChild as ChildOf<Self>>::Index;
 }
 
 impl crate::Declared for LifecycleProbe {
     type Depends = ();
     type Spawns = (SucceedingChild, ());
+    type Parents = ();
 }
 
 impl crate::Spawns<SucceedingChild> for LifecycleProbe {
     type Index = crate::Here;
+    type Placement = <SucceedingChild as ChildOf<Self>>::Index;
 }
 
 impl crate::WasmDispatch<Self> for NestingParent {

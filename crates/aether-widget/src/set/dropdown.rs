@@ -54,8 +54,9 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 use crate::{
-    Collect, DropdownConfig, DropdownHover, DropdownOption, DropdownSelected, FocusLost, HoverLost, SetSelection,
-    SetWidgetState, WidgetDismiss, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
+    Collect, DropdownConfig, DropdownHover, DropdownOption, DropdownSelected, FocusLost, HoverLost, ScrollWidget,
+    SetSelection, SetWidgetState, WidgetDismiss, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetOpenChanged,
+    WidgetPanel,
 };
 
 /// Which way a keyboard step moves the highlighted row of an open list.
@@ -582,7 +583,7 @@ impl WidgetDefaults for DropdownWidget {
 /// closes an open list. Send it [`SetSelection`] to move the choice. It reports the width its widest option needs on its draw list's
 /// `intrinsic` once the theme font's metrics resolve, so a host can size the
 /// cell it sits in to the control rather than to a share of the row.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DropdownWidget {
     type Config = DropdownConfig;
     const NAMESPACE: &'static str = "aether.widget.dropdown";

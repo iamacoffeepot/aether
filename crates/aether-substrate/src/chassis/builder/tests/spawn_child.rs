@@ -61,6 +61,7 @@ fn ctx_spawn_child_routes_through_handler() {
     impl aether_actor::Declared for ChildCap {
         type Depends = ();
         type Spawns = ();
+        type Parents = (ParentCap, ());
     }
     impl NativeActor for ChildCap {
         type State = Self;
@@ -109,11 +110,14 @@ fn ctx_spawn_child_routes_through_handler() {
     impl aether_actor::Declared for ParentCap {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for ParentCap {
         type State = Self;
     }
-    impl ChildOf<ParentCap> for ChildCap {}
+    impl ChildOf<ParentCap> for ChildCap {
+        type Index = aether_actor::Here;
+    }
     impl Dispatch<Self> for ParentCap {
         fn dispatch(
             state: &mut Self,
@@ -267,6 +271,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl aether_actor::Declared for FailingChild {
         type Depends = ();
         type Spawns = ();
+        type Parents = (ParentCap, ());
     }
     impl NativeActor for FailingChild {
         type State = Self;
@@ -292,7 +297,9 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     }
     impl aether_actor::Root for ParentCap {}
     impl HandlesKind<Hatch> for ParentCap {}
-    impl ChildOf<ParentCap> for FailingChild {}
+    impl ChildOf<ParentCap> for FailingChild {
+        type Index = aether_actor::Here;
+    }
     impl aether_actor::Lifecycle<Self> for ParentCap {
         type Config = ();
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
@@ -307,6 +314,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
     impl aether_actor::Declared for ParentCap {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for ParentCap {
         type State = Self;
@@ -368,7 +376,9 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         const NAMESPACE: &'static str = "test.checked_spawn.child";
         type Resolver = aether_actor::Many;
     }
-    impl ChildOf<ActualParent> for Child {}
+    impl ChildOf<ActualParent> for Child {
+        type Index = aether_actor::Here;
+    }
     impl aether_actor::Lifecycle<Self> for Child {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -384,6 +394,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
     impl aether_actor::Declared for Child {
         type Depends = ();
         type Spawns = ();
+        type Parents = (ActualParent, ());
     }
     impl NativeActor for Child {
         type State = Self;
@@ -427,6 +438,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
     impl aether_actor::Declared for ActualParent {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for ActualParent {
         type State = Self;

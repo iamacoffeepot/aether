@@ -83,8 +83,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, Held, InlineChild, ModuleChild, Pending, Rebuildable,
-    RelativeMailbox, Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, Held, InlineChild, Pending, Rebuildable, RelativeMailbox, Sends,
+    SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
@@ -162,8 +162,7 @@ pub mod __macro_internals {
     // truth in `aether-data`.
     pub use aether_data::{
         ACTOR_LINEAGE_SECTION_VERSION, INPUTS_SECTION_VERSION, KINDS_SECTION_VERSION, LABELS_SECTION_VERSION,
-        actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, write_actor_lineage_child,
-        write_actor_lineage_module_child, write_actor_lineage_root,
+        actor_lineage_child_len, actor_lineage_root_len, write_actor_lineage_child, write_actor_lineage_root,
     };
     // ADR-0096: the multi-actor `export!` arm stores the instance as
     // `Box<dyn ErasedWasmActor>`; re-export `Box` so the emitted code

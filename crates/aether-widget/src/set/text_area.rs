@@ -24,8 +24,8 @@ use crate::state::InteractionState;
 use crate::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::theme::{Theme, ThemeState};
 use crate::{
-    Collect, FocusGained, FocusLost, SetText, SetWidgetState, TextAreaConfig, TextCommitted, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusGained, FocusLost, ScrollWidget, SetText, SetWidgetState, TextAreaConfig, TextCommitted,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,7 +373,13 @@ impl WidgetDefaults for TextAreaWidget {
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
 /// A re-sent config resizes and restyles it in place, holding the buffer;
 /// [`SetText`] replaces what it holds.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
+#[actor(
+    instanced,
+    root,
+    child_of(WidgetPanel, ScrollWidget),
+    handler_set(WidgetDefaults),
+    depends(TextCapability, ClipboardCapability)
+)]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.widget.text_area";

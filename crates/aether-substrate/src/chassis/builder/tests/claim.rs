@@ -112,6 +112,7 @@ impl<const FAIL: bool> aether_actor::Lifecycle<Self> for Cap<FAIL> {
 impl<const FAIL: bool> aether_actor::Declared for Cap<FAIL> {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl<const FAIL: bool> NativeActor for Cap<FAIL> {
     type State = Self;

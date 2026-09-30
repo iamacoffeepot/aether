@@ -43,8 +43,8 @@ use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::{FontMetricsAdapter, SingleLineLayout};
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    Collect, HoverGained, HoverLost, LabelConfig, SetWidgetState, TextAlign, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, HoverGained, HoverLost, LabelConfig, ScrollWidget, SetWidgetState, TextAlign, WidgetDrawItem,
+    WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// A static text label. Holds the text plus the cached theme / frame.
@@ -181,7 +181,7 @@ fn align_x(align: TextAlign, frame_width: f32, text_width: Option<f32>) -> f32 {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
-#[actor(instanced, root, composable, depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), depends(TextCapability))]
 impl WasmActor for LabelWidget {
     type Config = LabelConfig;
     const NAMESPACE: &'static str = "aether.widget.label";

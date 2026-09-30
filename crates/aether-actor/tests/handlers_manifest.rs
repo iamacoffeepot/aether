@@ -26,8 +26,8 @@ use aether_actor::{
 use aether_data::Kind;
 use aether_data::{
     ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, KindId,
-    ReplyContract, actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, wire,
-    write_actor_lineage_child, write_actor_lineage_module_child, write_actor_lineage_root,
+    ReplyContract, actor_lineage_child_len, actor_lineage_root_len, wire, write_actor_lineage_child,
+    write_actor_lineage_root,
 };
 
 #[repr(C)]
@@ -82,7 +82,7 @@ impl Addressable for RootPeer {
     type Resolver = One;
 }
 
-#[actor(instanced, child_of(FirstParent), child_of(SecondParent))]
+#[actor(instanced, child_of(FirstParent, SecondParent))]
 impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
@@ -115,20 +115,6 @@ impl WasmActor for ManifestProbe {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
     fn unwire(&mut self, _ctx: &mut WasmCtx<'_>) {}
-}
-
-struct ComposableProbe;
-
-#[actor(instanced, composable)]
-impl WasmActor for ComposableProbe {
-    const NAMESPACE: &'static str = "manifest.composable";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self)
-    }
-
-    #[fallback]
-    fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 }
 
 /// ADR-0231: the contract-row probe. A test build sets `cfg(test)`, so
@@ -395,7 +381,6 @@ fn the_inputs_manifest_records_cardinality() {
     }
 
     assert_eq!(instanced_records(&ManifestProbe::__AETHER_INPUTS_MANIFEST), 1, "instanced child");
-    assert_eq!(instanced_records(&ComposableProbe::__AETHER_INPUTS_MANIFEST), 1, "instanced composable");
     assert_eq!(instanced_records(&ContractProbe::__AETHER_INPUTS_MANIFEST), 0, "singleton adopting a handler set");
     assert_eq!(instanced_records(&DependentProbe::__AETHER_INPUTS_MANIFEST), 0, "singleton with dependencies");
 }
@@ -457,7 +442,7 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
 
     assert_eq!(
         ManifestProbe::__AETHER_PLACEMENT,
-        WasmPlacementFacts { is_instanced: true, module_child: false, exact_parent_tags: EXACT_PARENT_TAGS },
+        WasmPlacementFacts { is_instanced: true, exact_parent_tags: EXACT_PARENT_TAGS },
         "runtime placement facts must derive from the same exact parents as the wire records"
     );
 
@@ -476,30 +461,6 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
 }
 
 #[test]
-fn composable_lineage_manifest_records_module_child_and_placement_facts() {
-    assert_eq!(ACTOR_LINEAGE_SECTION_VERSION, 0x02, "module-child metadata requires v0x02 framing");
-
-    let bytes = &ComposableProbe::__AETHER_LINEAGE_MANIFEST;
-    assert_eq!(&bytes[1..5], &2u32.to_le_bytes(), "ModuleChild must retain wire selector 2");
-
-    let child = ActorId::singleton(ComposableProbe::NAMESPACE).0;
-    assert_eq!(
-        parse_lineage_section(bytes).expect("generated module-child lineage manifest must decode"),
-        vec![ActorLineageRecord::ModuleChild { child, child_namespace: ComposableProbe::NAMESPACE.into() }]
-    );
-    assert_eq!(
-        ComposableProbe::__AETHER_PLACEMENT,
-        WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] },
-        "the hidden runtime facts and module-child record must derive from one actor declaration"
-    );
-
-    let runtime =
-        wire::to_vec(&ActorLineageRecord::ModuleChild { child, child_namespace: ComposableProbe::NAMESPACE.into() })
-            .expect("runtime module-child encoding");
-    assert_eq!(&bytes[1..], runtime, "generated module-child bytes must match runtime aether-wire encoding");
-}
-
-#[test]
 fn lineage_const_encoders_match_runtime_wire_for_every_selector() {
     const ACTOR: u64 = ActorId::singleton(ManifestProbe::NAMESPACE).0;
     const FIRST: u64 = ActorId::singleton(FirstParent::NAMESPACE).0;
@@ -508,9 +469,6 @@ fn lineage_const_encoders_match_runtime_wire_for_every_selector() {
     const CHILD_LEN: usize = actor_lineage_child_len(FIRST, ACTOR, FirstParent::NAMESPACE, ManifestProbe::NAMESPACE);
     const CHILD_BYTES: [u8; CHILD_LEN] =
         write_actor_lineage_child(FIRST, ACTOR, FirstParent::NAMESPACE, ManifestProbe::NAMESPACE);
-    const MODULE_CHILD_LEN: usize = actor_lineage_module_child_len(ACTOR, ManifestProbe::NAMESPACE);
-    const MODULE_CHILD_BYTES: [u8; MODULE_CHILD_LEN] =
-        write_actor_lineage_module_child(ACTOR, ManifestProbe::NAMESPACE);
 
     let records = [
         (ROOT_BYTES.as_slice(), ActorLineageRecord::Root { actor: ACTOR, namespace: ManifestProbe::NAMESPACE.into() }),
@@ -522,10 +480,6 @@ fn lineage_const_encoders_match_runtime_wire_for_every_selector() {
                 parent_namespace: FirstParent::NAMESPACE.into(),
                 child_namespace: ManifestProbe::NAMESPACE.into(),
             },
-        ),
-        (
-            MODULE_CHILD_BYTES.as_slice(),
-            ActorLineageRecord::ModuleChild { child: ACTOR, child_namespace: ManifestProbe::NAMESPACE.into() },
         ),
     ];
 

@@ -7,10 +7,6 @@
 //! record naming both. The checks run before the module publishes or
 //! anything is staged: a load whose selected or boot type has no `Root` is
 //! refused whole, and no route registers (#6821).
-//!
-//! A `ModuleChild` record satisfies neither; `composable` names an inline
-//! spawn beneath any actor of the same module, which a guest reaches
-//! instead.
 
 use aether_data::ActorLineageRecord;
 
@@ -25,9 +21,6 @@ fn declared_placements(lineage: &[ActorLineageRecord], actor_namespace: &str) ->
                 if child_namespace == actor_namespace =>
             {
                 Some(format!("child_of({parent_namespace})"))
-            }
-            ActorLineageRecord::ModuleChild { child_namespace, .. } if child_namespace == actor_namespace => {
-                Some("composable".to_owned())
             }
             _ => None,
         })
@@ -95,18 +88,13 @@ mod tests {
         }
     }
 
-    fn module_child(namespace: &'static str) -> ActorLineageRecord {
-        ActorLineageRecord::ModuleChild { child: 2, child_namespace: namespace.into() }
-    }
-
     #[test]
     fn admits_only_a_root_record_for_the_same_namespace() {
-        let cases: [(&str, Vec<ActorLineageRecord>, bool); 6] = [
+        let cases: [(&str, Vec<ActorLineageRecord>, bool); 5] = [
             ("root for the namespace", vec![root("m.actor")], true),
             ("root beside a child record", vec![child("m.parent", "m.actor"), root("m.actor")], true),
             ("root for another namespace", vec![root("m.other")], false),
             ("child record alone", vec![child("m.parent", "m.actor")], false),
-            ("module child record alone", vec![module_child("m.actor")], false),
             ("no records", Vec::new(), false),
         ];
 
@@ -120,12 +108,11 @@ mod tests {
     // type never declared (#6821).
     #[test]
     fn a_child_placement_admits_only_the_edge_to_that_parent() {
-        let cases: [(&str, Vec<ActorLineageRecord>, bool); 5] = [
+        let cases: [(&str, Vec<ActorLineageRecord>, bool); 4] = [
             ("the edge to the parent", vec![child("m.parent", "m.actor")], true),
             ("the edge beside a root record", vec![root("m.actor"), child("m.parent", "m.actor")], true),
             ("an edge to another parent", vec![child("m.other", "m.actor")], false),
             ("a root record alone", vec![root("m.actor")], false),
-            ("a module child record alone", vec![module_child("m.actor")], false),
         ];
 
         for (case, lineage, admitted) in cases {
@@ -145,12 +132,12 @@ mod tests {
 
     #[test]
     fn the_refusal_names_the_actor_and_its_declared_placements() {
-        let lineage = [root("m.other"), child("m.parent", "m.actor"), module_child("m.actor")];
+        let lineage = [root("m.other"), child("m.parent", "m.actor")];
 
         let error = root_refusal(&lineage, "m.actor").expect("a child-only type is refused");
 
         assert!(error.starts_with("m.actor cannot be placed"), "{error}");
         assert!(error.contains("root"), "{error}");
-        assert!(error.ends_with("[child_of(m.parent), composable]"), "{error}");
+        assert!(error.ends_with("[child_of(m.parent)]"), "{error}");
     }
 }

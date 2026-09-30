@@ -284,9 +284,27 @@ pub fn root_mailbox<C: Root + Addressable<Resolver = One>>() -> MailboxId {
 /// beneath logical parent `P` (ADR-0166).
 ///
 /// This describes a legal edge, not ownership, supervision, or liveness. A
-/// child may implement `ChildOf` for several distinct parents and may also
-/// implement [`Root`] when both placements are meaningful.
-pub trait ChildOf<P: Addressable>: Addressable {}
+/// child lists every parent it may sit beneath in one `child_of(A, B, ..)`
+/// list on its `#[actor(..)]`, and may also be [`Root`] when both placements
+/// are meaningful.
+///
+/// A hand-written impl does not compile (ADR-0231 §10). The actor's one
+/// [`Declared`] impl lists its parents as [`Declared::Parents`], and each impl
+/// names `P`'s position in that list as [`Index`](ChildOf::Index), so an impl
+/// for an undeclared parent either repeats an emitted impl (`E0119`) or names
+/// a position that holds another parent or none (`E0277`). The list is the
+/// actor's whole placement set.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not declare `{P}` as a parent",
+    label = "`{P}` is not in `{Self}`'s `child_of(..)`",
+    note = "add `{P}` to the `child_of(..)` list on `{Self}`'s `#[actor(..)]`"
+)]
+pub trait ChildOf<P: Addressable>: Addressable + Declared {
+    /// `P`'s position in [`Declared::Parents`], written by the expansion
+    /// that declared it.
+    #[doc(hidden)]
+    type Index: ListIndex<<Self as Declared>::Parents, P>;
+}
 
 /// A declared dependency (ADR-0230): `Self: DependsOn<R>` means the actor
 /// could not have been created before `R` was `Live`. It is checked where
@@ -779,7 +797,14 @@ mod tests {
             type Resolver = Many;
         }
         impl Root for Worker {}
-        impl ChildOf<Manager> for Worker {}
+        impl Declared for Worker {
+            type Depends = ();
+            type Spawns = ();
+            type Parents = (Manager, ());
+        }
+        impl ChildOf<Manager> for Worker {
+            type Index = Here;
+        }
 
         fn requires_root<T: Root>() {}
         fn requires_child<T: ChildOf<Manager>>() {}

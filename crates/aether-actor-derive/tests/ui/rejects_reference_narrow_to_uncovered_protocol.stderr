@@ -1,7 +1,7 @@
 error[E0277]: `Child` has no contract row for `Unhandled`
-  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:50:41
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:64:41
    |
-50 |     let _uncovered = reference.narrow::<Uncovered>();
+64 |     let _uncovered = reference.narrow::<Uncovered>();
    |                                ------   ^^^^^^^^^ no handler for `Unhandled` on this target
    |                                |
    |                                required by a bound introduced by this call
@@ -9,10 +9,10 @@ error[E0277]: `Child` has no contract row for `Unhandled`
    = note: a `#[fallback]` does not count as handling a kind
 help: the trait `Contract<Unhandled>` is not implemented for `Child`
       but trait `Contract<Handled>` is implemented for it
-  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:36:1
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:50:1
    |
-36 | #[actor(instanced, composable)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+50 | #[actor(instanced, child_of(Parent))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `Handled`, found `Unhandled`
    = note: required for `Child` to implement `CoversRows<(Row<Handled, Silent>, Row<Unhandled, Silent>)>`
    = note: required for `Uncovered` to implement `CoveredBy<Child>`
@@ -24,9 +24,9 @@ note: required by a bound in `ActorRef::<R>::narrow`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Child` has no contract row for `Unhandled`
-  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:55:37
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:69:37
    |
-55 |     let _uncovered = child.narrow::<Uncovered>();
+69 |     let _uncovered = child.narrow::<Uncovered>();
    |                            ------   ^^^^^^^^^ no handler for `Unhandled` on this target
    |                            |
    |                            required by a bound introduced by this call
@@ -34,10 +34,10 @@ error[E0277]: `Child` has no contract row for `Unhandled`
    = note: a `#[fallback]` does not count as handling a kind
 help: the trait `Contract<Unhandled>` is not implemented for `Child`
       but trait `Contract<Handled>` is implemented for it
-  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:36:1
+  --> tests/ui/rejects_reference_narrow_to_uncovered_protocol.rs:50:1
    |
-36 | #[actor(instanced, composable)]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+50 | #[actor(instanced, child_of(Parent))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `Handled`, found `Unhandled`
    = note: required for `Child` to implement `CoversRows<(Row<Handled, Silent>, Row<Unhandled, Silent>)>`
    = note: required for `Uncovered` to implement `CoveredBy<Child>`

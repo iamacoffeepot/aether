@@ -3,7 +3,7 @@
 //! lifecycle calls the composition path makes.
 
 use super::{
-    __validate_inline_child_placement, ActorTypeTag, Addressable, ChildOf, FailingChild, LifecycleProbe, ModuleChild,
+    __validate_inline_child_placement, ActorTypeTag, Addressable, ChildOf, FailingChild, LifecycleProbe,
     NO_INBOUND_SOURCE, NestingParent, PROBE_UNWIRE_COUNT, PROBE_WIRE_COUNT, Registry, STUB_INIT_CONFIG, SpawnError,
     StubChild, StubConfig, SucceedingChild, WasmCtx, WasmPlacementFacts, install_inline_child, panicking_resolver,
     stub_resolver,
@@ -255,7 +255,7 @@ fn by_tag_placement_rejects_non_instanced_selection() {
         &registry,
         0x20,
         child,
-        WasmPlacementFacts { is_instanced: false, module_child: true, exact_parent_tags: &[] },
+        WasmPlacementFacts { is_instanced: false, exact_parent_tags: &[] },
     );
     assert!(matches!(result, Err(SpawnError::ActorNotInstanced(tag)) if tag == child));
 }
@@ -276,7 +276,7 @@ fn by_tag_placement_rejects_disallowed_parent() {
 }
 
 #[test]
-fn by_tag_placement_accepts_module_child() {
+fn by_tag_placement_accepts_any_listed_parent() {
     let registry = Registry::new();
     registry.set_self_id(0x40);
     registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
@@ -287,41 +287,30 @@ fn by_tag_placement_accepts_module_child() {
         ActorTypeTag::of::<SucceedingChild>(),
         SucceedingChild::__AETHER_PLACEMENT,
     );
-    assert!(result.is_ok(), "a composable instanced actor accepts the actual module parent: {result:?}");
+    assert!(result.is_ok(), "a child accepts a runtime parent later in its child_of list: {result:?}");
 }
 
 #[test]
-fn placement_fixtures_cover_exact_and_composable_lineage() {
+fn placement_fixtures_cover_exact_lineage() {
     const EXACT_PARENT: ActorTypeTag = ActorTypeTag::of::<NestingParent>();
     const MISMATCH_PARENT: ActorTypeTag = ActorTypeTag::of::<LifecycleProbe>();
 
     fn assert_child_of<P: Addressable, C: ChildOf<P>>() {}
-    fn assert_module_child<C: ModuleChild>() {}
 
     assert_child_of::<NestingParent, FailingChild>();
     assert_child_of::<NestingParent, StubChild>();
-    assert_module_child::<SucceedingChild>();
     assert_child_of::<NestingParent, SucceedingChild>();
     assert_child_of::<LifecycleProbe, SucceedingChild>();
 
     assert_ne!(EXACT_PARENT, MISMATCH_PARENT, "the rejection candidate must have a distinct parent tag");
     assert_eq!(
         StubChild::__AETHER_PLACEMENT,
-        WasmPlacementFacts { is_instanced: true, module_child: false, exact_parent_tags: &[EXACT_PARENT] },
+        WasmPlacementFacts { is_instanced: true, exact_parent_tags: &[EXACT_PARENT] },
         "the exact candidate must name only its declared parent",
     );
     assert!(
         !StubChild::__AETHER_PLACEMENT.exact_parent_tags.contains(&MISMATCH_PARENT),
         "the exact candidate must reject a different parent tag",
-    );
-    assert_eq!(
-        SucceedingChild::__AETHER_PLACEMENT,
-        WasmPlacementFacts { is_instanced: true, module_child: true, exact_parent_tags: &[] },
-        "the composable candidate carries module permission without exact parents",
-    );
-    assert!(
-        SucceedingChild::__AETHER_PLACEMENT.exact_parent_tags.is_empty(),
-        "a composable candidate must not also carry exact parents",
     );
 }
 
@@ -438,12 +427,12 @@ fn spawn_inline_rejects_unavailable_parent_identity_before_host_call() {
     );
 }
 
-/// Issue 5722: `spawn_inline` does not care *which* exported actor the ctx is
-/// executing — a `composable` child may sit beneath any parent its module
-/// exports. Under a ctx whose recorded identity is a `LifecycleProbe`, the
-/// two-type verb naming `NestingParent` fails with `ParentIdentityMismatch`
-/// (the sibling test above), while this one falls through the parent gate to
-/// subname validation. The mismatch error is what a copied-from-a-sibling
+/// Issue 5722: `spawn_inline` reads its parent from the ctx rather than
+/// naming it, and `A: Spawns<C>` already proved `C` lists that parent in its
+/// `child_of(..)`. Under a ctx whose recorded identity is a `LifecycleProbe`,
+/// the two-type verb naming `NestingParent` fails with
+/// `ParentIdentityMismatch` (the sibling test above), while this one falls
+/// through the parent gate to subname validation. The mismatch error is what a copied-from-a-sibling
 /// wrong `P` produces, and consumers `.ok()` or warn-log it into a silently
 /// absent child.
 #[test]

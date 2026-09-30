@@ -37,8 +37,8 @@ use crate::set::{
 use crate::state::{InteractionState, emit_state_changed};
 use crate::theme::Theme;
 use crate::{
-    Collect, RadioConfig, RadioSelected, SetSelection, SetWidgetState, WidgetControlState, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, RadioConfig, RadioSelected, ScrollWidget, SetSelection, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPanel,
 };
 
 /// Which way an arrow key moves the selection.
@@ -172,7 +172,7 @@ impl WidgetDefaults for RadioGroupWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `RadioConfig` again to replace the options or theme in place — that
 /// holds the current choice. Send it [`SetSelection`] to move the choice.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.widget.radio";

@@ -79,7 +79,10 @@ use crate::set::{
 use crate::state::{InteractionState, emit_state_changed};
 use crate::text_edit::FontMetricsAdapter;
 use crate::theme::{TextRole, Theme};
-use crate::{Collect, DialogConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPlaced};
+use crate::{
+    Collect, DialogConfig, ScrollWidget, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetPanel,
+    WidgetPlaced,
+};
 
 /// The plate's inset, in spacing units — two, which is the least a control
 /// inside a plate may sit from its edge.
@@ -268,7 +271,7 @@ impl WidgetDefaults for DialogWidget {
 /// children standing on it and raise them into the overlay lane
 /// (`Composite::set_slot_overlay`), so the plate arrives under its own
 /// contents and over the screen it covers.
-#[actor(instanced, root, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DialogWidget {
     type Config = DialogConfig;
     const NAMESPACE: &'static str = "aether.widget.dialog";

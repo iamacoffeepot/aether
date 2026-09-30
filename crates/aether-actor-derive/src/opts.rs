@@ -32,9 +32,10 @@ pub struct ActorOpts {
     /// the `Root` marker impl a native root carries, because a loaded guest is
     /// named at the root as a native actor is.
     pub root: bool,
-    /// ADR-0166: actor types that may directly parent this actor. Repetition
-    /// is intentional so one child identity can be permitted beneath several
-    /// logical parents.
+    /// ADR-0166: the actor types that may directly parent this actor, from
+    /// one `child_of(A, B, …)` list. The list becomes `Declared::Parents`, and
+    /// each listed type emits `impl ChildOf<P> for Self` at its position in it
+    /// (ADR-0231 §10), so the list is the whole placement set.
     pub child_of: Vec<syn::TypePath>,
     /// ADR-0230: actor types this actor depends on, from one
     /// `depends(A, B, …)` list. The list becomes `Declared::Depends`, and
@@ -53,9 +54,6 @@ pub struct ActorOpts {
     /// its own module (`ListedIn`), so that `export!` must list every declared
     /// child.
     pub spawns: Vec<syn::TypePath>,
-    /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
-    /// parent exported from the same resident module.
-    pub composable: bool,
     /// ADR-0169: the `#[handler_set]` trait this actor adopts, from
     /// `#[actor(handler_set(T))]`. Its handlers are consulted after the local
     /// dispatch chain misses, and its records join this actor's inputs
@@ -99,18 +97,6 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             }
             opts.root = true;
             Ok(())
-        } else if meta.path.is_ident("composable") {
-            if meta.input.peek(Paren) || meta.input.peek(syn::Token![=]) {
-                return Err(meta.error("`composable` takes no arguments; use `#[actor(instanced, composable)]`"));
-            }
-            if opts.composable {
-                return Err(meta.error("duplicate `composable` declaration in #[actor]"));
-            }
-            if !opts.child_of.is_empty() {
-                return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
-            }
-            opts.composable = true;
-            Ok(())
         } else if meta.path.is_ident("handler_set") {
             // ADR-0169: adopt a `#[handler_set]` trait's handlers. The path is
             // used verbatim in the emitted `<Self as Path>::…` delegation and
@@ -132,11 +118,8 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             opts.handler_set = Some(set);
             Ok(())
         } else if meta.path.is_ident("child_of") {
-            push_actor_type_entry(&meta, &mut opts.child_of)?;
-            if opts.composable {
-                return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
-            }
-            Ok(())
+            // ADR-0166 (issue 7210): one list per actor, like `depends`.
+            parse_type_list_once(&meta, &mut opts.child_of, "child_of", "WidgetPanel", "ScrollWidget")
         } else if meta.path.is_ident("depends") {
             // ADR-0230 (issue 6557): one list per actor.
             parse_type_list_once(&meta, &mut opts.depends, "depends", "RenderCapability", "FsCapability")
@@ -162,7 +145,6 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
                  `root`, `child_of(TypePath)`, `depends(TypePath)`, `spawns(TypePath)`, \
-                 `composable`, \
                  `handler_set(TraitPath)`, \
                  `runtime_feature = \"name\"`, or a bare runtime module path",
             ))
@@ -172,27 +154,7 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
     Ok(opts)
 }
 
-/// Parse one entry of the repeatable `child_of(P)` option into `slot`:
-/// exactly one type path, rejecting a repeated identical type.
-fn push_actor_type_entry(meta: &meta::ParseNestedMeta, slot: &mut Vec<syn::TypePath>) -> syn::Result<()> {
-    let content;
-    syn::parenthesized!(content in meta.input);
-    let target: syn::TypePath = content.parse().map_err(|_| {
-        content.error("`child_of` expects exactly one actor type path, for example `child_of(Manager)`")
-    })?;
-    if !content.is_empty() {
-        return Err(
-            content.error("`child_of` expects exactly one actor type path; repeat `child_of(...)` for another parent")
-        );
-    }
-    if contains_type(slot, &target) {
-        return Err(meta.error("duplicate identical `child_of` declaration in #[actor]"));
-    }
-    slot.push(target);
-    Ok(())
-}
-
-/// Parse a `depends` / `spawns` list into `slot`, refusing a second list for
+/// Parse a `child_of` / `depends` / `spawns` list into `slot`, refusing a second list for
 /// the same option. Empty lists are refused, so a non-empty slot means the
 /// option was already written.
 fn parse_type_list_once(
@@ -211,8 +173,8 @@ fn parse_type_list_once(
     Ok(())
 }
 
-/// Parse one `option(A, B, …)` type list — `depends` (ADR-0230) or
-/// `spawns` (ADR-0114): at least one actor type path, comma-separated,
+/// Parse one `option(A, B, …)` type list — `child_of` (ADR-0166),
+/// `depends` (ADR-0230), or `spawns` (ADR-0114): at least one actor type path, comma-separated,
 /// trailing comma allowed, each type named once. Declaration order is kept,
 /// so it is the order of the emitted impl items and of the `Declared` list.
 /// `first` and `second` are the example types the error messages show.

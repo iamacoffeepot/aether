@@ -84,6 +84,7 @@ impl aether_actor::Lifecycle<Self> for Spawned {
 impl aether_actor::Declared for Spawned {
     type Depends = ();
     type Spawns = ();
+    type Parents = ();
 }
 impl NativeActor for Spawned {
     type State = Self;
@@ -192,6 +193,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
     impl aether_actor::Declared for Pumped {
         type Depends = ();
         type Spawns = ();
+        type Parents = ();
     }
     impl NativeActor for Pumped {
         type State = Self;
