@@ -528,9 +528,15 @@ the workspace never asks who sent it. The ADR-0231 pieces it uses:
 | `ActorPath::<JournalActor>::instance(&unit_key).narrow::<ArtifactStorage>()` → `ProtocolPath<ArtifactStorage>` | the unit's driver, once, from the key it was born with (`DriverParams.unit`) | compiles only if `ArtifactStorage: CoveredBy<JournalActor>`; the text `aether.bloomery.journal:<key>` is written from the type and the key, and the narrowing is type-level, with no registry lookup and no position (ADR-0230 §2, ADR-0231 §3) |
 | `ctx.resolve(&run.source)` → `ProtocolRef<ArtifactStorage>` | the workspace, on receipt, before anything is queued | liveness only: the path compiles to its position by the lineage fold, and one route-table lookup finds a `Live` route under that canonical name. The source's coverage of `ArtifactStorage` was proven before `resolve` runs, by the contextual decode of the `Run` or `Import` that carried it, against the engine's published rows (ADR-0231 §3, #6858) |
 
-A source that does not resolve is refused at receipt:
-`Refused(Refusal::SourceUnavailable)` for a run, `Failed { detail }` for an
-import. Every read and stage of the request goes through the resolved
+A source that does not prove is answered with the request's reply, whose
+`Err` arm names the refusal as a `PathRefused` (the path and why):
+`Err(RunError::Refused(Refusal::SourceUnavailable(..)))` for a run,
+`Err(ImportError::Source(..))` for an import. Both replies implement
+`From<PathRefused>`, so the `#[actor]` dispatch answers a source refused at
+decode before any handler runs, and the workspace answers one that closed
+before its `resolve` the same way, through `From<ResolveError>`; a
+path-carrying request whose reply lacks the impl does not compile (ADR-0231
+§3, #7226). Every read and stage of the request goes through the resolved
 `ProtocolRef`; the reply goes to the caller, as today.
 
 **Bloomery's sources.** The unit's driver writes its journal's source once
@@ -574,7 +580,8 @@ provides.
 **Outputs.** Step stdout and stderr, the output tree, and an import's tree
 are staged in bounded batches as they are produced, each `Stage` answered
 before the next is sent. The reply follows the last `Staged`. A `Stage`
-answered `Err` ends a run or an import `Failed { detail }`. A run or import
+answered `Err` ends a run `Err(RunError::Failed { detail })` and an import
+`Err(ImportError::Failed { detail })`. A run or import
 that ends any way but `Ok` leaves what it staged cited by nothing:
 content-addressed and inert, like an `import-commit` batch with no head move.
 Staging as it goes bounds memory by the batch rather than by the largest
@@ -635,7 +642,7 @@ the per-unit component host.
 | Unexportable invariants stay unexported | Config carries `UnitKey`s; `ActorRef` crosses nothing. A request carries its source as a `ProtocolPath`, an `ErasedActorPath` on the wire, and the workspace proves it again on receipt. |
 | Static contract checks | A storage source is written from the journal's type and key and narrowed to `ArtifactStorage`, which compiles only if the journal covers it; the source the workspace receives is proven by its contextual decode against the engine's published rows, and its `resolve` on receipt proves liveness only (D7, ADR-0231 §3). The bootstrap writes its paths with type constructors whose bounds check placement. `child_of(JournalActor)` places the driver; identity halves make bootstrap sends kind-checked. No runtime token or injection. |
 | One valid way; every door needs a named production consumer | One relay path for every program API. `spawn_child` (embedder): the mount. `UnitKey` as a bundle root's key: the driver. `UnitKey::new`: D3's lowering. `resolve`: the bootstrap for the guest arm over `ActorPath<R>`, the workspace for the native arm over `ProtocolPath<P>` (D7, D8); the other arms wait for a caller. `ActorPath::instance` and `narrow`: the driver and the bootstrap; `ActorPath::child` and `UnitMember`: the bootstrap. `Stage`: the workspace's source-backed sink, answered by the journal owner. `ArtifactStorage`: `Run.source` and `Import.source`. |
-| Pending replies never dropped | D6's hops park and answer once; nothing evicts. Each storage request is answered once, and a request whose source does not resolve is answered at receipt, never queued. |
+| Pending replies never dropped | D6's hops park and answer once; nothing evicts. Each storage request is answered once, and a request whose source does not prove, at decode or at `resolve`, is answered `Err` naming the `PathRefused`, never dropped or queued. |
 | Fewer events, simpler architecture | No new actor, event, or record kind; one new mail kind pair (`Stage`). The workspace sheds its store, and isolation between units is the source each driver sets, with no table. The dedicated unit root is rejected for having no behaviour, and bundle roots keep the host they have. |
 | No recursion on unbounded data | Mount iterates the unit list; relays are single hops. |
 | No z-index; no drive or storage figures | None appear. |

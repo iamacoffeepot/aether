@@ -232,7 +232,7 @@ held.answer(ctx, &WatchHeadResult { .. });
 
 - The type does not prove that a stored `Held<R>` is ever answered. Rust has no linear types. An unanswered drop fails fast, but a debt parked forever is legitimate for a long-poll and is ended only by the requester's timeout.
 - There are two values where one handler used to have none. The receipt is the cost of keeping the contract on the return type.
-- Every reply kind a handler holds implements `HeldReply`, one line per kind. A kind with no failure variant must gain one: a reply that can go unanswered has to be able to say so. The field shapes differ between kinds (`ConnectResult::Err` also carries `addr`), so the impl is written by hand, not derived.
+- Every reply kind a handler holds implements `HeldReply`, one line per kind. A kind with no failure variant must gain one: a reply that can go unanswered has to be able to say so. The field shapes differ between kinds (`ConnectResult::Err` holds a `ConnectError`, whose `Failed` arm also carries `addr`), so the impl is written by hand, not derived.
 - A guest `hold` encodes its `unanswered` reply once, whether or not it is ever needed.
 - A task context must be a kind, so a staging actor keeps its live values in state under a key instead of in the context, which some staging sites do not do today.
 - Taking a task's context checks its type at run time, as a reply's does; today a completion's context type is a compile-time generic.
