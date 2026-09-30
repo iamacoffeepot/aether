@@ -28,6 +28,7 @@ mod bins;
 mod build_wasm;
 mod bump;
 mod cargo;
+mod clippy_wasm;
 mod dev_component;
 mod dist;
 mod docs;
@@ -47,6 +48,7 @@ use crate::affected::AffectedArgs;
 use crate::bins::BinsArgs;
 use crate::build_wasm::BuildWasmArgs;
 use crate::bump::BumpArgs;
+use crate::clippy_wasm::ClippyWasmArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
@@ -72,6 +74,11 @@ enum Commands {
     /// gate's own failure text, so it is the one command a reader who hit
     /// a missing artifact is told to run.
     BuildWasm(BuildWasmArgs),
+    /// Clippy-lint the component wasm set on `wasm32-unknown-unknown`
+    /// (issue #7185): the host clippy arm never compiles
+    /// `cfg(target_family = "wasm")` code, so this is that code's only
+    /// lint gate.
+    ClippyWasm(ClippyWasmArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
     /// Pin hand-written documentation against the surface it mirrors.
@@ -121,6 +128,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::DevComponent(args) => dev_component::run(&args),
         Commands::BuildWasm(args) => build_wasm::run(&args),
+        Commands::ClippyWasm(args) => clippy_wasm::run(&args),
         Commands::Dist(args) => dist::run(&args),
         Commands::Docs(args) => docs::run(&args),
         Commands::Package(args) => package::run(&args),
