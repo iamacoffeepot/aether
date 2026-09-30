@@ -248,7 +248,7 @@ struct PathTell {
 }
 
 /// [`PathProbe`]'s reply, which can name a refused path.
-#[aether_data::kind(name = "test.decode_refusal.path_answer", partial_eq)]
+#[aether_data::kind(name = "test.decode_refusal.path_answer")]
 enum PathAnswer {
     Ok,
     Err(PathRefused),
@@ -294,10 +294,10 @@ struct AskProbe;
 struct AskTell;
 
 /// What the [`PathAsker`] hears back.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum Heard {
     Answer(PathAnswer),
-    Refused(KindId),
+    Refused(DecodeRefused),
 }
 
 /// An asker that opts into `DecodeRefused` and records every answer it hears.
@@ -334,7 +334,7 @@ impl NativeActor for PathAsker {
 
     #[aether_actor::handler::tell]
     fn on_decode_refused(&mut self, _ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
-        self.heard.send(Heard::Refused(notice.kind)).expect("heard receiver stays live");
+        self.heard.send(Heard::Refused(notice)).expect("heard receiver stays live");
     }
 }
 
@@ -362,7 +362,11 @@ fn a_request_whose_path_does_not_prove_is_answered_once_with_its_reply() {
     harness.execute(vec![("ask", HarnessOp::send_and_settle(&asker, &AskProbe))]).expect("the request chain settles");
 
     let refused = PathRefused { path: absent_path().as_erased().clone(), reason: PathRefusal::Unpublished };
-    assert_eq!(heard.try_iter().collect::<Vec<_>>(), [Heard::Answer(PathAnswer::Err(refused))]);
+    let heard: Vec<Heard> = heard.try_iter().collect();
+    assert!(
+        matches!(heard.as_slice(), [Heard::Answer(PathAnswer::Err(answer))] if *answer == refused),
+        "one Err reply naming the path, and no notice: {heard:?}",
+    );
 }
 
 /// A silent row of a path-carrying kind keeps the drop: the opted-in asker
@@ -375,5 +379,9 @@ fn a_tell_whose_path_does_not_prove_keeps_the_drop() {
 
     harness.execute(vec![("ask", HarnessOp::send_and_settle(&asker, &AskTell))]).expect("the request chain settles");
 
-    assert_eq!(heard.try_iter().collect::<Vec<_>>(), [Heard::Refused(<PathTell as Kind>::ID)]);
+    let heard: Vec<Heard> = heard.try_iter().collect();
+    assert!(
+        matches!(heard.as_slice(), [Heard::Refused(notice)] if notice.kind == <PathTell as Kind>::ID),
+        "the notice alone, naming the tell: {heard:?}",
+    );
 }

@@ -831,10 +831,13 @@ fn wire_impls(
     decode_body: &TokenStream2,
 ) -> TokenStream2 {
     // ADR-0231 §3: the type proves a route when any field does, wherever it
-    // nests. `Vec<u8>` keeps its memcpy arm but still answers `false`.
-    let proves_routes = field_types
-        .iter()
-        .map(|ty| quote! { || <#ty as ::aether_data::__derive_runtime::WireDecode<'de>>::PROVES_ROUTES });
+    // nests. `Vec<u8>` keeps its memcpy arm but still answers `false`. The
+    // field types are echoed at the derive's call site, as `reach_impls`
+    // echoes them, so a qualified spelling is linted on the field alone.
+    let proves_routes = field_types.iter().map(|ty| {
+        let ty = call_site_tokens(ty.to_token_stream());
+        quote! { || <#ty as ::aether_data::__derive_runtime::WireDecode<'de>>::PROVES_ROUTES }
+    });
     quote! {
         impl ::aether_data::wire::WireEncode for #name {
             fn encode(

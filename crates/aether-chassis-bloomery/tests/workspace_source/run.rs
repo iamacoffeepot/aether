@@ -137,7 +137,7 @@ fn run_against(
 fn outcome(answer: RunResult) -> Result<Outcome, Box<dyn Error>> {
     match answer {
         RunResult::Ok(outcome) => Ok(outcome),
-        other => Err(format!("expected an outcome, got {other:?}").into()),
+        other @ RunResult::Err(_) => Err(format!("expected an outcome, got {other:?}").into()),
     }
 }
 
