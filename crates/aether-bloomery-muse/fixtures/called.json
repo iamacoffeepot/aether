@@ -1,0 +1,51 @@
+{
+  "id": "resp_0002",
+  "object": "response",
+  "created_at": 1790000100,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "rs_0002",
+      "type": "reasoning",
+      "summary": [
+        { "type": "summary_text", "text": "The notes answer this; read them, then ask a sub-turn." }
+      ]
+    },
+    {
+      "id": "msg_0002",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "text": "Reading the notes first.", "annotations": [] }
+      ]
+    },
+    {
+      "id": "fc_0001",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_read",
+      "name": "workspace-read",
+      "arguments": "{\"path\": \"notes/bloomery.md\"}"
+    },
+    {
+      "id": "fc_0002",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_turn",
+      "name": "muse-turn",
+      "arguments": "{\"endpoint\":\"https://example.test/v1/responses\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1500,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 90,
+    "output_tokens_details": { "reasoning_tokens": 40 },
+    "total_tokens": 1590
+  }
+}

@@ -6,15 +6,18 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    Endpoint, ModelName, MuseTurn, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems, TurnOutcome,
-    TurnResult,
+    Endpoint, ModelName, MuseTurn, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, TurnInput,
+    TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
-use aether_bloomery_program::{AsyncSession, Pending, PendingCall, PollResult, Program, Started, start_async};
+use aether_bloomery_program::{
+    AsyncSession, Pending, PendingCall, PollResult, Program, Started, start_async, tool_definition,
+};
 use aether_data::{Kind, Storage};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
+const CALLED: &str = include_str!("../fixtures/called.json");
 const URL: &str = "https://example.test/v1/responses";
 
 /// A staged artifact's payload, read whole and verified against its digest.
@@ -23,22 +26,28 @@ fn payload(artifact: &EncodedArtifact) -> Result<Vec<u8>, DigestMismatch> {
     ClosureArtifact::new(kind, bytes).load(artifact.digest())
 }
 
-/// Start one turn whose closure carries the input and every cited text, and
-/// return the session parked on its first cap send.
-fn start_turn() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
+/// Start one turn offering `tools` (each a program and its definition text)
+/// whose closure carries the input, every cited text, and every definition,
+/// and return the session parked on its first cap send.
+fn start_turn(tools: &[(&str, String)]) -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
     let texts = [(Role::Developer, "Be brief."), (Role::User, "What is a bloomery?")];
-    let items = texts.iter().map(|&(role, text)| TurnItem::new(role, Ref::of_text(text))).collect();
+    let items = texts.iter().map(|&(role, text)| TurnItem::message(role, Ref::of_text(text))).collect();
+    let offered = tools
+        .iter()
+        .map(|(program, definition)| Ok(OfferedTool::new(ProgramName::new(*program)?, Ref::of_text(definition))))
+        .collect::<Result<_, Box<dyn Error>>>()?;
     let input = TurnInput::new(
         Endpoint::new(URL)?,
         ModelName::new("muse-spark-1.3")?,
+        OfferedTools::new(offered)?,
         TurnItems::new(items)?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
     );
     let (kind, payload, _) = EncodedArtifact::new(&input)?.into_parts();
     let input_artifact = ClosureArtifact::new(kind, payload);
-    let mut closure: Vec<_> =
-        texts.iter().map(|(_, text)| ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec())).collect();
+    let cited = texts.iter().map(|(_, text)| *text).chain(tools.iter().map(|(_, definition)| definition.as_str()));
+    let mut closure: Vec<_> = cited.map(|text| ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec())).collect();
     closure.push(input_artifact.clone());
 
     let invoke = Invoke::new(7, ProgramName::new(MuseTurn::NAME)?, input_artifact.claimed().unverified(), closure);
@@ -53,7 +62,7 @@ fn start_turn() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
 fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn Error>> {
     // Catches a result citing an unstaged artifact, texts not read from the injected closure, a fetch to
     // the wrong target or reply kind, and a second fetch per turn.
-    let (mut session, pending) = start_turn()?;
+    let (mut session, pending) = start_turn(&[])?;
     assert_eq!(pending.api, ProgramApi::Http);
     assert_eq!(pending.kind_id, Fetch::ID);
     assert_eq!(pending.expected_reply, FetchResult::ID);
@@ -95,7 +104,7 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
 fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box<dyn Error>> {
     // Catches the `Retry-After` header not threaded from the fetch reply into the record, an overload
     // recorded as terminal, the refusal body dropped, and a hidden in-run retry.
-    let (mut session, pending) = start_turn()?;
+    let (mut session, pending) = start_turn(&[])?;
     let reply = FetchResult::Ok {
         request_id: 1,
         url: URL.into(),
@@ -125,7 +134,7 @@ fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box
 #[test]
 fn a_turn_with_no_reply_refuses_with_the_http_error() -> Result<(), Box<dyn Error>> {
     // Catches a turn that never reached the vendor being recorded as answered.
-    let (mut session, pending) = start_turn()?;
+    let (mut session, pending) = start_turn(&[])?;
     let reply = FetchResult::Err { request_id: 1, url: URL.into(), error: HttpError::Timeout };
     session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
 
@@ -136,4 +145,50 @@ fn a_turn_with_no_reply_refuses_with_the_http_error() -> Result<(), Box<dyn Erro
         }
         other => panic!("expected Refused naming the HTTP error, got {other:?}"),
     }
+}
+
+#[test]
+fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(), Box<dyn Error>> {
+    // Catches a definition read from outside the injected closure or left out of the request, a result citing
+    // unstaged arguments, and a rendered definition the request's own name check refuses.
+    let read_definition = serde_json::json!({
+        "type": "function",
+        "name": "workspace-read",
+        "description": "Read one workspace file.",
+        "parameters": { "type": "object" },
+        "strict": false,
+    });
+    let tools =
+        [("muse.turn", tool_definition::<MuseTurn>()?.to_string()), ("workspace.read", read_definition.to_string())];
+    let (mut session, pending) = start_turn(&tools)?;
+
+    let fetch = Fetch::decode_from_bytes(&pending.api_call(1).payload).ok_or("the pending call is a fetch")?;
+    let sent: serde_json::Value = serde_json::from_slice(&fetch.body)?;
+    let sent_names: Vec<_> =
+        sent["tools"].as_array().ok_or("tools are sent")?.iter().map(|tool| &tool["name"]).collect();
+    assert_eq!(sent_names, ["muse-turn", "workspace-read"], "both offered definitions are sent, in order");
+
+    let reply = FetchResult::Ok {
+        request_id: 1,
+        url: URL.into(),
+        status: 200,
+        headers: Vec::new(),
+        body: CALLED.as_bytes().to_vec(),
+    };
+    session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+    let PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) = session.poll() else {
+        panic!("expected the turn to complete after its one fetch");
+    };
+
+    let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
+    let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
+    let TurnOutcome::Called { calls, text, .. } = recorded.outcome() else {
+        panic!("expected Called, got {:?}", recorded.outcome());
+    };
+    let programs: Vec<_> = calls.as_slice().iter().map(|call| call.program().as_str()).collect();
+    assert_eq!(programs, ["workspace.read", "muse.turn"]);
+    for cited in calls.as_slice().iter().map(ToolCall::arguments).chain([*text]) {
+        assert!(staged.iter().any(|artifact| artifact.digest() == cited.digest()), "every cited text is staged");
+    }
+    Ok(())
 }
