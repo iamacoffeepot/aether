@@ -5,11 +5,10 @@
 //! keeps every namespace its predecessor exported (ADR-0241 §4). This lib has
 //! no `export!` of its own.
 //!
-//! [`ProbeGate`] is `v2`'s own `test.republish.gate` type rather than a type
-//! every version shares: `v1`'s gate has no `GateProbe` row, and several
-//! scenarios assert that absence, so it stays local to its own example.
-//! `ProbeGate` moves here only so a test can load or cast it by a name an
-//! rlib dependent can reach (issue 7143).
+//! [`ProbeGate`] is the one exception: only `republish_group_v2` exports it.
+//! `v1`'s gate has no `GateProbe` row, and several scenarios assert that
+//! absence, so `v1` keeps its own gate in its example. `ProbeGate` lives here
+//! only so a test can name the successor's type (issue 7143).
 
 use std::mem;
 
