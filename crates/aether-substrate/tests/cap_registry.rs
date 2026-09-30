@@ -69,8 +69,8 @@ fn cap_registry_reports_fallback() {
     assert!(!harness.accepts(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
-/// Publishing the gate pair's second version republishes its first with
-/// its second (ADR-0241 §7), whose `test.republish.gate` keeps v1's
+/// Publishing the gate pair's second version republishes its first
+/// (ADR-0241 §7); v2's `test.republish.gate` keeps v1's
 /// `GateQuery` row and adds a `GateProbe` row, so admission's growth rule
 /// passes. The registry reflects the post-replace accept-set at the same
 /// mailbox id (stable across replace per ADR-0022): `GateProbe` flips
