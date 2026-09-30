@@ -47,7 +47,7 @@ fn boot_bench() -> SubstrateHarness {
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ActorRef<Probe>, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load::<Probe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .load::<Probe>(LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.probe".to_owned()) })
         .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
 }
 

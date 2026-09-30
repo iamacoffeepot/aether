@@ -22,7 +22,7 @@ use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, ReplaceComponent, ReplaceResult, Tick};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, Tick};
 use aether_test_fixtures_kinds::{GateProbe, GateQuery, UnsubscribeKeys};
 use std::fs;
 
@@ -31,11 +31,11 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Load the bundle's default export, the singleton `test.probe`.
+/// Load the bundle's singleton `test.probe` export.
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ErasedActorRef, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.probe".to_owned()) })
         .unwrap_or_else(|error| panic!("load_component(test.probe): {error}"))
 }
 
@@ -69,8 +69,8 @@ fn cap_registry_reports_fallback() {
     assert!(!harness.accepts(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
-/// `aether.component.replace` republishes the gate pair's first version with
-/// its second (ADR-0241 §7), whose `test.republish.gate` keeps v1's
+/// Publishing the gate pair's second version republishes its first
+/// (ADR-0241 §7); v2's `test.republish.gate` keeps v1's
 /// `GateQuery` row and adds a `GateProbe` row, so admission's growth rule
 /// passes. The registry reflects the post-replace accept-set at the same
 /// mailbox id (stable across replace per ADR-0022): `GateProbe` flips
@@ -94,17 +94,8 @@ fn cap_registry_updates_on_replace() {
     assert!(harness.accepts(swappable, GateQuery::ID));
     assert!(!harness.accepts(swappable, GateProbe::ID));
 
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let wasm = fs::read(&v2_path).expect("read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm, configs: Vec::new() }),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    if let Err(error) = harness.publish(fs::read(&v2_path).expect("read fixture wasm")) {
+        panic!("publish(gate v2): {error}");
     }
 
     // Post-replace: v2's accept-set wins.
