@@ -75,7 +75,7 @@ impl Program for SessionContinue {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Ref, Refusal};
+    use aether_bloomery_kinds::{Ref, Refusal, Tree};
 
     use super::{ContinueInput, SessionContinue};
     use crate::input::{OfferedTools, Role, TurnItem};
@@ -91,7 +91,8 @@ mod tests {
             TurnItem::message(Role::Assistant, Ref::of_text("hello")),
         ];
         let items = SessionItems::new(items).expect("items");
-        let session = Session::new(settings(OfferedTools::default()), items, RestReason::Completed, None);
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let session = Session::new(settings(OfferedTools::default()), items, RestReason::Completed, tree);
         let user = Ref::of_text("more");
         let input = ContinueInput::new(
             SessionKey::new(4),

@@ -13,13 +13,14 @@
 //!
 //! A tool is a program to run. The caller renders each offered program with
 //! `aether_bloomery_program::tool_definition` and cites the definition in an
-//! [`OfferedTool`], beside the program's input and result schemas
-//! (`ToolSchema::of`); nothing defaults to every declared program. A reply
+//! [`OfferedTool`], beside the schemas of the program's arguments (the `A` of
+//! its `Tooled<A>` input) and of its result (`ToolSchema::of`); nothing
+//! defaults to every declared program. A reply
 //! that asks for calls is [`TurnOutcome::Called`], each [`ToolCall`] citing
 //! its arguments verbatim and holding a [`ToolInput`]: a call whose name is an
 //! offered program's function name and whose arguments decode against the
-//! offered input schema carries the program and the input stored under the
-//! input's kind; any other call is refused under the name the model wrote,
+//! offered arguments schema carries the program and the arguments stored
+//! under their kind; any other call is refused under the name the model wrote,
 //! with the text of the refusal (`no such tool: <name>`, or the refused
 //! decode), so the model sees its mistake on the next turn. The
 //! program never runs a call. A later turn replays the call as
@@ -44,11 +45,15 @@
 //!
 //! A session loops over turns and the calls they ask for as a bloomery
 //! reactor, `MuseSession`, exported from this same bundle. `muse.session.open`
-//! opens one and `muse.session.continue` resumes one; the loop runs each
-//! decoded call through a bound tool (`muse.echo` for now) one at a time,
-//! sends the next turn with the calls and their outputs appended, and at each
-//! rest writes the conversation down as a [`Session`] (`muse.session`) through
-//! `muse.session.record`, moving the session's head to it. Each open and
+//! opens one on a tree and `muse.session.continue` resumes one; the loop runs
+//! each decoded call through a bound tool one at a time, over the session's
+//! current tree, sends the next turn with the calls and their outputs
+//! appended, and at each rest writes the conversation and the latest tree
+//! down as a [`Session`] (`muse.session`) through `muse.session.record`,
+//! moving the session's head to it. The bound tools are [`TreeEdit`]
+//! (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
+//! tree the loop carries to the next call, and the fixture [`Echo`]
+//! (`muse.echo`). Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`].
 
@@ -80,6 +85,7 @@ mod request;
 mod response;
 mod result;
 mod session;
+mod tools;
 
 pub use input::{
     CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, ModelName, ModelNameError,
@@ -89,12 +95,12 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    CallAnswer, ContinueInput, Echo, EchoInput, EchoResult, MUSE, MuseSession, OpenInput, RecordInput, RestReason,
-    Session, SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnLimit,
-    TurnLimitError, TurnSettings, offered,
+    CallAnswer, ContinueInput, MUSE, MuseSession, OpenInput, RecordInput, RestReason, Session, SessionContinue,
+    SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnLimitError, TurnSettings,
 };
+pub use tools::{Echo, EchoArgs, EchoResult, EditArgs, MAX_TEXT_BYTES, TreeEdit, TreeWrite, WriteArgs, offered};
 
 aether_actor::export!(
-    public = [MuseTurn, SessionOpen, SessionContinue, SessionRecord, Echo, MuseSession],
+    public = [MuseTurn, SessionOpen, SessionContinue, SessionRecord, Echo, TreeEdit, TreeWrite, MuseSession],
     generators = [aether_bloomery_program::bundle],
 );

@@ -50,20 +50,15 @@ pub struct RecordInput {
     /// For a turn that asked for calls, one output for each call in the order
     /// asked. Empty for a turn that answered, stopped early, or refused.
     outputs: Vec<CallAnswer>,
-    /// The tree the session's tools left. `None` until tools edit files.
-    tree: Option<Ref<Tree>>,
+    /// The tree the session's tools left: the latest tree of the session.
+    tree: Ref<Tree>,
 }
 
 impl RecordInput {
     /// Record the rest after the turn `turn` that answered `result`, with the
-    /// `outputs` of any calls it asked for.
+    /// `outputs` of any calls it asked for and the `tree` its tools left.
     #[must_use]
-    pub const fn new(
-        turn: Ref<TurnInput>,
-        result: Ref<TurnResult>,
-        outputs: Vec<CallAnswer>,
-        tree: Option<Ref<Tree>>,
-    ) -> Self {
+    pub const fn new(turn: Ref<TurnInput>, result: Ref<TurnResult>, outputs: Vec<CallAnswer>, tree: Ref<Tree>) -> Self {
         Self { turn, result, outputs, tree }
     }
 }
@@ -123,7 +118,7 @@ fn refused(reason: &str) -> Refusal {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Ref, Refusal};
+    use aether_bloomery_kinds::{Ref, Refusal, Tree};
 
     use super::{CallAnswer, RecordInput, SessionRecord};
     use crate::input::tests::call;
@@ -150,7 +145,7 @@ mod tests {
                 Ref::of_encoded(&turn).expect("turn"),
                 Ref::of_encoded(&result).expect("result"),
                 outputs,
-                None,
+                Ref::of_encoded(&Tree::empty()).expect("tree"),
             );
             run::<SessionRecord>(&input, vec![stored(&turn), stored(&result)])
         };

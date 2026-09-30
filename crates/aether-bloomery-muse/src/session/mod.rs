@@ -8,14 +8,17 @@
 //!
 //! - `open_turn` and `continue_turn` run `muse.turn` over the open's or the
 //!   continue's result.
-//! - `call` runs the first call a turn asked for over the input `muse.turn`
-//!   decoded for it. A call whose arguments did not decode is answered with
-//!   the stored refusal and skipped.
+//! - `call` runs the first call a turn asked for over the session's current
+//!   tree and the arguments `muse.turn` decoded for it. A call whose
+//!   arguments did not decode is answered with the stored refusal and
+//!   skipped.
 //! - `resume`, on any program's run that answers the call the loop ran,
-//!   records its result as the call's output and runs the next call, or, when every
-//!   call has its output, sends `muse.turn` again with the previous input's
-//!   items plus the turn's text, its calls, and their outputs, so each turn's
-//!   conversation begins with exactly what the previous one sent.
+//!   records its result as the call's output, takes the tree of a result
+//!   that is an `Edited` as the session's current tree, and runs the next
+//!   call, or, when every call has its output, sends `muse.turn` again with
+//!   the previous input's items plus the turn's text, its calls, and their
+//!   outputs, so each turn's conversation begins with exactly what the
+//!   previous one sent.
 //! - `record` records a session a turn rested (completed, declined, or
 //!   incomplete) as a [`Session`] through `muse.session.record`. `call` and
 //!   `resume` record one the same way when the activation has made as many
@@ -23,13 +26,16 @@
 //! - `rest` moves the session's head to that record, compare-and-swap from the
 //!   record before it.
 //!
+//! A session opens on a tree, and a continue picks up the tree its record
+//! rested with. Every record holds the session's latest tree.
+//!
 //! Calls run one at a time. A tool run that faults ends the session, and the
 //! fault is its record.
 
 mod continue_;
 mod conversations;
 #[cfg(test)]
-mod fixture;
+pub mod fixture;
 mod open;
 mod record;
 mod replay;
@@ -46,7 +52,8 @@ pub use record::{CallAnswer, RecordInput, SessionRecord};
 pub use state::{
     RestReason, Session, SessionItems, SessionItemsError, SessionKey, TurnLimit, TurnLimitError, TurnSettings,
 };
-pub use tools::{Echo, EchoInput, EchoResult, MUSE, offered};
+pub use tools::MUSE;
+pub use tools::program_name;
 
 use crate::program::MuseTurn;
 use tools::call;

@@ -6,7 +6,7 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    CallId, Echo, EchoInput, EchoResult, Endpoint, FunctionName, ModelName, MuseTurn, OfferedTool, OfferedTools,
+    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, ModelName, MuseTurn, OfferedTool, OfferedTools,
     OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome,
     TurnResult,
 };
@@ -193,23 +193,26 @@ fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(),
     // Catches a definition or schema read from outside the injected closure or a definition left out of the
     // request, a result citing unstaged arguments, arguments decoded against the wrong schema or into bytes the
     // input's own `Storage` impl does not read, an unstaged decode, and a refused decode recorded as a decode.
-    let read_definition = serde_json::json!({
-        "type": "function",
-        "name": "workspace-read",
-        "description": "Read one workspace file.",
-        "parameters": { "type": "object" },
-        "strict": false,
-    });
+    let definition = |name: &str, description: &str| {
+        serde_json::json!({
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": { "type": "object" },
+            "strict": false,
+        })
+        .to_string()
+    };
     let tools = [
         Tool {
             program: "muse.turn",
-            definition: tool_definition::<MuseTurn>()?.to_string(),
+            definition: definition("muse-turn", "Run one turn."),
             input: ToolSchema::of::<TurnInput>(),
             result: ToolSchema::of::<TurnResult>(),
         },
         Tool {
             program: "workspace.read",
-            definition: read_definition.to_string(),
+            definition: definition("workspace-read", "Read one workspace file."),
             input: ToolSchema::of::<ReadInput>(),
             result: ToolSchema::of::<ReadInput>(),
         },
@@ -274,7 +277,7 @@ fn a_call_to_a_tool_the_turn_did_not_offer_is_recorded_refused() -> Result<(), B
     let tools = [Tool {
         program: "muse.echo",
         definition: tool_definition::<Echo>()?.to_string(),
-        input: ToolSchema::of::<EchoInput>(),
+        input: ToolSchema::of::<EchoArgs>(),
         result: ToolSchema::of::<EchoResult>(),
     }];
     let (items, closure) = opening();
@@ -306,7 +309,7 @@ fn a_call_to_a_tool_the_turn_did_not_offer_is_recorded_refused() -> Result<(), B
     let ToolInput::Decoded { input, .. } = echo.input() else {
         panic!("expected the offered call to decode, got {:?}", echo.input());
     };
-    assert_eq!(input.cast::<EchoInput>(), Some(Ref::of_encoded(&EchoInput::new("alpha"))?));
+    assert_eq!(input.cast::<EchoArgs>(), Some(Ref::of_encoded(&EchoArgs::new("alpha"))?));
     let ToolInput::Refused { name, refusal } = shout.input() else {
         panic!("expected the unoffered call to refuse, got {:?}", shout.input());
     };
