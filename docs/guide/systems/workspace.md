@@ -61,7 +61,10 @@ needs is a request its own actor sends for it and hands the answer back:
   closure over the budget reads that one directory with `ReadArtifact` and
   prefetches each subdirectory the same way, over an explicit work stack, so
   only the spine of oversized directories and the blobs directly inside them
-  are read one at a time. Every member is verified against its digest before
+  are left out. Those blobs are read as the archive reaches them, in batched
+  `ReadArtifacts` of up to 64 MiB and 4,096 blobs: one names a blob and the
+  later files of its directory not yet read, and the answer is held only until
+  the archive takes it, never charged to the budget. Every member is verified against its digest before
   it is trusted; a blob hashes as it streams into a container and fails the
   write at its end on a mismatch.
 - **Writes, bounded batches.** Each blob and tree is staged as it is produced,

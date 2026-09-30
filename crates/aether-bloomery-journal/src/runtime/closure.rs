@@ -40,6 +40,12 @@ pub struct PlannedMember {
 }
 
 impl PlannedMember {
+    /// A member to read under `digest`, whose row records `size_bytes`.
+    #[must_use]
+    pub(crate) const fn new(digest: Digest, size_bytes: u64) -> Self {
+        Self { digest, size_bytes }
+    }
+
     /// The digest the member is stored under.
     #[must_use]
     pub const fn digest(&self) -> Digest {

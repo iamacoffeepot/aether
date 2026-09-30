@@ -96,7 +96,9 @@ impl<'a> StagingSink<'a> {
         match self.port.wait(seq)? {
             StorageAnswer::Stage(StageResult::Staged) => Ok(()),
             StorageAnswer::Stage(StageResult::Err { message }) => Err(StorageError::Refused(message)),
-            StorageAnswer::Read(_) | StorageAnswer::ReadClosure(_) => Err(StorageError::Answer),
+            StorageAnswer::Read(_) | StorageAnswer::ReadMany(_) | StorageAnswer::ReadClosure(_) => {
+                Err(StorageError::Answer)
+            }
         }
     }
 }

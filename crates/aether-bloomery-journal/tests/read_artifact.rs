@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
+    ArtifactDigests, ClosureLimit, Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult,
+    ReadArtifacts, ReadArtifactsResult, Utf8Text, artifact_blob, artifact_digest,
 };
 use aether_data::{Kind, KindId, Storage, StorageData};
 use aether_substrate::Subname;
@@ -228,4 +229,49 @@ fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
     ));
     assert_no_events(&mismatch_path);
     assert_no_events(&short_path);
+}
+
+#[test]
+fn a_batched_read_answers_the_prefix_its_limit_covers_in_request_order() {
+    // Catches an off-by-one at the cut, a reordered answer, a dropped first member under a small
+    // limit, and a missing row that is not reported.
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let path = temp.path().join("batched");
+    let seeded = seed(&path, b"component");
+    let absent = Digest::from_bytes([0; 32]);
+    let (registry, mailer) = bare_substrate();
+    let (caller_id, rx) = caller(&registry, "test.journal_actor.batched_caller");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe =
+        chassis.spawn_actor::<BlobProbe>(Subname::Named("batched_probe"), (), arrivals).finish().expect("probe birth");
+    let owner = chassis
+        .spawn_actor::<JournalActor>(
+            Subname::Named("artifact_batched"),
+            ReadCacheBudget::default(),
+            Journal::open(&path).expect("open the journal root"),
+        )
+        .finish()
+        .expect("birth");
+    let read = |digests: Vec<Digest>, limit: u64| ReadArtifacts {
+        digests: ArtifactDigests::new(digests).expect("a valid digest list"),
+        limit_bytes: ClosureLimit::new(limit).expect("a valid limit"),
+    };
+
+    // Stored length is the payload plus the eight-byte kind prefix: "stored text" then "component".
+    let first_two: u64 = (11 + 8) + (9 + 8);
+    let order = vec![seeded.text, seeded.blob, seeded.empty];
+    request(&registry, owner, probe.erase(), 91, &read(order.clone(), first_two));
+    request(&registry, owner, probe.erase(), 92, &read(order, ClosureLimit::MIN_BYTES));
+    let replies = probed_by_correlation(&probe_rx, &[91, 92]);
+    let text = Member { digest: seeded.text, kind: Utf8Text::ID, payload: Ok(b"stored text".to_vec()) };
+    let blob = Member { digest: seeded.blob, kind: OpaqueBytes::ID, payload: Ok(b"component".to_vec()) };
+    assert_eq!(replies.get(&91), Some(&Probed::Artifacts(vec![text.clone(), blob])));
+    assert_eq!(replies.get(&92), Some(&Probed::Artifacts(vec![text])));
+
+    request(&registry, owner, caller_id, 93, &read(vec![seeded.text, absent, seeded.blob], first_two));
+    assert!(
+        matches!(reply::<ReadArtifactsResult>(&rx, 93), ReadArtifactsResult::Missing { digest } if digest == absent)
+    );
+    assert_no_events(&path);
 }

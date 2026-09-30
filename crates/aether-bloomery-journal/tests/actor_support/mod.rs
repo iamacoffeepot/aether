@@ -5,7 +5,9 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::{ActorRef, ErasedActorRef, actor};
-use aether_bloomery_kinds::{ClosureArtifact, Digest, DigestMismatch, ReadArtifactResult, ReadClosureResult};
+use aether_bloomery_kinds::{
+    ClosureArtifact, Digest, DigestMismatch, ReadArtifactResult, ReadArtifactsResult, ReadClosureResult,
+};
 use aether_data::{Kind, KindId, Source, SourceAddr};
 use aether_substrate::BootError;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -104,6 +106,8 @@ pub enum Probed {
     Artifact(Member),
     /// A `ReadClosureResult::Found`: the echoed root and every member in order.
     Closure { root: Digest, members: Vec<Member> },
+    /// A `ReadArtifactsResult::Found`: every answered member in order.
+    Artifacts(Vec<Member>),
     /// Any other reply: the request was expected to be found.
     NotFound,
 }
@@ -138,6 +142,15 @@ impl NativeActor for BlobProbe {
         let probed = match result {
             ReadArtifactResult::Found { artifact } => Probed::Artifact(Member::read(&artifact)),
             ReadArtifactResult::Missing { .. } | ReadArtifactResult::Err { .. } => Probed::NotFound,
+        };
+        self.forward(ctx, probed);
+    }
+
+    #[handler::response]
+    fn on_read_artifacts_result(&mut self, ctx: &mut NativeCtx<'_>, result: ReadArtifactsResult) {
+        let probed = match result {
+            ReadArtifactsResult::Found { artifacts } => Probed::Artifacts(artifacts.iter().map(Member::read).collect()),
+            ReadArtifactsResult::Missing { .. } | ReadArtifactsResult::Err { .. } => Probed::NotFound,
         };
         self.forward(ctx, probed);
     }
