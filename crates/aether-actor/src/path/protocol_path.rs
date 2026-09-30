@@ -32,8 +32,13 @@ use crate::{CoveredBy, Protocol, RowSet};
 /// closed still decodes, since names are never reused, and the route can
 /// leave between decode and use either way, so a receiver's `resolve`
 /// proves that a live actor still stands at the path and its handler
-/// answers the "not live" case itself. A refused decode reaches no handler:
-/// the mail is dropped with a warn and nothing is sent back.
+/// answers the "not live" case itself, through `From<ResolveError>` for
+/// [`PathRefused`](crate::PathRefused). A refused decode reaches no handler.
+/// A request carrying the path is still answered: its reply implements
+/// `From<PathRefused>`, and the `#[actor]` dispatch answers the refusal with
+/// it (the compiler refuses a replying handler whose reply does not). A
+/// silent or unchecked row drops the mail with a warn and sends nothing
+/// back.
 ///
 /// On the wire it is the path text alone, with [`ErasedActorPath`]'s schema
 /// and codec, so it may be a kind field. It serializes but has no
@@ -132,6 +137,8 @@ impl<R> ActorPath<R> {
 /// so no leaf namespace is compared. The plain [`WireDecode::decode`] goes
 /// through the `&[u8]` decoder, which refuses the route proof.
 impl<'de, P: Protocol> WireDecode<'de> for ProtocolPath<P> {
+    const PROVES_ROUTES: bool = true;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
         Self::decode_from(cursor)
     }

@@ -6,8 +6,9 @@
 //! handles that stage silently (ADR-0231 §3, §8). A reflexive request names
 //! no subscriber: the cap types its sender with the guard cast.
 
-use aether_actor::{ProtocolPath, Subscriber};
+use aether_actor::{PathRefused, ProtocolPath, Subscriber};
 use aether_kinds::{InitCaps, InitComponents, Present, Render, Shutdown, Tick};
+use serde::{Deserialize, Serialize};
 
 /// Writes [`LifecycleSubscription`] from the stage list.
 macro_rules! subscription {
@@ -35,9 +36,9 @@ published_stages!(subscription);
 /// handles the stage silently (ADR-0231 §3); the cap proves it live at
 /// receipt. Substrate replies with [`LifecycleSubscribeResult`] — `Err` when
 /// the chassis's lifecycle graph doesn't declare the stage (fail-fast at wire
-/// time per ADR-0082 §7) or when the subscriber is no longer live, naming its
-/// path. A path no actor has stood at, or whose actor does not handle the
-/// stage silently, is refused at decode with a warn and gets no reply.
+/// time per ADR-0082 §7), and `Err(Subscriber(..))` naming the path when the
+/// subscriber does not prove: no actor has stood at it, its actor does not
+/// handle the stage silently, or it is no longer live.
 #[aether_data::kind(name = "aether.lifecycle.subscribe", no_serde, eq)]
 pub struct LifecycleSubscribe {
     pub subscription: LifecycleSubscription,
@@ -82,12 +83,39 @@ pub struct LifecycleUnsubscribeSelf {
     pub stage: u64,
 }
 
-/// Reply to the four subscription requests. `Err` carries the stage kind id
-/// and a human-readable reason — fail-fast subscribe per ADR-0082 §7. Same
-/// shape and rationale as `SubscribeWindowResult` for window-event
+/// Reply to the four subscription requests. `Err` names why the request
+/// failed ([`LifecycleSubscribeError`]) — fail-fast subscribe per ADR-0082
+/// §7. Same shape and rationale as `SubscribeWindowResult` for window-event
 /// subscriptions.
 #[aether_data::kind(name = "aether.lifecycle.subscribe_result")]
 pub enum LifecycleSubscribeResult {
     Ok,
-    Err { stage: u64, error: String },
+    Err(LifecycleSubscribeError),
+}
+
+/// Why a lifecycle subscription request failed.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleSubscribeError {
+    /// The explicit subscriber path did not prove (ADR-0231 §3): no actor has
+    /// stood at it, its actor does not handle the stage silently, or it is no
+    /// longer live.
+    Subscriber(PathRefused),
+    /// The stage kind id and a human-readable reason: a stage the chassis's
+    /// lifecycle graph does not declare, or a `_self` request from a sender
+    /// that has no local mailbox or does not handle the stage.
+    Stage { stage: u64, error: String },
+}
+
+impl LifecycleSubscribeResult {
+    /// The request for `stage` failed for `error`.
+    #[must_use]
+    pub fn stage_error(stage: u64, error: impl Into<String>) -> Self {
+        Self::Err(LifecycleSubscribeError::Stage { stage, error: error.into() })
+    }
+}
+
+impl From<PathRefused> for LifecycleSubscribeResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(LifecycleSubscribeError::Subscriber(refused))
+    }
 }

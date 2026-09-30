@@ -7,7 +7,7 @@ mod support;
 use std::error::Error;
 
 use aether_bloomery_kinds::{Digest, Invoked, Ref, Refusal, Tree};
-use aether_bloomery_workspace::{Outcome, RunResult};
+use aether_bloomery_workspace::{Outcome, RunError, RunResult};
 use aether_bloomery_workspace_programs::vendor::{CargoVendor, VendorInput, VendorResult};
 
 use support::{completed_with, one_step, output_tree};
@@ -37,7 +37,8 @@ fn a_non_zero_exit_fails_citing_stderr_not_stdout() -> Result<(), Box<dyn Error>
 fn a_workspace_refusal_is_the_programs_refusal() -> Result<(), Box<dyn Error>> {
     // Catches a refusal recorded as a vendor result, over the empty run tree's missing-input path.
     let missing = Ref::of_encoded(&Tree::empty())?.digest();
-    let invoked = answer(&RunResult::Refused(aether_bloomery_workspace::Refusal::InputMissing(missing)))?;
+    let invoked =
+        answer(&RunResult::Err(RunError::Refused(aether_bloomery_workspace::Refusal::InputMissing(missing))))?;
     let Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } } = invoked else {
         return Err(format!("expected the program's own refusal, got {invoked:?}").into());
     };

@@ -143,10 +143,8 @@ impl Dispatch<Self> for TickSource {
         // means the harness's lifecycle graph lacks `Tick`, so the cell runs
         // with no offered load; say so rather than report a silent zero.
         if kind.0 == LifecycleSubscribeResult::ID.0 {
-            if let Some(LifecycleSubscribeResult::Err { stage, error }) =
-                LifecycleSubscribeResult::decode_from_bytes(payload)
-            {
-                tracing::warn!(target: "aether_perf", stage, %error, "tick source's Tick subscribe was refused");
+            if let Some(LifecycleSubscribeResult::Err(error)) = LifecycleSubscribeResult::decode_from_bytes(payload) {
+                tracing::warn!(target: "aether_perf", ?error, "tick source's Tick subscribe was refused");
             }
             return Some(());
         }

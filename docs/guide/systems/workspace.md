@@ -26,8 +26,8 @@ they produce.
 
 | Request | Fields | Reply | Arms |
 |---|---|---|---|
-| `aether.workspace.import` | `image: ImageRef`, `source: ProtocolPath<ArtifactStorage>` | `aether.workspace.import_result` | `Ok { tree: Ref<Tree> }`, `Failed { detail: Detail }` |
-| `aether.workspace.run` | `source: ProtocolPath<ArtifactStorage>`, `request: RunRequest` | `aether.workspace.run_result` | `Ok(Outcome)`, `Refused(Refusal)`, `Exhausted(Resource)`, `Failed { detail: Detail }` |
+| `aether.workspace.import` | `image: ImageRef`, `source: ProtocolPath<ArtifactStorage>` | `aether.workspace.import_result` | `Ok { tree: Ref<Tree> }`, `Err(ImportError)`: `Failed { detail: Detail }` or `Source(PathRefused)` |
+| `aether.workspace.run` | `source: ProtocolPath<ArtifactStorage>`, `request: RunRequest` | `aether.workspace.run_result` | `Ok(Outcome)`, `Err(RunError)`: `Refused(Refusal)`, `Exhausted(Resource)`, or `Failed { detail: Detail }` |
 
 `RunRequest` (`aether.workspace.run_request`) holds every field of a run but
 its source: `tree`, `environment`, `mounts`, `steps`, `scratch`, and `network`.
@@ -45,10 +45,11 @@ an imported tree must be a function of the request that named it.
 journal owner, `aether.bloomery.journal:<unit key>`, written as
 `ActorPath::<JournalActor>::instance(key).narrow::<ArtifactStorage>()`. The
 mail that carries it decodes only when a route covering the protocol has stood
-at the path, so a path no journal ever stood at is dropped at decode with a
-warning and gets no reply. On receipt the actor proves the source live before
-anything is queued: one that is not answers `Refused(SourceUnavailable)` for a
-run and `Failed { detail }` for an import, without a single Engine API request.
+at the path; on receipt the actor proves the source live before anything is
+queued. A source that fails either proof is answered naming the path and why,
+`Err(Refused(SourceUnavailable(PathRefused { path, reason })))` for a run and
+`Err(Source(PathRefused { path, reason }))` for an import, without a single
+Engine API request.
 
 Every read and stage of the request then goes through that source as mail. The
 tar codec runs on a worker thread, which sends no mail, so each read or stage it
@@ -97,9 +98,9 @@ the reply lands and no dispatcher thread blocks on the daemon or the source:
 6. When the decode and the removal both succeeded, the last stage is answered
    before the reply, so the tree the reply names is stored.
 
-A source that is not live, a failed pull, an unlisted digest, an export the
-decoder refuses, a failed removal, or a refused stage all answer
-`Failed { detail }`. No container is left behind, and what a failed import
+A failed pull, an unlisted digest, an export the decoder refuses, a failed
+removal, or a refused stage all answer `Err(Failed { detail })`; a source that
+did not prove answers `Err(Source(..))`. No container is left behind, and what a failed import
 staged is cited by nothing: harmless content named by its digest. The pulled
 image stays in the daemon's cache.
 
@@ -189,15 +190,15 @@ directory and its destination on the same side.
 | Answer | When |
 |---|---|
 | `Ok(Outcome)` | The steps ran. `steps` holds one `StepOutcome` per step that ran, each with `exit_code: Some(code)`, the stored stdout and stderr, and the `ToolRecord` naming the executable blob that ran; `tree` is `/work` minus scratch. A non-zero exit is an outcome. Docker reports a signal death as 128 + n, which cannot be told apart from `exit(128 + n)`, so this backend always answers `Some`. |
-| `Refused(InputMissing(digest))` | The source lacks the environment, the tree, a mount tree, a stdin blob, or anything they cite. |
-| `Refused(SourceUnavailable)` | The source is not live when the run is received. Answered before the run is queued. |
-| `Refused(ToolchainMismatch)` | The tree's `rust-toolchain.toml` asks for a channel, component, or target the environment does not provide. |
-| `Refused(UnknownTool(name))` | A step's tool is not in the table, or its path does not hold an executable. |
-| `Refused(PlatformMismatch)` | The environment's platform is not the daemon's. |
-| `Refused(EnvironmentUnavailable)` | The daemon answered but could not produce the environment image, or the image's label names another environment. Never a mid-run failure. |
-| `Exhausted(Time)` | A step was still running at the deadline; it is killed. |
-| `Exhausted(Memory)` | The kernel killed a step for memory (`OOMKilled`). |
-| `Failed { detail }` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a read or stage the source refused, or a failed removal. `detail` names the failed call or the in-tree path and the class of failure (for example `reading the daemon's platform: connecting to the Docker daemon failed (entity not found)`), never a host path, a socket, a host name, the daemon's own message, or the source's, because the driver records it. The actor's log keeps the full text. |
+| `Err(Refused(InputMissing(digest)))` | The source lacks the environment, the tree, a mount tree, a stdin blob, or anything they cite. |
+| `Err(Refused(SourceUnavailable(refused)))` | The source did not prove: no journal has stood at the path, its route does not cover `ArtifactStorage`, or it is not live when the run is received. `refused` names the path and why. Answered before the run is queued. |
+| `Err(Refused(ToolchainMismatch))` | The tree's `rust-toolchain.toml` asks for a channel, component, or target the environment does not provide. |
+| `Err(Refused(UnknownTool(name)))` | A step's tool is not in the table, or its path does not hold an executable. |
+| `Err(Refused(PlatformMismatch))` | The environment's platform is not the daemon's. |
+| `Err(Refused(EnvironmentUnavailable))` | The daemon answered but could not produce the environment image, or the image's label names another environment. Never a mid-run failure. |
+| `Err(Exhausted(Time))` | A step was still running at the deadline; it is killed. |
+| `Err(Exhausted(Memory))` | The kernel killed a step for memory (`OOMKilled`). |
+| `Err(Failed { detail })` | The executor failed after accepting the run: a daemon or transport error, an output over the decode bounds, a `/work` no tree can represent (a FIFO, a device, an absolute symlink, a name the kinds refuse), an unreadable `rust-toolchain.toml`, a read or stage the source refused, or a failed removal. `detail` names the failed call or the in-tree path and the class of failure (for example `reading the daemon's platform: connecting to the Docker daemon failed (entity not found)`), never a host path, a socket, a host name, the daemon's own message, or the source's, because the driver records it. The actor's log keeps the full text. |
 
 `Exhausted` and `Failed` are faults about the attempt, never results: the
 `Workspace` program binding ends the invocation on either, and the program
@@ -240,9 +241,9 @@ the driver records the fault, caused by the request's `Requested`:
 
 | Run answer | Recorded fault |
 |---|---|
-| `Exhausted(Time)` | `Fault { TimedOut }` |
-| `Exhausted(Memory)` | `Fault { ResourceExhausted }` |
-| `Failed { detail }` | `Fault { ExecutorFailed { reason } }`, with `reason` the same detail |
+| `Err(Exhausted(Time))` | `Fault { TimedOut }` |
+| `Err(Exhausted(Memory))` | `Fault { ResourceExhausted }` |
+| `Err(Failed { detail })` | `Fault { ExecutorFailed { reason } }`, with `reason` the same detail |
 
 Step stdout and stderr are `Ref<OpaqueBytes>` values the actor stored, and the
 output tree is a stored `Ref<Tree>`. A program cites them in its result without

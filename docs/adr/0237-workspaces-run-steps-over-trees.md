@@ -95,9 +95,17 @@ the sandbox, or they make the program `Sampled`.
    #[aether_data::kind(name = "aether.workspace.run_result")]
    pub enum RunResult {
        Ok(Outcome),
+       Err(RunError),
+   }
+
+   pub enum RunError {
        Refused(Refusal),
        Exhausted(Resource),                 // the executor's allotment ran out; never reaches the program
        Failed { detail: Detail },           // the executor failed during the run; never reaches the program
+   }
+
+   impl From<PathRefused> for RunResult {   // a `source` that did not prove (ADR-0231 §3)
+       fn from(refused: PathRefused) -> Self { Self::Err(RunError::Refused(Refusal::SourceUnavailable(refused))) }
    }
 
    pub enum Resource { Memory, Time }
@@ -122,7 +130,7 @@ the sandbox, or they make the program `Sampled`.
        ToolchainMismatch { tree_wants: RustToolchain, environment_provides: Option<RustToolchain> },
        UnknownTool(ToolName),
        InputMissing(Digest),
-       SourceUnavailable,                   // `source` does not resolve to a live ArtifactStorage
+       SourceUnavailable(PathRefused),      // `source` does not prove as a live ArtifactStorage
    }
    ```
 
@@ -195,7 +203,13 @@ the sandbox, or they make the program `Sampled`.
    }
 
    #[aether_data::kind(name = "aether.workspace.import_result")]
-   pub enum ImportResult { Ok { tree: Ref<Tree> }, Failed { detail: Detail } }
+   pub enum ImportResult { Ok { tree: Ref<Tree> }, Err(ImportError) }
+
+   pub enum ImportError { Failed { detail: Detail }, Source(PathRefused) }
+
+   impl From<PathRefused> for ImportResult {    // a `source` that did not prove (ADR-0231 §3)
+       fn from(refused: PathRefused) -> Self { Self::Err(ImportError::Source(refused)) }
+   }
    ```
 
    *The actor pulls the image, creates a container from it without starting
@@ -313,7 +327,7 @@ the sandbox, or they make the program `Sampled`.
 
    | Step | Mechanism |
    |---|---|
-   | Receipt | Resolve `source`, a `ProtocolPath<ArtifactStorage>`, to a `ProtocolRef<ArtifactStorage>` with `ctx.resolve` (ADR-0231 §3) before anything is queued: the path compiles to its position by the lineage fold, and one route-table lookup requires a `Live` route under that canonical name. The source arrived in mail, so it is a decoded path, and the lookup also requires the route's published rows to cover `ArtifactStorage`; that comparison is made once per route and kept, since published rows only grow. A source that does not resolve is `Refused(SourceUnavailable)` for a run and `Failed { detail }` for an import. |
+   | Receipt | Resolve `source`, a `ProtocolPath<ArtifactStorage>`, to a `ProtocolRef<ArtifactStorage>` with `ctx.resolve` (ADR-0231 §3) before anything is queued: the path compiles to its position by the lineage fold, and one route-table lookup requires a `Live` route under that canonical name. The source arrived in mail, so it is a decoded path, and the lookup also requires the route's published rows to cover `ArtifactStorage`; that comparison is made once per route and kept, since published rows only grow. A source that does not prove, at decode or here, is answered with the reply's `From<PathRefused>`: `Err(Refused(SourceUnavailable(..)))` for a run and `Err(Source(..))` for an import, naming the path and why. |
    | Reads | Every tree, blob, and environment the run cites is read through that reference, including the checks that refuse before any container exists. A tree whose closure fits the workspace's read budget is one `read_closure` (`aether.bloomery.journal.read_closure`); only a larger one is read in pieces, a `read` (`aether.bloomery.journal.read_artifact`) per node and blob. |
    | Writes | Step stdout and stderr, the output tree, and an import's tree are `stage`d (`aether.bloomery.journal.stage`) through it in bounded batches as they are produced. A run that does not end `Ok` leaves what it staged cited by nothing. |
    | Codec | A `TreeSource` / `TreeSink` implementation over the reference; the container steps above are unchanged. |

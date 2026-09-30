@@ -254,9 +254,9 @@ The `handler` path must be canonical — the `path` a `load_component` reply
 returns, `api` for a singleton component whose `NAMESPACE` is `api`. The named actor has to take `aether.http.server.request` and reply
 `HttpRouterResult`: the path is `ProtocolPath<HttpRouter>`, so a path no
 route has stood at, or whose route does not publish that row, is refused when
-the mail is decoded — logged at warn, with no `register_route_result` reply at
-all, rather than accepted and then answering `502` on every request. A path
-whose handler has closed decodes, and the reply is `Err` naming it. In Rust the same path
+the mail is decoded, and answered `Err(Handler(..))` naming the path and why,
+rather than accepted and then answering `502` on every request. A path whose
+handler has closed decodes, and gets the same answer from the receipt. In Rust the same path
 is written `ActorPath::<Handler>::root().narrow::<HttpRouter>()`, which will
 not compile unless `Handler` has the row. Every route holder has it, including
 a streaming, websocket, or deferred handler and a `#[http::router]` actor.
@@ -271,8 +271,10 @@ a streaming, websocket, or deferred handler and a `#[http::router]` actor.
 }
 ```
 
-The reply is `aether.http.server.register_route_result` — `"Ok"` or
-`{ "Err": { "error": "…" } }` — the same shape `register_route_self` replies,
+The reply is `aether.http.server.register_route_result` — `"Ok"`,
+`{ "Err": { "Rejected": { "error": "…" } } }` when the server refuses the
+claim, or `{ "Err": { "Handler": { "path": "…", "reason": "Unpublished" } } }`
+when the handler path did not prove — the same type `register_route_self` replies,
 which is *why* the named form exists: an external caller (an MCP session, a
 test) has no in-process `Source` to resolve, so `register_route_self` always
 answers it `Err`.

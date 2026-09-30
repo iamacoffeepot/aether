@@ -659,7 +659,9 @@ fn a_workspace_run_targets_the_workspace_and_hands_the_program_its_outcome_or_re
     assert_eq!((result, staged), (expected.digest(), vec![expected]), "the result cites stdout without staging it");
 
     let unknown = aether_bloomery_workspace::Refusal::UnknownTool(aether_bloomery_workspace::ToolName::new("tool")?);
-    let (refused, after_await) = answer_workspace(&aether_bloomery_workspace::RunResult::Refused(unknown))?;
+    let (refused, after_await) = answer_workspace(&aether_bloomery_workspace::RunResult::Err(
+        aether_bloomery_workspace::RunError::Refused(unknown),
+    ))?;
     let PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } }) = refused else {
         return Err(format!("expected the program's own refusal, got {refused:?}").into());
     };
@@ -676,15 +678,21 @@ fn an_exhausted_or_failed_run_ends_the_invocation_unseen_by_the_program() -> Res
     let detail = Detail::new("starting container c1: the Docker daemon answered 500");
     let cases = [
         (
-            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Time),
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Exhausted(
+                aether_bloomery_workspace::Resource::Time,
+            )),
             ExecutorFault::TimedOut,
         ),
         (
-            aether_bloomery_workspace::RunResult::Exhausted(aether_bloomery_workspace::Resource::Memory),
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Exhausted(
+                aether_bloomery_workspace::Resource::Memory,
+            )),
             ExecutorFault::ResourceExhausted,
         ),
         (
-            aether_bloomery_workspace::RunResult::Failed { detail: detail.clone() },
+            aether_bloomery_workspace::RunResult::Err(aether_bloomery_workspace::RunError::Failed {
+                detail: detail.clone(),
+            }),
             ExecutorFault::Failed { reason: detail },
         ),
     ];

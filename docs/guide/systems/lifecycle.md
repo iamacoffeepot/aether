@@ -181,8 +181,10 @@ subscriptions when the component drops.
 To subscribe another actor — an operator over MCP, or a test — send
 `aether.lifecycle.subscribe` with a `subscription` naming the stage and the
 subscriber's canonical path, as in `{"Tick": "aether.kit.camera"}`.
-The path decodes only when the live actor there handles the stage silently, and
-the cap proves it live at receipt.
+The path decodes only when the actor there handles the stage silently, and the
+cap proves it live at receipt. A path that fails either proof is answered
+`{"Err": {"Subscriber": {"path": …, "reason": …}}}` naming it and why; a stage
+the graph does not declare is `{"Err": {"Stage": {"stage": …, "error": …}}}`.
 
 Then handle each stage as its kind, like any other mail:
 

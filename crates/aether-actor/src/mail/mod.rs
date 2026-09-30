@@ -278,7 +278,28 @@ impl Mail<'_> {
         // (cast or structured) from running past the substrate-written
         // region into adjacent linear memory.
         let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
-        decode_payload(bytes)
+        decode_payload(bytes).ok()
+    }
+
+    /// [`Self::decode_kind`] for an `#[actor]` arm whose row replies, keeping
+    /// why a decode refused (ADR-0231 §3): `Err(None)` on a kind mismatch or
+    /// `count != 1`, `Err(Some(error))` when the decode itself refused, so
+    /// the arm can answer a typed-path refusal with its reply. The guest
+    /// context carries no published routes, so every `ProtocolPath` refuses
+    /// `ProtocolPathUnchecked` until ADR-0241.
+    ///
+    /// # Errors
+    ///
+    /// As above.
+    #[doc(hidden)]
+    pub fn __decode_kind_or_refused<K: Kind>(&self) -> Result<K, Option<wire::Error>> {
+        if self.kind != K::ID.0 || self.count != 1 {
+            return Err(None);
+        }
+        // SAFETY: as in `decode_kind`: the substrate guarantees `byte_len`
+        // bytes valid at `ptr` for this `Mail`'s lifetime.
+        let bytes = unsafe { slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
+        decode_payload(bytes).map_err(Some)
     }
 
     /// The raw inbound payload — the `byte_len` bytes the substrate wrote at
@@ -412,17 +433,16 @@ impl<'a> PriorState<'a> {
 /// values (ADR-0238 decision 3). The context has no published routes, so a
 /// `ProtocolPath` refuses; a refusal is logged at warn.
 #[cfg(target_arch = "wasm32")]
-fn decode_payload<K: Kind>(bytes: &[u8]) -> Option<K> {
+fn decode_payload<K: Kind>(bytes: &[u8]) -> Result<K, wire::Error> {
     K::decode_with(bytes, &mut wire::DecodeCtx::empty().blobs(&mut GuestResolver))
         .inspect_err(|error| tracing::warn!(kind = K::NAME, %error, "decode refused"))
-        .ok()
 }
 
 /// [`Mail::decode_kind`]'s decode of a bounded payload. The host build of the
 /// SDK holds no guest blob table, so a tag-1 field refuses.
 #[cfg(not(target_arch = "wasm32"))]
-fn decode_payload<K: Kind>(bytes: &[u8]) -> Option<K> {
-    K::decode_from_bytes(bytes)
+fn decode_payload<K: Kind>(bytes: &[u8]) -> Result<K, wire::Error> {
+    K::decode_with(bytes, &mut wire::DecodeCtx::empty())
 }
 
 #[cfg(test)]

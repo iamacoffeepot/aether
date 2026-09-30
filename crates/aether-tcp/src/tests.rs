@@ -10,11 +10,11 @@ use std::thread;
 use std::time::Duration;
 
 use super::{
-    BindListener, BindListenerResult, BindListenerSelf, Connect, ConnectResult, ListListeners, ListListenersResult,
-    SessionClosed, SessionData, SessionWrite, TcpCapability, TcpConsumer, TcpListenerActor, TcpSessionActor,
-    UnbindListener, UnbindListenerResult,
+    BindListener, BindListenerError, BindListenerResult, BindListenerSelf, Connect, ConnectError, ConnectResult,
+    ListListeners, ListListenersResult, SessionClosed, SessionData, SessionWrite, TcpCapability, TcpConsumer,
+    TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
-use aether_actor::{ActorPath, Addressable, ErasedActorRef, ProtocolPath, actor};
+use aether_actor::{ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::spawn::Subname;
@@ -281,7 +281,7 @@ fn bind_then_list_then_unbind_roundtrip() {
         drive_and_decode(&chassis, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None });
     let (listener_name, local_port) = match bind_reply {
         BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
     assert_eq!(listener_name, local_port.to_string(), "default subname should be the bound port");
     assert!(local_port > 0, "OS-picked port should be non-zero");
@@ -356,7 +356,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
         &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
     );
     assert!(
-        matches!(rejected, BindListenerResult::Err { ref addr, ref error }
+        matches!(rejected, BindListenerResult::Err(BindListenerError::Failed { ref addr, ref error })
             if addr == &socket_addr.to_string() && error.contains("spawn failed")),
         "owner rejection returns one typed bind failure: {rejected:?}",
     );
@@ -424,14 +424,14 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
         .iter()
         .filter_map(|(_, result)| match result {
             BindListenerResult::Ok { local_port, .. } => Some(*local_port),
-            BindListenerResult::Err { .. } => None,
+            BindListenerResult::Err(_) => None,
         })
         .collect();
     let failures: Vec<_> = replies
         .iter()
         .filter_map(|(_, result)| match result {
-            BindListenerResult::Err { addr, error } => Some((addr.clone(), error.clone())),
-            BindListenerResult::Ok { .. } => None,
+            BindListenerResult::Err(BindListenerError::Failed { addr, error }) => Some((addr.clone(), error.clone())),
+            _ => None,
         })
         .collect();
     assert_eq!(successes.len(), 1, "one staged child owns the parent-local name: {replies:?}");
@@ -477,7 +477,7 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
     );
 
     assert!(
-        matches!(rejected, ConnectResult::Err { ref addr, ref error }
+        matches!(rejected, ConnectResult::Err(ConnectError::Failed { ref addr, ref error })
             if addr == &socket_addr.to_string() && error.contains("spawn failed")),
         "owner rejection returns one typed connect failure: {rejected:?}",
     );
@@ -501,7 +501,7 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     );
     let listener_name = match bind_reply {
         BindListenerResult::Ok { listener_name, .. } => listener_name,
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
 
     let session = SessionToken(Uuid::from_u128(0x3051));
@@ -552,7 +552,7 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     );
     let listener_name = match next_reply::<BindListenerResult>(&rx, "the bind reply").2 {
         BindListenerResult::Ok { listener_name, .. } => listener_name,
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
 
     let first_session = SessionToken(Uuid::from_u128(0x3051_0001));
@@ -618,7 +618,7 @@ fn connect_roundtrip_spawns_writable_session() {
         drive_and_decode(&chassis, &rx, tcp, &Connect { addr: addr.to_string(), name: None, consumer: Some(consumer) });
     let (session_name, peer) = match connect_reply {
         ConnectResult::Ok { session_name, peer } => (session_name, peer),
-        ConnectResult::Err { error, .. } => panic!("connect failed: {error}"),
+        ConnectResult::Err(error) => panic!("connect failed: {error:?}"),
     };
     assert!(!session_name.is_empty(), "connect result should name the spawned session");
     let session_path = format!("{}/{}:{session_name}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
@@ -728,7 +728,7 @@ fn bind_port_in_use_returns_err() {
     );
     let local_port = match first {
         BindListenerResult::Ok { local_port, .. } => local_port,
-        BindListenerResult::Err { error, .. } => panic!("first bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("first bind failed: {error:?}"),
     };
 
     // Second bind on the same port — must fail.
@@ -739,11 +739,11 @@ fn bind_port_in_use_returns_err() {
         &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()), consumer: None },
     );
     match second {
-        BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
-        BindListenerResult::Err { error, addr } => {
+        BindListenerResult::Err(BindListenerError::Failed { error, addr }) => {
             assert_eq!(addr, format!("127.0.0.1:{local_port}"));
             assert!(error.starts_with("bind failed:"), "expected bind-fail error, got: {error}");
         }
+        other => panic!("expected port-in-use Err, got {other:?}"),
     }
 }
 
@@ -765,27 +765,30 @@ fn unbind_unknown_listener_errors() {
 }
 
 /// A refused consumer binds no socket and spawns no listener: a `consumer`
-/// path at which no live actor covers [`TcpConsumer`] is refused at decode,
-/// so the request gets no reply and leaves the listener fleet empty, rather
-/// than binding a listener whose frames go nowhere. The next reply the
-/// session sees is the list's, and it lists nothing.
+/// path no route has stood at is refused at decode, and the dispatch answers
+/// the request `Err(Consumer(..))` naming the path, rather than dropping it or
+/// binding a listener whose frames go nowhere. It is the one reply the
+/// request gets, and the next the session sees is the list's, which lists
+/// nothing.
 #[test]
 fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
     let unregistered = ActorPath::<SessionConsumer>::instance(&LoadName::new("unregistered").expect("a valid key"));
+    let consumer: ProtocolPath<TcpConsumer> = unregistered.narrow();
 
-    send_and_settle(
+    let refused: BindListenerResult = drive_and_decode(
         &chassis,
+        &rx,
         tcp,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("orphan".into()),
-            consumer: Some(unregistered.narrow()),
-        },
-        Some(session_reply()),
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("orphan".into()), consumer: Some(consumer.clone()) },
     );
-    assert!(rx.try_recv().is_err(), "a refused bind sends no reply");
+    assert!(
+        matches!(&refused, BindListenerResult::Err(BindListenerError::Consumer(PathRefused { path, reason }))
+            if path == consumer.as_erased() && *reason == PathRefusal::Unpublished),
+        "the refused consumer is answered naming its path: {refused:?}",
+    );
+    assert!(rx.try_recv().is_err(), "a refused bind sends exactly one reply");
 
     let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
@@ -806,10 +809,10 @@ fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol
         .recv_timeout(SettlementConfig::from_env().to_cap())
         .expect("the self-bind reply never reached its sender within the settlement cap");
     match reply {
-        BindListenerResult::Err { error, .. } => {
+        BindListenerResult::Err(BindListenerError::Failed { error, .. }) => {
             assert!(error.contains("TcpConsumer"), "expected a consumer-protocol refusal, got: {error}");
         }
-        BindListenerResult::Ok { .. } => panic!("a sender that does not cover TcpConsumer must not bind"),
+        other => panic!("a sender that does not cover TcpConsumer must not bind: {other:?}"),
     }
 
     let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
@@ -832,7 +835,7 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
 
     let first_body = b"first complete frame";
@@ -911,7 +914,7 @@ fn nested_lineage_consumer_receives_session_mail() {
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
 
     let body = b"frame for a nested consumer";
@@ -943,7 +946,7 @@ fn session_reports_frame_rejection_to_bound_consumer() {
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
-        BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
+        BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
     };
 
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
