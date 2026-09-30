@@ -1,6 +1,9 @@
 //! The artifact storage protocol (ADR-0240 D7).
 
-use crate::{ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, Stage, StageResult};
+use crate::{
+    ReadArtifact, ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, ReadClosure, ReadClosureResult, Stage,
+    StageResult,
+};
 
 /// A place artifacts are read from and staged to.
 ///
@@ -11,14 +14,18 @@ use crate::{ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, St
 /// whichever journal the request came from without naming the journal crate.
 ///
 /// `read_closure` reads a whole tree in one round trip when its closure fits
-/// the reader's budget; `read` fetches one artifact, and `stage` stores
-/// artifacts with no event and no head move.
+/// the reader's budget; `read` fetches one artifact; `read_many` fetches
+/// several named artifacts in one round trip, answering the prefix that fits
+/// its byte limit; and `stage` stores artifacts with no event and no head
+/// move.
 #[aether_actor::protocol]
 pub trait ArtifactStorage {
     /// Read one stored artifact.
     fn read(mail: ReadArtifact) -> ReadArtifactResult;
     /// Read an artifact's transitive closure under a byte limit.
     fn read_closure(mail: ReadClosure) -> ReadClosureResult;
+    /// Read several named artifacts, in order, under a byte limit.
+    fn read_many(mail: ReadArtifacts) -> ReadArtifactsResult;
     /// Store artifacts content-addressed, unfenced.
     fn stage(mail: Stage) -> StageResult;
 }

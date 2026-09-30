@@ -6,13 +6,16 @@
 //! [`WatchHead`] is a long-poll watch on the head, answered once a
 //! committed write moves it past the requested boundary. [`ReadClosure`]
 //! reads an artifact's transitive closure over the journal's stored citation
-//! edges under a validated [`ClosureLimit`], never truncating. [`Stage`]
+//! edges under a validated [`ClosureLimit`], never truncating.
+//! [`ReadArtifacts`] reads several named artifacts in one request, answering
+//! the prefix that fits its limit. [`Stage`]
 //! stores artifacts content-addressed with no fence, event, or head move, and
 //! [`ArtifactStorage`] is the protocol naming the read and stage rows.
 
 mod append;
 mod artifact;
 mod closure;
+mod read_many;
 mod stage;
 mod storage;
 mod watch;
@@ -29,6 +32,7 @@ use crate::{ClosureArtifact, Digest, Entry, Seq};
 pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
 pub use closure::{ClosureLimit, ClosureLimitError, ReadClosure, ReadClosureResult};
+pub use read_many::{ArtifactDigests, ArtifactDigestsError, ReadArtifacts, ReadArtifactsResult};
 pub use stage::{Stage, StageResult};
 pub use storage::ArtifactStorage;
 pub use watch::{WatchHead, WatchHeadResult};

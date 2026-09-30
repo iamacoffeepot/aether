@@ -4,7 +4,7 @@ use std::error::Error;
 use std::thread;
 
 use aether_bloomery_journal::Batch;
-use aether_bloomery_kinds::{Digest, Node, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Node, ReadArtifacts, Ref, Tree};
 use aether_bloomery_workspace::testing::{
     RUN_CONTAINER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
 };
@@ -593,10 +593,23 @@ fn nested_tree(batch: &mut Batch) -> Result<Ref<Tree>, Box<dyn Error>> {
     )
 }
 
-/// The `/work` archive a run over a nested tree writes into its first container, booted with `flags`.
-fn work_archive(flags: &[&str]) -> Result<Vec<u8>, Box<dyn Error>> {
+/// A tree holding one directory of one more distinct small file than one batched read may name, so its blobs take
+/// two batches.
+fn wide_tree(batch: &mut Batch) -> Result<Ref<Tree>, Box<dyn Error>> {
+    let names = (0..=ReadArtifacts::MAX_ARTIFACTS).map(|index| format!("f{index:05}")).collect::<Vec<_>>();
+    let files =
+        names.iter().map(|name| (name.as_str(), Node::File(batch.stage_bytes(name.as_bytes())))).collect::<Vec<_>>();
+    let wide = directory(batch, files)?;
+    directory(batch, vec![("wide", Node::Directory(wide))])
+}
+
+/// Stages a run's tree into a seed batch.
+type StageTree = fn(&mut Batch) -> Result<Ref<Tree>, Box<dyn Error>>;
+
+/// The `/work` archive a run over the tree `tree` stages writes into its first container, booted with `flags`.
+fn work_archive(tree: StageTree, flags: &[&str]) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut inputs = Inputs::new(Vec::new())?;
-    inputs.tree = nested_tree(&mut inputs.batch)?;
+    inputs.tree = tree(&mut inputs.batch)?;
     let (hex, request) = (inputs.hex(), inputs.request("tool", "target")?);
     let output = built_work();
 
@@ -611,11 +624,22 @@ fn a_tree_over_the_prefetch_budget_writes_the_same_archive_as_one_that_fits() ->
     // Catches a descend path that skips or reorders members: under an eight-byte budget no closure fits, so every
     // directory is read on its own and every blob on demand, and the archive must still be byte-equal to the one the
     // one-request closure read writes.
-    let fitting = work_archive(FLAGS)?;
-    let descended = work_archive(&[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
+    let fitting = work_archive(nested_tree, FLAGS)?;
+    let descended = work_archive(nested_tree, &[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
 
     assert!(fitting.len() > large_payload().len(), "the archive holds the large file");
     assert!(fitting == descended, "the descended archive differs from the fitting one");
+    Ok(())
+}
+
+#[test]
+fn a_directory_wider_than_one_batched_read_writes_the_same_archive_as_one_that_fits() -> TestResult {
+    // Catches a second batched read that skips or repeats the first batch's last member: under an eight-byte budget
+    // the wide directory's blobs are read in batches as the archive reaches them, and one batch cannot name them all.
+    let fitting = work_archive(wide_tree, FLAGS)?;
+    let batched = work_archive(wide_tree, &[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
+
+    assert!(fitting == batched, "the batched archive differs from the fitting one");
     Ok(())
 }
 

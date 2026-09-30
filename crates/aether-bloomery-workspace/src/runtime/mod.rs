@@ -30,7 +30,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use aether_actor::{PathRefused, runtime};
-use aether_bloomery_kinds::{ClosureLimit, ReadArtifactResult, ReadClosureResult, StageResult};
+use aether_bloomery_kinds::{ClosureLimit, ReadArtifactResult, ReadArtifactsResult, ReadClosureResult, StageResult};
 use aether_bloomery_tar::{Limits, LimitsError, Rules};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
@@ -228,6 +228,17 @@ impl NativeActor for WorkspaceCapability {
         ticket: StorageTicket,
     ) {
         state.desk.answer(ticket, StorageAnswer::Read(result));
+    }
+
+    /// A source's answer to a worker's `ReadArtifacts`, handed to the worker.
+    #[handler::response]
+    fn on_read_artifacts_result(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        result: ReadArtifactsResult,
+        ticket: StorageTicket,
+    ) {
+        state.desk.answer(ticket, StorageAnswer::ReadMany(result));
     }
 
     /// A source's answer to a worker's `ReadClosure`, handed to the worker.

@@ -6,20 +6,30 @@
 //! [`Blob`](aether_data::Blob)s, never copied. `TooLarge` reads that one tree
 //! node with a `ReadArtifact` and pushes its subtrees onto an explicit work
 //! stack, each prefetched in turn, so only the spine of oversized directories
-//! and the blobs directly inside them are read one at a time. A lookup the
-//! map misses is one `ReadArtifact`.
+//! and the blobs directly inside them are left out of the map.
+//!
+//! Those blobs are read as the archive reaches them, a batch at a time. The
+//! reader remembers each directory listing it loads, its file digests in
+//! entry order (the order the archive opens them). A blob the map misses
+//! that a remembered listing holds is read with one `ReadArtifacts` naming it
+//! and every later file in its listing the map does not hold, under
+//! [`READ_MANY_BYTES`]; the answered prefix goes into a transient window that
+//! each open takes from, never charged to the read budget and replaced by the
+//! next batch, so it holds at most one batch. Any other lookup the map
+//! misses is one `ReadArtifact`.
 //!
 //! Every member is verified against the digest it is read under before it is
 //! trusted: a tree through [`ClosureArtifact::load`], a blob through a
 //! [`StoredBlob`] that hashes as it streams and fails at its end on a
 //! mismatch, so a corrupt blob never crosses into a container whole.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
+use std::iter;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, ClosureLimit, Digest, Node, OpaqueBytes, ReadArtifact, ReadArtifactResult, ReadClosure,
-    ReadClosureResult, Ref, Tree, VerifiedRead,
+    ArtifactDigests, ClosureArtifact, ClosureLimit, Digest, Node, OpaqueBytes, ReadArtifact, ReadArtifactResult,
+    ReadArtifacts, ReadArtifactsResult, ReadClosure, ReadClosureResult, Ref, Tree, VerifiedRead,
 };
 use aether_bloomery_tar::{SourceBlob, TreeSource};
 use aether_data::{Kind, Storage};
@@ -29,16 +39,51 @@ use super::{StorageAnswer, StorageCall, StorageError, StoragePort};
 /// The bytes a stored blob holds beyond its payload: its kind prefix.
 const PREFIX_BYTES: u64 = 8;
 
+/// Largest stored length one batched read answers past its first blob: the
+/// stage batch's byte bound.
+pub const READ_MANY_BYTES: u64 = 64 << 20;
+
 /// What a session has read, keyed by digest, and how much of its read budget
-/// is left.
+/// is left; the directory listings it has loaded; and the blobs the last
+/// batched read answered that no open has taken yet.
 pub struct Fetched {
     members: HashMap<Digest, ClosureArtifact>,
     remaining_bytes: u64,
+    /// Each file digest's latest listing and its position there.
+    listed: HashMap<Digest, (usize, usize)>,
+    /// Each loaded listing's file digests, in entry order.
+    listings: Vec<Vec<Digest>>,
+    /// The last batch's members not yet opened; not charged to the budget.
+    window: HashMap<Digest, ClosureArtifact>,
 }
 
 impl Fetched {
     pub fn new(budget: ClosureLimit) -> Self {
-        Self { members: HashMap::new(), remaining_bytes: budget.get() }
+        Self {
+            members: HashMap::new(),
+            remaining_bytes: budget.get(),
+            listed: HashMap::new(),
+            listings: Vec::new(),
+            window: HashMap::new(),
+        }
+    }
+
+    /// Remember `tree`'s file digests in entry order, the order an archive
+    /// opens them.
+    fn list(&mut self, tree: &Tree) {
+        let index = self.listings.len();
+        let files = tree
+            .entries()
+            .values()
+            .filter_map(|node| match node {
+                Node::File(blob) | Node::Executable(blob) => Some(blob.digest()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (position, digest) in files.iter().enumerate() {
+            self.listed.insert(*digest, (index, position));
+        }
+        self.listings.push(files);
     }
 
     /// Keep `member` under `digest`, charging its stored length to the
@@ -145,7 +190,8 @@ impl<'a> SourceReader<'a> {
     }
 
     /// Open the blob `blob` names as a reader verified at its end. A blob the
-    /// map misses is read and not kept.
+    /// map misses is taken from the window, read in a batch with the later
+    /// blobs of its listing, or read alone, and never kept.
     ///
     /// # Errors
     ///
@@ -153,11 +199,55 @@ impl<'a> SourceReader<'a> {
     /// read; [`StorageError::OtherKind`] when it is not stored as bytes.
     pub fn open(&mut self, blob: &Ref<OpaqueBytes>) -> Result<StoredBlob, StorageError> {
         let digest = blob.digest();
-        let member = self.member(digest, false)?;
+        let member = if let Some(member) = self.fetched.window.remove(&digest) {
+            member
+        } else if self.fetched.members.contains_key(&digest) {
+            self.member(digest, false)?
+        } else if let Some(&at) = self.fetched.listed.get(&digest) {
+            self.read_batch(digest, at)?
+        } else {
+            self.member(digest, false)?
+        };
         if member.kind() != OpaqueBytes::ID {
             return Err(StorageError::OtherKind(digest));
         }
         Ok(StoredBlob(member.verified_reader(digest)))
+    }
+
+    /// Read the blob `digest` names with one `ReadArtifacts` naming it and
+    /// every later file of its listing, `at`, that the map does not hold,
+    /// returning its member and replacing the window with the rest of the
+    /// answered prefix.
+    fn read_batch(
+        &mut self,
+        digest: Digest,
+        (listing, position): (usize, usize),
+    ) -> Result<ClosureArtifact, StorageError> {
+        let fetched = &mut *self.fetched;
+        fetched.window.clear();
+        let mut named = HashSet::from([digest]);
+        let later = fetched.listings[listing][position + 1..]
+            .iter()
+            .copied()
+            .filter(|later| !fetched.members.contains_key(later) && named.insert(*later));
+        let digests = iter::once(digest).chain(later).take(ReadArtifacts::MAX_ARTIFACTS).collect::<Vec<_>>();
+
+        let request = ReadArtifacts {
+            digests: ArtifactDigests::new(digests).map_err(|_| StorageError::Answer)?,
+            limit_bytes: ClosureLimit::new(READ_MANY_BYTES).expect("64 MiB is within a closure limit's bounds"),
+        };
+        let StorageAnswer::ReadMany(result) = self.port.call(StorageCall::ReadMany(request))? else {
+            return Err(StorageError::Answer);
+        };
+        let mut artifacts = match result {
+            ReadArtifactsResult::Found { artifacts } => artifacts.into_iter(),
+            ReadArtifactsResult::Missing { digest } => return Err(StorageError::Missing(digest)),
+            ReadArtifactsResult::Err { message } => return Err(StorageError::Refused(message)),
+        };
+        let first =
+            artifacts.next().filter(|first| first.claimed().unverified() == digest).ok_or(StorageError::Answer)?;
+        self.fetched.window.extend(artifacts.map(|member| (member.claimed().unverified(), member)));
+        Ok(first)
     }
 
     /// The member under `digest`: from the map, or read with one
@@ -189,7 +279,9 @@ impl TreeSource for SourceReader<'_> {
         Self: 'b;
 
     fn tree(&mut self, tree: &Ref<Tree>) -> Result<Tree, StorageError> {
-        self.load(tree)
+        let tree = self.load(tree)?;
+        self.fetched.list(&tree);
+        Ok(tree)
     }
 
     fn blob(&mut self, blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<StoredBlob>, StorageError> {
