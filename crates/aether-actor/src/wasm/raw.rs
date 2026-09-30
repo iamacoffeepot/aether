@@ -151,6 +151,16 @@ unsafe extern "C" {
     /// ADR-0166 path grammar; the SDK passes only a validated `ErasedActorPath`.
     #[link_name = "resolve_path_p32"]
     pub fn resolve_path(path_ptr: u32, path_len: u32) -> u64;
+    /// ADR-0230 §3 (#7205): the position of the `Live` route standing under
+    /// exactly the canonical path at `(path_ptr, path_len)`, a UTF-8 slice in
+    /// guest memory copied out before the call returns. The return is the
+    /// packed `(ptr << 32) | len` of a live guest buffer holding the
+    /// wire-encoded answer, a `__LiveRoute`, which the SDK decodes and frees
+    /// as [`asset_catalog`] does. The host traps on an out-of-bounds
+    /// pointer, text that is not UTF-8, and text outside the ADR-0166 path
+    /// grammar; the SDK passes only a typed path's text.
+    #[link_name = "live_route_p32"]
+    pub fn live_route(path_ptr: u32, path_len: u32) -> u64;
     /// ADR-0231 §4: the rows the route at `position` published while it is
     /// `Live`. The return is the packed `(ptr << 32) | len` of a live guest
     /// buffer holding the wire-encoded answer, a `__PublishedRows`, which the
@@ -343,6 +353,21 @@ pub unsafe fn asset_catalog() -> u64 {
 #[must_use]
 pub unsafe fn resolve_path(_path_ptr: u32, _path_len: u32) -> u64 {
     panic!("aether-actor: resolve_path called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::live_route` import (ADR-0230 §3).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn live_route(_path_ptr: u32, _path_len: u32) -> u64 {
+    panic!("aether-actor: live_route called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::published_rows` import (ADR-0231 §4).

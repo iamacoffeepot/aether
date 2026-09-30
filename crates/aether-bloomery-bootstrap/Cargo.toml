@@ -24,6 +24,9 @@ aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-fea
 # The identity half only: `JournalActor`, which types the config's journal
 # path, so the imports can name it as their storage source.
 aether-bloomery-journal = { path = "../aether-bloomery-journal", default-features = false }
+# The identity half only: `BundleDriver`, which types the config's bundle
+# driver path, so the merge `Call` is checked against its handled kinds.
+aether-bloomery-driver = { path = "../aether-bloomery-driver", default-features = false }
 # `MergeInput`, the `environment.merge` input the script stages. `library`
 # strips the bundle's own `export!` entry surface (one `export!` per wasm
 # module); `xtask dist` builds each component package in its own cargo

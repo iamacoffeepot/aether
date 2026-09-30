@@ -1,7 +1,8 @@
-//! Proving an [`ErasedActorPath`] that arrived in config or mail —
-//! [`WasmCtx::resolve_path`], the guest twin of the native
-//! `NativeCtx::resolve_path` (ADR-0230 §3), and its refusal,
-//! [`ResolvePathError`].
+//! Proving a path that arrived in config or mail: [`WasmCtx::resolve_path`],
+//! the guest twin of the native `NativeCtx::resolve_path` (ADR-0230 §3), over
+//! an untyped [`ErasedActorPath`], and its refusal, [`ResolvePathError`]; and
+//! [`WasmCtx::resolve`], the guest's typed-path door (ADR-0230 §3, #7205),
+//! over an [`ActorPath<R>`], and its refusal, [`ResolveError`].
 
 use core::error::Error;
 use core::fmt;
@@ -11,8 +12,9 @@ use alloc::string::String;
 
 use super::WasmCtx;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::reference::ErasedActorRef;
+use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::bridge::address::{self, __ResolvedPath};
+use crate::{ActorPath, Addressable, ResolveError};
 
 /// Why [`WasmCtx::resolve_path`] could not prove an [`ErasedActorPath`] (ADR-0230
 /// §3). Neither refusal names a position.
@@ -58,14 +60,16 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// `wire` (a [`WireCtx`](super::WireCtx) derefs here) or at receipt, and
     /// keep the reference; never re-derive it at a send.
     ///
-    /// The reference is an [`ErasedActorRef`], because a guest cannot name the
-    /// type of a native actor it reaches by path, so a send through it is not
-    /// checked by kind: a kind the actor does not handle is caught only at the
-    /// recipient.
-    ///
-    /// Its consumer is the environment bootstrap script
-    /// (`aether-bloomery-bootstrap`), whose `wire` proves the journal owner and
-    /// the bundle driver from its config.
+    /// The reference is an [`ErasedActorRef`], because its answer names no
+    /// actor type: it is for a guest handed an [`ErasedActorPath`] with no
+    /// compile-time claim on what stands there — text that arrived over the
+    /// wire, or a short path that only expands against the live registry. A
+    /// holder that already knows the actor type resolves an
+    /// [`ActorPath<R>`] instead, through [`Self::resolve`], and gets a
+    /// kind-checked [`ActorRef<R>`]. After #6932, this verb serves identity
+    /// (naming what a path resolves to) and the guard cast
+    /// ([`Self::cast`](super::WasmCtx::cast), over a reference this proves),
+    /// not a checked send.
     ///
     /// # Errors
     ///
@@ -78,5 +82,36 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
             __ResolvedPath::Unresolved { detail } => Err(ResolvePathError::Unresolved { detail }),
             __ResolvedPath::NotLive { canonical_path } => Err(ResolvePathError::NotLive { canonical_path }),
         }
+    }
+
+    /// Prove an [`ActorPath<R>`] that arrived in this component's config or
+    /// in a payload, and hand back a proven, kind-checked [`ActorRef<R>`]
+    /// (ADR-0230 §3, #7205). The guest's typed-path door, beside
+    /// [`Self::resolve_path`]'s untyped one: both fold the path as written —
+    /// a typed path is canonical by construction, so no short-path expansion
+    /// runs — and find the `Live` route standing under exactly that
+    /// canonical name through `Registry::live_route`, the same read the
+    /// native `NativeCtx::resolve` (over a `ProtocolPath<P>`) takes, so the
+    /// two answers cannot drift apart. No actor-type tag is compared: the
+    /// path's leaf namespace is `R::NAMESPACE` by construction (ADR-0230
+    /// §2), so a route standing under it is an `R`.
+    ///
+    /// It costs one host call reading the published route view. Run it
+    /// once, at `wire` (a [`WireCtx`](super::WireCtx) derefs here) or at
+    /// receipt, and keep the reference; never re-derive it at a send.
+    ///
+    /// Its consumer is the environment bootstrap script
+    /// (`aether-bloomery-bootstrap`), whose `wire` proves the journal owner
+    /// and the bundle driver from its config.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::NotLive`] naming the path when no `Live` route stands
+    /// under its canonical name. It never names a position.
+    pub fn resolve<R: Addressable>(&self, path: &ActorPath<R>) -> Result<ActorRef<R>, ResolveError> {
+        address::live_route(path.as_erased())
+            .position
+            .map(|position| ActorRef::new(MailboxId(position)))
+            .ok_or_else(|| ResolveError::NotLive { path: path.as_erased().clone() })
     }
 }

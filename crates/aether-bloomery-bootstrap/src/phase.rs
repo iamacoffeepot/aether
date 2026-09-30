@@ -1,7 +1,9 @@
 //! Where a bootstrap run stands, and the pure builders for the mail each step
 //! sends.
 
-use aether_actor::{ActorInitError, ErasedActorRef};
+use aether_actor::{ActorInitError, ActorRef};
+use aether_bloomery_driver::BundleDriver;
+use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{
     Call, ClosureArtifact, Digest, EncodedArtifact, Head, HeadNameError, NativeOrigin, OpaqueBytes, ProgramName,
     Publish, RecordedHead, RecordedHeadMove, Ref, Tree,
@@ -24,9 +26,9 @@ const ORIGIN: &str = "aether.bloomery.bootstrap";
 #[derive(Debug, Clone, Copy)]
 pub struct Peers {
     /// The journal owner: `ReadHead`, `Publish`, and `ReadArtifact` go here.
-    pub journal: ErasedActorRef,
+    pub journal: ActorRef<JournalActor>,
     /// The bundle driver: the merge `Call` goes here.
-    pub driver: ErasedActorRef,
+    pub driver: ActorRef<BundleDriver>,
 }
 
 /// The bootstrap's lifecycle. Stored state holds only proofs, never an id or a
