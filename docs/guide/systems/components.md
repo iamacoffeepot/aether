@@ -76,7 +76,7 @@ separately. Grouping actors that belong together — a subsystem's coordinator a
 panels it manages, say — into one module is the intended use: it ships and versions
 them as a unit, and lets a running instance spawn its module's actors as inline children ([below](#spawning-children-inline)).
 
-The `generators = [aether_bloomery_bundle::bundle]` key names
+The `generators = [aether_bloomery_program::bundle]` key names
 the one bloomery export generator. `export!` stays the only author entry;
 `bundle` is a function-like macro hook, not a second export macro and not a
 runtime trait. `#[actor]`, `#[program]`, and `#[reactor]` emit a same-name
@@ -111,7 +111,7 @@ module's public exports, so `export: Some("aether.bloomery.bundle")` selects it.
 ```rust
 aether_actor::export!(
     public = [Probe, ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
-    generators = [aether_bloomery_bundle::bundle],
+    generators = [aether_bloomery_program::bundle],
 );
 ```
 

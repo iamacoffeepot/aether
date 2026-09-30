@@ -1,0 +1,13 @@
+error: #[fold] method name conflicts with a generated View method
+  --> tests/ui/view/fail_conflicting_name.rs:15:8
+   |
+15 |     fn advance(&mut self, _event: Event) {}
+   |        ^^^^^^^
+
+warning: unused import: `View`
+ --> tests/ui/view/fail_conflicting_name.rs:1:31
+  |
+1 | use aether_bloomery_program::{View, ViewCursor, view};
+  |                               ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

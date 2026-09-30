@@ -9,7 +9,7 @@ use aether_bloomery_kinds::{
     Call, CallOutcome, Digest, Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, Publish,
     PublishResult, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Tree,
 };
-use aether_bloomery_view::Heads;
+use aether_bloomery_program::Heads;
 use aether_bloomery_workspace::Environment;
 use aether_bloomery_workspace_programs::environment::MergeInput;
 use aether_data::Kind;

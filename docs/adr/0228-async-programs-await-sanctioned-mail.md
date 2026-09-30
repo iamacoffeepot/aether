@@ -25,9 +25,9 @@ Depends on [ADR-0227](0227-reply-contracts-are-type-markers.md)
 ADR-0224 ships programs as WASM-bundle functions over an injected
 `Env<Pure>`: `fn run(input, env) -> Result<Result, Refusal>`. The
 program cannot read the journal, send mail, or perform I/O. `#[program]`
-(`crates/aether-bloomery-program-derive/src/check.rs`) refuses `async fn
+(`crates/aether-bloomery-derive/src/program/check.rs`) refuses `async fn
 run` and anything but `Mode::Pure`. The generated invocation child
-(`crates/aether-bloomery-bundle-derive/src/expand/programs.rs`
+(`crates/aether-bloomery-derive/src/bundle/expand/programs.rs`
 `on_invoke`) calls `dispatch` and replies `Invoked` in the same handler.
 `Mode` already means only "same input digest ⇒ same result digest"
 (`Pure`) vs "never memoized" (`Sampled`). It is not a synonym for

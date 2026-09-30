@@ -9,7 +9,7 @@ use aether_bloomery_kinds::{
     ProgramName, ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested,
     RuleName, Transition, Utf8Text,
 };
-use aether_bloomery_view::{Activations, HeadActivation};
+use aether_bloomery_program::{Activations, HeadActivation};
 use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{PublishResult, Spawn, SpawnResult};

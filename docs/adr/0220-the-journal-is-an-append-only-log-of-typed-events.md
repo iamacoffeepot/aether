@@ -377,7 +377,7 @@ garbage collection is in this work.
 
 A view is a fold over a contiguous journal prefix. It is not stored in
 SQLite and it is not a second source of truth. The journal still does
-not fold views; `aether-bloomery-view` consumes supplied `Entry` values
+not fold views; `aether_bloomery_program::view` consumes supplied `Entry` values
 and does not own a `Journal`.
 
 ```rust
@@ -406,8 +406,8 @@ registry caught each fold up to an exact prefix, poisoned failed slots, and
 refused a replaced journal via `JournalIdentity`. That author-facing
 registry is retired: it had no remaining production consumer, and generated
 reactor actors maintain the views they need. Cursor checks, poisoning, and
-identity binding are the owner's responsibility. `aether-bloomery-view`
-depends on kinds and data only, not the journal or program crates.
+identity binding are the owner's responsibility. `aether_bloomery_program::view`
+uses kinds and data only, not the journal.
 
 Historical views, persisted checkpoints, eviction, background updates,
 Causes, reactor scheduling, and performance issue #6111 are deferred.

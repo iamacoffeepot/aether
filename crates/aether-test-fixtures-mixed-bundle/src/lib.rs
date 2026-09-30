@@ -3,9 +3,7 @@
 
 use aether_actor::export;
 use aether_bloomery_kinds::{CallInput, CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
-use aether_bloomery_program::{Env, Program, Sync, program};
-use aether_bloomery_reactor::{Guard, NoViews, reactor};
-use aether_bloomery_view::At;
+use aether_bloomery_program::{At, Env, Guard, NoViews, Program, Sync, program, reactor};
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -53,6 +51,6 @@ impl Reactor for MixedCaller {
     }
 }
 
-export!(public = [Summarize, MixedCaller], generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Summarize, MixedCaller], generators = [aether_bloomery_program::bundle]);
 
 const _: Summarize = Summarize;

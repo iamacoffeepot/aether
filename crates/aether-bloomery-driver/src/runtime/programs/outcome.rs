@@ -7,7 +7,7 @@
 //! entry's own seq and record.
 
 use aether_bloomery_kinds::{AppendRecords, CallOutcome, DriverRecord, EncodedArtifact, Fault, FaultReason, Seq};
-use aether_bloomery_view::Outcome as RecordedOutcome;
+use aether_bloomery_program::Outcome as RecordedOutcome;
 
 use crate::runtime::core::{AppendTicket, CallerId, Command, PendingWrite, ProgramCore};
 

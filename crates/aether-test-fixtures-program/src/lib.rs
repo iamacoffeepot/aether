@@ -206,7 +206,7 @@ impl Program for ReadLarge {
 
 export!(
     public = [Summarize, Refuse, FetchBody, Stall, ReadUncited, ReadLarge],
-    generators = [aether_bloomery_bundle::bundle],
+    generators = [aether_bloomery_program::bundle],
 );
 
 const _: Summarize = Summarize;

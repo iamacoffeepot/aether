@@ -1,0 +1,25 @@
+error: #[program] needs a `///` doc on the impl: it is the program's tool description
+  --> tests/ui/program/fail_undocumented_program.rs:20:18
+   |
+20 | impl Program for UndocumentedProgram {
+   |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/program/fail_undocumented_program.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Env` and `Sync`
+ --> tests/ui/program/fail_undocumented_program.rs:2:31
+  |
+2 | use aether_bloomery_program::{Env, Program, Sync, program};
+  |                               ^^^           ^^^^
+
+warning: unused import: `Program`
+ --> tests/ui/program/fail_undocumented_program.rs:2:36
+  |
+2 | use aether_bloomery_program::{Env, Program, Sync, program};
+  |                                    ^^^^^^^

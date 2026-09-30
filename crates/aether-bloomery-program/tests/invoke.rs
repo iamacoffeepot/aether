@@ -546,7 +546,7 @@ fn sampled_process_run_yields_need_send_then_completes() -> Result<(), Box<dyn E
 fn invocation_child_has_no_run_kind_arm() {
     // Tripwire: Process shares Http's generic NeedSend pump. A per-kind `Run`
     // arm in the generated invocation child reopens the closed PendingSend enum.
-    let child = include_str!("../../aether-bloomery-bundle-derive/src/expand/programs.rs");
+    let child = include_str!("../../aether-bloomery-derive/src/bundle/expand/programs.rs");
     assert!(!child.contains("PendingSend::Process"), "invocation child must not grow a Process arm");
     assert!(!child.contains("Run =>"), "invocation child must not match on Run");
 }

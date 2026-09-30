@@ -2,8 +2,7 @@
 //! head into a `CallProgram` for the summarize program.
 
 use aether_bloomery_kinds::{CallInput, CallProgram, Head, HeadMoved, ProgramName, Ref, Utf8Text};
-use aether_bloomery_reactor::{Guard, NoViews, reactor};
-use aether_bloomery_view::{At, ViewCursor, view};
+use aether_bloomery_program::{At, Guard, NoViews, ViewCursor, reactor, view};
 use aether_test_fixtures_kinds::{SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 struct SummarizeName(ProgramName);
@@ -66,4 +65,4 @@ impl Reactor for SummarizeCaller {
     }
 }
 
-aether_actor::export!(public = [SummarizeCaller], generators = [aether_bloomery_bundle::bundle]);
+aether_actor::export!(public = [SummarizeCaller], generators = [aether_bloomery_program::bundle]);

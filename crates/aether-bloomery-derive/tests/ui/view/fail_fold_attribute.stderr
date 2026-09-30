@@ -1,0 +1,13 @@
+error: #[fold] takes no arguments
+  --> tests/ui/view/fail_fold_attribute.rs:14:5
+   |
+14 |     #[fold(extra)]
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `View`
+ --> tests/ui/view/fail_fold_attribute.rs:1:31
+  |
+1 | use aether_bloomery_program::{View, ViewCursor, view};
+  |                               ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

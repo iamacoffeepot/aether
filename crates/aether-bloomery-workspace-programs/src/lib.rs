@@ -19,5 +19,5 @@ pub mod vendor;
 
 aether_actor::export!(
     public = [environment::EnvironmentMerge, proof::ClippyProof, vendor::CargoVendor],
-    generators = [aether_bloomery_bundle::bundle]
+    generators = [aether_bloomery_program::bundle]
 );

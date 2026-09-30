@@ -15,8 +15,8 @@ or chassis changes.
 | Order | Deliverable | Proposed surface |
 | --- | --- | --- |
 | W1 | Atomic move-head command on journal owner | `aether-bloomery-journal`, `aether-bloomery-kinds` |
-| W2 | Requests, receipts, attribution, and native driver | `aether-bloomery-kinds`, `aether-bloomery-program`, `aether-bloomery-reactor` |
-| W3 | Executor selection without a required member | `aether-bloomery-kinds`, `aether-bloomery-view` |
+| W2 | Requests, receipts, attribution, and native driver | `aether-bloomery-kinds`, `aether-bloomery-program` |
+| W3 | Executor selection without a required member | `aether-bloomery-kinds`, `aether-bloomery-program` |
 | W4 | Native feeder and side-by-side routes | new `aether-bloomery-feeder` |
 | W5 | Activate and retire program executors | feeder and kinds crates |
 | W6 | Genesis through the application layer | feeder and journal crates; chassis integration deferred |

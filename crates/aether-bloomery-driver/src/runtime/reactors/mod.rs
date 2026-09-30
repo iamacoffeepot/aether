@@ -24,7 +24,7 @@ use aether_bloomery_kinds::{
     ActivationRejected, ClosureArtifact, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName,
     ReactorSet, SetHeads,
 };
-use aether_bloomery_view::Heads;
+use aether_bloomery_program::Heads;
 
 use self::instance::Instance;
 use self::intents::PlannedIntent;

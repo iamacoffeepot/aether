@@ -68,6 +68,6 @@ fn refused(error: impl Display) -> Refusal {
     Refusal::Refused { reason: Detail::new(error.to_string()) }
 }
 
-export!(public = [RunTool], generators = [aether_bloomery_bundle::bundle]);
+export!(public = [RunTool], generators = [aether_bloomery_program::bundle]);
 
 const _: RunTool = RunTool;

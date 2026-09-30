@@ -51,7 +51,7 @@ Nothing on main can carry any of this yet:
   with no variant for load failures, oversized closures, or interrupted
   attempts.
 - **Selection is all-or-nothing.** `select_reactors`
-  (`crates/aether-bloomery-view/src/selection.rs`) fails the whole set
+  (`crates/aether-bloomery-program/src/view/selection.rs`) fails the whole set
   with `MemberUnbound` when one member is unbound, and fails with
   `SetUnbound` at genesis. `Heads::get` (`heads.rs`) is public, and
   `ReactorSet::clusters` lists member heads without merging equal
@@ -218,7 +218,7 @@ Nothing on main can carry any of this yet:
    trigger's own seq. Four facts decide this:
    - A rule sees views folded through `N`, including the trigger.
      `Owner::prepare` catches views up to the last retained entry, which
-     is the trigger. The `aether-bloomery-reactor` crate doctest asserts
+     is the trigger. The `aether_bloomery_program::reactor` module doctest asserts
      that `heads.cursor()` equals the trigger's seq and that the result
      includes the trigger's own move.
    - `Heads` is a pure fold. Resolving through `N` therefore gives what
@@ -365,7 +365,7 @@ Nothing on main can carry any of this yet:
   `Digest` field isn't part of a closure. Artifacts stored before the edge
   table existed have no edges. No deployed journal holds any.
 - **New crate.** The driver lives in a new native crate. Its kinds live
-  in `aether-bloomery-kinds` and its folds in `aether-bloomery-view`.
+  in `aether-bloomery-kinds` and its folds in `aether-bloomery-program`.
   Chassis mounting landed as the `aether-chassis-bloomery` crate (issue
   #6244): base stratum + component host + RPC server, with the journal
   owner and the driver spawned post-build as

@@ -1,7 +1,7 @@
 //! Startup recovery: fault every prior-life request `Interrupted` (ADR-0226 decision 9, programs).
 //!
 //! Once the core first catches up, every request in
-//! [`Requests::outstanding`](aether_bloomery_view::Requests::outstanding) is
+//! [`Requests::outstanding`](aether_bloomery_program::Requests::outstanding) is
 //! from a prior life, because this core has written nothing yet. Each one is
 //! appended a `Fault { Interrupted }` — at most [`EVENTS_PAGE`] records per
 //! append — and is never invoked: re-running a program that may trap would

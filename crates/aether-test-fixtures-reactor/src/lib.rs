@@ -1,7 +1,7 @@
 //! Reactor-bundle fixture: two reactors share one views owner inside a
 //! digest-loaded root, and both publish the triggering tree as a `SetHeads`.
 //!
-//! Authors declare reactors and guards. `export!(public = […], generators = [aether_bloomery_bundle::bundle])`
+//! Authors declare reactors and guards. `export!(public = […], generators = [aether_bloomery_program::bundle])`
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
 //! under the journal artifact digest with empty config.
 
@@ -11,8 +11,7 @@ use core::error::Error;
 use core::fmt;
 
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHeads, Tree};
-use aether_bloomery_reactor::{And, Guard, reactor};
-use aether_bloomery_view::{At, Heads, Publish, PublishError, View, ViewCursor, view};
+use aether_bloomery_program::{And, At, Guard, Heads, Publish, PublishError, View, ViewCursor, reactor, view};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 
@@ -154,4 +153,4 @@ impl Reactor for SourceWitness {
     }
 }
 
-aether_actor::export!(public = [SourcePublisher, SourceWitness], generators = [aether_bloomery_bundle::bundle]);
+aether_actor::export!(public = [SourcePublisher, SourceWitness], generators = [aether_bloomery_program::bundle]);
