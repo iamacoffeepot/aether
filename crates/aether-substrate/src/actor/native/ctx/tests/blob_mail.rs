@@ -641,8 +641,8 @@ fn naming(hash: aether_data::BlobHash) -> Vec<u8> {
 }
 
 /// A reply target at `to` for a relay's caller.
-fn answered_to(to: ErasedActorRef) -> Option<ReplyTarget> {
-    Some(ReplyTarget::Actor { to, correlation: 0 })
+fn answered_to(to: ErasedActorRef) -> ReplyTarget {
+    ReplyTarget::Actor { to, correlation: 0 }
 }
 
 /// What a raw forward's caller caught: the forwarded [`Carrier`] envelopes,
@@ -672,7 +672,7 @@ fn a_raw_forward_of_attached_bytes_shares_their_entries() {
         ..Routes::default()
     });
 
-    rig.run(&RelayCarrier, answered_to(d_ref));
+    rig.run(&RelayCarrier, Some(answered_to(d_ref)));
 
     let (carriers, closed) = caught(&d_rx);
     assert!(closed, "the deferred reply closes");
@@ -698,7 +698,7 @@ fn a_raw_forward_naming_a_hash_the_handled_mail_lacks_is_refused() {
     let mut rig =
         stage.boot(Routes { raw: Some(RawForward { bytes: Some(naming(other.hash())) }), ..Routes::default() });
 
-    rig.run(&RelayCarrier, answered_to(c_ref));
+    rig.run(&RelayCarrier, Some(answered_to(c_ref)));
 
     let (carriers, closed) = caught(&c_rx);
     assert!(closed, "the deferred reply closes");
@@ -719,7 +719,7 @@ fn a_raw_send_from_a_handler_holding_no_blob_goes_out_unwalked() {
     let mut rig =
         stage.boot(Routes { raw: Some(RawForward { bytes: Some(naming(entry.hash())) }), ..Routes::default() });
 
-    rig.run(&RelayNote, answered_to(c_ref));
+    rig.run(&RelayNote, Some(answered_to(c_ref)));
 
     let (carriers, closed) = caught(&c_rx);
     assert!(closed, "the deferred reply closes");
