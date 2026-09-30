@@ -9,9 +9,10 @@
 
 mod tests {
     use aether_data::Kind;
+    use aether_kinds::LoadComponent;
     use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult};
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// The source asset the bundle embeds via
     /// `export_asset!("asset_fixture.txt")`, read at compile time so the
@@ -34,7 +35,17 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
+        let addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.quiet_probe".to_owned()),
+                },
+            )
+            .addr;
 
         let replies = harness.send(engine, &addr, &AssetProbe);
         let reply = match replies.as_slice() {

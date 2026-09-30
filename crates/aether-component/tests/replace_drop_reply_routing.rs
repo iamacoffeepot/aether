@@ -1,17 +1,17 @@
 //! `FleetHarness` reply-routing regression for the two **held**
 //! component-lifecycle ops (issue 1466). Over the real hub → RPC →
-//! forked-substrate wire, the component host holds the reply to
-//! `ReplaceComponent` across a republish's prepare, publish and commit
-//! turns (ADR-0241 §7), and hands `DropComponent`'s to the trampoline;
-//! either reply must stream back before the originating call settles.
-//! Before the issue-1466 fix a deferred reply did not hold the call's trace
-//! root open, so the call emitted `ReplyEnd(Ok)` with zero reply events and
-//! the `ReplaceResult` / `DropResult` routed to a call that had already
-//! closed (discarded).
+//! forked-substrate wire, the component host holds the reply to a `Publish`
+//! of a successor across a republish's prepare, publish and commit turns
+//! (ADR-0241 §3, §7), and hands `DropComponent`'s to the trampoline; either
+//! reply must stream back before the originating call settles. Before the
+//! issue-1466 fix a deferred reply did not hold the call's trace root open,
+//! so the call emitted `ReplyEnd(Ok)` with zero reply events and the
+//! `PublishResult` / `DropResult` routed to a call that had already closed
+//! (discarded).
 
 mod tests {
-    use aether_data::Kind;
-    use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+    use aether_data::{Blob, Kind};
+    use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Publish, PublishResult};
     use aether_rpc::ReplyEnvelope;
     use aether_substrate::testing::successor_wasm;
 
@@ -51,18 +51,18 @@ mod tests {
 
         // The reply set is empty before the issue-1466 fix (`ReplyEnd` with
         // zero events).
-        let replace_replies = harness.send::<ReplaceComponent>(
+        let publish_replies = harness.send::<Publish>(
             engine,
             "aether.component",
-            &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
+            &Publish { code: Blob::from(successor_wasm(&wasm, 1)), configs: Vec::new() },
         );
         assert!(
-            !replace_replies.is_empty(),
-            "ReplaceComponent drew zero reply events — the call settled before the held reply answered (issue 1466)",
+            !publish_replies.is_empty(),
+            "Publish drew zero reply events — the call settled before the held reply answered (issue 1466)",
         );
-        match decode_reply::<ReplaceResult>(&replace_replies) {
-            ReplaceResult::Ok { .. } => {}
-            ReplaceResult::Err { error } => panic!("replace failed: {error}"),
+        match decode_reply::<PublishResult>(&publish_replies) {
+            PublishResult::Ok { .. } => {}
+            PublishResult::Err { error } => panic!("publish of the successor failed: {error}"),
         }
 
         // The loaded guest publishes only its own rows, which do not include

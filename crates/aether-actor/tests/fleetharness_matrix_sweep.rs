@@ -37,9 +37,10 @@
 
 mod tests {
     use aether_data::Kind;
+    use aether_kinds::LoadComponent;
     use aether_test_fixtures_kinds::{CollectMatrix, MatrixReport, RunMatrix};
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// Drive the full cluster-addressing matrix over the wire and assert
     /// every cell: in-cluster delivery + the sender verdict each recipient
@@ -57,8 +58,26 @@ mod tests {
         // plus two inline children). The observer loads first and under its
         // own namespace: the parent declares it as a dependency, so its route
         // has to be `Live` before the parent's load is accepted.
-        harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
-        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
+        harness.load(
+            engine,
+            &LoadComponent {
+                wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                name: None,
+                config: Vec::new(),
+                export: Some("test.source_observer".to_owned()),
+            },
+        );
+        let parent_addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.matrix.parent".to_owned()),
+                },
+            )
+            .addr;
 
         // Drive the sweep: the parent fans out every in-cluster direction
         // in place, plus a cross-cluster send to the observer during the

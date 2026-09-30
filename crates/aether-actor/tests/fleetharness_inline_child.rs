@@ -15,12 +15,14 @@
 
 mod tests {
     use aether_data::Kind;
+    use aether_kinds::LoadComponent;
+    use aether_substrate::testing::successor_wasm;
     use aether_test_fixtures_kinds::{
         Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
         InlineProbe,
     };
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
@@ -36,7 +38,17 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent").addr;
+        let parent_addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.inline.parent".to_owned()),
+                },
+            )
+            .addr;
 
         // The child's first-class lineage address: the parent's
         // rendered name plus the inline child's own node (ADR-0114, ADR-0241 §6).
@@ -102,7 +114,15 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
+        let parent = harness.load(
+            engine,
+            &LoadComponent {
+                wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                name: None,
+                config: Vec::new(),
+                export: Some("test.inline.configured_parent".to_owned()),
+            },
+        );
         let child_addr = format!("{}/test.inline.configured_child:widget", parent.addr);
 
         // Baseline: the child's durable counter starts from the spawn
@@ -131,7 +151,7 @@ mod tests {
         // under a new hash: the common rebuild where both sides are the same
         // SDK build (per issue 2690's design notes on the composite bundle's
         // transience). Identical bytes would answer with no swap.
-        harness.replace_with_successor(engine, "aether_test_fixtures_bundle", 1);
+        harness.publish(engine, successor_wasm(&read_component_wasm("aether_test_fixtures_bundle"), 1));
 
         // The moved state — not the config default, not the spawn
         // config's initial value, not silently dropped — survives the

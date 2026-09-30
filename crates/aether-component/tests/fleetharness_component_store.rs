@@ -2,7 +2,7 @@
 //! real hub → RPC → engines-cap stack to upload a component wasm
 //! content-addressed, read its manifest straight from the wasm, resolve it
 //! by name / hash / handled-kind attribute, dedup an identical re-upload,
-//! load + replace by selector, and bring a component up from a boot manifest
+//! load + publish by selector, and bring a component up from a boot manifest
 //! of selectors. Headless: no GPU, no pixel readback.
 
 mod tests {
@@ -15,7 +15,8 @@ mod tests {
 
     use aether_data::{Kind, Schema, SchemaType, wire};
     use aether_kinds::{
-        ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, UploadComponentResult,
+        ComponentSelector, ListComponentBinaries, LoadComponent, LogTailResult, ResolveComponentResult,
+        UploadComponentResult,
     };
     use aether_test_fixtures_kinds::{LogMarker, ProbeConfig};
 
@@ -276,12 +277,13 @@ mod tests {
             ResolveComponentResult::Err { error } => panic!("typed resolve failed: {error}"),
         }
 
-        // Fork a headless engine, load by selector (resolve-and-forward),
-        // and assert it registers at the lineage address and answers
-        // LogTail (it's live).
+        // Fork a headless engine, resolve the selector to its bytes + export
+        // and load it (resolve-and-forward), then assert it registers at the
+        // lineage address and answers LogTail (it's live).
         let engine = harness.spawn_headless();
         let expected = probe_lineage_addr();
-        let loaded = harness.load_by_selector(engine, "probe@test.quiet_probe");
+        let (wasm, export) = harness.component_wasm("probe@test.quiet_probe");
+        let loaded = harness.load(engine, &LoadComponent { wasm, name: None, config: Vec::new(), export });
         assert_eq!(loaded.addr, expected, "load by selector registers at the lineage addr");
         match harness.log_tail(engine, &expected, None, None) {
             LogTailResult::Ok { .. } => {}
@@ -291,13 +293,16 @@ mod tests {
         }
 
         // Republish the loaded module by hash (ADR-0116 selector, ADR-0241
-        // §7). The same bytes already publish every namespace, so the replace
-        // answers with the published types and swaps nothing.
-        let types = harness.replace_by_selector(engine, &hash);
+        // §7): a replace names no actor, so the selector's resolved export
+        // must be `None`. The same bytes already publish every namespace, so
+        // the publish answers with the published types and swaps nothing.
+        let (wasm, export) = harness.component_wasm(&hash);
+        assert!(export.is_none(), "a replace selector names no actor, got {export:?}");
+        let types = harness.publish(engine, wasm);
         let quiet = types
             .iter()
-            .find(|replaced| replaced.namespace == "test.quiet_probe")
-            .unwrap_or_else(|| panic!("the replace reports the loaded type: {types:?}"));
+            .find(|published| published.namespace == "test.quiet_probe")
+            .unwrap_or_else(|| panic!("the publish reports the loaded type: {types:?}"));
         assert!(
             quiet.capabilities.handlers.iter().any(|h| h.id == LogMarker::ID),
             "the republished probe still advertises its LogMarker handler"

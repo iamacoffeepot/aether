@@ -7,10 +7,26 @@
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{DescribeComponent, DescribeComponentResult};
+    use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent};
     use aether_test_fixtures_kinds::{AssetProbe, LogMarker};
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
+
+    /// The bundle's `QuietProbe` export, loaded fresh per test so each
+    /// scenario addresses its own instance.
+    fn load_probe(harness: &mut FleetHarness, engine: aether_data::EngineId) -> String {
+        harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.quiet_probe".to_owned()),
+                },
+            )
+            .addr
+    }
 
     /// Load the bundle's `QuietProbe` export, then send
     /// `aether.component.describe` addressed by the lineage name the load
@@ -26,7 +42,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
+        let addr = load_probe(&mut harness, engine);
 
         let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {
@@ -78,7 +94,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
+        let addr = load_probe(&mut harness, engine);
 
         let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {

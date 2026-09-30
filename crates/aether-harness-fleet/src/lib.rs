@@ -57,10 +57,9 @@ use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinarySelector, ComponentCapabilities, ComponentSelector, DeadEngineDescriptor, EngineDescriptor,
-    ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
-    ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, ReplacedType, ResolveComponent, ResolveComponentResult, SpawnEngine,
+    BinarySelector, ComponentSelector, DeadEngineDescriptor, EngineDescriptor, ListComponentBinaries,
+    ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult,
+    ListEngines, ListEnginesResult, LogTail, LogTailResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
     SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
     UploadComponentResult,
 };
@@ -72,9 +71,12 @@ use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
-use aether_substrate::testing::successor_wasm;
 use aether_substrate::testing::{TestChassis, boot_authority};
 use aether_trace::TraceDispatchCapability;
+
+mod component;
+
+pub use component::Loaded;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked
 /// `read_frame` wakes to log a slow-gate line and re-check its cumulative
@@ -245,17 +247,6 @@ enum DistComponentRequirement {
     ManifestAbsent,
     ManifestUnreadable(String),
     StemMissing,
-}
-
-/// The two `LoadResult::Ok` fields a loaded component exposes: the rendered
-/// ADR-0099 lineage `addr` (the recipient of every later mail, which a
-/// [`replace`](FleetHarness::replace) keeps), and the advertised receive-side `capabilities`.
-/// Returned by [`load_full`](FleetHarness::load_full) for the lifecycle rows
-/// that need the capabilities the thin [`load`](FleetHarness::load) delegate
-/// discards.
-pub struct Loaded {
-    pub addr: String,
-    pub capabilities: ComponentCapabilities,
 }
 
 /// A booted hub chassis plus a connected, handshaken raw-frame client.
@@ -532,115 +523,6 @@ impl FleetHarness {
         ResolveComponentResult::decode_from_bytes(&payload).expect("undecodable ResolveComponentResult")
     }
 
-    /// Load a component into `engine` by registry selector (ADR-0116, issue
-    /// 1956), mirroring aether-mcp's resolve-then-forward: resolve the
-    /// selector hub-local to the wasm bytes + `@actor` export, then forward
-    /// `LoadComponent { wasm, export }` to the engine's `aether.component`
-    /// mailbox. Returns the loaded component's [`Loaded`] (lineage address,
-    /// capabilities). Panics on a resolve / load error.
-    pub fn load_by_selector(&mut self, engine: EngineId, selector: &str) -> Loaded {
-        let resolved = self.resolve_component(ComponentSelector {
-            query: Some(selector.to_owned()),
-            namespace: None,
-            handled_kind: None,
-        });
-        let (wasm, export) = match resolved {
-            ResolveComponentResult::Ok { wasm, export, .. } => (wasm, export),
-            ResolveComponentResult::Err { error } => {
-                panic!("resolve of selector {selector:?} failed: {error}")
-            }
-        };
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export },
-        );
-        let payload = single_reply(&replies, "LoadComponent");
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
-            Some(LoadResult::Err { error }) => {
-                panic!("load by selector {selector:?} failed: {error}")
-            }
-            None => panic!("undecodable LoadResult"),
-        }
-    }
-
-    /// Republish on `engine` the module a registry selector resolves to
-    /// (ADR-0116, issue 1956; ADR-0241 §7) — the resolve-then-forward twin
-    /// of [`replace`](Self::replace), which reads a dist stem. Every live
-    /// instance of the module's namespaces moves to it; returns each type it
-    /// publishes. A replace names no actor, so a selector carrying an
-    /// `@actor` half is a scenario bug.
-    pub fn replace_by_selector(&mut self, engine: EngineId, selector: &str) -> Vec<ReplacedType> {
-        let resolved = self.resolve_component(ComponentSelector {
-            query: Some(selector.to_owned()),
-            namespace: None,
-            handled_kind: None,
-        });
-        let wasm = match resolved {
-            ResolveComponentResult::Ok { wasm, export: None, .. } => wasm,
-            ResolveComponentResult::Ok { export: Some(export), .. } => {
-                panic!("replace selector {selector:?} names the actor {export:?}; a replace names no actor")
-            }
-            ResolveComponentResult::Err { error } => {
-                panic!("resolve of selector {selector:?} failed: {error}")
-            }
-        };
-        self.replace_wasm(engine, wasm, selector)
-    }
-
-    /// Load the `<stem>` component wasm (located through
-    /// `dist/manifest.json`) into `engine` and return its registered
-    /// address, the guest's published name (`<NAMESPACE>` for a singleton,
-    /// ADR-0241 §5). Loads with no
-    /// init-config — the `LoadComponent.config` carrier is empty, which a
-    /// `Config = ()` component decodes uniformly. A thin delegate over
-    /// [`load_full`](Self::load_full) for callers that need only the
-    /// address.
-    pub fn load(&mut self, engine: EngineId, stem: &str) -> String {
-        self.load_full(engine, stem).addr
-    }
-
-    /// Load the `<stem>` component and surface both `LoadResult::Ok` fields
-    /// as a [`Loaded`]: the rendered lineage `addr` (which a
-    /// [`replace`](Self::replace) keeps) and the advertised `capabilities`,
-    /// which the thin [`load`](Self::load) delegate drops.
-    pub fn load_full(&mut self, engine: EngineId, stem: &str) -> Loaded {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
-        );
-        let payload = single_reply(&replies, "LoadComponent");
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
-            Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
-            None => panic!("undecodable LoadResult"),
-        }
-    }
-
-    /// Like [`load_full`](Self::load_full) but selects a specific actor type
-    /// from a multi-actor bundle via `export` (ADR-0096, issue 1994). The
-    /// `export` string is the actor's `NAMESPACE` const. Returns both
-    /// `LoadResult::Ok` fields as a [`Loaded`].
-    pub fn load_full_export(&mut self, engine: EngineId, stem: &str, export: &str) -> Loaded {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(export.to_owned()) },
-        );
-        let payload = single_reply(&replies, "LoadComponent");
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
-            Some(LoadResult::Err { error }) => {
-                panic!("load of {stem:?}@{export:?} failed: {error}")
-            }
-            None => panic!("undecodable LoadResult"),
-        }
-    }
-
     /// Terminate `engine` through the asserting `call`
     /// path — the agent-facing `terminate_substrate`, distinct from the
     /// `Drop`-only best-effort
@@ -660,35 +542,6 @@ impl FleetHarness {
             None => panic!("undecodable TerminateEngineResult"),
         }
         self.spawned.retain(|e| *e != engine);
-    }
-
-    /// Republish on `engine` the module in the `<stem>` wasm (ADR-0241 §7):
-    /// every live instance of its namespaces moves to it as one group, each
-    /// keeping its mailbox and its stored config. Returns each type the
-    /// module publishes with its advertised capabilities.
-    pub fn replace(&mut self, engine: EngineId, stem: &str) -> Vec<ReplacedType> {
-        self.replace_wasm(engine, read_component_wasm(stem), stem)
-    }
-
-    /// Republish on `engine` the `<stem>` module with identical code under a
-    /// new content hash ([`successor_wasm`] with `generation`), so every live
-    /// instance of its namespaces is really swapped: a republish of the
-    /// same bytes answers with no swap (ADR-0241 §7). Returns each type the
-    /// module publishes.
-    pub fn replace_with_successor(&mut self, engine: EngineId, stem: &str, generation: u32) -> Vec<ReplacedType> {
-        self.replace_wasm(engine, successor_wasm(&read_component_wasm(stem), generation), stem)
-    }
-
-    /// Send `wasm` as a republish with no instance configs and return the
-    /// types it published, panicking with `label` on a refusal.
-    fn replace_wasm(&mut self, engine: EngineId, wasm: Vec<u8>, label: &str) -> Vec<ReplacedType> {
-        let replies = self.call(Some(engine), "aether.component", &ReplaceComponent { wasm, configs: Vec::new() });
-        let payload = single_reply(&replies, "ReplaceComponent");
-        match ReplaceResult::decode_from_bytes(&payload) {
-            Some(ReplaceResult::Ok { types }) => types,
-            Some(ReplaceResult::Err { error }) => panic!("replace with {label:?} failed: {error}"),
-            None => panic!("undecodable ReplaceResult"),
-        }
     }
 
     /// Tail `recipient`'s per-actor `ActorLogRing` (ADR-0081) on
@@ -742,8 +595,9 @@ impl FleetHarness {
     /// Steady-state call: waits on the reply chain's `ReplyEnd` under the
     /// [`reply_cap`] backstop. The reply-wait is settlement-driven — a
     /// slow-but-healthy chain re-arms rather than dying on a wall-clock
-    /// gate (issue 2064).
-    fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<ReplyEnvelope>
+    /// gate (issue 2064). `pub(crate)` so [`component`] builds its publish /
+    /// spawn / load verbs on the same call path as every other helper here.
+    pub(crate) fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<ReplyEnvelope>
     where
         K: WireMail,
     {
@@ -899,55 +753,6 @@ impl FleetHarness {
         }
     }
 
-    /// Like [`load`](Self::load) but threads a typed init-config into the
-    /// component: `config` is encoded into the `LoadComponent.config`
-    /// carrier the guest decodes as its `WasmActor::Config` (ADR-0090).
-    /// Returns the registered ADR-0099 lineage address. Used by
-    /// components whose typed `Config` cannot decode from the empty
-    /// carrier the empty-config [`load`](Self::load) sends.
-    pub fn load_with_config<C>(&mut self, engine: EngineId, stem: &str, config: &C) -> String
-    where
-        C: WireMail,
-    {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: None },
-        );
-        let payload = single_reply(&replies, "LoadComponent");
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, .. }) => path.to_string(),
-            Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
-            None => panic!("undecodable LoadResult"),
-        }
-    }
-
-    /// Like [`load_with_config`](Self::load_with_config) but also selects a
-    /// specific actor type from a multi-actor bundle via `export` (ADR-0096,
-    /// issue 1994). The `export` string is the actor's `NAMESPACE` const —
-    /// `LoadComponent.export` routes the host to that type instead of the
-    /// module's entry type. Returns the registered ADR-0099 lineage address.
-    pub fn load_with_config_export<C>(&mut self, engine: EngineId, stem: &str, config: &C, export: &str) -> String
-    where
-        C: WireMail,
-    {
-        let wasm = read_component_wasm(stem);
-        let replies = self.call(
-            Some(engine),
-            "aether.component",
-            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: Some(export.to_owned()) },
-        );
-        let payload = single_reply(&replies, "LoadComponent");
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, .. }) => path.to_string(),
-            Some(LoadResult::Err { error }) => {
-                panic!("load of {stem:?}@{export:?} failed: {error}")
-            }
-            None => panic!("undecodable LoadResult"),
-        }
-    }
-
     /// Route a one-entry traced batch (`DispatchTraced`) to a forked
     /// engine's `aether.trace` mailbox and return the chassis-root
     /// [`MailId`] every dispatched envelope inherited plus the reply
@@ -1091,7 +896,7 @@ fn boot_hub(
 
 /// Exactly one `ReplyEvent` payload, panicking if a call that should
 /// yield a single reply yielded zero or many.
-fn single_reply(replies: &[ReplyEnvelope], label: &str) -> Vec<u8> {
+pub(crate) fn single_reply(replies: &[ReplyEnvelope], label: &str) -> Vec<u8> {
     match replies {
         [one] => one.payload.clone(),
         other => panic!("{label} expected exactly one reply event, got {}", other.len()),

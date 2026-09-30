@@ -16,11 +16,12 @@
 mod tests {
     use aether_data::Kind;
     use aether_fs::{List, ListResult, NamespaceAddr};
+    use aether_kinds::LoadComponent;
     use aether_kinds::trace::DispatchTraced;
     use aether_rpc::RpcError;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// Ping-pong (verify-first, the #1451 deferral): load
     /// `ProbeWithConfig` from the `probe` bundle with a seeded `ProbeConfig`, send it a
@@ -43,8 +44,17 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
         let config = ProbeConfig { seed: 0x00C0_FFEE, label: "fleetharness".to_owned() };
-        let addr =
-            harness.load_with_config_export(engine, "aether_test_fixtures_bundle", &config, "test.probe_with_config");
+        let addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: config.encode_into_bytes(),
+                    export: Some("test.probe_with_config".to_owned()),
+                },
+            )
+            .addr;
 
         let replies = harness.send(engine, &addr, &ConfigQuery);
         let reply = match replies.as_slice() {
@@ -55,7 +65,7 @@ mod tests {
         let echo = ConfigEcho::decode_from_bytes(&reply.payload).expect("the reply payload decodes as ConfigEcho");
         assert_eq!(
             echo,
-            ConfigEcho { seed: config.seed, label: config.label.clone() },
+            ConfigEcho { seed: config.seed, label: config.label },
             "the echoed config should match the seeded ProbeConfig",
         );
 

@@ -7,7 +7,7 @@ mod tests {
     use aether_data::Kind;
     use aether_kinds::{LoadComponent, LoadResult};
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
     /// Load the bundle's `QuietProbe` export and assert `LoadResult.path` is
     /// the guest's own published name, `<NAMESPACE>` for a singleton
@@ -24,7 +24,17 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
+        let addr = harness
+            .load(
+                engine,
+                &LoadComponent {
+                    wasm: read_component_wasm("aether_test_fixtures_bundle"),
+                    name: None,
+                    config: Vec::new(),
+                    export: Some("test.quiet_probe".to_owned()),
+                },
+            )
+            .addr;
 
         assert_eq!(addr, "test.quiet_probe", "LoadResult.path should be the guest's published name");
 

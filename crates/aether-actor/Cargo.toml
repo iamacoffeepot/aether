@@ -80,6 +80,12 @@ inventory = { workspace = true }
 # through the bundle, which cargo permits for the test-target graph —
 # same precedent as aether-kit).
 aether-harness-fleet = { path = "../aether-harness-fleet" }
+# `fleetharness_inline_child`'s replace gate builds its republish bytes with
+# `successor_wasm` (ADR-0241 §7), the canonical same-code-new-hash fixture
+# every other FleetHarness republish scenario reaches for. `test-support`
+# gates `aether_substrate::testing`; the dev-dep cycle back through
+# aether-substrate is the same precedent `aether-harness-fleet` already sets.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The shared `Kind` definitions the fleet tests decode + assert against;
 # also pinned (`use … as _`) so the fixture kinds' `inventory::submit!`
 # descriptor entries land in each test binary.

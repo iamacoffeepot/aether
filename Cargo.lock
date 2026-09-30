@@ -44,6 +44,7 @@ dependencies = [
  "aether-lifecycle",
  "aether-math",
  "aether-render",
+ "aether-substrate",
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "aether-window",

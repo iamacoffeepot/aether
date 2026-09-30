@@ -16,7 +16,7 @@ mod tests {
 
     use aether_codec::frame::max_frame_size;
     use aether_data::{EngineId, Kind};
-    use aether_kinds::{CostRow, CostTail, CostTailResult};
+    use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent};
     use aether_rpc::RpcError;
     use aether_tcp::{
         ListListeners, ListListenersResult, SessionDataReady, SessionWrite, UnbindListener, UnbindListenerResult,
@@ -27,7 +27,7 @@ mod tests {
     };
     use serde::Serialize;
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available, poll_until};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, poll_until, read_component_wasm};
 
     const FIXTURE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_EXPORT: &str = "test.tcp_load_probe";
@@ -652,7 +652,15 @@ mod tests {
         let profile = TcpLoadProfile::resolve();
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let probe = harness.load_full_export(engine, FIXTURE_STEM, FIXTURE_EXPORT);
+        let probe = harness.load(
+            engine,
+            &LoadComponent {
+                wasm: read_component_wasm(FIXTURE_STEM),
+                name: None,
+                config: Vec::new(),
+                export: Some(FIXTURE_EXPORT.to_owned()),
+            },
+        );
         assert!(list_listeners(&mut harness, engine).listeners.is_empty(), "listener baseline is empty");
         assert!(
             harness
