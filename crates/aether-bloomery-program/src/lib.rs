@@ -24,6 +24,8 @@
 //!
 //! [`tool_definition`] renders a declared program as a responses-API function
 //! tool: its `///` doc, and its input's JSON Schema with every field's doc.
+//! [`ToolSchema`] stores a program input's or result's schema as data, for a
+//! reader that links neither type.
 //!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
@@ -51,7 +53,9 @@ pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreach
 pub use ran::Ran;
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{Declaration, DeclarationsError, declarations};
-pub use tool::{MAX_FUNCTION_NAME_BYTES, ToolDefinitionError, function_name, program_name, tool_definition};
+pub use tool::{
+    MAX_FUNCTION_NAME_BYTES, ToolDefinitionError, ToolSchema, function_name, program_name, tool_definition,
+};
 
 #[doc(hidden)]
 pub mod __macro_internals {

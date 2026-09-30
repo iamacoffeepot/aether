@@ -82,10 +82,12 @@ program is tested without spending money.
      The HTTP capability's allowlist stays the policy for where a request
      may go.
    - `model: ModelName`: 1 to 128 bytes matching `[a-z0-9][a-z0-9._-]*`.
-   - `tools: OfferedTools`: at most 128 `OfferedTool { program, definition }`,
-     no program twice. `program` is a `ProgramName`; `definition` is a
-     `Ref<Utf8Text>` citing the function definition sent for it. An empty
-     list offers nothing and the request sends no `tools` field (decision 9).
+   - `tools: OfferedTools`: at most 128 `OfferedTool { program, definition,
+     input, result }`, no program twice. `program` is a `ProgramName`;
+     `definition` is a `Ref<Utf8Text>` citing the function definition sent
+     for it; `input` and `result` are `Ref<ToolSchema>`s citing the schemas
+     of the program's input and result. An empty list offers nothing and the
+     request sends no `tools` field (decision 9).
    - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
      one of three arms:
      - `Message { role, text }`: a `Role` (`Developer`, `User`, or
@@ -94,11 +96,18 @@ program is tested without spending money.
        no separate instructions field.
      - `Call(ToolCall)`: a call the model asked for in an earlier turn,
        replayed as a `function_call` item. `ToolCall { call_id, program,
-       arguments }` holds a `CallId` (1 to 256 bytes of ASCII graphic
-       characters), a `ProgramName` sent under its function name, and the
-       arguments as a `Ref<Utf8Text>`.
+       arguments, input }` holds a `CallId` (1 to 256 bytes of ASCII graphic
+       characters), a `ProgramName` sent under its function name, the
+       arguments as a `Ref<Utf8Text>`, sent verbatim, and a `ToolInput`:
+       `Decoded(ErasedRef)` citing the input the arguments decoded to, or
+       `Refused(Ref<Utf8Text>)` citing why they did not.
      - `CallOutput { call_id, output }`: that call's output, replayed as a
-       `function_call_output` item matched by `call_id`.
+       `function_call_output` item matched by `call_id`. `output` is a
+       `ToolOutput`: `Result { schema, result }`, a `Ref<ToolSchema>` and
+       an `ErasedRef` citing the program's stored result, sent rendered to
+       JSON; or `Refused(Ref<Utf8Text>)`, sent as its stored text. A result
+       cites its own schema, since a later turn may no longer offer the
+       program.
 
      The last item is a `User` message or a `CallOutput`; every
      `CallOutput` names the `call_id` of an earlier `Call`; and no two
@@ -191,13 +200,16 @@ program is tested without spending money.
    the model asks for.** A tool is a program to run. The caller chooses
    the programs offered: nothing defaults to every program a bundle or unit
    declares.
-   - `muse.turn` cannot read another bundle's declarations or a program
-     input's schema, so the caller renders each offered program with
+   - `muse.turn` cannot read another bundle's declarations or link a
+     program's types, so the caller renders each offered program with
      `aether_bloomery_program::tool_definition` (a responses-API function
      object whose `name` is `function_name(program)`, the program name with
      its dots mapped to dashes), stages the JSON as a `Utf8Text`, and cites
-     it in `tools`. The closure walk injects each definition like any cited
-     text, so the journal holds exactly what was sent.
+     it in `tools`. The caller also stages `ToolSchema::of` the program's
+     input and of its result (`bloomery.program.tool_schema`: the storage
+     kind's name and its `SchemaType` as data) and cites both. The closure
+     walk injects each definition and schema like any cited artifact, so
+     the journal holds exactly what was sent and what it was read with.
    - The request sends each definition in order, as written, in `tools`.
      A definition that is not a JSON object whose `name` is its program's
      function name refuses the run before any fetch: the input was built
@@ -210,11 +222,27 @@ program is tested without spending money.
      offered program, or whose id is invalid or repeats, makes the reply
      `Unreadable`, and the body stays on the record; the program never
      keeps a partial list.
-   - `muse.turn` never decodes arguments and never runs a call. A caller
-     decodes them into the program's typed input through `aether-codec`;
-     a refused decode is text the caller can replay as that call's
-     `CallOutput`. Running the calls, and any loop that feeds their
-     outputs into the next turn, live above the program.
+   - `muse.turn` decodes each call's arguments against its offered input
+     schema with `aether-codec`'s storage codec (`encode_storage_schema`)
+     and stages either the payload under the input's kind or a refusal
+     text: a fixed sentence naming the kind plus the parser's or codec's
+     message. The recorded `ToolCall` cites which. A loop above the program
+     then builds the next turn from references only: it runs a decoded
+     input, and replays a refusal as the call's `ToolOutput::Refused`.
+   - When it builds the request, `muse.turn` renders each cited
+     `ToolOutput::Result` with `decode_storage_schema` under a fixed value
+     ceiling and serializes it with `serde_json`, whose maps sort their
+     keys, so the request bytes are a function of the cited input alone. A
+     result not stored under its schema's kind, or one its schema cannot
+     decode, refuses the run before any fetch, like a misnamed definition.
+   - Two limits are accepted. A decoded input carries no citations, since
+     a `SchemaType` does not mark a `Ref` field: a tool whose input cites
+     artifacts reads them by fetching. And a tool input's
+     `#[storage(validate)]` invariant is not checked by the schema walk: a
+     violating input surfaces in the tool's own run as an `InputDecode`
+     fault.
+   - `muse.turn` never runs a call. Running the calls, and any loop that
+     feeds their outputs into the next turn, live above the program.
 
 ## Consequences
 
@@ -242,7 +270,8 @@ program is tested without spending money.
   vendor's signal; whether, how often, and when to retry is the caller's
   policy. Waiting out `Retry-After` needs a clock no program, reactor, or
   the driver has, so that mechanism is #6630.
-- Adding `Transient`, and then tools, changed the shapes of
+- Adding `Transient`, then tools, then decoded call inputs and cited call
+  results, changed the shapes of
   `muse.turn.input` and `muse.turn.result`. Their storage kind ids hash the
   name only (`storage_kind_id_from_name`), so a value recorded in an older
   shape keeps the same kind id and no longer decodes. This is accepted
@@ -289,9 +318,16 @@ program is tested without spending money.
   Rejected: it would restate the responses-API function object as a second
   schema beside its one renderer, `tool_definition`; the cited text is
   exactly what was sent.
-- **Decoding call arguments inside `muse.turn`.** Rejected: the program
-  would need every offered program's input type, and a refused decode is
-  the caller's to hand back to the model.
+- **A reactor rule decodes the arguments and renders the result.**
+  Rejected: a rule stores exactly one fresh artifact, the call's input, so
+  it cannot also store a refusal text or a rendered result, and a
+  hand-listed set of extra artifacts beside the input would be a second
+  source of truth. `muse.turn` decodes and renders from cited schemas
+  instead (decision 9), so it still links no tool's types.
+- **The wire codec for stored inputs (`encode_schema`).** Rejected: it
+  writes `aether_data::wire` bytes, and a program's input decodes only
+  through `Storage::decode_storage`, so the tool's run would refuse every
+  decoded input.
 - **Dropping calls to unoffered programs and keeping the rest.** Rejected:
   a partial record of what the model asked for; `Unreadable` keeps the body
   whole for later correction.

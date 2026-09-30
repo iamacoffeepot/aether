@@ -53,6 +53,6 @@ pub use reactor::{
     UncitedArtifact, Warm, WarmEntries, WarmEntriesError, Warmed, reactor_declarations, reactor_record_len,
     write_reactor_record,
 };
-pub use reference::Ref;
+pub use reference::{ErasedRef, Ref};
 pub use tree::{Name, NameError, Node, Path, PathError, Tree};
 pub use unit::{UnitKey, UnitKeyError};

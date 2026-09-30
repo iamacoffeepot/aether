@@ -99,6 +99,17 @@ impl EncodedArtifact {
         Self { kind: Utf8Text::ID, bytes: Blob::from(text.as_bytes().to_vec()), citations: Vec::new() }
     }
 
+    /// Stage `payload`, already encoded, under `kind` with no citations: the
+    /// form for a stager that links no Rust type of `kind`.
+    ///
+    /// The journal verifies every citation an artifact supplies, not that
+    /// the list is complete, so a payload that cites artifacts is staged
+    /// here as if it cited none; the stager is the one that says so.
+    #[must_use]
+    pub fn uncited(kind: KindId, payload: &[u8]) -> Self {
+        Self { kind, bytes: Blob::from(payload.to_vec()), citations: Vec::new() }
+    }
+
     /// Storage kind of the encoded value; the stored blob's prefix.
     #[must_use]
     pub const fn kind(&self) -> KindId {

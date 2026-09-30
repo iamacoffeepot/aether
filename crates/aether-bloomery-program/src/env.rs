@@ -14,8 +14,8 @@ use core::task::{Context, Poll};
 
 use aether_actor::{Addressable, CallerAddressable, Replies, Singleton};
 use aether_bloomery_kinds::{
-    ApiCall, ClosureArtifact, Digest, EncodedArtifact, ExecutorFault, OpaqueBytes, ProgramApi, ReadArtifactResult, Ref,
-    Refusal, Utf8Text,
+    ApiCall, ClosureArtifact, Digest, EncodedArtifact, ErasedRef, ExecutorFault, OpaqueBytes, ProgramApi,
+    ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
 use aether_data::{ActorMail, Cites, Kind, KindId, Storage};
 
@@ -404,6 +404,15 @@ impl<M> Env<M> {
         Ref::from_digest(self.record(EncodedArtifact::text(text)))
     }
 
+    /// Stage `payload`, already encoded, under `kind`, for a program that
+    /// links no Rust type of `kind`. Identical payloads yield one artifact.
+    ///
+    /// The artifact supplies no citations: a payload that cites artifacts
+    /// stages as if it cited none (see [`EncodedArtifact::uncited`]).
+    pub fn stage_payload(&mut self, kind: KindId, payload: &[u8]) -> ErasedRef {
+        ErasedRef::new(kind, self.record(EncodedArtifact::uncited(kind, payload)))
+    }
+
     /// Encode `value` and record it as a staged artifact.
     ///
     /// # Errors
@@ -474,6 +483,19 @@ impl Env<Async> {
     /// journal reports a backend failure.
     pub async fn read_text(&mut self, r: Ref<Utf8Text>) -> Result<String, Refusal> {
         ReadText { env: *self, digest: r.digest(), requested: false }.await
+    }
+
+    /// Load the payload `r` cites, unprefixed and undecoded, from the injected
+    /// map, or fetch it from the journal on a miss: [`Self::read`] for a
+    /// program that links no Rust type of the cited kind.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::InputMissing`] when the digest is absent after the journal replies missing.
+    /// [`Refusal::InputDecode`] when the stored kind is not `r`'s, the bytes do not hash to
+    /// the digest, or the journal reports a backend failure.
+    pub async fn read_payload(&mut self, r: ErasedRef) -> Result<Vec<u8>, Refusal> {
+        ReadPayload { env: *self, cited: r, requested: false }.await
     }
 
     pub(crate) fn take_pending(self) -> Option<Pending> {
@@ -581,6 +603,32 @@ impl Future for ReadText {
             Err(refusal) if this.env.terminal(this.digest) => Poll::Ready(Err(refusal)),
             Err(Refusal::InputMissing) if !this.requested => {
                 this.env.request(this.digest, Utf8Text::ID);
+                this.requested = true;
+                Poll::Pending
+            }
+            Err(Refusal::InputMissing) => Poll::Pending,
+            Err(refusal) => Poll::Ready(Err(refusal)),
+        }
+    }
+}
+
+struct ReadPayload {
+    env: Env<Async>,
+    cited: ErasedRef,
+    requested: bool,
+}
+
+impl Future for ReadPayload {
+    type Output = Result<Vec<u8>, Refusal>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let (digest, kind) = (this.cited.digest(), this.cited.kind());
+        match this.env.load_injected(digest, kind) {
+            Ok(payload) => Poll::Ready(Ok(payload)),
+            Err(refusal) if this.env.terminal(digest) => Poll::Ready(Err(refusal)),
+            Err(Refusal::InputMissing) if !this.requested => {
+                this.env.request(digest, kind);
                 this.requested = true;
                 Poll::Pending
             }

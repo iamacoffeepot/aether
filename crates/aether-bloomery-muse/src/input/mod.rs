@@ -1,19 +1,19 @@
 //! `muse.turn.input`: everything one turn sends except the credential.
 //!
-//! The input plus every text its items and offered tools cite is the recorded
-//! closure, so the journal holds the whole request. Every field is a validated type, and each
+//! The input plus every artifact its items and offered tools cite is the
+//! recorded closure, so the journal holds the whole request. Every field is a validated type, and each
 //! validated newtype re-checks on decode.
 
 mod items;
 mod limits;
 mod tools;
 
-pub use items::{Role, TurnItem, TurnItems, TurnItemsError};
+pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError};
 pub use limits::{
     Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, ReasoningEffort,
 };
 pub use tools::{
-    CallId, CallIdError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall, ToolCalls, ToolCallsError,
+    CallId, CallIdError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall, ToolCalls, ToolCallsError, ToolInput,
 };
 
 /// One stateless turn: where it goes, which model answers, the programs it
@@ -92,13 +92,37 @@ impl TurnInput {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref};
+    use aether_bloomery_program::ToolSchema;
 
     use super::{
-        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, Role, ToolCall,
-        TurnItem, TurnItems, TurnItemsError,
+        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OutputBudget, OutputBudgetError, Role,
+        ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
     };
+    use crate::result::TurnResult;
+
+    /// `program` offered with a definition citing its own name and real schemas.
+    pub fn offered_tool(program: ProgramName) -> OfferedTool {
+        let schema = |schema: ToolSchema| Ref::of_encoded(&schema).expect("a schema encodes");
+        let definition = Ref::of_text(program.as_str());
+        OfferedTool::new(
+            program,
+            definition,
+            schema(ToolSchema::of::<TurnInput>()),
+            schema(ToolSchema::of::<TurnResult>()),
+        )
+    }
+
+    /// Call `id` to `program` with arguments `{}` that did not decode.
+    pub fn call(id: &str, program: &str) -> ToolCall {
+        ToolCall::new(
+            CallId::new(id).expect("call id"),
+            ProgramName::new(program).expect("program"),
+            Ref::of_text("{}"),
+            ToolInput::Refused(Ref::of_text("refused")),
+        )
+    }
 
     #[test]
     fn each_input_rule_refuses_and_accepts_its_neighbour() {
@@ -138,17 +162,13 @@ mod tests {
         assert_eq!(OutputBudget::new(0), Err(OutputBudgetError::Zero));
         assert_eq!(OutputBudget::new(1).map(OutputBudget::get), Ok(1));
 
-        let call = |id: &str| {
-            ToolCall::new(
-                CallId::new(id).expect("call id"),
-                ProgramName::new("muse.turn").expect("program"),
-                Ref::of_text("{}"),
-            )
-        };
+        let call = |id: &str| call(id, "muse.turn");
         let item = |role| TurnItem::message(role, Ref::of_text("text"));
         let user = item(Role::User);
-        let output =
-            |id: &str| TurnItem::CallOutput { call_id: CallId::new(id).expect("call id"), output: Ref::of_text("ok") };
+        let output = |id: &str| TurnItem::CallOutput {
+            call_id: CallId::new(id).expect("call id"),
+            output: ToolOutput::Refused(Ref::of_text("ok")),
+        };
         let items = [
             (Vec::new(), TurnItemsError::Empty, vec![user.clone()]),
             (
