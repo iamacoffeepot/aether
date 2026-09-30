@@ -21,6 +21,7 @@ use crate::actor::native::offload::blocking::{DeferredCompletion, IntoDeferredRe
 use crate::actor::native::spawn::activation::{BirthOutcome, NativeSpawnFinalizer, SpawnFinalizer};
 use crate::mail::MailId;
 use crate::runtime::effect_chain::{EffectChain, OrderingDevice, Uncaused};
+use crate::runtime::wire_root::WireRoot;
 
 use super::reservation::{ChildReservationKey, ParentReservation};
 use super::spawner::prepare::StagedActor;
@@ -243,6 +244,12 @@ impl<A: Instanced + NativeActor, O: BirthOutcome<A>> PreparedBirth<A, O> {
 
     /// Hand the armed completion to the birth's finalizer and append the
     /// ordered commit to the parent's outbound work (ADR-0165).
+    ///
+    /// The birth opens a fresh wire root (ADR-0244 §2) for the sends its
+    /// `wire` makes, beside the causing chain `chain` names: the causing
+    /// chain keeps every birth-completing effect and every hold, and the
+    /// wire root gathers the actor's startup sends under one root a test can
+    /// await without the staging caller waiting on them.
     fn commit(self, completion: DeferredCompletion<O>, chain: EffectChain) {
         let Self { spawner, parent_binding, parent_reservation, staged, guest, .. } = self;
         let mailbox_id = staged.identity.id;
@@ -257,6 +264,12 @@ impl<A: Instanced + NativeActor, O: BirthOutcome<A>> PreparedBirth<A, O> {
             ),
             None => NativeSpawnFinalizer::<A, O>::rooted(completion, mailbox_id, canonical_name),
         };
-        parent_binding.stage_child_birth(spawner.prepare_commit_as(staged, Some(finalizer), chain, guest, None));
+        parent_binding.stage_child_birth(spawner.prepare_commit_as(
+            staged,
+            Some(finalizer),
+            chain,
+            guest,
+            Some(WireRoot::open(spawner.mailer())),
+        ));
     }
 }

@@ -83,14 +83,20 @@ const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
 /// Assert the handler loaded under `name` resolves to its trampoline through
-/// the chassis's boundary address parser, answering its canonical address.
+/// the chassis's boundary address parser, then wait until its `wire` has
+/// settled, and answer its canonical address.
+///
 /// `build` returns only once every boot component has answered its load, and
 /// the trampoline answers that load after its birth completes, so the guest
-/// resolves at once, with no wait (as `headless_autoload.rs` relies on).
+/// resolves at once, with no wait (as `headless_autoload.rs` relies on). The
+/// guest registers its routes from `wire`, whose sends settle under the
+/// birth's own wire root (ADR-0244 §2), so once `await_wire_settled` returns
+/// the server has handled every registration and one request is enough.
 fn live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ErasedActorPath {
     let address = ErasedActorPath::new(name).expect("a loaded handler name forms a well-formed actor path");
     let resolved = built.resolve_address(&address);
     assert!(resolved.is_ok(), "boot guest {address} is not live when build returns: {resolved:?}");
+    built.await_wire_settled(&address);
     address
 }
 
@@ -400,16 +406,9 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // The handler binds the `/` catch-all from its `wire`, a handler-staged
-        // birth's `wire` with no wire root (ADR-0244 §2), so no settlement the
-        // test can await covers the registration: poll it live.
-        poll_body_contains(
-            port,
-            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            "hello from aether",
-        );
-
-        // GET / → 200 with body "hello from aether"
+        // The handler binds the `/` catch-all from its `wire`, which
+        // `live_trampoline` waited on (ADR-0244 §2), so the first request is
+        // answered. GET / → 200 with body "hello from aether"
         let root_response =
             round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
         let root_str = String::from_utf8_lossy(&root_response);
@@ -496,11 +495,8 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // The handler binds the `/` catch-all from its `wire`, a handler-staged
-        // birth's `wire` with no wire root (ADR-0244 §2), so no settlement the
-        // test can await covers the registration: poll it live.
-        poll_body_contains(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", "chunk-");
-
+        // The handler binds the `/` catch-all from its `wire`, which
+        // `live_trampoline` waited on (ADR-0244 §2), so one request is enough.
         let response =
             round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
         let head = String::from_utf8_lossy(&response);
@@ -590,27 +586,17 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // The `register_route_self` rides a handler-staged birth's `wire`,
-        // which has no wire root (ADR-0244 §2), so no settlement the test can
-        // await covers it: poll until the streamed body reassembles.
+        // The `register_route_self` rides the guest's `wire`, which
+        // `live_trampoline` waited on (ADR-0244 §2), so one request is enough.
+        let response =
+            round_trip(port, b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").complete();
+        let head = String::from_utf8_lossy(&response);
+        assert!(head.starts_with("HTTP/1.1 200 "), "GET /routed-stream should reply 200, got: {head:?}");
+        assert!(head.contains("Transfer-Encoding: chunked"), "routed stream should be chunked, got: {head:?}");
+
+        let reassembled = dechunk(body_after_head(&response)).expect("reassemble the routed streamed body");
         let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(|i| format!("chunk-{i}\n").into_bytes()).collect();
-        let request = b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let response = round_trip(port, request).bytes;
-            let head = String::from_utf8_lossy(&response);
-            if head.starts_with("HTTP/1.1 200 ")
-                && head.contains("Transfer-Encoding: chunked")
-                && dechunk(body_after_head(&response)).is_ok_and(|body| body == expected)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "routed streaming response did not reassemble within 30s; last: {head:?}",
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        assert_eq!(reassembled, expected, "reassembled routed body: {:?}", String::from_utf8_lossy(&reassembled));
     }
 
     /// Boot a headless chassis with `HttpServerCapability` bound and the
@@ -689,31 +675,20 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        // Handshake. The handler binds the `/` catch-all from a handler-staged
-        // birth's `wire`, which has no wire root (ADR-0244 §2), so no
-        // settlement the test can await covers it: poll the upgrade live
-        // (reconnecting each attempt) — a pre-registration upgrade is 503.
+        // Handshake. The handler binds the `/` catch-all from its `wire`,
+        // which `live_trampoline` waited on (ADR-0244 §2), so the first
+        // upgrade is answered; before the registration it would be 503.
         let handshake = format!(
             "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {WS_TEST_KEY}\r\n\r\n"
         );
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let (mut stream, head) = loop {
-            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-            stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
-            stream.write_all(handshake.as_bytes()).expect("write handshake");
-            stream.flush().expect("flush handshake");
-            let head = read_http_head(&mut stream);
-            if head.starts_with("HTTP/1.1 101 ") {
-                break (stream, head);
-            }
-            assert!(
-                Instant::now() < deadline,
-                "websocket upgrade did not go live (route registration) within 30s; last: {head:?}",
-            );
-            thread::sleep(Duration::from_millis(25));
-        };
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
+        stream.write_all(handshake.as_bytes()).expect("write handshake");
+        stream.flush().expect("flush handshake");
+        let head = read_http_head(&mut stream);
+        assert!(head.starts_with("HTTP/1.1 101 "), "websocket upgrade should reply 101, got: {head:?}");
         assert!(
             head.contains(&format!("Sec-WebSocket-Accept: {WS_TEST_ACCEPT}")),
             "101 should echo the computed accept key, got: {head:?}",
@@ -815,12 +790,23 @@ mod tests {
         assert_eq!(opcode, WS_OPCODE_CLOSE, "the cap should echo a close frame");
     }
 
+    /// Send `request` once and assert the response body contains `expected`.
+    /// A caller uses it once the route it asks for is known to be live, as
+    /// after `live_trampoline` has waited on the guest's `wire`.
+    fn assert_body_contains(port: u16, request: &[u8], expected: &str) {
+        let response = round_trip(port, request).complete();
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.split_once("\r\n\r\n").is_some_and(|(_, body)| body.contains(expected)),
+            "expected body containing {expected:?}, got: {text:?}",
+        );
+    }
+
     /// Poll `request` until the response body contains `expected`
-    /// (bounded deadline). A boot guest's route registration rides a
-    /// handler-staged birth's `wire`, which has no wire root (ADR-0244 §2),
-    /// and the drop's route purge rides the departing trampoline's
-    /// `MonitorNotice` fan-out; the test holds no chain for either, so no
-    /// settlement covers them and they are polled.
+    /// (bounded deadline). Only the drop's route purge is polled: it rides
+    /// the departing trampoline's close-tail `MonitorNotice` fan-out, which
+    /// `finalize_close_and_fan_out` sends outside settlement by design, so no
+    /// chain the test can await covers it (#7244 tracks a wait for it).
     fn poll_body_contains(port: u16, request: &[u8], expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -915,19 +901,18 @@ mod tests {
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
 
-        // Route live: a handler-staged `wire` registration has no wire root
-        // (ADR-0244 §2) the test can await, so poll it.
-        poll_body_contains(
+        // Route live: the guest registers `/routed` from its `wire`, which
+        // `live_trampoline` waited on (ADR-0244 §2), so one request is enough.
+        assert_body_contains(
             port,
             b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             "routed handler",
         );
 
-        // `/routed/drop` is a second exact route (#3697) with its own
-        // rootless registration — confirm it live before the destructive POST
-        // so that request cannot race its registration. An empty body is a clean 400
-        // ("component actor path"), so this probe drops nothing.
-        poll_body_contains(
+        // `/routed/drop` is a second exact route (#3697), registered from the
+        // same `wire`. An empty body is a clean 400 ("component actor path"),
+        // so this probe drops nothing.
+        assert_body_contains(
             port,
             b"GET /routed/drop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             "component actor path",
@@ -949,11 +934,13 @@ mod tests {
             "drop bridge should acknowledge, got: {drop_str:?}",
         );
 
-        // The purge rides the drop's `MonitorNotice` fan-out, a chain the test
-        // does not hold, so it is polled; once it lands, /routed falls
-        // back to the `web` fixture, which echoes the path in its 200 body
-        // — distinct from the routed component's fixed "routed handler"
-        // body, so this still discriminates route-live from route-purged.
+        // The purge rides the close tail's `MonitorNotice` fan-out, which
+        // `finalize_close_and_fan_out` sends outside settlement, so no chain
+        // the test can await covers it and it is polled (#7244). Once it
+        // lands, /routed falls back to the `web` fixture, which echoes the
+        // path in its 200 body — distinct from the routed component's fixed
+        // "routed handler" body, so this still discriminates route-live from
+        // route-purged.
         poll_body_contains(
             port,
             b"GET /routed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",

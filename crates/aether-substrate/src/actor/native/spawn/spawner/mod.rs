@@ -36,6 +36,8 @@ pub(super) mod prepare;
 #[cfg(any(test, feature = "test-support"))]
 mod registry_barrier;
 mod teardown;
+#[cfg(any(test, feature = "test-support"))]
+mod wire_wait;
 
 /// The dispatch `Source` an embedder's [`ReplyTarget`] names: the push's
 /// `reply_to`, read at the push and nowhere else.
@@ -127,6 +129,11 @@ pub struct Spawner {
 pub(in crate::actor::native::spawn) struct InstancedSlotEntry {
     slot: Arc<dyn Drainable>,
     wake: WakeHandle,
+    /// Issue #7120: the subscription to the birth's wire root (ADR-0244 §7)
+    /// that the test-support `Spawner::await_wire_settled` consumes, kept on
+    /// the one row each born actor already has.
+    #[cfg(any(test, feature = "test-support"))]
+    wire_settled: wire_wait::WireSettled,
 }
 impl Spawner {
     pub fn new(
@@ -223,11 +230,30 @@ impl Spawner {
         self.ring_capacities
     }
 
-    pub(super) fn retain_activated_slot(&self, id: MailboxId, slot: Arc<dyn Drainable>, wake: WakeHandle) {
-        self.instanced_slots
-            .lock()
-            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
-            .insert(id, InstancedSlotEntry { slot, wake });
+    /// Keep a pooled instanced actor's slot and wake handle for teardown.
+    ///
+    /// `wire_root` is the root the birth's `wire` ran under when the birth
+    /// opened its own (ADR-0244), still held open by the caller. A test
+    /// build subscribes to it here, before the hold is released, so the
+    /// test-support `Spawner::await_wire_settled` cannot miss the settle.
+    /// `None` is a birth whose `wire` ran under the boot's root, or under
+    /// none.
+    pub(super) fn retain_activated_slot(
+        &self,
+        id: MailboxId,
+        slot: Arc<dyn Drainable>,
+        wake: WakeHandle,
+        wire_root: Option<&WireRoot>,
+    ) {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = wire_root;
+        let entry = InstancedSlotEntry {
+            slot,
+            wake,
+            #[cfg(any(test, feature = "test-support"))]
+            wire_settled: wire_wait::WireSettled::subscribe(wire_root, &self.mailer),
+        };
+        self.instanced_slots.lock().expect("instanced_slots mutex poisoned; fail-fast per ADR-0063").insert(id, entry);
     }
 
     /// Allocate the next monotonic discriminator from the same per-chassis

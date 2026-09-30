@@ -2,16 +2,18 @@
 //! and `wire` runs exactly once — at chassis boot for a singleton, and on a
 //! runtime spawn for an instanced actor.
 
-use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::spawn::Subname;
-use crate::chassis::builder::Builder;
+use crate::actor::native::{Dispatch, SpawnOutcome, TaskDone};
+use crate::chassis::builder::{Builder, PassiveChassis};
 use crate::mail::KindId;
-use crate::testing::{TestChassis, bare_substrate};
+use crate::runtime::trace::SettlementHold;
+use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
-use aether_data::Kind;
+use aether_data::{ErasedActorPath, Kind, LoadName};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -192,6 +194,136 @@ fn spawn_wire_mail_settles_under_the_spawn_root() {
         .expect("spawn the wire-sending pinger");
 
     assert_eq!(received.load(AtomicOrdering::SeqCst), 1, "ponger must have handled the spawned pinger's wire ping");
+
+    drop(chassis);
+}
+
+/// Asks a [`StagingParent`] to stage its [`WiredChild`].
+#[aether_data::kind(name = "test.staged_wire.stage")]
+struct StageWired;
+
+/// Tells a [`WiredChild`] to release the hold its `wire` took.
+#[aether_data::kind(name = "test.staged_wire.release")]
+struct ReleaseWireHold;
+
+/// The key [`StagingParent`] stages its [`WiredChild`] under, and the path
+/// the child is born at.
+const WIRED_KEY: &str = "wired";
+const WIRED_PATH: &str = "test.staged_wire.parent/test.staged_wire.child:wired";
+
+/// A root whose handler stages one [`WiredChild`], the handler-staged birth
+/// every guest load also is, and signals once the birth's completion is back.
+struct StagingParent {
+    born: Sender<()>,
+}
+
+#[aether_actor::actor(root)]
+impl NativeActor for StagingParent {
+    const NAMESPACE: &'static str = "test.staged_wire.parent";
+    type Config = ();
+    type Params = Sender<()>;
+
+    fn init((): (), born: Sender<()>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { born })
+    }
+
+    #[handler::tell]
+    fn on_stage(&mut self, ctx: &mut NativeCtx<'_>, _stage: StageWired) {
+        let _ = self;
+        let _receipt =
+            ctx.spawn_child::<WiredChild>(Subname::Named(WIRED_KEY), (), ()).stage().expect("the birth stages");
+    }
+
+    #[handler(task)]
+    fn on_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<WiredChild>>) {
+        assert!(done.into_output().result.is_ok(), "the wired child is born");
+        let _ = self.born.send(());
+    }
+}
+
+/// A handler-staged child whose `wire` mails the composed [`Ponger`] and
+/// takes a hold, which it keeps until told to release it.
+struct WiredChild {
+    hold: Option<SettlementHold>,
+}
+
+#[aether_actor::actor(instanced, child_of(StagingParent), depends(Ponger))]
+impl NativeActor for WiredChild {
+    const NAMESPACE: &'static str = "test.staged_wire.child";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { hold: None })
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+        self.hold = ctx.acquire_settlement_hold();
+        ctx.send::<Ponger>(&WireBarrierPing { tag: 3 });
+    }
+
+    #[handler::tell]
+    fn on_release(&mut self, _ctx: &mut NativeCtx<'_>, _release: ReleaseWireHold) {
+        self.hold = None;
+    }
+}
+
+/// Boot a [`Ponger`] and a [`StagingParent`], have the parent's handler
+/// stage its [`WiredChild`], wait for the birth's completion and then on the
+/// child's `wire`, and answer the chassis, the ponger's count, and the
+/// receiver for the staging chain's settlement.
+fn stage_wired_child() -> (PassiveChassis<TestChassis>, Arc<AtomicU32>, Receiver<()>) {
+    let (registry, mailer) = bare_substrate();
+    let received = Arc::new(AtomicU32::new(0));
+    let (born_tx, born) = crossbeam_channel::bounded(1);
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<Ponger>(Arc::clone(&received))
+        .with_actor::<StagingParent>(born_tx)
+        .build_passive()
+        .expect("ponger and staging parent boot");
+
+    let (_, staged) = chassis.send_tracked(chassis.actor_ref::<StagingParent>(), &StageWired, None);
+    await_signal(&born, "test.staged_wire.born");
+    chassis.await_wire_settled(&ErasedActorPath::new(WIRED_PATH).expect("the wired child's path is well formed"));
+
+    (chassis, received, staged)
+}
+
+/// ADR-0244 §2: a handler-staged birth's `wire` sends settle under the
+/// birth's own wire root, so once `await_wire_settled` returns the composed
+/// peer has handled the mail, with no poll. A `wire` send that minted its own
+/// root, or a hold released before the held mail was flushed, would let the
+/// wait return first.
+#[test]
+fn handler_staged_wire_mail_settles_under_the_birth_root() {
+    let (chassis, received, _staged) = stage_wired_child();
+
+    assert_eq!(received.load(AtomicOrdering::SeqCst), 1, "ponger must have handled the staged child's wire ping");
+
+    drop(chassis);
+}
+
+/// ADR-0244 §2 and ADR-0168 §1: a hold a handler-staged birth's `wire` takes
+/// gates the chain that caused the birth, never the birth's wire root. The
+/// wire root settles while the hold is still held, and the staging chain
+/// settles only once the hold is released. A hold that gated the wire root
+/// would wedge `await_wire_settled`, and one that gated nothing would let the
+/// staging chain settle early.
+#[test]
+fn handler_staged_wire_hold_gates_the_causing_chain() {
+    let (chassis, _received, staged) = stage_wired_child();
+
+    assert!(
+        matches!(staged.try_recv(), Err(TryRecvError::Empty)),
+        "the hold the staged child's wire took must keep the staging chain open"
+    );
+
+    let parent = chassis.actor_ref::<StagingParent>();
+    let child = chassis
+        .child::<StagingParent, WiredChild>(parent, LoadName::new(WIRED_KEY).expect("a valid key"))
+        .expect("the wired child is live");
+    let (_, released) = chassis.send_tracked(child, &ReleaseWireHold, None);
+    await_settled(&released, "test.staged_wire.release");
+    await_settled(&staged, "test.staged_wire.staging_chain");
 
     drop(chassis);
 }

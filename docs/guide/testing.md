@@ -204,16 +204,18 @@ wake, and the wait returns when the roots settle. Boot the actor through
 - **A chain whose actors all dispatch on the pool.** There is no slot to pump:
   send tracked through the chassis and `testing::await_settled` on the root's
   settlement receiver, under the same patience a chassis gate gets.
-- **What an actor's `wire` sent.** A boot's and an embedder spawn's `wire`
-  run under one held wire root (ADR-0244). Call
-  `PassiveChassis::await_boot_settled()` for everything the boot's `wire`
-  hooks sent, or finish an embedder spawn with
-  `SpawnBuilder::finish_wire_settled()` in place of `finish()`. Each returns
-  once every mail `wire` sent, and everything it caused, has been handled,
-  and at once for a `wire` that sends nothing.
+- **What an actor's `wire` sent.** Every birth's `wire` runs under one held
+  wire root (ADR-0244). Call `PassiveChassis::await_boot_settled()` for
+  everything the boot's `wire` hooks sent, or finish an embedder spawn with
+  `SpawnBuilder::finish_wire_settled()` in place of `finish()`. For a guest a
+  handler loaded, such as an autoloaded one, or a child a handler staged,
+  call `await_wire_settled(path)` on the `BuiltChassis` or `PassiveChassis`
+  with the actor's path. Each returns once every mail `wire` sent, and
+  everything it caused, has been handled, and at once for a `wire` that sends
+  nothing. A hold a handler-staged `wire` takes gates the chain that caused
+  the birth, so settling that chain covers it.
 - **A detached effect that lands on a pooled actor** — a `MonitorNotice` from a
-  close tail, a handler-staged birth's `wire` send, a `send_detached` send, a
-  child's `after_init` mail.
+  close tail, a `send_detached` send, a child's `after_init` mail.
   No root the test holds covers it, so the observing actor signals a test
   channel and the test waits with `testing::await_signal`, which names the
   wait as the signal it is rather than as settlement. A FIFO tracked barrier

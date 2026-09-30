@@ -52,6 +52,39 @@ macro_rules! chassis_accessors {
             self.booted.spawner.resolve_address(address)
         }
 
+        /// Block until the root the pooled instanced actor at `address` ran
+        /// its `wire` under has settled (ADR-0244 §7): every mail its `wire`
+        /// sent, and everything those mails caused, has been handled. The
+        /// **test-scoped** wait on one birth's `wire`, gated on the
+        /// `test-support` feature like `await_closed` and
+        /// `await_boot_settled`. It waits on settlement, never on the clock.
+        ///
+        /// It covers every birth that opened a wire root of its own: a guest a
+        /// handler loaded, a child a handler staged, and an embedder spawn.
+        /// The address is resolved through the boundary parser, as
+        /// [`Self::resolve_address`] does, so a test that holds only the path
+        /// of an actor it did not spawn itself, such as an autoloaded guest,
+        /// can wait on it. The first call takes the settlement, and every
+        /// later call on the same actor returns at once.
+        ///
+        /// # Panics
+        /// Panics naming the `chassis.wire_settled` gate when `address`
+        /// resolves to no live mailbox, when it names no pooled instanced
+        /// actor, when the actor's `wire` ran under the boot's root (await
+        /// `await_boot_settled` for it), or when the root does not settle
+        /// within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn await_wire_settled(&self, address: &aether_data::ErasedActorPath) {
+            self.booted.spawner.await_wire_settled(
+                self.booted
+                    .spawner
+                    .resolve_address(address)
+                    .unwrap_or_else(|error| panic!("chassis.wire_settled: {address} names no live actor: {error}"))
+                    .mailbox_id,
+                "chassis.wire_settled",
+            );
+        }
+
         pub fn spawn_actor<'a, A>(
             &'a self,
             subname: crate::Subname<'a>,
