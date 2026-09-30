@@ -127,8 +127,8 @@ const fn has_path_separator(name: &str) -> bool {
 /// host-fn resolve.
 ///
 /// This hashes `name` as **one atom**. A `/`-rendered lineage path (the
-/// form `LoadResult.path` carries for a hosted actor, e.g.
-/// `aether.component/aether.embedded:NAME`) resolves through the host
+/// form `LoadResult.path` carries for a child actor, e.g.
+/// `test.parent/test.child:leaf`) resolves through the host
 /// registry instead, which folds the path node by node; hashing the
 /// joined string here yields an id the registry never registered, which
 /// mail silently warn-drops. A `debug_assert!`
@@ -188,10 +188,9 @@ pub(crate) const fn mailbox_id_from_name_pair(prefix: &str, segment: &str) -> Ma
 /// The depth-1 case is the identity: a root node's carry is its own
 /// `ActorId.0`, and because that value is already `Tag::Mailbox`-tagged,
 /// `with_tag(Mailbox, carry) == ActorId`. So every chassis cap keeps the
-/// exact id it has today; only depth-≥2 actors fold. Harness-specific
-/// composition (a loaded component's `[host, aether.embedded:name]`
-/// lineage) lives where the host / embedding-host class `NAMESPACE` consts
-/// do, not here — this primitive is name-agnostic.
+/// exact id it has today; only depth-≥2 actors fold. Which lineage a given
+/// actor folds (a child's `[parent, test.child:leaf]`) is decided where its
+/// placement is, not here — this primitive is name-agnostic.
 #[must_use]
 pub const fn fold_lineage(parent_carry: u64, child: ActorId) -> u64 {
     fnv1a_64_fold(parent_carry, &child.0.to_le_bytes())
@@ -291,21 +290,21 @@ mod tests {
         // The exact footgun from #1472: a `/`-rendered lineage address
         // handed to the single-segment hasher. Without the guard this
         // returns an unregistered id that mail silently warn-drops.
-        let _ = mailbox_id_from_name("aether.component/aether.embedded:mat4_source");
+        let _ = mailbox_id_from_name("test.parent/test.child:leaf");
     }
 
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic = "a lineage path folds node by node"]
     fn from_name_pair_panics_on_a_slash_in_prefix() {
-        let _ = mailbox_id_from_name_pair("aether.component/aether.embedded", "camera");
+        let _ = mailbox_id_from_name_pair("test.parent/test.child", "camera");
     }
 
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic = "a lineage path folds node by node"]
     fn from_name_pair_panics_on_a_slash_in_segment() {
-        let _ = mailbox_id_from_name_pair("aether.embedded", "host/leaf");
+        let _ = mailbox_id_from_name_pair("test.child", "host/leaf");
     }
 
     #[test]
@@ -313,7 +312,7 @@ mod tests {
         assert!(has_path_separator("a/b"));
         assert!(has_path_separator("/leading"));
         assert!(has_path_separator("trailing/"));
-        assert!(!has_path_separator("aether.embedded:camera"));
+        assert!(!has_path_separator("test.child:camera"));
         assert!(!has_path_separator(""));
     }
 
@@ -323,10 +322,7 @@ mod tests {
         // `prefix` + `:` + `segment` hashes the same as hashing the
         // already-joined name, so the const path never has to allocate.
         assert_eq!(mailbox_id_from_name_pair("a", "b"), mailbox_id_from_name("a:b"),);
-        assert_eq!(
-            mailbox_id_from_name_pair("aether.embedded", "camera"),
-            mailbox_id_from_name("aether.embedded:camera"),
-        );
+        assert_eq!(mailbox_id_from_name_pair("test.child", "camera"), mailbox_id_from_name("test.child:camera"),);
         // Empty prefix / segment still composes consistently with the
         // joined form (the separator is always present).
         assert_eq!(mailbox_id_from_name_pair("", "x"), mailbox_id_from_name(":x"));

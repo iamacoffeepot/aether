@@ -111,7 +111,7 @@ pub enum ParamKind {
         domain: &'static [u8],
     },
     /// Instances are minted at runtime from an unbounded parameter
-    /// (`aether-instanced-{full_name}`, `aether.embedded:{name}`).
+    /// (`aether-instanced-{full_name}`, `test.instanced:{name}`).
     /// The template declares the family's existence + shape; individual
     /// instances reverse via the runtime registry, not this map.
     Dynamic,
@@ -454,12 +454,12 @@ mod tests {
         // through the joined form.
         let entry = TemplateEntry {
             domain: MAILBOX_DOMAIN,
-            prefix: "aether.embedded",
+            prefix: "test.instanced",
             template: ":{subname}",
             param: ParamKind::Dynamic,
         };
-        assert_eq!(entry.pattern(), "aether.embedded:{subname}");
-        assert_eq!(fill_template(&entry.pattern(), "camera").as_deref(), Some("aether.embedded:camera"),);
+        assert_eq!(entry.pattern(), "test.instanced:{subname}");
+        assert_eq!(fill_template(&entry.pattern(), "camera").as_deref(), Some("test.instanced:camera"),);
         // An empty prefix borrows the template unchanged (the hand-written,
         // single-literal case) — no allocation.
         let lit = TemplateEntry {
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn fill_template_substitutes_single_hole() {
         assert_eq!(fill_template("aether-worker-{N}", "7").as_deref(), Some("aether-worker-7"));
-        assert_eq!(fill_template("aether.embedded:{name}", "cam").as_deref(), Some("aether.embedded:cam"));
+        assert_eq!(fill_template("test.instanced:{name}", "cam").as_deref(), Some("test.instanced:cam"));
         assert_eq!(fill_template("no-hole", "x"), None);
     }
 

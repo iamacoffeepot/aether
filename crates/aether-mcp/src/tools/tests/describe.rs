@@ -403,7 +403,7 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
 #[tokio::test]
 async fn describe_component_reads_the_cache() {
     let engine_id = "00000000-0000-0000-0000-000000000001";
-    let canonical = "aether.component/aether.embedded:fake_component";
+    let canonical = "test.fake_component";
     let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (_chassis, port) = boot_hub_with_address_route_loopback(engine, canonical, Arc::clone(&calls));
@@ -469,8 +469,8 @@ async fn describe_component_reads_the_cache() {
 
 #[tokio::test]
 async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_supplied_alias() {
-    let supplied = "aether.component/:camera";
-    let canonical = "aether.component/aether.embedded:camera";
+    let supplied = "test.host/:camera";
+    let canonical = "test.host/test.camera:camera";
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let replies = Arc::new(Mutex::new(VecDeque::from([ScriptedRouteReply {

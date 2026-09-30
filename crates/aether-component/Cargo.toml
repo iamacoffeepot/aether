@@ -13,10 +13,10 @@ publish = false
 # The cap (`component`) and the trampoline every loaded wasm component
 # runs as (`trampoline`) move as one unit because they are one capability
 # split across two modules: the cap names `WasmTrampoline` /
-# `WasmTrampolineConfig` for real — it spawns the trampoline, reads its
-# `NAMESPACE` to build peer addresses, and hands it its init config —
-# while the trampoline's references back to the cap are rustdoc links
-# only. Neither half is useful alone.
+# `WasmTrampolineConfig` for real — it spawns each guest through the
+# trampoline under the guest's own published name and hands it its init
+# config — while the trampoline's references back to the cap are rustdoc
+# links only. Neither half is useful alone.
 #
 # The `http` cap's deferred-reply path names `ComponentHostCapability` to
 # resolve the handler component it answers through, so `aether-http`
@@ -24,8 +24,9 @@ publish = false
 # neither crate re-exports the other's names.
 #
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the ZST
-# cap and trampoline identities with their `Addressable`, per-handler
-# `HandlesKind`, and name-inventory markers compile always-on; the
+# cap and trampoline identities with their `Addressable` and per-handler
+# `HandlesKind` markers (and the cap's name-inventory markers; the
+# trampoline's hand-written identity submits none) compile always-on; the
 # state-bearing wasmtime half (the cap state, the trampoline state, and
 # both init configs, which hold `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`)
 # is gated so a marker-only wasm guest can declare

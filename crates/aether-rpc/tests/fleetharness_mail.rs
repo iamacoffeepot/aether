@@ -147,9 +147,10 @@ mod tests {
 
     /// Issue 6570: a wire `Call` names its recipient by `ErasedActorPath`, and the
     /// engine that hosts it expands an ADR-0166 short path on arrival. The
-    /// component host keeps its one native hole until #6869, but no guest is
-    /// born there (ADR-0241 §5), so the short path expands to a position with
-    /// no live actor, and the engine's refusal names the expanded path. Fails
+    /// headless chassis composes the HTTP server, whose one instanced child is
+    /// its dispatch shard, so `aether.http.server/:NAME` expands to the shard
+    /// position; no shard is born under that key, and the engine's refusal
+    /// names the expanded path. Fails
     /// if any hop — the harness, the hub, or the proxy — hashes or folds the
     /// recipient text instead of carrying the path to the engine, because only
     /// the engine that hosts the hole can expand it.
@@ -159,11 +160,11 @@ mod tests {
         let engine = harness.spawn_headless();
 
         let error = harness
-            .try_send(engine, "aether.component/:never_loaded", &ConfigQuery)
+            .try_send(engine, "aether.http.server/:never_loaded", &ConfigQuery)
             .expect_err("the expanded short path names no live actor");
-        let expanded = format!("{}:never_loaded", aether_actor::EMBEDDED_SCOPE);
+        let expanded = "aether.http.server/aether.http.server.shard:never_loaded";
         assert!(
-            matches!(&error, RpcError::NotPresent { detail, .. } if detail.contains(&expanded)),
+            matches!(&error, RpcError::NotPresent { detail, .. } if detail.contains(expanded)),
             "the engine expanded the short path it was carried: {error:?}",
         );
     }

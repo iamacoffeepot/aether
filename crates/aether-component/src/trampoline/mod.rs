@@ -5,11 +5,13 @@
 //!
 //! ## Identity / runtime split (ADR-0122)
 //!
-//! The trampoline is split into an addressing **identity** and a
-//! state-bearing **runtime**. [`WasmTrampoline`] is a ZST identity carrying
-//! only the addressing surface — `Addressable` (`NAMESPACE` / `Resolver`),
-//! the per-handler `HandlesKind<DropComponent>` and republish-row markers, and the `OnePer("component")` name-inventory entry — all emitted
-//! always-on by `#[actor]`. The state-bearing runtime
+//! The trampoline is split into an **identity** and a state-bearing
+//! **runtime**. [`WasmTrampoline`] is a ZST identity written by hand in
+//! `identity.rs`: `Addressable` (a diagnostics-label `NAMESPACE`, `Resolver =
+//! Many`), the empty `Declared` lists, and one `HandlesKind` / `Replies` /
+//! `Contract` row per mail handler. It carries no placement and submits no
+//! inventory row, so the component host is never its address parent and its
+//! label names no address (ADR-0241 §5). The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
 //! `Engine` / `Linker` / `HubOutbound` handles, the resident `Module` and the
 //! engine's module cache) and
@@ -25,10 +27,10 @@
 //! ## Where this lives (issue 654)
 //!
 //! The trampoline sits next to [`crate::component::ComponentHostCapability`] —
-//! its only consumer — and the namespace is whatever
-//! `WasmTrampoline::NAMESPACE` says it is. Single declaration, cap-owned,
-//! reachable on every target via the `Addressable` trait const, forward-fed
-//! from [`EMBEDDED_SCOPE`] until #6869 retires it. No guest is named by it.
+//! its only consumer. It is core engine machinery, born only through
+//! `NativeCtx::spawn_guest`, so it is not declared with `#[actor]`: its
+//! identity is hand-written and names no parent, and no guest is named by
+//! its label.
 //!
 //! ## Shape
 //!
@@ -78,9 +80,7 @@
 // decoded bytes so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{EMBEDDED_SCOPE, actor};
-
-use crate::component::ComponentHostCapability;
+mod identity;
 
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
 // (imports, `WasmTrampolineState`, `WasmTrampolineConfig`, the republish
@@ -95,14 +95,13 @@ mod runtime;
 pub use runtime::WasmTrampolineConfig;
 
 /// The wasm-trampoline **identity** (ADR-0122 identity/runtime split). A ZST
-/// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the
-/// per-handler `HandlesKind` markers, and the `OnePer("component")`
-/// name-inventory entry, all emitted always-on by `#[actor]`. The
-/// state-bearing runtime (`WasmTrampolineState`, which holds the wasmtime
-/// `Component` and the substrate handles) lives behind the one
-/// `feature = "runtime"` gate, so a transport-only build never names the state
-/// nor pulls `aether_substrate` through this cap. The component host stages
-/// each guest through it — `spawn_guest::<WasmTrampoline, GuestControl>` —
-/// under the guest's own name.
-#[actor(instanced, child_of(ComponentHostCapability), child_of(WasmTrampoline))]
+/// whose identity is written by hand in `identity.rs`: `Addressable` under a
+/// diagnostics label, the empty `Declared` lists, and the per-handler
+/// `HandlesKind` / `Replies` / `Contract` rows. It has no placement and no
+/// inventory row, so it names no address. The state-bearing runtime
+/// (`WasmTrampolineState`, which holds the wasmtime `Component` and the
+/// substrate handles) lives behind the one `feature = "runtime"` gate, so a
+/// transport-only build never names the state nor pulls `aether_substrate`
+/// through this cap. The component host stages each guest through it —
+/// `spawn_guest::<WasmTrampoline, GuestControl>` — under the guest's own name.
 pub struct WasmTrampoline;

@@ -453,9 +453,9 @@ mod tests {
     #[test]
     fn address_selector_rejects_missing_malformed_and_mailbox_id_values() {
         assert!(parse_address("").is_err());
-        assert!(parse_address("aether.component//echo").is_err());
+        assert!(parse_address("example.host//echo").is_err());
         assert!(parse_address("mbx-2aaaaaaaaaaa").is_err());
-        assert_eq!(parse_address("aether.component/:echo").as_deref(), Ok("aether.component/:echo"));
+        assert_eq!(parse_address("example.host/:echo").as_deref(), Ok("example.host/:echo"));
     }
 
     #[test]
@@ -471,7 +471,7 @@ mod tests {
             "--engine-id",
             "engine",
             "--address",
-            "aether.component/:echo",
+            "example.echo",
             "--namespace",
             "example.alpha",
         ])
@@ -500,7 +500,7 @@ mod tests {
         let mut builder = builder([Ok(artifact.clone()), Ok(artifact)]);
         let mut caller = caller([
             Ok(json!({ "hash": "hash-1" })),
-            Ok(json!({ "engine_id": "engine", "address": "aether.component/example:echo", "capabilities": {} })),
+            Ok(json!({ "engine_id": "engine", "address": "example.echo:1", "capabilities": {} })),
             Ok(json!({ "hash": "hash-2" })),
             Ok(json!({ "capabilities": [] })),
         ]);
@@ -510,7 +510,7 @@ mod tests {
         run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("load pass");
         run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("replace pass");
 
-        assert_eq!(binding, Some(LiveBinding { address: "aether.component/example:echo".to_string() }));
+        assert_eq!(binding, Some(LiveBinding { address: "example.echo:1".to_string() }));
         let calls = calls.lock().expect("calls mutex").clone();
         assert_eq!(
             calls.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
@@ -533,7 +533,7 @@ mod tests {
         let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
         let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({ "capabilities": [] }))]);
         let calls = caller.calls.clone();
-        let mut binding = Some(LiveBinding { address: "aether.component/aether.embedded:echo".to_string() });
+        let mut binding = Some(LiveBinding { address: "example.echo".to_string() });
 
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
@@ -586,7 +586,7 @@ mod tests {
         let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
         let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({}))]);
         let calls = caller.calls.clone();
-        let original = LiveBinding { address: "aether.component/:echo".to_string() };
+        let original = LiveBinding { address: "example.host/:echo".to_string() };
         let mut binding = Some(original.clone());
 
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
@@ -598,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_failure_keeps_the_prior_binding() {
-        let original = LiveBinding { address: "aether.component/:canonical".to_string() };
+        let original = LiveBinding { address: "example.echo:1".to_string() };
 
         let mut binding = Some(original.clone());
         assert!(run_pass(&mut builder([Err("build")]), &mut caller([]), "engine", None, &mut binding).await.is_err());
