@@ -87,7 +87,7 @@ fn peak_rss_bytes() -> Option<u64> {
 
 // Dev/perf tooling: optional CI-provided git-sha override, as perf-trial reads
 // it — not a capability, no config layer in scope.
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: the optional AETHER_PERF_GIT_SHA stamp, read as perf-trial reads it (owner sign-off in #7281)
 fn git_sha() -> Option<String> {
     if let Ok(sha) = env::var("AETHER_PERF_GIT_SHA")
         && !sha.is_empty()

@@ -142,7 +142,7 @@ fn rested_items(turns: u32, calls: usize) -> Option<usize> {
 // Dev/perf tooling: this benchmark takes its run parameters from env, as
 // perf-trial does, because perf-compare passes knobs only through env — not a
 // capability, no config layer in scope.
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: the bench reads its run knobs from env because aether-perf-compare passes knobs only through env, as perf-trial does (owner sign-off in #7281)
 fn read(knob: &'static str) -> Result<Option<String>, KnobError> {
     match env::var(knob) {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
