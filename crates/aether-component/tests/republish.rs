@@ -148,9 +148,9 @@ fn keeps() -> Option<Keeps> {
 }
 
 /// Send the keeper a `ReleaseCarried` and wait for its chain to settle.
-fn release_keeper(harness: &mut SubstrateHarness, keeper: &ActorRef<Keeper>) {
+fn release_keeper(harness: &mut SubstrateHarness, keeper: ActorRef<Keeper>) {
     harness
-        .execute(vec![("release", HarnessOp::send_and_settle(keeper, &ReleaseCarried))])
+        .execute(vec![("release", HarnessOp::send_and_settle(&keeper, &ReleaseCarried))])
         .expect("release the keeper");
 }
 
@@ -321,7 +321,7 @@ fn an_abort_gives_each_ready_member_its_dehydrated_state_back() {
     let kept: CountReport = call(&mut harness, &keeper, &CountQuery);
     assert_eq!(kept.count, 1, "the reinstated keeper has the count its dehydrate moved out");
 
-    release_keeper(&mut harness, &keeper);
+    release_keeper(&mut harness, keeper);
     let answered = harness.await_deferred::<HeldRequestResult>(pending).expect("the held reply");
     assert_eq!(answered.tag, 7, "the moved-out held reply answers its requester");
 }
@@ -351,7 +351,7 @@ fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
     let kept: CountReport = call(&mut harness, &keeper, &CountQuery);
     assert_eq!(kept.count, 2, "the reinstated keeper has the count its dehydrate moved out");
 
-    release_keeper(&mut harness, &keeper);
+    release_keeper(&mut harness, keeper);
     let first = harness.await_deferred::<HeldRequestResult>(first).expect("the saved held reply");
     let second = harness.await_deferred::<HeldRequestResult>(second).expect("the stray held reply");
     assert_eq!((first.tag, second.tag), (7, 8), "both held replies answer their requesters");
@@ -394,8 +394,8 @@ fn a_changed_config_kind_needs_a_config_for_each_instance() {
     let mut harness = pooled();
     let (gate_a, path_a) = load_gate(&mut harness, &fixtures.v1, "a");
     let (gate_b, path_b) = load_gate(&mut harness, &fixtures.v1, "b");
-    let gate_a_row = harness.cast::<GateRow>(gate_a).expect("gate a publishes GateQuery");
-    let gate_b_row = harness.cast::<GateRow>(gate_b).expect("gate b publishes GateQuery");
+    let gate_a = harness.cast::<GateRow>(gate_a).expect("gate a publishes GateQuery");
+    let gate_b = harness.cast::<GateRow>(gate_b).expect("gate b publishes GateQuery");
     let config = |path: &ErasedActorPath, label| ReplaceConfig {
         path: path.clone(),
         config: GateLabelledConfig { label }.encode_into_bytes(),
@@ -413,8 +413,8 @@ fn a_changed_config_kind_needs_a_config_for_each_instance() {
     let replaced = republish(&mut harness, &complete);
 
     expect_ok(&replaced);
-    let a: GateQueryResult = call(&mut harness, &gate_a_row, &GateQuery);
-    let b: GateQueryResult = call(&mut harness, &gate_b_row, &GateQuery);
+    let a: GateQueryResult = call(&mut harness, &gate_a, &GateQuery);
+    let b: GateQueryResult = call(&mut harness, &gate_b, &GateQuery);
     assert_eq!((a.seqs, b.seqs), (vec![7], vec![9]), "each instance is built with its own supplied config");
 }
 

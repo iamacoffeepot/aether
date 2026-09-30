@@ -59,9 +59,9 @@ fn load_probe(
 }
 
 /// Ask the loaded `probe_with_config` guest which config its `init` saw.
-fn echo_config(harness: &mut SubstrateHarness, probe: &ActorRef<ProbeWithConfig>) -> ConfigEcho {
+fn echo_config(harness: &mut SubstrateHarness, probe: ActorRef<ProbeWithConfig>) -> ConfigEcho {
     harness
-        .execute(vec![("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery))])
+        .execute(vec![("echo", HarnessOp::send_and_await_reply(&probe, &ConfigQuery))])
         .expect("echo sequence")
         .reply::<ConfigEcho>("echo")
         .expect("decode ConfigEcho")
@@ -77,7 +77,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (probe, _) = load_probe(&mut harness, &wasm_path, Vec::new());
 
-    let echo = echo_config(&mut harness, &probe);
+    let echo = echo_config(&mut harness, probe);
     let expected = ProbeConfig::default();
     assert_eq!(echo.seed, expected.seed, "default seed reaches init");
     assert_eq!(echo.label, expected.label, "default label reaches init");
@@ -102,7 +102,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
     let (probe, _) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
 
-    let echo = echo_config(&mut harness, &probe);
+    let echo = echo_config(&mut harness, probe);
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
     assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
 }
@@ -134,7 +134,7 @@ fn a_replace_without_config_reuses_the_spawn_config() {
     assert!(matches!(replaced, ReplaceResult::Ok { .. }), "the replace commits: {replaced:?}");
 
     assert_eq!(
-        echo_config(&mut harness, &probe),
+        echo_config(&mut harness, probe),
         ConfigEcho { seed: config.seed, label: config.label },
         "the candidate's init sees the spawn config"
     );
