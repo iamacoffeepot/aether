@@ -17,8 +17,8 @@
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind, ProtocolRef, Unchecked, Undeclared};
-use aether_data::{Blob, BlobReader, ErasedActorPath, Kind, KindDescriptor, Schema, SessionToken, Uuid};
+use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, Unchecked};
+use aether_data::{Blob, BlobReader, Kind, KindDescriptor, Schema, SessionToken, Uuid};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Subname};
@@ -95,14 +95,6 @@ trait Carries {
     fn carrier(mail: Carrier);
     fn set_carrier(mail: SetCarrier);
     fn pair(mail: Pair);
-}
-
-/// What the courier forwards itself on a relay turn, so the forwarded mail's
-/// reply target is the relay's caller.
-#[aether_actor::protocol]
-trait Relayed {
-    fn carrier(mail: Carrier) -> Undeclared;
-    fn note(mail: Note) -> Undeclared;
 }
 
 /// The terminal reply that closes a raw forward's deferred reply, after its
@@ -259,9 +251,9 @@ struct Routes {
 /// its routes say to.
 struct Courier {
     routes: Routes,
-    /// This courier as a relay target, cast once at `wire` from the path its
-    /// namespace names.
-    me: Option<ProtocolRef<Relayed>>,
+    /// This courier's own proof, which the rig hands it from the boot's record
+    /// once the boot returns: a relay turn forwards itself mail through it.
+    me: Option<ActorRef<Self>>,
     kept: Vec<Blob>,
 }
 
@@ -270,8 +262,8 @@ impl Courier {
         self.routes.blob.clone().unwrap_or_else(|| Blob::from(SHARED.to_vec()))
     }
 
-    fn me(&self) -> ProtocolRef<Relayed> {
-        self.me.expect("the courier cast itself at wire")
+    fn me(&self) -> ActorRef<Self> {
+        self.me.expect("the rig hands the courier its proof at boot")
     }
 
     /// Raw-forward the configured bytes, or this turn's own, as a [`Carrier`]
@@ -296,11 +288,6 @@ impl NativeActor for Courier {
 
     fn init((): (), routes: Routes, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { routes, me: None, kept: Vec::new() })
-    }
-
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
-        let me = ctx.resolve_path(&ErasedActorPath::new(Self::NAMESPACE).expect("a canonical path"));
-        state.me = me.ok().and_then(|me| ctx.cast(me));
     }
 
     #[handler::single]
@@ -432,7 +419,9 @@ impl Stage {
 
     fn boot(self, routes: Routes) -> Rig {
         let caller = sink(&self.registry, &self.mailer, "test.blob_mail.caller");
-        let driver = PumpedDriver::boot(self.chassis, (), routes);
+        let mut driver = PumpedDriver::boot(self.chassis, (), routes);
+        let me = driver.chassis().actor_ref::<Courier>();
+        driver.host_turn(|courier, _ctx| courier.me = Some(me));
 
         Rig { driver, mailer: self.mailer, egress: self.egress, caller }
     }
