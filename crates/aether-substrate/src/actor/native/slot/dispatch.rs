@@ -309,7 +309,7 @@ pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) -> bo
 
 /// Warn — once per `(actor, kind)` for the life of the process — that a typed
 /// handler serviced a kind the actor never declared in
-/// [`Dispatch::capabilities`](crate::actor::native::Dispatch::capabilities)
+/// [`Dispatch::capabilities`]
 /// (iamacoffeepot/aether#4261).
 ///
 /// The `#[actor]` macro emits `capabilities` from the same handler list it
