@@ -73,7 +73,7 @@ fn reactor_protocol_kind_ids_are_pinned() {
 
 const TRIPWIRE_WARM: KindId = KindId(0x2ab0_47ad_e6ab_bdc4);
 const TRIPWIRE_WARMED: KindId = KindId(0x2e92_8abc_d04c_43a0);
-const TRIPWIRE_EVENT: KindId = KindId(0x241b_bd4d_0535_3f94);
+const TRIPWIRE_EVENT: KindId = KindId(0x2b77_3cce_7f03_78ee);
 const TRIPWIRE_EVALUATED: KindId = KindId(0x2381_9f0f_18d4_93d3);
 const TRIPWIRE_STATUS_QUERY: KindId = KindId(0x2e1c_78f0_8320_e7c6);
 const TRIPWIRE_STATUS: KindId = KindId(0x2007_56da_bbf2_ec0f);
