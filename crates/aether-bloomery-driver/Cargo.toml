@@ -19,6 +19,7 @@ runtime = [
   "dep:aether-bloomery-journal",
   "dep:aether-bloomery-program",
   "dep:wasmparser",
+  "dep:tracing",
 ]
 
 [dependencies]
@@ -42,6 +43,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
 aether-bloomery-program = { path = "../aether-bloomery-program", optional = true }
 wasmparser = { version = "0.246", optional = true }
+# Native-only runtime half: the shell opens one span per ticketed step under
+# the `aether.bloomery.step` target, closed at its reply.
+tracing = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 # The end-to-end scenarios boot the shipped bloomery chassis through its
@@ -50,6 +54,8 @@ wasmparser = { version = "0.246", optional = true }
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+# The step-span scenario installs a registry with one counting layer.
+tracing-subscriber = "0.3"
 
 [lints]
 workspace = true

@@ -48,6 +48,12 @@
 //! answers every held ticket with its reply kind's `unanswered()` before the
 //! state drops, and an engine teardown settles them silently (ADR-0243 §1).
 //!
+//! Each ticketed command the shell performs is a `tracing` span under the
+//! `aether.bloomery.step` target, opened when the command is sent and closed
+//! when the reply that takes its ticket back arrives, so a subscriber times
+//! every step with no mechanism of the driver's own; the `steps` module
+//! names each span.
+//!
 //! Timers run on the shell's clock (ADR-0245). The core asks for one tick
 //! at a time with [`Command::ArmTick`], and only while a `clock.until`
 //! request is armed. The shell offloads the wait to a worker that sleeps one
@@ -72,6 +78,7 @@ mod programs;
 mod reactors;
 mod recovery;
 mod root;
+mod steps;
 
 pub use self::core::{
     ApiReply, ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE,
@@ -97,8 +104,10 @@ use aether_http::FetchResult;
 use aether_kinds::{PublishResult, SpawnResult};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
+use tracing::debug_span;
 
 use self::root::BundleRoot;
+use self::steps::{STEP_TARGET, StepSpans};
 use crate::BundleDriver;
 
 // Tripwire: the core reads the journal `EVENTS_PAGE` entries per page, and the
@@ -162,6 +171,8 @@ pub struct BundleDriverState {
     /// Each loaded or adopted bundle's root, cast from the stamped sender of
     /// its spawn reply once per declared role.
     roots: HashMap<Digest, BundleRoot>,
+    /// The span of each ticketed step in flight, closed at its reply.
+    steps: StepSpans,
 }
 
 /// One held reply the driver owes, typed by the inbound kind that armed it.
@@ -206,6 +217,7 @@ impl NativeActor for BundleDriver {
             callers: HashMap::new(),
             loading: BTreeMap::new(),
             roots: HashMap::new(),
+            steps: StepSpans::default(),
         })
     }
 
@@ -245,6 +257,7 @@ impl NativeActor for BundleDriver {
         result: ReadEventsResult,
         ticket: EventsTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_events(ticket, result);
         state.perform(ctx, commands);
     }
@@ -256,6 +269,7 @@ impl NativeActor for BundleDriver {
         result: ReadArtifactResult,
         ticket: ArtifactTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_artifact(ticket, result);
         state.perform(ctx, commands);
     }
@@ -267,6 +281,7 @@ impl NativeActor for BundleDriver {
         result: ReadArtifactsResult,
         ticket: ArtifactsTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_artifacts(ticket, result);
         state.perform(ctx, commands);
     }
@@ -301,6 +316,7 @@ impl NativeActor for BundleDriver {
 
     #[handler::response]
     fn on_fetch_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: FetchResult, ticket: ApiTicket) {
+        state.steps.close(ticket);
         let commands = state.core.on_api_reply(ticket, ApiReply::Fetch(result));
         state.perform(ctx, commands);
     }
@@ -312,6 +328,7 @@ impl NativeActor for BundleDriver {
         result: aether_bloomery_workspace::RunResult,
         ticket: ApiTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_api_reply(ticket, ApiReply::Workspace(result));
         state.perform(ctx, commands);
     }
@@ -323,6 +340,7 @@ impl NativeActor for BundleDriver {
         result: ReadClosureResult,
         ticket: ClosureTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_closure(ticket, result);
         state.perform(ctx, commands);
     }
@@ -334,6 +352,7 @@ impl NativeActor for BundleDriver {
         result: AppendRecordsResult,
         ticket: AppendTicket,
     ) {
+        state.steps.close(ticket);
         let commands = state.core.on_appended(ticket, result);
         state.perform(ctx, commands);
     }
@@ -354,6 +373,7 @@ impl NativeActor for BundleDriver {
         match namespace {
             Ok(namespace) => state.spawn_root(ctx, namespace, ticket),
             Err(error) => {
+                state.steps.close(ticket);
                 state.loading.remove(&ticket);
                 let commands = state.core.on_loaded(ticket, LoadOutcome::Failed { error });
                 state.perform(ctx, commands);
@@ -370,6 +390,7 @@ impl NativeActor for BundleDriver {
     /// load, so the core never addresses it in that role.
     #[handler::response]
     fn on_spawn_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: SpawnResult, ticket: LoadTicket) {
+        state.steps.close(ticket);
         let load = state.loading.remove(&ticket);
         let outcome = match (result, ctx.sender(), load) {
             (SpawnResult::Err { error }, ..) => LoadOutcome::Failed { error },
@@ -392,6 +413,7 @@ impl NativeActor for BundleDriver {
 
     #[handler::response]
     fn on_invoked(state: &mut Self::State, ctx: &mut NativeCtx<'_>, invoked: Invoked, ticket: InvokeTicket) {
+        state.steps.close(ticket);
         let commands = state.core.on_invoked(ticket, invoked);
         state.perform(ctx, commands);
     }
@@ -409,18 +431,21 @@ impl NativeActor for BundleDriver {
 
     #[handler::response]
     fn on_warmed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, warmed: Warmed, ticket: WarmTicket) {
+        state.steps.close(ticket);
         let commands = state.core.on_warmed(ticket, warmed);
         state.perform(ctx, commands);
     }
 
     #[handler::response]
     fn on_evaluated(state: &mut Self::State, ctx: &mut NativeCtx<'_>, evaluated: Evaluated, ticket: EvaluateTicket) {
+        state.steps.close(ticket);
         let commands = state.core.on_evaluated(ticket, evaluated);
         state.perform(ctx, commands);
     }
 
     #[handler::response]
     fn on_status(state: &mut Self::State, ctx: &mut NativeCtx<'_>, status: Status, ticket: StatusTicket) {
+        state.steps.close(ticket);
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
     }
@@ -430,8 +455,10 @@ impl NativeActor for BundleDriver {
     /// (ADR-0245). The wait owes no one a reply.
     #[handler(task)]
     fn on_tick_elapsed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _done: &TaskDone<TickElapsed>) {
-        let commands = state.core.tick(state.clock.now_millis());
-        state.perform(ctx, commands);
+        debug_span!(target: STEP_TARGET, "tick").in_scope(|| {
+            let commands = state.core.tick(state.clock.now_millis());
+            state.perform(ctx, commands);
+        });
     }
 }
 

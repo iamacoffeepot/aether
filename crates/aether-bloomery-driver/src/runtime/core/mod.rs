@@ -34,6 +34,7 @@ use crate::runtime::reactors::{CommittedRouting, Routing};
 pub use command::{ApiReply, Command, LoadOutcome, RootRoles};
 pub use journal::EVENTS_PAGE;
 pub use journal::{Journal, PendingWrite, PlannedRecord, RequestedClaim};
+pub use ticket::TicketId;
 pub use ticket::{
     ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket,
     InvokeTicket, LoadTicket, StatusTicket, WarmTicket, WatchTicket,

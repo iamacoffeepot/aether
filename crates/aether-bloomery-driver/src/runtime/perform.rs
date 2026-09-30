@@ -8,7 +8,9 @@ use aether_data::{ActorMail, Kind};
 use aether_http::HttpCapability;
 use aether_kinds::{Publish, Spawn};
 use aether_substrate::actor::native::NativeCtx;
+use tracing::debug_span;
 
+use super::steps::{STEP_TARGET, purpose};
 use super::{BundleDriverState, BundleRoot, Caller, CallerId, Command, LoadTicket};
 
 impl BundleDriverState {
@@ -28,6 +30,9 @@ impl BundleDriverState {
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
     /// wait.
+    ///
+    /// Every ticketed send but the head watch opens its step's span first,
+    /// which the reply handler that takes the ticket back closes.
     pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability> + DependsOn<HttpCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
@@ -36,21 +41,28 @@ impl BundleDriverState {
         for command in commands {
             match command {
                 Command::ReadEvents { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "read_events"));
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::ReadArtifact { ticket, request } => {
+                    let purpose = purpose(self.core.artifact_reads.get(&ticket));
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "read_artifact", purpose));
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::ReadArtifacts { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "read_artifacts"));
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::ReadClosure { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "read_closure"));
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::Append { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "append"));
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
                 Command::Load { ticket, bundle, roles, wasm } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "load", %bundle));
                     self.loading.insert(ticket, (bundle, roles));
                     let _ = ctx.send_with_context::<ComponentHostCapability>(
                         &Publish { code: wasm.into(), configs: Vec::new() },
@@ -58,18 +70,31 @@ impl BundleDriverState {
                     );
                 }
                 Command::Invoke { ticket, bundle, request } => {
+                    self.steps.open(
+                        ticket,
+                        debug_span!(
+                            target: STEP_TARGET,
+                            "invoke",
+                            %bundle,
+                            seq = request.seq(),
+                            closure = request.closure().len(),
+                        ),
+                    );
                     self.send_to_root(ctx, bundle, "program", |root| root.program, &request, ticket);
                 }
                 Command::WatchHead { ticket, request } => {
                     let _ = ctx.send_detached_to_with_context(self.journal, &request, ticket);
                 }
                 Command::Warm { ticket, bundle, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "warm", %bundle));
                     self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &request, ticket);
                 }
                 Command::Evaluate { ticket, bundle, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "evaluate", %bundle));
                     self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &request, ticket);
                 }
                 Command::QueryStatus { ticket, bundle } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "status", %bundle));
                     self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &StatusQuery, ticket);
                 }
                 // A second answer for one caller drops: the caller already
@@ -90,9 +115,11 @@ impl BundleDriverState {
                     None => {}
                 },
                 Command::Fetch { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "fetch"));
                     let _ = ctx.send_with_context::<HttpCapability>(&request, ticket);
                 }
                 Command::RunWorkspace { ticket, request } => {
+                    self.steps.open(ticket, debug_span!(target: STEP_TARGET, "run_workspace"));
                     let run = Run { source: self.source.clone(), request };
                     let _ = ctx.send_to_with_context(self.workspace, &run, ticket);
                 }
