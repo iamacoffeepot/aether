@@ -1,6 +1,7 @@
 //! Declaration lists and their positions (ADR-0231 §10): the one place an
 //! actor's contract rows, declared dependencies, declared inline children,
-//! and declared parents are stated, and the sealed index each per-entry marker names into them.
+//! and declared parents are stated, and the sealed index each per-entry
+//! marker names into them.
 //!
 //! Coherence allows one impl of a trait for a type. `#[actor]` emits exactly
 //! one [`Contracts`](crate::Contracts) impl and one [`Declared`] impl per
@@ -133,8 +134,8 @@ impl<H, Tail, K, I: RowIndex<Tail, K>> RowIndex<(H, Tail), K> for There<I> {
 /// `#[actor]` emits the one impl per actor. Each
 /// [`DependsOn<R>`](crate::DependsOn), [`Spawns<C>`](crate::Spawns), and
 /// [`ChildOf<P>`](crate::ChildOf) impl names its entry's position in these
-/// lists, so none compiles without its entry here. A type that no `#[actor]` expansion built writes this impl
-/// itself, as it writes its own dispatch; `NativeActor` and
+/// lists, so none compiles without its entry here. A type that no `#[actor]`
+/// expansion built writes this impl itself, as it writes its own dispatch; `NativeActor` and
 /// [`WasmActor`](crate::WasmActor) both require it.
 pub trait Declared {
     /// The declared dependencies, in `depends(..)` order.

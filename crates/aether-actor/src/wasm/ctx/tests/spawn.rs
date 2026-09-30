@@ -432,9 +432,9 @@ fn spawn_inline_rejects_unavailable_parent_identity_before_host_call() {
 /// `child_of(..)`. Under a ctx whose recorded identity is a `LifecycleProbe`,
 /// the two-type verb naming `NestingParent` fails with
 /// `ParentIdentityMismatch` (the sibling test above), while this one falls
-/// through the parent gate to subname validation. The mismatch error is what a copied-from-a-sibling
-/// wrong `P` produces, and consumers `.ok()` or warn-log it into a silently
-/// absent child.
+/// through the parent gate to subname validation. The mismatch error is what
+/// a wrong `P` copied from a sibling produces, and consumers `.ok()` or
+/// warn-log it into a silently absent child.
 #[test]
 fn spawn_inline_accepts_any_recorded_parent_type() {
     let registry = Registry::new();

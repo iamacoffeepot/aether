@@ -881,7 +881,8 @@ Five per-actor markers stand for facts only a macro expansion establishes:
 `Contract<K>` (a handler for `K` exists, §1, §2), `DependsOn<R>` (the birth
 checked that `R` was `Live`, ADR-0230 §3), `Spawns<C>` (the spawner declared
 `C`, ADR-0114 §5), `ChildOf<P>` (the actor declared `P` as a parent, ADR-0166),
-and `Rebuildable<M>` (the module's `export!` lists the type). Sealing cannot close them, because `#[actor]` and `export!` expand in
+and `Rebuildable<M>` (the module's `export!` lists the type). Sealing cannot
+close them, because `#[actor]` and `export!` expand in
 the author's crate and any path they name the author can name too, and
 `unsafe` marks undefined behaviour, not a logic rule. They are closed by
 coherence instead: a trait has one impl per type, and a hand-written impl

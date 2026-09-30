@@ -72,8 +72,9 @@
 //! InlineStatefulChild>(), …)` — rather than the compile-time-typed verb,
 //! exercising the real `export!`-generated resolver. It records all four
 //! outcomes surfaced on a `TagSpawnQuery`: the instanced child that lists
-//! `InlineTagParent` in its `child_of(..)` spawns successfully, while an exact child of another parent, an exported
-//! non-instanced actor, and an unknown tag are rejected. Because the accepted
+//! `InlineTagParent` in its `child_of(..)` spawns successfully, while an exact
+//! child of another parent, an exported non-instanced actor, and an unknown
+//! tag are rejected. Because the accepted
 //! child is `InlineStatefulChild`, its state reconstructs across a
 //! `replace_component` swap through the same reconstruct arm the tag came
 //! from.
