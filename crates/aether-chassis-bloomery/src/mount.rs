@@ -8,10 +8,12 @@
 
 use std::fmt::Debug;
 use std::io;
+use std::sync::Arc;
+use std::time::Duration;
 
 use aether_actor::ActorRef;
 use aether_bloomery_driver::{BundleDriver, DriverParams};
-use aether_bloomery_journal::{Journal, JournalActor, ReadCacheBudget};
+use aether_bloomery_journal::{Clock, Journal, JournalActor, ReadCacheBudget};
 use aether_bloomery_kinds::{ClosureLimit, UnitKey};
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_substrate::Subname;
@@ -32,10 +34,22 @@ pub struct Mounted {
     pub driver: ActorRef<BundleDriver>,
 }
 
+/// What the bundle driver spawns over besides its journal: the closure limit,
+/// and the clock and tick period its timers fire on (ADR-0245).
+pub struct DriverSetup {
+    /// The byte budget of one closure read.
+    pub limit: ClosureLimit,
+    /// The clock the journal stamps entries with, shared with the driver.
+    pub clock: Arc<dyn Clock + Send + Sync>,
+    /// How long one driver tick waits before it reads the clock.
+    pub tick: Duration,
+}
+
 /// Spawn the journal owner over `journal` with the `read_cache` budget under
 /// `Subname::Named(unit)` and the bundle driver under `Subname::Named("driver")`
-/// over the unit's key, the journal's born reference, and the composed
-/// workspace's reference, so the engine answers as
+/// over the unit's key, the journal's born reference, the composed
+/// workspace's reference, and `driver`'s limit, clock, and tick, so the engine
+/// answers as
 /// `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, and
 /// hand both references back as [`Mounted`]. The journal's name is already the
 /// unit-root name ADR-0240 D1 gives it.
@@ -52,14 +66,16 @@ pub fn mount(
     built: &BuiltChassis<BloomeryChassis>,
     unit: &UnitKey,
     journal: Journal,
-    limit: ClosureLimit,
     read_cache: ReadCacheBudget,
+    driver: DriverSetup,
 ) -> Result<Mounted, BootError> {
+    let DriverSetup { limit, clock, tick } = driver;
     let journal = built
         .spawn_actor::<JournalActor>(Subname::Named(unit.as_str()), read_cache, journal)
         .finish()
         .map_err(|error| spawn_failed(&format!("aether.bloomery.journal:{unit}"), &error))?;
-    let params = DriverParams { unit: unit.clone(), journal, workspace: built.actor_ref::<WorkspaceCapability>() };
+    let params =
+        DriverParams { unit: unit.clone(), journal, workspace: built.actor_ref::<WorkspaceCapability>(), clock, tick };
     let driver = built
         .spawn_actor::<BundleDriver>(Subname::Named("driver"), limit, params)
         .finish()

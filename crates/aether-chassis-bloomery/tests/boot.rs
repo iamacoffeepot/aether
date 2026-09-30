@@ -62,6 +62,7 @@ fn unset_units_refuses_boot() {
             units: None,
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+            clock_tick_millis: 1000,
         },
     );
     let error = BloomeryChassis::build(env).expect_err("boot without a unit must fail");
@@ -84,6 +85,7 @@ fn a_root_another_engine_holds_refuses_boot_naming_the_root() {
             units: Some(format!("{UNIT}={}", root.display())),
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+            clock_tick_millis: 1000,
         },
     );
 

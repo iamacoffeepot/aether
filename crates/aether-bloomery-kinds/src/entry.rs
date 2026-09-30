@@ -25,7 +25,12 @@ pub struct Entry {
     pub kind: KindId,
     /// The `seq` this entry reacts to, if any.
     pub cause: Option<Seq>,
-    /// Wall clock at insert, for people and consoles. A fold never reads it.
+    /// Journal time at insert, in unix milliseconds (ADR-0245).
+    ///
+    /// Journal time is monotone: the journal stamps each append at the
+    /// greatest of its last recorded time, its wall clock, and the append's
+    /// floor, so no entry is stamped before an earlier one. Folds, guards, and
+    /// rules may read it only as recorded here, and never read a live clock.
     pub recorded_at_millis: u64,
     /// Encoded payload, stored verbatim.
     pub bytes: Vec<u8>,

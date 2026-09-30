@@ -5,7 +5,7 @@ mod common;
 use std::error::Error;
 use std::fs;
 
-use aether_bloomery_journal::{Batch, Draft, Journal, JournalError, Seq};
+use aether_bloomery_journal::{Batch, Draft, Journal, JournalError, MAX_CLOCK_BEHIND_MILLIS, Seq};
 use aether_bloomery_kinds::{Digest, Head, RecordedHeadMove, Ref, Tree};
 use aether_data::{Kind, Storage, StorageData, storage_kind_id_from_name};
 use common::FixedClock;
@@ -149,5 +149,29 @@ fn corrupt_legacy_kind_values_are_rejected() -> Result<(), Box<dyn Error>> {
         journal.read(Seq(0), 1),
         Err(JournalError::CorruptEntryKind("kind is neither a blob nor legacy text"))
     ));
+    Ok(())
+}
+
+#[test]
+fn a_clock_more_than_a_day_behind_the_last_entry_refuses_the_open() -> Result<(), Box<dyn Error>> {
+    // Catches opening under a clock far behind recorded time, which would
+    // stamp every later entry at the old time, and a refusal that fires at
+    // exactly one day or does not name both times.
+    const LAST_MILLIS: u64 = 1_700_000_000_000;
+    let (root, mut journal) = common::temp_journal(LAST_MILLIS)?;
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("recorded")]))?;
+    drop(journal);
+
+    let behind = LAST_MILLIS - MAX_CLOCK_BEHIND_MILLIS - 1;
+    match Journal::open_with_clock(root.path(), Box::new(FixedClock(behind))) {
+        Err(JournalError::ClockBehind { wall_millis, last_recorded_millis }) => {
+            assert_eq!((wall_millis, last_recorded_millis), (behind, LAST_MILLIS));
+        }
+        Err(other) => panic!("expected ClockBehind, got {other:?}"),
+        Ok(_) => panic!("a clock more than a day behind must refuse the open"),
+    }
+
+    let journal = Journal::open_with_clock(root.path(), Box::new(FixedClock(LAST_MILLIS - MAX_CLOCK_BEHIND_MILLIS)))?;
+    assert_eq!(journal.head()?, Seq(1), "exactly one day behind opens");
     Ok(())
 }

@@ -3,8 +3,10 @@
 mod common;
 
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
+use aether_bloomery_journal::{AppendError, Batch, Clock, Draft, Journal, Seq};
 use aether_data::Kind;
 
 fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
@@ -75,5 +77,44 @@ fn fresh_schema_requires_an_eight_byte_blob_kind() -> Result<(), Box<dyn Error>>
     assert!(conn.execute(insert, [b"ninebytes".as_slice()]).is_err());
     assert!(conn.execute(insert, ["legacy.text"]).is_err());
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get::<_, i64>(0))?, 0);
+    Ok(())
+}
+
+/// A clock the test moves by hand while the journal holds it.
+struct SteppedClock(AtomicU64);
+
+impl Clock for SteppedClock {
+    fn now_millis(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The recorded time of the entry at `seq`.
+fn recorded_at(journal: &Journal, seq: u64) -> Result<u64, Box<dyn Error>> {
+    let entry = journal.read(Seq(seq - 1), 1)?.into_iter().next().ok_or("the entry is recorded")?;
+    Ok(entry.recorded_at_millis)
+}
+
+#[test]
+fn journal_time_never_goes_backwards_and_a_floor_above_the_clock_is_stamped() -> Result<(), Box<dyn Error>> {
+    // Catches stamping the raw clock, so a backward wall step records an
+    // entry earlier than the one before it, and ignoring the batch floor, so a
+    // fired timer is stamped before its due time.
+    let root = tempfile::tempdir()?;
+    let clock = Arc::new(SteppedClock(AtomicU64::new(STAMP_MILLIS)));
+    let mut journal = Journal::open_with_clock(root.path(), Box::new(Arc::clone(&clock)))?;
+
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("first")]))?;
+    clock.0.store(STAMP_MILLIS - 5_000, Ordering::SeqCst);
+    journal.append(Seq(1), &batch_from_drafts([Note::draft("stepped back")]))?;
+    assert_eq!(recorded_at(&journal, 2)?, STAMP_MILLIS, "a backward step stamps the latest recorded time");
+
+    let mut floored = batch_from_drafts([Note::draft("floored")]);
+    floored.not_before(STAMP_MILLIS + 500);
+    journal.append(Seq(2), &floored)?;
+    assert_eq!(recorded_at(&journal, 3)?, STAMP_MILLIS + 500, "a floor above the clock is the stamp");
+
+    journal.append(Seq(3), &batch_from_drafts([Note::draft("after the floor")]))?;
+    assert_eq!(recorded_at(&journal, 4)?, STAMP_MILLIS + 500, "the floor becomes the latest recorded time");
     Ok(())
 }

@@ -48,6 +48,14 @@
 //! answers every held ticket with its reply kind's `unanswered()` before the
 //! state drops, and an engine teardown settles them silently (ADR-0243 §1).
 //!
+//! Timers run on the shell's clock (ADR-0245). The core asks for one tick
+//! at a time with [`Command::ArmTick`], and only while a `clock.until`
+//! request is armed. The shell offloads the wait to a worker that sleeps one
+//! tick period and holds no settlement chain, since an armed timer waits on
+//! time rather than on any caller's work; its completion reads the injected
+//! clock and feeds [`ProgramCore::tick`]. The clock is the journal's own, so
+//! the two read one time.
+//!
 //! A program API call relays the same way as a fetch (ADR-0240 D6): the
 //! invocation sends [`ApiCall`] to its bundle root, the root relays it here,
 //! and the core maps `Http` to the http capability and `Workspace` to the
@@ -57,6 +65,7 @@
 //! once at `init` from the unit key (ADR-0240 D7).
 
 mod bundles;
+mod clock;
 mod core;
 mod perform;
 mod programs;
@@ -72,9 +81,12 @@ pub use self::core::{
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-use aether_actor::{ActorPath, ActorRef, ProtocolPath, runtime};
-use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
+use aether_actor::{ActorPath, ActorRef, ProtocolPath, ReplyMode, runtime};
+use aether_bloomery_journal::{Clock, JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
     ClosureLimit, Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadArtifactsResult,
@@ -83,7 +95,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
 use aether_kinds::{PublishResult, SpawnResult};
-use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
 
 use self::root::BundleRoot;
@@ -95,8 +107,8 @@ use crate::BundleDriver;
 const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 
 /// Composer-supplied construction input: the unit's key, the born journal
-/// owner's reference, and the reference of the workspace the unit's programs
-/// run through.
+/// owner's reference, the reference of the workspace the unit's programs
+/// run through, and the clock and tick period its timers fire on.
 ///
 /// The journal reference is what the journal's own `spawn_actor(..).finish()`
 /// returns, so holding it proves the journal was born (ADR-0230); a driver
@@ -112,7 +124,18 @@ pub struct DriverParams {
     pub journal: ActorRef<JournalActor>,
     /// The workspace programs' `Workspace` calls reach (ADR-0240 D6).
     pub workspace: ActorRef<WorkspaceCapability>,
+    /// The clock timers fire against: the one the journal stamps entries
+    /// with, so a due time and the stamp of its firing read one time
+    /// (ADR-0245).
+    pub clock: Arc<dyn Clock + Send + Sync>,
+    /// How long one tick waits before it reads the clock. A timer fires
+    /// within about one tick after its due time while the engine is healthy.
+    pub tick: Duration,
 }
+
+/// The output of one tick's wait: the period elapsed and the clock is due a
+/// read.
+pub struct TickElapsed;
 
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
 /// journal it folds for, the workspace its programs run through and the
@@ -124,6 +147,9 @@ pub struct BundleDriverState {
     unit: UnitKey,
     journal: ActorRef<JournalActor>,
     workspace: ActorRef<WorkspaceCapability>,
+    /// The clock each tick reads, and the period a tick waits.
+    clock: Arc<dyn Clock + Send + Sync>,
+    tick: Duration,
     /// The unit's journal as the storage every relayed run names, written
     /// from the unit key: `aether.bloomery.journal:<unit key>`.
     source: ProtocolPath<ArtifactStorage>,
@@ -165,7 +191,7 @@ impl NativeActor for BundleDriver {
         params: DriverParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<BundleDriverState, BootError> {
-        let DriverParams { unit, journal, workspace } = params;
+        let DriverParams { unit, journal, workspace, clock, tick } = params;
         let (core, startup) = ProgramCore::start(limit);
         let source = ActorPath::<JournalActor>::instance(unit.as_load_name()).narrow::<ArtifactStorage>();
         Ok(BundleDriverState {
@@ -174,6 +200,8 @@ impl NativeActor for BundleDriver {
             unit,
             journal,
             workspace,
+            clock,
+            tick,
             startup,
             callers: HashMap::new(),
             loading: BTreeMap::new(),
@@ -396,9 +424,33 @@ impl NativeActor for BundleDriver {
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
     }
+
+    /// One tick's wait elapsed: read the clock, fire every due timer, and
+    /// perform what follows, a next tick included while a timer stays armed
+    /// (ADR-0245). The wait owes no one a reply.
+    #[handler(task)]
+    fn on_tick_elapsed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _done: &TaskDone<TickElapsed>) {
+        let commands = state.core.tick(state.clock.now_millis());
+        state.perform(ctx, commands);
+    }
 }
 
 impl BundleDriverState {
+    /// Wait one tick period on a worker, then complete into
+    /// `on_tick_elapsed`.
+    ///
+    /// The wait holds no settlement chain: an armed timer waits on time, not
+    /// on the work of whichever chain armed it, so a chain that sets a
+    /// timer settles without waiting it out.
+    pub(crate) fn arm_tick<M: ReplyMode, A>(&self, ctx: &mut NativeCtx<'_, A, M>) {
+        let period = self.tick;
+        let reply_to = ctx.reply_target();
+        let _ = ctx.dispatch_blocking_resumed_with(None, reply_to, (), move || {
+            thread::sleep(period);
+            TickElapsed
+        });
+    }
+
     /// Keep `bundle`'s cast root and report `kept`, or fail the load with the
     /// role the root refused.
     fn keep_root(&mut self, root: Result<BundleRoot, String>, bundle: Digest, kept: LoadOutcome) -> LoadOutcome {

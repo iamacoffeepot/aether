@@ -23,7 +23,7 @@ impl BundleDriverState {
     /// spawn reply when it loaded, a program's
     /// relayed `Http` call goes to the http capability and its `Workspace` call
     /// to the held workspace reference, and answers, fetch answers, and API
-    /// answers release the held reply. Every send carries its ticket as the request
+    /// answers release the held reply, and a tick waits on a worker. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
@@ -101,6 +101,7 @@ impl BundleDriverState {
                     Some(_) => owed_other(ctx, caller, "ApiCallResult"),
                     None => {}
                 },
+                Command::ArmTick => self.arm_tick(ctx),
                 Command::Abort { reason } => ctx.fatal_abort(reason),
             }
         }

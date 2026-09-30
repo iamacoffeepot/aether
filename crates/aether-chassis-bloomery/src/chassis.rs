@@ -26,7 +26,7 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use aether_bloomery_journal::{Journal, ReadCacheBudget};
+use aether_bloomery_journal::{Journal, ReadCacheBudget, SystemClock};
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_chassis::boot::{
     ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
@@ -99,6 +99,7 @@ impl BloomeryChassis {
         // with no units configured.
         let bloomery = mem::take(&mut env.bloomery);
         let (units, limit) = bloomery.to_units_and_limit()?;
+        let tick = bloomery.clock_tick()?;
         // `read_cache_bytes` is the engine total, split equally among the
         // units (ADR-0240 I-6). The share is taken from the whole lowered list;
         // an empty list is refused by `sole_unit` on the next line, so its
@@ -109,8 +110,10 @@ impl BloomeryChassis {
         );
         let unit = config::sole_unit(units)?;
         // Open the root before wasmtime too: a root another engine holds, or
-        // one that cannot be created, refuses boot here, naming the root.
-        let journal = Journal::open(&unit.root).map_err(|error| {
+        // one that cannot be created, refuses boot here, naming the root. The
+        // journal and the driver read one clock (ADR-0245).
+        let clock = Arc::new(SystemClock);
+        let journal = Journal::open_with_clock(&unit.root, Box::new(Arc::clone(&clock))).map_err(|error| {
             BootError::Other(Box::new(io::Error::other(format!(
                 "the bloomery journal root {} of unit `{}` does not open: {error}",
                 unit.root.display(),
@@ -123,7 +126,8 @@ impl BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let mounted = mount::mount(&built, &unit.key, journal, limit, read_cache)?;
+        let driver = mount::DriverSetup { limit, clock, tick };
+        let mounted = mount::mount(&built, &unit.key, journal, read_cache, driver)?;
         tracing::info!(
             unit = %unit.key,
             journal_root = %unit.root.display(),

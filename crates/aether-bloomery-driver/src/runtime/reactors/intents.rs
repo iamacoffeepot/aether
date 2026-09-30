@@ -10,6 +10,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_program::Heads;
 use aether_data::{Kind, KindId};
 
+use crate::runtime::clock::program_bundle;
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::PendingDestination;
 
@@ -34,7 +35,8 @@ pub fn reaction_failed(cause: u64, bundle: Digest, reactor: Option<ReactorName>,
 /// Plan one `Completed` reply's intents in reply order.
 ///
 /// `CallProgram` resolves its program head through `heads`, the prefix
-/// through `cause`. Ordinals count each `(reactor, rule)`'s intents within
+/// through `cause`, except the reserved clock head, which resolves to the
+/// clock's own identity (ADR-0245). Ordinals count each `(reactor, rule)`'s intents within
 /// the reply. An unbound head, an undecodable payload, or an unsupported
 /// kind fails that intent alone.
 pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, heads: &Heads) -> Vec<PlannedIntent> {
@@ -73,10 +75,10 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
             let Some(call) = decode_call_program(kind, &bytes) else {
                 return failed(Detail::new("undecodable call_program intent"));
             };
-            let Some(bound) = heads.get(&call.program) else {
+            let Some(bundle) = program_bundle(heads, &call.program) else {
                 return failed(Detail::new("program head unbound"));
             };
-            let program = ProgramRef::new(bound.digest(), call.name);
+            let program = ProgramRef::new(bundle, call.name);
             let source = RequestSource::Reaction { bundle, reactor, rule, ordinal };
             match call.input {
                 CallInput::Stored(input) => PlannedIntent::Ready(DriverRecord::Requested {

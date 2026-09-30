@@ -123,7 +123,10 @@ impl Requests {
             return Err(RequestFoldError::DuplicateRequest { seq: entry.seq, first });
         }
 
-        self.by_seq.insert(entry.seq, Request { seq: entry.seq, cause, requested, outcome: None });
+        self.by_seq.insert(
+            entry.seq,
+            Request { seq: entry.seq, cause, recorded_at_millis: entry.recorded_at_millis, requested, outcome: None },
+        );
         self.index.insert(key, entry.seq);
         self.outstanding.insert(entry.seq);
         if is_reaction {
@@ -224,6 +227,7 @@ impl View for Requests {
 pub struct Request {
     seq: Seq,
     cause: Option<Seq>,
+    recorded_at_millis: u64,
     requested: Requested,
     outcome: Option<Outcome>,
 }
@@ -239,6 +243,13 @@ impl Request {
     #[must_use]
     pub const fn cause(&self) -> Option<Seq> {
         self.cause
+    }
+
+    /// The journal time the `Requested` entry was recorded at, in unix
+    /// milliseconds: the time a clock request's due time is measured from.
+    #[must_use]
+    pub const fn recorded_at_millis(&self) -> u64 {
+        self.recorded_at_millis
     }
 
     /// The recorded request.

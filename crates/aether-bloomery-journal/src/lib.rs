@@ -28,8 +28,8 @@ pub use aether_bloomery_kinds::{
 #[cfg(feature = "runtime")]
 pub use runtime::{
     AppendError, ArtifactBatch, ArtifactStore, Batch, BatchError, BlobFile, Clock, Closure, Draft, DraftError,
-    GetError, Journal, JournalError, JournalIdentity, JournalReader, ReadCacheBudget, SystemClock, VerifiedBlob,
-    split_artifact,
+    GetError, Journal, JournalError, JournalIdentity, JournalReader, MAX_CLOCK_BEHIND_MILLIS, ReadCacheBudget,
+    SystemClock, VerifiedBlob, split_artifact,
 };
 
 /// Maximum number of entries one read mail can return.

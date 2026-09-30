@@ -34,6 +34,14 @@ pub const DATABASE_FILE: &str = "journal.sqlite";
 /// The file a live journal holds an exclusive lock on.
 const LOCK_FILE: &str = "lock";
 
+/// How far the clock may lag the last recorded entry at open before the
+/// journal refuses to open (ADR-0245): one day.
+pub const MAX_CLOCK_BEHIND_MILLIS: u64 = 24 * 60 * 60 * 1000;
+
+/// How far the clock may lag the last recorded entry at an append before the
+/// journal warns: one second. The append still stamps monotone time.
+const WARN_CLOCK_BEHIND_MILLIS: u64 = 1000;
+
 /// How long a write waits for another connection's write transaction on the
 /// same root, such as an [`crate::ArtifactBatch`] commit racing an `append`,
 /// before it fails `SQLITE_BUSY`. Both writers insert rows only (blob bytes
@@ -110,9 +118,15 @@ impl fmt::Debug for JournalIdentity {
 /// [`Journal::artifact_store`] hands out, whose batches insert rows through
 /// the same row insert and citation check `append` runs.
 /// The injected clock is `Send` so a journal can be owned by a native actor.
+///
+/// Journal time is monotone (ADR-0245): each append is stamped at the
+/// greatest of the last recorded time, the clock, and the batch's floor.
 pub struct Journal {
     conn: Connection,
     clock: Box<dyn Clock + Send>,
+    /// The latest `recorded_at_millis` of any entry: seeded from the log at
+    /// open and raised by every append, so no stamp goes backwards.
+    last_recorded_millis: u64,
     identity: JournalIdentity,
     pub(crate) root: PathBuf,
     pub(crate) blobs: BlobDir,
@@ -156,7 +170,10 @@ impl Journal {
     /// [`JournalError::Io`] when the root's layout cannot be created or swept,
     /// or the empty tree's blob cannot be written.
     /// [`JournalError::Backend`] when `SQLite` cannot open the log, apply DDL,
-    /// or store the empty tree's row.
+    /// or store the empty tree's row. [`JournalError::ClockBehind`] when the
+    /// clock reads more than [`MAX_CLOCK_BEHIND_MILLIS`] before the latest
+    /// recorded entry: journal time never goes backwards, so a clock that far
+    /// behind would stamp every later entry with the old time.
     pub fn open_with_clock(root: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         create_root(root)?;
         let lock = lock_root(root)?;
@@ -168,10 +185,18 @@ impl Journal {
         let mut conn = Connection::open(root.join(DATABASE_FILE))?;
         configure_writer(&conn)?;
         prepare_schema(&conn)?;
-        seed_empty_tree(&mut conn, &blobs, clock.now_millis())?;
+
+        let wall_millis = clock.now_millis();
+        let last_recorded_millis = last_recorded_of(&conn)?;
+        if wall_millis.saturating_add(MAX_CLOCK_BEHIND_MILLIS) < last_recorded_millis {
+            return Err(JournalError::ClockBehind { wall_millis, last_recorded_millis });
+        }
+
+        seed_empty_tree(&mut conn, &blobs, wall_millis)?;
         Ok(Self {
             conn,
             clock,
+            last_recorded_millis,
             identity: JournalIdentity::new(),
             root: root.to_path_buf(),
             blobs,
@@ -215,6 +240,12 @@ impl Journal {
     /// writes nothing. The returned range is `head+1 .. head+n+1` (end
     /// exclusive).
     ///
+    /// Every entry and newly stored artifact row is stamped at the greatest
+    /// of the latest recorded time, the clock, and the batch's
+    /// [`Batch::not_before`] floor, so journal time never goes backwards and a
+    /// floored batch is never stamped before its floor (ADR-0245). A clock
+    /// more than a second behind the latest recorded time logs a warning.
+    ///
     /// # Errors
     ///
     /// [`AppendError::HeadMoved`] when the fence does not match.
@@ -230,7 +261,15 @@ impl Journal {
     /// when a citation's identity bytes are not 32 bytes.
     /// [`AppendError::Journal`] on a backend or constraint failure.
     pub fn append(&mut self, expect_head: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
-        let recorded_at_millis = self.clock.now_millis();
+        let wall_millis = self.clock.now_millis();
+        if wall_millis.saturating_add(WARN_CLOCK_BEHIND_MILLIS) < self.last_recorded_millis {
+            tracing::warn!(
+                wall_millis,
+                last_recorded_millis = self.last_recorded_millis,
+                "the journal clock reads behind the latest recorded entry; the append is stamped at recorded time",
+            );
+        }
+        let recorded_at_millis = self.last_recorded_millis.max(wall_millis).max(batch.not_before_millis());
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head = head_of(&tx)?;
         if head != expect_head {
@@ -258,6 +297,7 @@ impl Journal {
         )?;
         let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
+        self.last_recorded_millis = recorded_at_millis;
         Ok(range)
     }
 
@@ -737,6 +777,12 @@ fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
 
 /// The last stored sequence, `Seq(0)` when empty. Shared by [`Journal::head`]
 /// and [`crate::JournalReader::head`].
+/// The latest `recorded_at_millis` of any entry, or `0` for an empty log.
+fn last_recorded_of(conn: &Connection) -> Result<u64, JournalError> {
+    let millis: Option<i64> = conn.query_row("SELECT MAX(recorded_at_millis) FROM entries", [], |row| row.get(0))?;
+    millis.map_or(Ok(0), from_sqlite_i64)
+}
+
 pub fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
     let seq: Option<i64> = conn.query_row("SELECT MAX(seq) FROM entries", [], |row| row.get(0))?;
     match seq {
@@ -806,6 +852,14 @@ pub enum JournalError {
     },
     /// [`Storage::encode_storage`] refused a value staged into an artifact batch.
     Encode(StorageError),
+    /// The clock read more than a day before the latest recorded entry when
+    /// the journal opened (ADR-0245).
+    ClockBehind {
+        /// The clock's reading at open.
+        wall_millis: u64,
+        /// The latest `recorded_at_millis` in the log.
+        last_recorded_millis: u64,
+    },
     /// A file-system operation on the journal root failed.
     Io {
         /// The path the operation touched.
@@ -840,6 +894,11 @@ impl fmt::Display for JournalError {
                 write!(f, "streamed blob payload is {actual_bytes} bytes, opened as {expected_bytes}")
             }
             Self::Encode(error) => write!(f, "failed to encode staged artifact: {error}"),
+            Self::ClockBehind { wall_millis, last_recorded_millis } => write!(
+                f,
+                "the clock reads {wall_millis}, more than a day before the latest recorded entry at \
+                 {last_recorded_millis} (unix milliseconds)"
+            ),
             Self::Io { path, error } => write!(f, "journal root i/o at {}: {error}", path.display()),
         }
     }
@@ -860,7 +919,8 @@ impl Error for JournalError {
             | Self::NotADirectory { .. }
             | Self::Locked { .. }
             | Self::MissingBlob(_)
-            | Self::BlobLength { .. } => None,
+            | Self::BlobLength { .. }
+            | Self::ClockBehind { .. } => None,
         }
     }
 }
