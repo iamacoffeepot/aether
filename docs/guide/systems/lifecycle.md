@@ -189,7 +189,7 @@ the graph does not declare is `{"Err": {"Stage": {"stage": …, "error": …}}}`
 Then handle each stage as its kind, like any other mail:
 
 ```rust
-#[handler::single]
+#[handler::event]
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
 

@@ -383,7 +383,7 @@ mod tests {
             Ok(Self::default())
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, req: Ping) -> Pong {
             self.pings += 1;
             Pong { seq: req.seq }
@@ -399,7 +399,7 @@ mod tests {
             }
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_emit(&mut self, ctx: &mut NativeCtx<'_>, _e: EmitReq) {
             // A non-reply peer send: buffered here, flushed at ctx drop
             // through the binding's outbound burst → the pool `WakeSink`,
@@ -407,26 +407,24 @@ mod tests {
             ctx.send::<Peer>(&Poke { note: 7 });
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _h: HoldReq) -> Pending<Pong> {
             let (pending, held) = ctx.hold::<Pong>();
             self.held = Some(held);
             pending
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_park(&mut self, ctx: &mut NativeCtx<'_>, park: Park) -> Pending<Pong> {
             let (pending, held) = ctx.hold::<Pong>();
             self.parked.push(ctx.send_with_context::<Peer>(&Poke { note: park.seq }, Stash { held }));
             pending
         }
 
-        #[handler::single]
-        fn on_unstash(&mut self, ctx: &mut NativeCtx<'_>, unstash: Unstash) {
-            if let Some(Stash { held }) = ctx.take_context::<Stash>() {
-                held.answer(ctx, &Pong { seq: unstash.seq });
-                self.unstashed += 1;
-            }
+        #[handler::response]
+        fn on_unstash(&mut self, ctx: &mut NativeCtx<'_>, unstash: Unstash, Stash { held }: Stash) {
+            held.answer(ctx, &Pong { seq: unstash.seq });
+            self.unstashed += 1;
         }
 
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {

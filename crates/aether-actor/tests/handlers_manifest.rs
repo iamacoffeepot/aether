@@ -92,13 +92,13 @@ impl WasmActor for ManifestProbe {
 
     /// # Agent
     /// Increments the tick counter.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 
     // ADR-0109: a `-> R` handler — the return type is the reply
     // contract, so the macro auto-replies `Pong` and threads its kind id
     // onto this handler's inputs-manifest record.
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }
@@ -147,7 +147,7 @@ struct SetUnchecked {
 
 #[handler_set]
 trait ContractSet {
-    #[handler::single]
+    #[handler::tell]
     fn on_set_silent(&mut self, _ctx: &mut WasmCtx<'_>, _mail: SetSilent) {}
 
     #[handler::unchecked(reason = "test: a handler set carries an unchecked row's reason")]
@@ -166,13 +166,13 @@ impl WasmActor for ContractProbe {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     #[cfg(test)]
     fn on_present(&mut self, _ctx: &mut WasmCtx<'_>, present: Present) -> Pong {
         Pong { seq: present.seq }
     }
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(not(test))]
     fn on_stripped(&mut self, _ctx: &mut WasmCtx<'_>, _stripped: Stripped) {}
 }
@@ -187,7 +187,7 @@ impl WasmActor for DependentProbe {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 }
 

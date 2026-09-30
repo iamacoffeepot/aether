@@ -117,7 +117,7 @@ region), and the receiver's handler casts the mail's sender to the protocol it
 will send and keeps the result (`crates/aether-widget/src/editor.rs`):
 
 ```rust
-#[handler::single]
+#[handler::tell]
 fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
     let Some(reference) = ctx.sender() else {
         tracing::warn!(/* … */ "region attach arrived with no sender; ignoring");

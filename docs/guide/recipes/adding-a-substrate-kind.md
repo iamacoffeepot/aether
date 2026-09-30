@@ -116,7 +116,7 @@ master vector to edit. The live engine's registry and inventory expose it.
 ## 4. Add a handler class deliberately
 
 ```rust
-#[handler::single]
+#[handler::request]
 fn on_get_text(
     state: &mut Self::State,
     _ctx: &mut NativeCtx<'_>,
@@ -131,14 +131,14 @@ fn on_get_text(
 
 Use:
 
-- `single` for zero-or-one typed return;
+- `request` for a typed return, and `tell`, `event`, or `response` for none;
 - a single reply whose kind carries a list for a bounded repeated result;
 - `unchecked(reason = "…")` only when reply timing/type cannot be expressed as
   a return, with the reason saying which;
 - `task` completion for sanctioned off-thread work.
 
 Do not copy an old low-level `send_reply` signature. Returning the reply from a
-single handler preserves correlation and keeps handler inventory accurate.
+`request` handler preserves correlation and keeps handler inventory accurate.
 
 If several chassis claim the same namespace, add the contract everywhere. An
 unsupported backend should return the ordinary error reply rather than accept

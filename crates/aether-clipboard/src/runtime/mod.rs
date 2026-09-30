@@ -83,7 +83,7 @@ impl NativeActor for ClipboardCapability {
         Ok(ClipboardCapabilityState { backend })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_get_text(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
@@ -95,7 +95,7 @@ impl NativeActor for ClipboardCapability {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_set_text(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

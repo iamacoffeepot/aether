@@ -36,7 +36,7 @@ impl WasmActor for SourceForwarder {
     /// Forward `SourceQuery` to the declared observer. The handler spells its
     /// actor type because `actor_ref` is bounded `A: DependsOn<R>` and so does
     /// not exist on the erased ctx.
-    #[handler::single]
+    #[handler::tell]
     fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_, SourceForwarder>, _msg: SendSourceQuery) {
         let observer = ctx.actor_ref::<SourceObserver>();
         ctx.send_to(observer, &SourceQuery);
@@ -46,7 +46,7 @@ impl WasmActor for SourceForwarder {
     /// to the origin the host stamped on the query, the one the observer's
     /// `ctx.sender()` read, so the arrival here shows that origin was this
     /// forwarder.
-    #[handler::single]
+    #[handler::response]
     fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, report: SourceReport) {
         tracing::info!(target: "test.source_forwarder", "source_report_received had_sender={}", report.had_sender);
     }

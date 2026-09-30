@@ -7,6 +7,6 @@ struct RuntimeState;
 impl NativeActor for RuntimeState {
     const NAMESPACE: &'static str = "test.struct_nested_cap";
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(state: &mut Self::State, ctx: &mut Ctx, mail: Ping) {}
 }

@@ -91,14 +91,14 @@ impl NativeActor for MacroProbeCap {
     }
 
     /// Handles structured-shape `Greet` mail.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) {
         self.greet_total.fetch_add(mail.tag, AtomicOrdering::SeqCst);
         let _ = self.greeted.send(());
     }
 
     /// Handles cast-shape `Ping` mail.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ping(&self, _ctx: &mut NativeCtx<'_>, mail: Ping) {
         self.ping_total.fetch_add(mail.seq, AtomicOrdering::SeqCst);
     }
@@ -499,7 +499,7 @@ impl NativeActor for TaskRouteCap {
 
     /// Dispatch a worker that produces a `ResultA`. The completion routes
     /// to `on_result_a` by output type.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_kick_a(&self, ctx: &mut NativeCtx<'_>, mail: KickA) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -511,7 +511,7 @@ impl NativeActor for TaskRouteCap {
     }
 
     /// Dispatch a worker that produces a `ResultB`.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_kick_b(&self, ctx: &mut NativeCtx<'_>, mail: KickB) {
         self.obs.dispatched.fetch_add(1, AtomicOrdering::SeqCst);
         let seed = mail.seed;
@@ -613,18 +613,18 @@ impl NativeActor for CfgGatedCap {
         Ok(Self { seen: AtomicU32::new(0) })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_kept(&self, _ctx: &mut NativeCtx<'_>, mail: CfgKept) {
         self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     #[cfg(test)]
     fn on_present(&self, _ctx: &mut NativeCtx<'_>, mail: CfgPresent) {
         self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     #[cfg(not(test))]
     fn on_stripped(&self, _ctx: &mut NativeCtx<'_>, mail: CfgStripped) {
         self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
@@ -701,18 +701,18 @@ struct SetCfgStripped {
 trait CfgGatedSet {
     fn seen(&self) -> &AtomicU32;
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_set_kept(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgKept) {
         self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     #[cfg(test)]
     fn on_set_present(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgPresent) {
         self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     #[cfg(not(test))]
     fn on_set_stripped(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgStripped) {
         self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
@@ -852,7 +852,7 @@ impl NativeActor for ReplyMacroCap {
     /// captures from the return type. Stateless: the link-time
     /// `HandlerEntry` (not handler behaviour) is what this cap exists to
     /// exercise.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
         Pong { echoed: mail.tag }
     }
@@ -871,7 +871,7 @@ impl NativeActor for InstancedChildCap {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
 
@@ -972,7 +972,7 @@ impl NativeActor for TypedWireCap {
         let _ = ctx.actor_ref::<MacroProbeCap>();
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Ping) {
         let _ = self;
     }
@@ -1030,7 +1030,7 @@ impl NativeActor for OmittedCtxCap {
         let _ = ctx.actor_ref::<MacroProbeCap>();
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ping(&mut self, ctx: &mut NativeCtx<'_>, _mail: Ping) {
         let _ = self;
         ctx.send_detached::<MacroProbeCap>(&Greet { tag: 19 });
@@ -1120,7 +1120,7 @@ impl NativeActor for InstancedRootCap {
 
     /// Present only so the identity carries a handler like any other cap; the
     /// link-time placement facts are what this fixture exists to exercise.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
 
@@ -1254,7 +1254,7 @@ impl NativeActor for DeferredReplyCap {
     /// Reply path: `-> Pending<EchoReply>` declares the deferred reply
     /// kind on the request signature and arms an `EchoReply` worker; the
     /// macro sends nothing now.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
         let seed = mail.seed;
         ctx.dispatch_blocking(move || EchoReply { value: seed })
@@ -1262,7 +1262,7 @@ impl NativeActor for DeferredReplyCap {
 
     /// Worker-panic path: the worker panics with a probe naming the seed,
     /// so no `EchoReply` output ever lands.
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_kick_panic(&self, ctx: &mut NativeCtx<'_>, mail: KickPanic) -> Pending<EchoReply> {
         let seed = mail.seed;
         ctx.dispatch_blocking(move || -> EchoReply { panic!("worker probe panic {seed}") })
@@ -1278,7 +1278,7 @@ impl NativeActor for DeferredReplyCap {
 
     /// No-reply path: returns `()`, so it dispatches via
     /// `dispatch_blocking_with` (no `Pending<R>` contract to declare).
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_kick_s(&self, ctx: &mut NativeCtx<'_>, mail: KickS) {
         let seed = mail.seed;
         ctx.dispatch_blocking_with((), move || Silent { value: seed });

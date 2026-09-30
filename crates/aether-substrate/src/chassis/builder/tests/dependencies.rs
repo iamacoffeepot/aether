@@ -33,7 +33,7 @@ impl NativeActor for AudioDep {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -50,7 +50,7 @@ impl NativeActor for VideoDep {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -67,7 +67,7 @@ impl NativeActor for PairDependent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -87,7 +87,7 @@ impl NativeActor for LonelyDependent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -151,7 +151,7 @@ impl NativeActor for OrderedDependent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -168,7 +168,7 @@ impl NativeActor for SpawnedDependent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }
@@ -185,7 +185,7 @@ impl NativeActor for PumpedDependent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
     }

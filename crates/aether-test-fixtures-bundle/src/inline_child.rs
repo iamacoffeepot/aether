@@ -126,7 +126,7 @@ impl WasmActor for InlineParent {
 
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
     /// the parent marker — the membrane's own-id (control) path.
-    #[handler::single]
+    #[handler::request]
     fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
         InlineEcho { who: INLINE_WHO_PARENT }
     }
@@ -147,7 +147,7 @@ impl WasmActor for InlineChild {
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
-    #[handler::single]
+    #[handler::request]
     fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
         InlineEcho { who: INLINE_WHO_CHILD }
     }
@@ -218,14 +218,14 @@ impl WasmActor for InlineStatefulChild {
 
     /// Increment the child's in-memory counter (mail demuxed to the
     /// child's alias).
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }
@@ -266,7 +266,7 @@ impl WasmActor for InlineDespawnParent {
     /// alias route is retired with it (#4228), so a later probe to the dead
     /// alias settles as mail to a retired address rather than falling through
     /// to this parent — and either way never leaks.
-    #[handler::single]
+    #[handler::tell]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
             let _ = ctx.despawn_inline_child(child);
@@ -279,7 +279,7 @@ impl WasmActor for InlineDespawnParent {
     /// rides the trigger's chain. Once that key's child was despawned, its
     /// name is spent (ADR-0241 §8): the host allocates no alias and the spawn
     /// fails before a child is built.
-    #[handler::single]
+    #[handler::request]
     fn on_respawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: RespawnChild) -> RespawnResult {
         match ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("respawn"), &()) {
             Ok(child) => {
@@ -294,7 +294,7 @@ impl WasmActor for InlineDespawnParent {
     /// the parent marker — the membrane's own-id (control) path. It is what
     /// shows the parent still live and answering after a teardown, so the
     /// dead alias's silence reads as the retirement rather than a dead host.
-    #[handler::single]
+    #[handler::request]
     fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
         InlineEcho { who: INLINE_WHO_PARENT }
     }
@@ -316,7 +316,7 @@ impl WasmActor for InlineDespawnChild {
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
-    #[handler::single]
+    #[handler::request]
     fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, _probe: InlineProbe) -> InlineEcho {
         InlineEcho { who: INLINE_WHO_CHILD }
     }
@@ -393,14 +393,14 @@ impl WasmActor for InlineConfiguredChild {
 
     /// Increment the child's in-memory counter (mail demuxed to the
     /// child's alias).
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }
@@ -444,7 +444,7 @@ impl WasmActor for NestedLineageChild {
         let _ = ctx.spawn_inline_child::<NestedLineageChild, NestedLineageLeaf>(Subname::Named("leaf"), &());
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: DespawnChild) {
         if let Some(leaf) = ctx.child_as::<NestedLineageLeaf>("leaf") {
             let _ = ctx.despawn_inline_child(leaf.erase());
@@ -475,12 +475,12 @@ impl WasmActor for NestedLineageLeaf {
         self.count = state.count;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }
@@ -548,7 +548,7 @@ impl WasmActor for InlineTagParent {
 
     /// Report the accepted tag spawn and all three rejected selections
     /// over the wire.
-    #[handler::single]
+    #[handler::request]
     fn on_tag_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: TagSpawnQuery) -> TagSpawnReport {
         TagSpawnReport {
             tag_spawned: self.child.is_some(),

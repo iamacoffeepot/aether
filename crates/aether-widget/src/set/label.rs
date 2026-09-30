@@ -207,7 +207,7 @@ impl WasmActor for LabelWidget {
 
     /// Change the text / role / alignment / theme in place from a re-sent
     /// config, and request metrics for the new theme font.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: LabelConfig) {
         self.text = config.text;
         self.role = config.role;
@@ -221,13 +221,13 @@ impl WasmActor for LabelWidget {
     }
 
     /// Update external availability without changing the label or theme.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         apply_static_control_state(ctx, &mut self.state, set.state);
     }
 
     /// Restyle: adopt the fanned theme and request metrics for its font.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.font_metrics.set_desired(set.theme.font_id);
         self.theme = set.theme;
@@ -235,26 +235,26 @@ impl WasmActor for LabelWidget {
     }
 
     /// Cache the layout rect the root assigned.
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
     }
 
     /// The pointer entered the label: an overflowing run now reveals itself.
-    #[handler::single]
+    #[handler::tell]
     fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
         self.state.set_hovered(true);
     }
 
     /// The pointer left: the reveal goes away with it.
-    #[handler::single]
+    #[handler::tell]
     fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
         self.state.set_hovered(false);
     }
 
     /// Install a font-metrics reply and pump any deferred newer request. A
     /// stale reply (its font is no longer the desired one) is dropped.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -274,7 +274,7 @@ impl WasmActor for LabelWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;

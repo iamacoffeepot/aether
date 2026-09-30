@@ -1449,7 +1449,7 @@ impl WasmActor for Widget {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.drive_frame(ctx);
     }
@@ -1461,7 +1461,7 @@ impl WasmActor for Widget {
     /// # Agent
     /// Sent by a compositing parent each frame; not useful to send
     /// manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         self.drive_frame(ctx);
     }
@@ -1473,7 +1473,7 @@ impl WasmActor for Widget {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);

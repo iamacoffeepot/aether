@@ -32,7 +32,7 @@ impl WasmActor for Trunk {
         Ok(Trunk { bumps: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         if self.bumps == 0 {
             let _ = ctx.spawn_inline_child::<Trunk, Branch>(Subname::Named("branch"), &());
@@ -58,7 +58,7 @@ impl WasmActor for Branch {
         let _ = ctx.spawn_inline_child::<Branch, Leaf>(Subname::Named("leaf"), &());
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
     }
@@ -77,7 +77,7 @@ impl WasmActor for Leaf {
         Ok(Leaf { bumps: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
     }
@@ -96,7 +96,7 @@ impl WasmActor for Host {
         Ok(Host { bumps: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
     }
@@ -115,7 +115,7 @@ impl WasmActor for Placed {
         Ok(Placed { bumps: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
     }

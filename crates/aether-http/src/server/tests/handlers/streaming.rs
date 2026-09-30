@@ -55,7 +55,7 @@ impl NativeActor for StreamHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
         state.next_index = 0;
         state.ended = false;
@@ -70,7 +70,7 @@ impl NativeActor for StreamHttpHandler {
     /// Addressed through the ADR-0133 [`ResponseStream`] handle — the
     /// data phase goes to whichever dispatch shard granted the credit,
     /// never to the supervisor by type (ADR-0135).
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
         let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
             return;
@@ -116,7 +116,7 @@ impl NativeActor for StreamIdEchoHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
         state.emitted = false;
         HttpRouterResult::Stream(HttpResponseStreamOpen {
@@ -125,7 +125,7 @@ impl NativeActor for StreamIdEchoHandler {
         })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
         let Some(sink) = ctx.sender().and_then(|sender| ctx.cast::<ResponseSink>(sender)) else {
             return;
@@ -171,12 +171,12 @@ impl NativeActor for FloodHttpHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Stream(HttpResponseStreamOpen { status: 200, headers: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
         if state.flooded {
             return;
@@ -232,7 +232,7 @@ impl NativeActor for StreamingUploadHandler {
     /// A route holder covers `HttpRouter`, so this handler takes the
     /// buffered request too. The cap streams every body to it except a
     /// websocket upgrade's, which it declines.
-    #[handler::single]
+    #[handler::request]
     fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) -> HttpRouterResult {
         HttpRouterResult::Response(HttpServerResponse {
             status: 400,
@@ -241,7 +241,7 @@ impl NativeActor for StreamingUploadHandler {
         })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_>, open: HttpRequestStreamOpen) {
         state.received = 0;
         state.stream = ctx
@@ -252,7 +252,7 @@ impl NativeActor for StreamingUploadHandler {
 
     /// Count the piece and grant one credit back so the cap delivers the
     /// next — the inbound mirror of [`StreamHttpHandler::on_credit`].
-    #[handler::single]
+    #[handler::tell]
     fn on_chunk(state: &mut Self::State, ctx: &mut NativeCtx<'_>, chunk: HttpRequestChunk) {
         state.received += chunk.body.len();
         if let Some(stream) = &state.stream {
@@ -260,7 +260,7 @@ impl NativeActor for StreamingUploadHandler {
         }
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_stream_end(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,

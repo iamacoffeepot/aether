@@ -128,7 +128,7 @@ impl NativeActor for TmpRouteHandler {
     }
 
     /// Hold the reply and release `/tmp`; the release's confirmation answers.
-    #[handler::single]
+    #[handler::request]
     fn on_request(
         _state: &mut TmpRouteHandlerState,
         ctx: &mut NativeCtx<'_>,
@@ -144,11 +144,13 @@ impl NativeActor for TmpRouteHandler {
 
     /// Answer the held request once the server confirms the release. A result
     /// with no release context answers the `wire` registration and is ignored.
-    #[handler::single]
-    fn on_route_result(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>, result: RegisterRouteResult) {
-        let Some(ReleaseContext { held }) = ctx.take_context::<ReleaseContext>() else {
-            return;
-        };
+    #[handler::response]
+    fn on_route_result(
+        _state: &mut TmpRouteHandlerState,
+        ctx: &mut NativeCtx<'_>,
+        result: RegisterRouteResult,
+        ReleaseContext { held }: ReleaseContext,
+    ) {
         let response = match result {
             RegisterRouteResult::Ok => HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() },
             RegisterRouteResult::Err(error) => {

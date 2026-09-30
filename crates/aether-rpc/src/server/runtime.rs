@@ -753,7 +753,7 @@ impl NativeActor for RpcServerCapability {
     /// The accept / reader sidecars fire this to wake the
     /// dispatcher; the handler drains the mpsc and dispatches per
     /// item.
-    #[handler::single]
+    #[handler::tell]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>, _mail: RpcInboundReady) {
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
@@ -837,7 +837,7 @@ impl NativeActor for RpcServerCapability {
     /// Internal — fires from `SettlementRegistry::fire_settled`,
     /// not from external mail. Subscribers parked in the registry
     /// receive one of these per settled root.
-    #[handler::single]
+    #[handler::event]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
         let Some(entry) = state.take_in_flight(correlation) else {
@@ -860,7 +860,7 @@ impl NativeActor for RpcServerCapability {
     /// settles, so sibling replies under a traced call still stream; a
     /// forwarded call has no local chain to wait on, so it closes at once.
     /// A notice for no in-flight call, or with no sender, changes nothing.
-    #[handler::single]
+    #[handler::tell]
     fn on_decode_refused(state: &mut Self::State, ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
         let (Some(request), Some(refuser)) = (ctx.in_reply_to(), ctx.sender()) else {
             return;
@@ -893,7 +893,7 @@ impl NativeActor for RpcServerCapability {
     /// published manual [`ForwardEnvelope`] row covers [`EngineRoute`]. A
     /// refusal creates no monitor and changes neither route map.
     /// Reply: `RegisterEngineRouteResult`.
-    #[handler::single]
+    #[handler::request]
     fn on_register_engine_route(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -915,7 +915,7 @@ impl NativeActor for RpcServerCapability {
     /// retires: the owner row, its engine's route, and each call still in
     /// flight at it, which closes with `ReplyEnd` `Err`. A notice with no
     /// sender, or from an actor that holds no route, changes nothing.
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
         let Some(departed) = ctx.sender() else {
             return;

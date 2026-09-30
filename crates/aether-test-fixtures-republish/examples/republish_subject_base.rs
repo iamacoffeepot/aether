@@ -30,13 +30,13 @@ impl WasmActor for Subject {
         self.count = count;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
         ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: u64::from(self.count) });
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }

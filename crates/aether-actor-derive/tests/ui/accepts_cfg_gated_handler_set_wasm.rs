@@ -103,18 +103,18 @@ struct Local {
 trait Shared {
     fn seen(&mut self) -> &mut u32;
 
-    #[handler::single]
+    #[handler::tell]
     fn on_always(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, always: Always) {
         *self.seen() += always.seq;
     }
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(test)]
     fn on_test_only(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, test_only: TestOnly) {
         *self.seen() += test_only.seq;
     }
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(not(test))]
     fn on_not_test(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, not_test: NotTest) {
         *self.seen() += not_test.seq;
@@ -128,12 +128,12 @@ trait Shared {
 trait Surviving {
     fn seen(&mut self) -> &mut u32;
 
-    #[handler::single]
+    #[handler::tell]
     fn on_always(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, always: Always) {
         *self.seen() += always.seq;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_not_test(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, not_test: NotTest) {
         *self.seen() += not_test.seq;
     }
@@ -147,7 +147,7 @@ trait Surviving {
 trait AllStripped {
     fn seen(&mut self) -> &mut u32;
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(test)]
     fn on_test_only(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, test_only: TestOnly) {
         *self.seen() += test_only.seq;
@@ -193,7 +193,7 @@ impl aether_actor::WasmActor for Adopter {
         Ok(Adopter { seen: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_local(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, local: Local) {
         self.seen = local.seq;
     }

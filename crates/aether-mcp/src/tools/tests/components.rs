@@ -66,25 +66,25 @@ impl NativeActor for FleetLocalSink {
         Ok(Self { cells })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_upload_binary(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         self.cells.binary.lock().expect("binary log mutex").push(mail);
         self.cells.binary_reply.lock().expect("binary reply mutex").clone()
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_upload_component(&mut self, _ctx: &mut NativeCtx<'_>, mail: UploadComponent) -> UploadComponentResult {
         self.cells.component.lock().expect("component log mutex").push(mail);
         self.cells.component_reply.lock().expect("component reply mutex").clone()
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_set_artifact_pinned(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetArtifactPinned) -> SetArtifactPinnedResult {
         self.cells.pins.lock().expect("pin log mutex").push(mail);
         self.cells.pin_reply.lock().expect("pin reply mutex").clone()
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_resolve_component(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ResolveComponent) -> ResolveComponentResult {
         self.cells.resolve_reply.lock().expect("resolve reply mutex").clone()
     }

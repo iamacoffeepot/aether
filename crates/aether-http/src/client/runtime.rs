@@ -115,7 +115,7 @@ impl NativeActor for HttpCapability {
     /// ceiling — a slow remote occupies one worker slot for its own sender
     /// instead of stalling the cap's dispatch thread. Over budget, the fetch
     /// queues (holding its chain) and dispatches when a slot frees.
-    #[handler::single]
+    #[handler::request]
     fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Fetch) -> Pending<FetchResult> {
         let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| Duration::from_millis(u64::from(ms)));
         let request_id = mail.request_id;

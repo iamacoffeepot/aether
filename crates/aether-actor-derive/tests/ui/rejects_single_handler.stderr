@@ -1,0 +1,11 @@
+error: `#[handler::single]` is retired: write `#[handler::request]` (returns `O` or `Pending<O>`), `#[handler::tell]`, `#[handler::event]` (arrives through a subscription), or `#[handler::response]` (answers this actor's own request; optional `context: C` / `Option<C>` fourth parameter)
+  --> tests/ui/rejects_single_handler.rs:30:5
+   |
+30 |     #[handler::single]
+   |     ^^^^^^^^^^^^^^^^^^
+
+error: `#[handler::single]` is retired: write `#[handler::request]` (returns `O` or `Pending<O>`), `#[handler::tell]`, `#[handler::event]` (arrives through a subscription), or `#[handler::response]` (answers this actor's own request; optional `context: C` / `Option<C>` fourth parameter)
+  --> tests/ui/rejects_single_handler.rs:50:5
+   |
+50 |     #[handler::single]
+   |     ^^^^^^^^^^^^^^^^^^

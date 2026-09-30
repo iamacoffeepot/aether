@@ -185,7 +185,7 @@ impl NativeActor for WasmTrampoline {
     /// to `Dropped`, and sends each watcher of the mailbox and of its
     /// inline-child aliases a `MonitorNotice`. A later load of the name is
     /// refused as retired, and nothing refills it.
-    #[handler::single]
+    #[handler::request]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
         state.release_guest(ctx);
         ctx.shutdown();
@@ -205,7 +205,7 @@ impl NativeActor for WasmTrampoline {
     /// delivery by its sender. It needs no such check: it answers only the
     /// mail's own reply target, so a delivery from anyone else reaches only
     /// the actor that sent it.
-    #[handler::single]
+    #[handler::request]
     fn on_load_delivered(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LoadDelivered) -> LoadResult {
         let LoadDelivered { path, capabilities } = payload;
         LoadResult::Ok { path, capabilities }
@@ -217,7 +217,7 @@ impl NativeActor for WasmTrampoline {
     /// just stood it up. The host hands its held spawn reply here the way it
     /// hands a load's to [`Self::on_load_delivered`], which answers only the
     /// mail's own reply target in the same way.
-    #[handler::single]
+    #[handler::request]
     fn on_spawn_delivered(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: SpawnDelivered) -> SpawnResult {
         let SpawnDelivered { path, capabilities, live } = payload;
         if live {
@@ -232,7 +232,7 @@ impl NativeActor for WasmTrampoline {
     /// guest waits at its inbox gate and nothing the candidate sends leaves.
     /// A refusal leaves the running guest in place, wired again if its hooks
     /// had run.
-    #[handler::single]
+    #[handler::request]
     fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
         let Prepare { code, config } = payload;
         let candidate =
@@ -250,7 +250,7 @@ impl NativeActor for WasmTrampoline {
     /// this commit's chain, and the mail the gate queued is delivered to it
     /// in order. A commit with nothing prepared is a host bug and aborts the
     /// substrate.
-    #[handler::single]
+    #[handler::request]
     fn on_commit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Commit) -> Committed {
         state.commit(ctx);
         Committed
@@ -259,7 +259,7 @@ impl NativeActor for WasmTrampoline {
     /// Discard the prepared candidate and its held mail, and reinstate the
     /// running guest, wired again, with the mail the gate queued (ADR-0241
     /// §7). With nothing prepared it answers at once.
-    #[handler::single]
+    #[handler::request]
     fn on_abort(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Abort) -> Aborted {
         state.abort(ctx);
         Aborted

@@ -516,7 +516,7 @@ impl WasmActor for MenuBarWidget {
     /// Replace the menus / theme in place from a re-sent config. An open menu
     /// closes, so the root gives up its pointer grab rather than holding it
     /// for a plate the new config may not describe.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: MenuBarConfig) {
         let closed = self.dismiss();
         self.menus = config.menus;
@@ -533,7 +533,7 @@ impl WasmActor for MenuBarWidget {
 
     /// Update external availability; a bar whose commands can no longer be
     /// reached closes its menu.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -547,7 +547,7 @@ impl WasmActor for MenuBarWidget {
 
     /// Install a font-metrics reply; the next `Collect` lays the titles out
     /// against their real widths.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -555,7 +555,7 @@ impl WasmActor for MenuBarWidget {
     /// While a menu is open every left press is the bar's: on an item it
     /// activates, anywhere else it closes. While closed a press on a title
     /// arms it for its matching release.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT {
             return;
@@ -568,7 +568,7 @@ impl WasmActor for MenuBarWidget {
     }
 
     /// A left release back inside the armed title opens its menu.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT {
             return;
@@ -584,7 +584,7 @@ impl WasmActor for MenuBarWidget {
     /// also switches menus and moves the highlight. The root forwards every
     /// move to the grabbed child, so this tracks the pointer over the plate
     /// rows that lie outside the bar's own slot.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if !self.state.is_available() {
             return;
@@ -603,7 +603,7 @@ impl WasmActor for MenuBarWidget {
     /// Up/Down walk the enabled items, and Enter activates the highlighted
     /// one. The bar opens by pointer only — a menu is a place to look, not a
     /// control the keyboard falls into.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         match key.code {
             KEY_ESCAPE => self.dismiss().emit(ctx),
@@ -626,7 +626,7 @@ impl WasmActor for MenuBarWidget {
     /// # Agent
     /// Send to a bar whose open menu must go away because something else took
     /// the screen.
-    #[handler::single]
+    #[handler::tell]
     fn on_dismiss(&mut self, ctx: &mut WasmCtx<'_>, _dismiss: WidgetDismiss) {
         self.dismiss().emit(ctx);
     }
@@ -637,7 +637,7 @@ impl WasmActor for MenuBarWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || {
             WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()).with_overlay(self.overlay_items())

@@ -235,7 +235,7 @@ impl NativeActor for HttpServerCapability {
     /// Internal wake mail — not part of the cap's external surface. The
     /// accept sidecar fires this; the handler drains the mpsc and assigns
     /// per item.
-    #[handler::single]
+    #[handler::tell]
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         // One deterministic child per handler turn keeps each birth in its
@@ -316,7 +316,7 @@ impl NativeActor for HttpServerCapability {
     /// form — an MCP session or test names the handler by its canonical
     /// path. An in-process actor registering itself sends
     /// `register_route_self` instead.
-    #[handler::single]
+    #[handler::request]
     fn on_register_route(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -350,7 +350,7 @@ impl NativeActor for HttpServerCapability {
     /// from a component's `wire` hook. An external session or remote
     /// engine has no local mailbox and gets an `Err` reply — use
     /// `register_route` with an explicit handler path instead.
-    #[handler::single]
+    #[handler::request]
     fn on_register_route_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -392,7 +392,7 @@ impl NativeActor for HttpServerCapability {
     /// # Agent
     /// `UnregisterRoute { prefix, method, handler }`. The path may be short;
     /// `resolve_path` expands it.
-    #[handler::single]
+    #[handler::request]
     fn on_unregister_route(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -413,7 +413,7 @@ impl NativeActor for HttpServerCapability {
     ///
     /// # Agent
     /// `UnregisterRouteSelf { prefix, method }`.
-    #[handler::single]
+    #[handler::request]
     fn on_unregister_route_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
@@ -444,7 +444,7 @@ impl NativeActor for HttpServerCapability {
     /// `ctx.sender()` is the same proven reference the monitor map and the
     /// route table's reverse index are keyed by (ADR-0230): both removals
     /// are keyed lookups, and only the holder's own routes are touched.
-    #[handler::single]
+    #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
         let Some(departed) = ctx.sender() else {
             return;

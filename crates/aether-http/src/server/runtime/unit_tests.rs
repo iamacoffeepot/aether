@@ -783,7 +783,7 @@ mod wake_coalescing {
             Ok(Self { wakes: 0 })
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_wake(&mut self, _ctx: &mut NativeCtx<'_>, _wake: HttpInboundReady) {
             self.wakes += 1;
         }

@@ -113,7 +113,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `ReadResult`. Echoes the address on both arms.
-    #[handler::single]
+    #[handler::request]
     fn on_read(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
         let bytes = state.adapter(&mail.addr).and_then(|adapter| adapter.read(&mail.addr.path));
 
@@ -126,7 +126,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `WriteResult`. Echoes the address (NOT bytes).
-    #[handler::single]
+    #[handler::request]
     fn on_write(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Write) -> WriteResult {
         let written = state.adapter(&mail.addr).and_then(|adapter| adapter.write(&mail.addr.path, &mail.bytes));
 
@@ -144,7 +144,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `CopyResult`. Echoes `from` + `to` (no bytes).
-    #[handler::single]
+    #[handler::request]
     fn on_copy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Copy) -> CopyResult {
         let copied = state
             .adapter(&mail.to)
@@ -157,7 +157,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `DeleteResult`. Echoes the address.
-    #[handler::single]
+    #[handler::request]
     fn on_delete(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Delete) -> DeleteResult {
         let deleted = state.adapter(&mail.addr).and_then(|adapter| adapter.delete(&mail.addr.path));
 
@@ -169,7 +169,7 @@ impl NativeActor for FsCapability {
     /// # Agent
     /// Reply: `ListResult`. Echoes the address, whose `path` is the
     /// listed prefix.
-    #[handler::single]
+    #[handler::request]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: List) -> ListResult {
         let entries = state.adapter(&mail.addr).and_then(|adapter| adapter.list(&mail.addr.path));
 
@@ -192,7 +192,7 @@ impl NativeActor for FsCapability {
     ///
     /// # Agent
     /// Reply: `FsFetchResult`. Echoes the address on both arms.
-    #[handler::single]
+    #[handler::request]
     fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
         let fetched = state.fetch(&mail.addr, &mail.transforms);
 

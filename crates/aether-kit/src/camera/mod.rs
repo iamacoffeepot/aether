@@ -312,7 +312,7 @@ impl WasmActor for CameraComponent {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {
         for cam in self.cameras.values_mut() {
             cam.mode.tick();
@@ -327,7 +327,7 @@ impl WasmActor for CameraComponent {
     ///
     /// # Agent
     /// Lifecycle-driven; not useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         if let Some(name) = &self.active
             && let Some(cam) = self.cameras.get(name)
@@ -340,7 +340,7 @@ impl WasmActor for CameraComponent {
     /// Reply to the sender with the active camera's world-space eye. The
     /// source-bound reply carries `None` when the active binding is absent or
     /// names a camera that is no longer live.
-    #[handler::single]
+    #[handler::request]
     fn on_eye(&mut self, _ctx: &mut WasmCtx<'_>, _request: CameraEyeRequest) -> CameraEyeResult {
         self.eye_result()
     }
@@ -351,7 +351,7 @@ impl WasmActor for CameraComponent {
     /// # Agent
     /// Publish-subscribe; the substrate pulses this every tick. Not
     /// useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
             self.aspect = size.width as f32 / size.height as f32;
@@ -362,7 +362,7 @@ impl WasmActor for CameraComponent {
     /// if `name` is already bound — use `set_mode` to swap an existing
     /// camera instead. Newly-created cameras are not made active
     /// automatically; pair with `set_active` to switch publishing.
-    #[handler::single]
+    #[handler::tell]
     fn on_create(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraCreate) {
         if self.cameras.contains_key(&msg.name) {
             tracing::warn!(
@@ -379,7 +379,7 @@ impl WasmActor for CameraComponent {
     /// camera doesn't exist. If the active camera is destroyed,
     /// publishing pauses (no `aether.view_projection` mail goes out) until
     /// `set_active` picks a survivor.
-    #[handler::single]
+    #[handler::tell]
     fn on_destroy(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraDestroy) {
         self.cameras.remove(&msg.name);
         if self.active.as_deref() == Some(msg.name.as_str()) {
@@ -390,7 +390,7 @@ impl WasmActor for CameraComponent {
     /// Promote `name` to be the camera whose `view_proj` publishes to
     /// `"aether.render"` each tick. Errors (warn-log, no state
     /// change) if `name` isn't bound.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_active(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetActive) {
         if self.cameras.contains_key(&msg.name) {
             self.active = Some(msg.name);
@@ -407,7 +407,7 @@ impl WasmActor for CameraComponent {
     /// discarded; the new mode is seeded from the supplied params plus
     /// per-mode compiled defaults. No-op (warn-log) if `name` isn't
     /// bound.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_mode(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetMode) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             cam.mode = ModeState::from_init(&msg.mode);
@@ -424,7 +424,7 @@ impl WasmActor for CameraComponent {
     /// field overwrites; `None` leaves the current value alone. No-op
     /// (warn-log) if the camera doesn't exist or is in a different
     /// mode.
-    #[handler::single]
+    #[handler::tell]
     fn on_orbit_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraOrbitSet) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             match &mut cam.mode {
@@ -448,7 +448,7 @@ impl WasmActor for CameraComponent {
     /// Apply topdown-mode field deltas to the named camera. Same
     /// semantics as `orbit.set` for the orthographic mode's `center`
     /// / `extent`.
-    #[handler::single]
+    #[handler::tell]
     fn on_topdown_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraTopdownSet) {
         if let Some(cam) = self.cameras.get_mut(&msg.name) {
             match &mut cam.mode {

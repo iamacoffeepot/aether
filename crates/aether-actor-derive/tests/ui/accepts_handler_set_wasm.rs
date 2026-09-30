@@ -59,12 +59,12 @@ struct Local {
 trait Shared {
     fn seen(&mut self) -> &mut u32;
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping) {
         *self.seen() += ping.seq;
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_pong(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, pong: Pong) {
         *self.seen() += pong.seq;
     }
@@ -96,7 +96,7 @@ impl aether_actor::WasmActor for Adopter {
         Ok(Adopter { seen: 0 })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_local(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, local: Local) {
         self.seen = local.seq;
     }

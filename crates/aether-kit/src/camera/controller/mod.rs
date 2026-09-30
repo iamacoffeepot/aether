@@ -163,19 +163,19 @@ impl WasmActor for CameraController {
         self.seed(ctx);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
         self.set_held(key.code, true);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, key: KeyRelease) {
         self.set_held(key.code, false);
     }
 
     /// Integrate the held keys one tick and, if anything moved, emit the
     /// changed-field delta to the target camera. Nothing held → no mail.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         let held = self.held;
         let camera = self.config.camera.clone();

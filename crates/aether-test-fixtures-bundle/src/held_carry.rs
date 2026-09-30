@@ -81,7 +81,7 @@ impl WasmActor for HeldRequester {
         self.replies = replies;
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunHeldRequest) {
         let request = HeldRequest { tag: run.tag };
         match run.target {
@@ -96,7 +96,7 @@ impl WasmActor for HeldRequester {
         self.sent.push(run.tag);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: HeldRequestResult) {
         if reply.tag == HELD_UNANSWERED_TAG {
             self.replies += 1;
@@ -112,7 +112,7 @@ impl WasmActor for HeldRequester {
         ctx.send::<SubstrateHarnessObserver>(&HeldReplyMatched);
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.replies }
     }
@@ -120,40 +120,28 @@ impl WasmActor for HeldRequester {
 
 /// Holds each request's reply in the context of a [`CarriedRequest`] to
 /// `ReplyHolder`, and answers when that request's result comes back.
-pub struct HeldRelay {
-    relayed: u32,
-}
+pub struct HeldRelay;
 
 #[actor(root, depends(ReplyHolder))]
 impl WasmActor for HeldRelay {
     const NAMESPACE: &'static str = "test.held.relay";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(HeldRelay { relayed: 0 })
+        Ok(HeldRelay)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         let _ = ctx.send_with_context::<ReplyHolder>(
             &CarriedRequest { tag: request.tag },
             HeldRelayContext { held, tag: request.tag },
         );
-        self.relayed += 1;
         pending
     }
 
-    #[handler::single]
-    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, result: CarriedRequestResult) {
-        let Some(context) = ctx.take_context::<HeldRelayContext>() else {
-            tracing::warn!(
-                target: "test.held.relay",
-                tag = result.tag,
-                relayed = self.relayed,
-                "carried result has no held relay context",
-            );
-            return;
-        };
+    #[handler::response]
+    fn on_result(&mut self, ctx: &mut WasmCtx<'_>, _result: CarriedRequestResult, context: HeldRelayContext) {
         context.held.answer(ctx, &HeldRequestResult { tag: context.tag });
     }
 }
@@ -172,14 +160,14 @@ impl WasmActor for HeldKeeper {
         Ok(HeldKeeper { kept: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         self.kept.push((held, request.tag));
         pending
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, _release: ReleaseHeld) {
         for (held, tag) in self.kept.drain(..) {
             held.answer(ctx, &HeldRequestResult { tag });
@@ -214,14 +202,14 @@ impl WasmActor for HeldForgetter {
         Ok(HeldForgetter { kept: Vec::new() })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
         self.kept.push((held, request.tag));
         pending
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, _release: ReleaseHeld) {
         for (held, tag) in self.kept.drain(..) {
             held.answer(ctx, &HeldRequestResult { tag });

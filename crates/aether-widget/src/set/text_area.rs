@@ -411,7 +411,7 @@ impl WasmActor for TextAreaWidget {
     /// seeds the buffer only at `init`, so the text, the caret, and the
     /// scrolled row window survive; only the window is re-reconciled, against
     /// the new row count. [`SetText`] replaces the contents.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextAreaConfig) {
         self.max_chars = config.max_chars;
         self.rows = config.rows;
@@ -422,21 +422,21 @@ impl WasmActor for TextAreaWidget {
         self.pump_font_metrics(ctx);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
 
     /// Replace the buffer from the host, then pull the row window back onto
     /// the caret. Silent — no [`TextCommitted`].
-    #[handler::single]
+    #[handler::tell]
     fn on_set_text(&mut self, _ctx: &mut WasmCtx<'_>, set: SetText) {
         self.edit.replace_value(set.text, set.keep_caret);
         self.preferred_x_pixels = None;
         self.reconcile_scroll();
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
         if !self.state.can_mutate() {
             return;
@@ -452,7 +452,7 @@ impl WasmActor for TextAreaWidget {
     /// reach the ends of the *line* the caret is on and word motion, Delete,
     /// and the Ctrl-or-Cmd clipboard chords work here exactly as in a field.
     /// A repeated press is another edit, never a suppressed repeat.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if !self.state.is_available() {
             return;
@@ -484,7 +484,7 @@ impl WasmActor for TextAreaWidget {
     }
 
     /// Settle an outstanding clipboard read into the buffer.
-    #[handler::single]
+    #[handler::response]
     fn on_get_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: GetClipboardTextResult) {
         let (policy, mutable) = (self.policy(), self.state.can_mutate());
         if accept_clipboard_paste(&mut self.paste_pending, &mut self.edit, policy, mutable, result) {
@@ -492,12 +492,12 @@ impl WasmActor for TextAreaWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_set_clipboard_text_result(&mut self, _ctx: &mut WasmCtx<'_>, result: SetClipboardTextResult) {
         report_clipboard_copy(&result);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
@@ -508,7 +508,7 @@ impl WasmActor for TextAreaWidget {
         self.reconcile_scroll();
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if !self.dragging || !self.state.is_available() {
             return;
@@ -518,17 +518,17 @@ impl WasmActor for TextAreaWidget {
         self.preferred_x_pixels = None;
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.dragging, false, release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         update_text_modifiers(&self.state, &mut self.modifiers, modifiers);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         if !self.state.can_mutate() {
             return;
@@ -541,12 +541,12 @@ impl WasmActor for TextAreaWidget {
         self.preferred_x_pixels = None;
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
     }

@@ -335,19 +335,19 @@ mod tests {
             Ok(Self::default())
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_hold(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldReq) -> Pending<Answer> {
             let (pending, held) = ctx.hold::<Answer>();
             self.held = Some(held);
             pending
         }
 
-        #[handler::single]
+        #[handler::tell]
         fn on_release(&mut self, ctx: &mut NativeCtx<'_>, release: Release) {
             self.held.take().expect("a hold is waiting").answer(ctx, &Answer { value: release.value });
         }
 
-        #[handler::single]
+        #[handler::request]
         fn on_hold_twice(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldTwice) -> Pending<Answer> {
             let (pending, first) = ctx.hold::<Answer>();
             self.held = Some(first);

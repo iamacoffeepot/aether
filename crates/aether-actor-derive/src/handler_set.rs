@@ -882,7 +882,7 @@ mod tests {
 
     fn ungated_handler() -> proc_macro2::TokenStream {
         quote! {
-            #[handler::single]
+            #[handler::tell]
             fn on_plain(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Plain) {
                 let _ = m;
             }
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn a_gated_handler_reaches_the_bridge_through_a_resolved_gate_pair() {
         let expanded = native_set(&quote! {
-            #[handler::single]
+            #[handler::request]
             #[cfg(feature = "extra")]
             fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) -> Reply {
                 let _ = m;
@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn several_cfgs_on_one_handler_conjoin_before_they_are_negated() {
         let expanded = native_set(&quote! {
-            #[handler::single]
+            #[handler::tell]
             #[cfg(unix)]
             #[cfg(feature = "extra")]
             fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
@@ -995,7 +995,7 @@ mod tests {
         let plain_then_gated = ungated_handler();
         let mixed = native_set(&quote! {
             #plain_then_gated
-            #[handler::single]
+            #[handler::tell]
             #[cfg(unix)]
             fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
                 let _ = m;

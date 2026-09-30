@@ -141,17 +141,17 @@ impl NativeActor for ReplySink {
         Ok(Self { cells })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
         *self.cells.list.lock().expect("test setup: list cell mutex poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
         *self.cells.spawn.lock().expect("test setup: spawn cell mutex poisoned") = Some(reply);
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
         *self.cells.terminate.lock().expect("test setup: terminate cell mutex poisoned") = Some(reply);
     }

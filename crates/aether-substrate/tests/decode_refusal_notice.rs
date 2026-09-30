@@ -79,7 +79,7 @@ impl NativeActor for Refuser {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
         let _ = self;
         panic!("a truncated probe never decodes");
@@ -107,7 +107,7 @@ impl NativeActor for NoticedAsker {
         state.me = cast_self(ctx, Self::NAMESPACE);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) {
         ctx.send_to(self.me.expect("the asker cast itself at wire"), &Forward);
     }
@@ -118,7 +118,7 @@ impl NativeActor for NoticedAsker {
         forward_truncated_probe(ctx);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_decode_refused(&mut self, ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
         self.notices.send((ctx.sender(), notice)).expect("notice receiver stays live");
     }
@@ -145,7 +145,7 @@ impl NativeActor for FallbackAsker {
         state.me = cast_self(ctx, Self::NAMESPACE);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, _ask: Ask) {
         ctx.send_to(self.me.expect("the asker cast itself at wire"), &Forward);
     }
@@ -224,7 +224,7 @@ impl NativeActor for Absent {
         Ok(Self)
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: Poke) {
         let _ = self;
     }
@@ -315,24 +315,24 @@ impl NativeActor for PathAsker {
         Ok(Self { heard })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask_probe(&mut self, ctx: &mut NativeCtx<'_>, _ask: AskProbe) {
         let _ = self;
         ctx.send::<PathRefuser>(&PathProbe { path: absent_path() });
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_ask_tell(&mut self, ctx: &mut NativeCtx<'_>, _ask: AskTell) {
         let _ = self;
         ctx.send::<PathRefuser>(&PathTell { path: absent_path() });
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::response]
     fn on_answer(&mut self, _ctx: &mut NativeCtx<'_>, answer: PathAnswer) {
         self.heard.send(Heard::Answer(answer)).expect("heard receiver stays live");
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_decode_refused(&mut self, _ctx: &mut NativeCtx<'_>, notice: DecodeRefused) {
         self.heard.send(Heard::Refused(notice.kind)).expect("heard receiver stays live");
     }

@@ -12,7 +12,7 @@ impl WasmActor for Subscriber {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) -> Key {
         unimplemented!()
     }

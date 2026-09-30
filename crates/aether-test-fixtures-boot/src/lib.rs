@@ -58,7 +58,7 @@ impl WasmActor for Boot {
         ctx.send::<SubstrateHarnessObserver>(&BootTornDown { marker: 0 });
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 
@@ -74,7 +74,7 @@ impl WasmActor for WidgetA {
         Ok(WidgetA)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 
@@ -90,7 +90,7 @@ impl WasmActor for WidgetB {
         Ok(WidgetB)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 

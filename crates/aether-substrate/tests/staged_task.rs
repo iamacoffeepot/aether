@@ -89,7 +89,7 @@ impl NativeActor for QueueProbe {
         Ok(Self { tasks: TaskQueue::new(1), params })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_work(&mut self, ctx: &mut NativeCtx<'_>, work: Work) -> Pending<Worked> {
         let QueueParams { gates, started } = self.params.clone();
         self.tasks.submit(ctx, move || {
@@ -231,14 +231,14 @@ impl NativeActor for StageProbe {
         Ok(Self { params, unstarted: Vec::new() })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_chain(&mut self, ctx: &mut NativeCtx<'_>, chain: Chain) {
         let task = ctx.stage_blocking_with::<Step, Note>(Note { step: 1, value: chain.value });
         self.see(Seen::Staged(task.request()));
         task.start(ctx, || Step { step: 1 });
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_strand(&mut self, ctx: &mut NativeCtx<'_>, _strand: Strand) -> Pending<Worked> {
         let (pending, held) = ctx.hold::<Worked>();
         let task = ctx.stage_blocking_with::<Step, Stranded>(Stranded { held });
@@ -247,25 +247,24 @@ impl NativeActor for StageProbe {
         pending
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_stage(&mut self, ctx: &mut NativeCtx<'_>, stage: Stage) {
         let task = ctx.stage_blocking_with::<Step, Note>(Note { step: 0, value: stage.value });
         self.see(Seen::Staged(task.request()));
         self.unstarted.push(task);
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_discard(&mut self, _ctx: &mut NativeCtx<'_>, _discard: Discard) {
         self.unstarted.clear();
     }
 
-    #[aether_actor::handler::single]
-    fn on_probe(&mut self, ctx: &mut NativeCtx<'_>, _probe: Probe) {
-        let stored = ctx.take_context::<Note>().is_some();
-        self.see(Seen::Probed(stored));
+    #[aether_actor::handler::response]
+    fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe, note: Option<Note>) {
+        self.see(Seen::Probed(note.is_some()));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_close(&mut self, ctx: &mut NativeCtx<'_>, _close: Close) {
         self.see(Seen::Closing);
         ctx.shutdown();
@@ -478,7 +477,7 @@ impl NativeActor for BirthProbe {
         Ok(Self { seen })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, hatch: Hatch) {
         let subname = format!("child-{}", hatch.value);
         let staged = ctx
@@ -489,7 +488,7 @@ impl NativeActor for BirthProbe {
             .send(staged.map_or_else(|(_, note)| Born::Refused(note), |receipt| Born::Staged(receipt.request)));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_hatch_refused(&mut self, ctx: &mut NativeCtx<'_>, hatch: HatchRefused) {
         let staged = ctx
             .spawn_child::<BirthChild>(Subname::Named("not a segment"), (), ())
@@ -522,7 +521,7 @@ impl NativeActor for BirthChild {
         Ok(Self { gate: 0 })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_work(&self, _ctx: &mut NativeCtx<'_>, work: Work) -> Worked {
         Worked { gate: work.gate.max(self.gate) }
     }

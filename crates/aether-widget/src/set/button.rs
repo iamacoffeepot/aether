@@ -157,7 +157,7 @@ impl WasmActor for ButtonWidget {
 
     /// Relabel / restyle in place from a re-sent config, and request metrics
     /// for the new theme font.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ButtonConfig) {
         self.label = config.label;
         self.emphasis = config.emphasis;
@@ -169,26 +169,26 @@ impl WasmActor for ButtonWidget {
     }
 
     /// Install a font-metrics reply; the next `Collect` centers the label.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// Read-only and validation are deliberately inapplicable to a momentary
     /// button; visibility/enabled still control routing and presentation.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
 
     /// A left press inside arms the button.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         self.arms.press_mouse_button(&self.frame, self.state.is_available(), press);
     }
 
     /// A left release fires the click if it lands back inside while armed.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT {
             return;
@@ -200,14 +200,14 @@ impl WasmActor for ButtonWidget {
 
     /// Enter activates once on its first press; Space arms until its matching
     /// release. Key-repeat presses are ignored while either key is armed.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if self.press_key(key.code) {
             Self::emit_click(ctx);
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         if self.release_key(release.code) {
             Self::emit_click(ctx);
@@ -220,7 +220,7 @@ impl WasmActor for ButtonWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }

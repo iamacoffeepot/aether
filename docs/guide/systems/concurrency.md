@@ -77,7 +77,7 @@ provider request, a subprocess — it hands the work *off* the scheduler thread
 ([ADR-0093](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0093-hold-until-resolve-dispatch-primitive.md)):
 
 ```rust
-#[handler::single]
+#[handler::request]
 fn on_generate(
     state: &mut Self::State,
     ctx: &mut NativeCtx<'_>,
@@ -177,7 +177,7 @@ frame loop — it arms the obligation with `ctx.hold::<R>()`
 ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)):
 
 ```rust
-#[handler::single]
+#[handler::request]
 fn on_watch_head(&mut self, ctx: &mut NativeCtx<'_>, _m: WatchHead) -> Pending<WatchHeadResult> {
     let (pending, held) = ctx.hold::<WatchHeadResult>();
     self.watchers.push(held);                              // the debt waits in state

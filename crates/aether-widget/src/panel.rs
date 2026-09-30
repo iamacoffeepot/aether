@@ -1055,7 +1055,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
@@ -1076,7 +1076,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
@@ -1095,7 +1095,7 @@ impl WasmActor for WidgetPanel {
     /// Nothing else is cancelled: a drag capture, a modal grab, and every
     /// child's own value are untouched. A root that forks this panel copies
     /// the rule — leaving it out is what keeps a pressed input lit forever.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if let Some(grabbed) = self.focus.grabbed() {
             if let Some(control) = self.lanes(grabbed).and_then(|lanes| lanes.control) {
@@ -1126,7 +1126,7 @@ impl WasmActor for WidgetPanel {
     /// [`Self::on_mouse_move`]'s — `Focus::release_capture` owns the rule, so
     /// a release inside an open menu cannot light the control its plate
     /// stands over.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if let Some(control) = self.focus.pointer_target(release.x, release.y).and_then(|key| self.lanes(key)?.control)
         {
@@ -1144,7 +1144,7 @@ impl WasmActor for WidgetPanel {
     /// pointer over rows drawn outside its slot. Hover edges are suppressed
     /// while a grab holds: nothing under a modal overlay should light up, and
     /// the next motion after the grab ends re-derives hover anyway.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if self.focus.grabbed().is_none()
             && let Some(transition) = self.focus.update_hover(moved.x, moved.y)
@@ -1160,7 +1160,7 @@ impl WasmActor for WidgetPanel {
     /// scroll viewport, or a virtual list, which owns the window it realizes.
     /// This is deliberately a fresh `hit_test`, not `pointer_target`: a
     /// button's drag capture owns move/release, not a separate wheel gesture.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if let Some(lane) = self.scroll_focus.hit_test(wheel.x, wheel.y).and_then(|key| self.lanes(key)?.wheel) {
             ctx.send_to(lane, &wheel);
@@ -1168,7 +1168,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// Tab cycles focus; every other key forwards to the focused child.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
             let direction = if self.modifiers.as_ref().is_some_and(|held| held.shift) {
@@ -1188,7 +1188,7 @@ impl WasmActor for WidgetPanel {
 
     /// Key releases forward to the focused child (Button uses matching Space
     /// release for exactly-once activation).
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         if let Some(key_release) = self.focused_lanes().and_then(|lanes| lanes.key_release) {
             ctx.send_to(key_release, &release);
@@ -1196,7 +1196,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// Committed text forwards to the focused child.
-    #[handler::single]
+    #[handler::event]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
             ctx.send_to(text_entry, &input);
@@ -1204,7 +1204,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// An IME composition forwards to the focused child.
-    #[handler::single]
+    #[handler::event]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
             ctx.send_to(text_entry, &preedit);
@@ -1213,7 +1213,7 @@ impl WasmActor for WidgetPanel {
 
     /// Modifier state forwards to the focused child (the text field caches
     /// it).
-    #[handler::single]
+    #[handler::event]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
         if let Some(text_entry) = self.focused_lanes().and_then(|lanes| lanes.text_entry) {
             ctx.send_to(text_entry, &modifiers);
@@ -1223,7 +1223,7 @@ impl WasmActor for WidgetPanel {
 
     /// Keep dynamic routing availability synchronized with the external state
     /// a child actually adopted. Source attribution identifies the panel slot.
-    #[handler::single]
+    #[handler::tell]
     fn on_widget_state_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetStateChanged) {
         let Some(source) = ctx.sender() else {
             return;
@@ -1234,7 +1234,7 @@ impl WasmActor for WidgetPanel {
 
     /// Keep content-derived pointer/keyboard eligibility synchronized. Source
     /// attribution identifies the panel slot the event came from.
-    #[handler::single]
+    #[handler::tell]
     fn on_widget_eligibility_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetEligibilityChanged) {
         let Some(source) = ctx.sender() else {
             return;
@@ -1248,7 +1248,7 @@ impl WasmActor for WidgetPanel {
     /// Observe one descendant scroll container's exact typed outcome. The
     /// owner is the direct child `widget` names, `relays` scroll hops inward:
     /// each intermediate scroll that relays the event adds one.
-    #[handler::single]
+    #[handler::tell]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased>, outcome: ScrollOutcome) {
         tracing::info!(
             target: "aether_widget",
@@ -1266,7 +1266,7 @@ impl WasmActor for WidgetPanel {
 
     /// The root is the terminal residual sink. Log every named axis field and
     /// drop the remainder; no second wheel-sign conversion occurs here.
-    #[handler::single]
+    #[handler::tell]
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased>, residual: ScrollResidual) {
         tracing::info!(
             target: "aether_widget",
@@ -1282,7 +1282,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: SliderChanged) {
         tracing::info!(
             target: "aether_widget",
@@ -1297,7 +1297,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_, Erased>, committed: TextCommitted) {
         tracing::info!(
             target: "aether_widget",
@@ -1311,7 +1311,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: RadioSelected) {
         tracing::info!(
             target: "aether_widget",
@@ -1325,7 +1325,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: VirtualListSelected) {
         tracing::info!(
             target: "aether_widget",
@@ -1342,7 +1342,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, action: VirtualListActivated) {
         tracing::info!(
             target: "aether_widget",
@@ -1360,7 +1360,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: VirtualListHover) {
         tracing::info!(
             target: "aether_widget",
@@ -1379,7 +1379,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: DropdownHover) {
         tracing::info!(
             target: "aether_widget",
@@ -1393,7 +1393,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// # Agent
     /// A child's reply; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, _clicked: ButtonActivated) {
         tracing::info!(
             target: "aether_widget",
@@ -1403,7 +1403,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A toggle value-up. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: ToggleChanged) {
         tracing::info!(
             target: "aether_widget",
@@ -1414,7 +1414,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A segmented selection. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: SegmentedSelected) {
         tracing::info!(
             target: "aether_widget",
@@ -1425,7 +1425,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A dropdown's choice. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: DropdownSelected) {
         tracing::info!(
             target: "aether_widget",
@@ -1442,7 +1442,7 @@ impl WasmActor for WidgetPanel {
     /// itself. One handler for every overlay-bearing widget, because the
     /// handshake does not vary by widget and a root that implemented it for
     /// one kind and not the next left that one open with no grab.
-    #[handler::single]
+    #[handler::tell]
     fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: WidgetOpenChanged) {
         let Some(source) = ctx.sender() else {
             return;
@@ -1455,7 +1455,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A menu item's activation. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Erased>, activated: MenuBarActivated) {
         tracing::info!(
             target: "aether_widget",
@@ -1467,7 +1467,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A tab strip's selection. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Erased>, selected: TabStripSelected) {
         tracing::info!(
             target: "aether_widget",
@@ -1478,7 +1478,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A numeric preview or commit. The map-editor seam; the reference logs it.
-    #[handler::single]
+    #[handler::tell]
     fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: NumericChanged) {
         tracing::info!(
             target: "aether_widget",
@@ -1491,7 +1491,7 @@ impl WasmActor for WidgetPanel {
 
     /// The font finished loading: stamp the real `font_id` into the theme and
     /// re-fan it so every child draws text with it.
-    #[handler::single]
+    #[handler::response]
     fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_>, result: LoadFontResult) {
         match result {
             LoadFontResult::Ok { font_id, .. } => {
@@ -1505,7 +1505,7 @@ impl WasmActor for WidgetPanel {
     }
 
     /// A live restyle: adopt the new theme and re-fan it to every child.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         self.theme = set.theme;
         self.retain_or_fan_theme(ctx);

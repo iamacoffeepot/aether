@@ -77,7 +77,7 @@ impl NativeActor for Autoloader {
     /// The current entry's module published: resolve which of its bound
     /// types to spawn from, then send its first `Spawn`, or fail the entry
     /// naming a refusal or an unresolvable namespace.
-    #[handler::single]
+    #[handler::response]
     fn on_publish_result(&mut self, ctx: &mut NativeCtx<'_>, result: PublishResult) {
         match result {
             PublishResult::Ok { types } => match self.resolve_namespace(&types) {
@@ -95,7 +95,7 @@ impl NativeActor for Autoloader {
     /// The current entry's spawn answered: continue to its next key, finish
     /// the entry once every key has spawned, or fail it naming the refusal
     /// (a `Live` answer means two boot entries name one instance).
-    #[handler::single]
+    #[handler::response]
     fn on_spawn_result(&mut self, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
         match result {
             SpawnResult::Spawned { .. } => self.send_next_spawn(ctx),

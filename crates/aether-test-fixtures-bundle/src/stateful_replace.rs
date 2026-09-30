@@ -52,13 +52,13 @@ impl WasmActor for Counter {
     }
 
     /// Increment the in-memory counter.
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the live counter so a test can read it across a swap.
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }
@@ -115,13 +115,13 @@ impl WasmActor for RehydrateTrap {
     }
 
     /// Increment the in-memory counter, the row `Counter` declares.
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.count += 1;
     }
 
     /// Reply with the counter, the row `Counter` declares.
-    #[handler::single]
+    #[handler::request]
     fn on_count_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }

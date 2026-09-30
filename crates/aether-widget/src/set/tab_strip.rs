@@ -331,7 +331,7 @@ impl WasmActor for TabStripWidget {
     /// Replace the labels / style / theme in place, re-clamping the selection
     /// into the new vector. `initial` seeds the strip only at `init`;
     /// [`SetSelection`] moves the tab.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TabStripConfig) {
         self.labels = config.labels;
         self.selected_index = clamp_selection(self.selected_index, self.labels.len());
@@ -345,7 +345,7 @@ impl WasmActor for TabStripWidget {
     }
 
     /// Update external availability without changing the tabs.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         self.apply_control_state(ctx, set.state);
     }
@@ -353,7 +353,7 @@ impl WasmActor for TabStripWidget {
     /// Push the current tab from the host, clamped into the labels. Silent —
     /// no [`TabStripSelected`]. A `None` index is ignored: a strip of tabs always
     /// has one selected.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
         if let Some(index) = set.index {
             self.selected_index = clamp_option_index(index, self.labels.len());
@@ -362,13 +362,13 @@ impl WasmActor for TabStripWidget {
 
     /// Install a font-metrics reply; the next `Collect` lays the tabs out
     /// against their real label widths.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
 
     /// A left press selects the tab under the pointer.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button == mouse_button::LEFT
             && let Some(selected) = self.select_at(press.x)
@@ -377,12 +377,12 @@ impl WasmActor for TabStripWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         release_left(&mut self.pressed_tab, None, release);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         if self.state.is_available() {
             self.hovered_tab = self.tab_at_pointer_x(moved.x);
@@ -390,7 +390,7 @@ impl WasmActor for TabStripWidget {
     }
 
     /// Left / Right move the selection while the strip holds focus.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         let forward = match key.code {
             KEY_LEFT => false,
@@ -411,7 +411,7 @@ impl WasmActor for TabStripWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
     }

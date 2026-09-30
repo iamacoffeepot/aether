@@ -81,7 +81,7 @@ impl WasmActor for TcpLoadProbe {
     /// Bind the named listener with this probe as the consumer; the bind
     /// reply lands in [`Self::on_bind_result`] inside the same chain, so the
     /// configure call settles with the port known.
-    #[handler::single]
+    #[handler::tell]
     fn on_configure(&mut self, ctx: &mut WasmCtx<'_, Self>, configure: ConfigureTcpLoadProbe) {
         ctx.send::<TcpCapability>(&BindListenerSelf {
             addr: "127.0.0.1:0".to_owned(),
@@ -89,7 +89,7 @@ impl WasmActor for TcpLoadProbe {
         });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_bind_result(&mut self, _ctx: &mut WasmCtx<'_>, result: BindListenerResult) {
         match result {
             BindListenerResult::Ok { local_port, .. } => self.local_port = Some(local_port),
@@ -97,7 +97,7 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_start_connect_load(&mut self, ctx: &mut WasmCtx<'_, Self>, start: StartTcpConnectLoad) {
         for index in 0..start.connection_count {
             let session_name = format!("{}-{index}", start.session_name_prefix);
@@ -106,7 +106,7 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_connect_result(&mut self, _ctx: &mut WasmCtx<'_>, result: ConnectResult) {
         match result {
             ConnectResult::Ok { session_name, .. } => {
@@ -117,7 +117,7 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_session_data(&mut self, ctx: &mut WasmCtx<'_>, data: SessionData) {
         let topology = self.topology_for(&data.session_name);
         let index = self.ensure_session(topology, &data.session_name);
@@ -143,14 +143,14 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_session_closed(&mut self, _ctx: &mut WasmCtx<'_>, closed: SessionClosed) {
         let topology = self.topology_for(&closed.session_name);
         let index = self.ensure_session(topology, &closed.session_name);
         self.sessions[index].snapshot.closed = true;
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_collect_snapshot(&mut self, _ctx: &mut WasmCtx<'_>, _query: CollectTcpLoadSnapshot) -> TcpLoadSnapshot {
         TcpLoadSnapshot {
             sessions: self.sessions.iter().map(|session| session.snapshot.clone()).collect(),

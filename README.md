@@ -224,7 +224,7 @@ impl WasmActor for Echo {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }

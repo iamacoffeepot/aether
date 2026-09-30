@@ -22,7 +22,7 @@ impl WasmActor for Peer {
         Ok(Self)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 

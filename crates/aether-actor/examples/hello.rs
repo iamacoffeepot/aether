@@ -50,7 +50,7 @@ impl WasmActor for Hello {
     /// Emits the configured triangle to the render capability every tick.
     /// Nothing sends this by hand: the substrate drives it from the frame
     /// lifecycle, and the effect shows up in a captured frame.
-    #[handler::single]
+    #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.send::<RenderCapability>(&TRIANGLE);
     }
@@ -59,7 +59,7 @@ impl WasmActor for Hello {
     /// caller with several requests in flight can pair each reply with its
     /// request. A ping with no sender (component-origin or broadcast) is
     /// dropped: there is nothing to reply to.
-    #[handler::single]
+    #[handler::request]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
         Pong { seq: ping.seq }
     }

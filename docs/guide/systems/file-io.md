@@ -159,7 +159,7 @@ These are fire-and-forget; the result arrives later as its own mail, which you
 receive like any other kind:
 
 ```rust
-#[handler::single]
+#[handler::response]
 fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
         ReadResult::Ok { addr, bytes } => { /* addr supplies readable domain context */ }

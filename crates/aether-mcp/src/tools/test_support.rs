@@ -115,7 +115,7 @@ impl NativeActor for AddressRouteSink {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]
@@ -190,7 +190,7 @@ impl NativeActor for ScriptedRouteSink {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]
@@ -245,7 +245,7 @@ impl NativeActor for RouteInventorySink {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::unchecked(reason = "test: stands in for an engine route that answers a forwarded call")]

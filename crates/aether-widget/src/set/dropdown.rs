@@ -618,7 +618,7 @@ impl WasmActor for DropdownWidget {
 
     /// Install a font-metrics reply; the next `Collect` reports an intrinsic
     /// measured against real advances.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
         self.forget_measurements();
@@ -632,7 +632,7 @@ impl WasmActor for DropdownWidget {
     /// A list that was open closes: its rows are the vector that just changed,
     /// so the root gives up its pointer grab rather than keeping it over a list
     /// of options nobody asked for.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: DropdownConfig) {
         let closed = self.dismiss();
         let state = config.state.clone();
@@ -649,7 +649,7 @@ impl WasmActor for DropdownWidget {
     /// Push the current choice from the host, clamped into the options and
     /// `None` for no choice at all. Silent — no [`DropdownSelected`]. An open
     /// list stays open, with its keyboard highlight following the new choice.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_selection(&mut self, ctx: &mut WasmCtx<'_>, set: SetSelection) {
         self.selected_index = clamp_optional_index(set.index, self.options.len());
         if self.open {
@@ -660,7 +660,7 @@ impl WasmActor for DropdownWidget {
 
     /// Update external availability; a dropdown that can no longer be chosen
     /// from closes its list.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -674,7 +674,7 @@ impl WasmActor for DropdownWidget {
 
     /// While open, any left press is the list's: on a row it chooses, off one
     /// it dismisses. While closed a press inside the row arms the toggle.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
         if press.button != mouse_button::LEFT {
             return;
@@ -689,7 +689,7 @@ impl WasmActor for DropdownWidget {
     }
 
     /// A left release back inside the closed row opens the list.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
         if release.button != mouse_button::LEFT {
             return;
@@ -704,7 +704,7 @@ impl WasmActor for DropdownWidget {
     /// Motion moves the highlighted row. The root forwards every move to the
     /// grabbed child, so this tracks the pointer over the overlay rows that
     /// lie outside the widget's own slot.
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         self.pointer_window = Some((moved.x, moved.y));
         if self.open && self.state.is_available() {
@@ -715,7 +715,7 @@ impl WasmActor for DropdownWidget {
 
     /// Escape closes; Up/Down move the highlight of an open list; Enter
     /// toggles on its press and Space arms until its matching release.
-    #[handler::single]
+    #[handler::event]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         match key.code {
             KEY_ESCAPE => self.dismiss().emit(ctx),
@@ -732,7 +732,7 @@ impl WasmActor for DropdownWidget {
         self.settle_hovered_option(ctx);
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
         if self.arms.release_key(self.state.can_mutate(), release.code) {
             self.toggle().emit(ctx);
@@ -746,7 +746,7 @@ impl WasmActor for DropdownWidget {
     /// # Agent
     /// Send to a dropdown whose list must go away because something else took
     /// the screen; the choice it already holds is untouched.
-    #[handler::single]
+    #[handler::tell]
     fn on_dismiss(&mut self, ctx: &mut WasmCtx<'_>, _dismiss: WidgetDismiss) {
         self.dismiss().emit(ctx);
         self.settle_hovered_option(ctx);
@@ -757,7 +757,7 @@ impl WasmActor for DropdownWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;

@@ -389,18 +389,18 @@ impl WasmActor for ScrollWidget {
         })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_frame(&mut self, ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
         self.frame = frame;
         self.sync_layout(ctx);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
@@ -411,7 +411,7 @@ impl WasmActor for ScrollWidget {
     /// scroll actors apply the same rule, so style follows the actor tree.
     /// An update that beats the first Collect is kept and replayed to a
     /// successfully spawned content root before that Collect.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         match self.content_lanes {
             Some(lanes) => {
@@ -423,7 +423,7 @@ impl WasmActor for ScrollWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::event]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         let lane = self
             .scroll_focus
@@ -435,7 +435,7 @@ impl WasmActor for ScrollWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased>, outcome: ScrollOutcome) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll outcome from non-child source");
@@ -446,7 +446,7 @@ impl WasmActor for ScrollWidget {
         }
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased>, residual: ScrollResidual) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll residual from non-child source");

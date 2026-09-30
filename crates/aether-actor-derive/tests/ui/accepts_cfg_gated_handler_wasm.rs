@@ -76,14 +76,14 @@ impl aether_actor::WasmActor for CfgGated {
         Ok(CfgGated)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_always(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _mail: Always) {}
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(target_family = "wasm")]
     fn on_only_on_wasm(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _mail: WasmOnly) {}
 
-    #[handler::single]
+    #[handler::tell]
     #[cfg(not(target_family = "wasm"))]
     fn on_only_off_wasm(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _mail: HostOnly) {}
 }

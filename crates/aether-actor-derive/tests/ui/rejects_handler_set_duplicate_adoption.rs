@@ -32,7 +32,7 @@ impl aether_actor::WasmActor for Adopter {
         Ok(Adopter)
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 

@@ -24,7 +24,7 @@ impl WasmActor for Refuser {
         Ok(Refuser { count: 0 })
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
         CountReport { count: self.count }
     }

@@ -122,7 +122,7 @@ impl NativeActor for ExampleCapability {
         // construct native state
     }
 
-    #[handler::single]
+    #[handler::request]
     fn on_request(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,

@@ -45,12 +45,12 @@ impl NativeActor for FleetCapSink {
         Ok(Self { cells })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
         self.cells.alive.lock().expect("test setup: alive cell mutex poisoned").push(mail.engine_id);
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         self.cells.died.lock().expect("test setup: died cell mutex poisoned").push(mail);
     }
@@ -90,12 +90,12 @@ impl NativeActor for ProxyReplySink {
         Ok(Self { log })
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
         self.log.lock().expect("test setup: reply log mutex poisoned").push(RecordedReply::Echo(reply.value));
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_settled(&mut self, _ctx: &mut NativeCtx<'_>, settled: CallSettled) {
         let result = match settled {
             CallSettled::Ok => Ok(()),

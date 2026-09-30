@@ -91,7 +91,7 @@ impl NativeActor for CloseProbe {
         Ok(Self { kept: Vec::new(), unstarted: Vec::new(), closing: false })
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_keep(&mut self, ctx: &mut NativeCtx<'_>, _keep: Keep) -> Pending<Owed> {
         assert!(!self.closing, "the scenario holds every request before it closes the actor");
         let (pending, held) = ctx.hold::<Owed>();
@@ -99,19 +99,19 @@ impl NativeActor for CloseProbe {
         pending
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::request]
     fn on_stash(&mut self, ctx: &mut NativeCtx<'_>, _stash: Stash) -> Pending<Owed> {
         let (pending, held) = ctx.hold::<Owed>();
         self.unstarted.push(ctx.stage_blocking_with::<Step, Stashed>(Stashed { held }));
         pending
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_stage(&mut self, ctx: &mut NativeCtx<'_>, _stage: Stage) {
         self.unstarted.push(ctx.stage_blocking_with::<Step, Note>(Note { value: 3 }));
     }
 
-    #[aether_actor::handler::single]
+    #[aether_actor::handler::tell]
     fn on_close(&mut self, ctx: &mut NativeCtx<'_>, _close: Close) {
         self.closing = true;
         ctx.shutdown();

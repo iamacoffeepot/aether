@@ -1067,7 +1067,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 
 | Target's handler for `K` | Contract row | Outcome |
 |---|---|---|
-| silent `#[handler::single] -> ()` | `Silent` | compiles |
+| silent `#[handler::tell]` / `event` / `response` `-> ()` | `Silent` | compiles |
 | single `-> O` | `O` | compiles if `A: HandlesKind<O>`, else compile error naming the missing handler |
 | deferred `-> Pending<O>` | `O` | as single |
 | enum reply `-> O`, `O` an enum kind | `O` | compiles if `A` handles `O`; one handler matches the variants |

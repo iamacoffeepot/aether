@@ -248,7 +248,7 @@ pub trait HttpRouter {
 /// §4), and answers `502` to a [`HttpRouterResult::Stream`] or
 /// [`HttpRouterResult::WebSocket`] reply from a holder that does not cover it.
 ///
-/// A silent `#[handler::single]` taking `HttpStreamCredit` covers the row.
+/// A `#[handler::tell]` taking `HttpStreamCredit` covers the row.
 #[aether_actor::protocol]
 pub trait StreamCreditRouter {
     fn credit(mail: HttpStreamCredit);
@@ -261,7 +261,7 @@ pub trait StreamCreditRouter {
 /// request body only to a holder that covers every row; any other holder gets
 /// the buffered [`HttpServerRequest`].
 ///
-/// Silent `#[handler::single]` handlers taking `HttpRequestStreamOpen` and
+/// `#[handler::tell]` handlers taking `HttpRequestStreamOpen` and
 /// `HttpRequestChunk` cover the first two rows. A handler taking
 /// `HttpRequestStreamEnd` that returns `HttpServerResponse`, or
 /// `Pending<HttpServerResponse>` and answers later through its held reply
@@ -281,7 +281,7 @@ pub trait RequestStreamRouter {
 /// `101` to a [`HttpRouterResult::WebSocket`] reply from a holder that does
 /// not cover both.
 ///
-/// Silent `#[handler::single]` handlers taking `WebSocketMessage` and
+/// `#[handler::tell]` handlers taking `WebSocketMessage` and
 /// `WebSocketClose` cover the rows.
 #[aether_actor::protocol]
 pub trait WebSocketRouter {

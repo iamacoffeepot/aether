@@ -36,7 +36,7 @@ impl NativeActor for Squatter {
     }
 
     /// Never sent here: an actor declares at least one handler.
-    #[handler::single]
+    #[handler::tell]
     fn on_bump(&mut self, _ctx: &mut NativeCtx<'_>, _bump: Bump) {
         self.bumps += 1;
     }

@@ -54,14 +54,14 @@ impl NativeActor for Stager {
         Ok(Self { storage, results })
     }
 
-    #[handler::single]
+    #[handler::tell]
     fn on_stage_checked_in(&mut self, ctx: &mut NativeCtx<'_>, mail: StageCheckedIn) {
         let len = usize::try_from(mail.len).expect("the test payload fits memory");
         let payload = ctx.check_in(patterned(len).into_boxed_slice());
         ctx.send_to(self.storage, &Stage::new(vec![EncodedArtifact::opaque_blob(payload)]));
     }
 
-    #[handler::single]
+    #[handler::response]
     fn on_stage_result(&mut self, _ctx: &mut NativeCtx<'_>, result: StageResult) {
         self.results.send(result).expect("the test holds the receiver");
     }

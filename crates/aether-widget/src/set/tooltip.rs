@@ -498,7 +498,7 @@ impl WasmActor for TooltipWidget {
     /// Replace what the tooltip says and where it stands, in place. This is
     /// the mail a host sends on every hover change, so it resets nothing the
     /// root owns.
-    #[handler::single]
+    #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TooltipConfig) {
         self.sections = config.sections;
         self.max_width_pixels = config.max_width_pixels;
@@ -521,7 +521,7 @@ impl WasmActor for TooltipWidget {
 
     /// Update external availability — the lane a host shows and hides the
     /// plate through.
-    #[handler::single]
+    #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
             emit_state_changed(ctx, &self.state);
@@ -530,7 +530,7 @@ impl WasmActor for TooltipWidget {
 
     /// Install a font-metrics reply; the next `Collect` measures the plate
     /// against real advances.
-    #[handler::single]
+    #[handler::response]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
         accept_font_metrics_result(ctx, &mut self.font_metrics, result);
     }
@@ -543,7 +543,7 @@ impl WasmActor for TooltipWidget {
     ///
     /// # Agent
     /// The panel root's per-frame poll; not useful to send manually.
-    #[handler::single]
+    #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         if reply_if_hidden(ctx, &self.state) {
             return;
