@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, ClosureArtifact, Detail, Digest, EncodedArtifact, ErasedRef, Evaluated, Event, Fault,
-    FaultReason, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node, ProgramName, ProgramRef,
-    ReactorIntent, ReadArtifactResult, RecordedHead, Ref, RequestSource, Requested, SetHeads, Transition, Tree,
-    Utf8Text, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
+    CLOCK, CLOCK_BUNDLE, CallInput, CallProgram, ClosureArtifact, Detail, Digest, EncodedArtifact, ErasedRef,
+    Evaluated, Event, Fault, FaultReason, Fired, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node,
+    ProgramName, ProgramRef, ReactorIntent, ReadArtifactResult, RecordedHead, Ref, RequestSource, Requested, SetHeads,
+    Transition, Tree, Until, Utf8Text, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
     ContinueInput, Echo, EchoResult, Endpoint, ModelName, MuseSession, MuseTurn, OfferedTools, OpenInput, OutputBudget,
@@ -19,10 +19,10 @@ use aether_bloomery_muse::{
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
-    AsyncProgram, Edited, Nil, Pending, PollResult, Program, Started, invoke, start_async, tooled,
+    AsyncProgram, ClockUntil, Edited, Nil, Pending, PollResult, Program, Started, invoke, start_async, tooled,
 };
 use aether_data::{Cites, Kind, Storage, StorageData};
-use aether_http::FetchResult;
+use aether_http::{FetchResult, HttpHeader};
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
@@ -31,6 +31,8 @@ const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_r
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
+const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
+const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
 const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
 const URL: &str = "https://example.test/v1/responses";
 const QUESTION: &str = "Echo alpha and beta, then say what a bloomery is.";
@@ -51,6 +53,29 @@ struct Asked {
     input: Digest,
 }
 
+/// One recorded reply to a turn.
+struct Reply {
+    status: u16,
+    headers: Vec<HttpHeader>,
+    body: String,
+}
+
+impl Reply {
+    /// A 200 carrying `body`, with no headers.
+    fn ok(body: &str) -> Self {
+        Self { status: 200, headers: Vec::new(), body: body.to_owned() }
+    }
+
+    /// A `status` refusal carrying `body`, with a `Retry-After` of `retry_after_secs` when given.
+    fn refused(status: u16, body: &str, retry_after_secs: Option<u32>) -> Self {
+        let headers = retry_after_secs
+            .map(|secs| HttpHeader { name: "Retry-After".to_owned(), value: secs.to_string() })
+            .into_iter()
+            .collect();
+        Self { status, headers, body: body.to_owned() }
+    }
+}
+
 /// The journal a driver appends, every artifact it holds, its heads, and the live reactor root it routes each
 /// entry to.
 struct Driver {
@@ -59,21 +84,29 @@ struct Driver {
     evaluated: Vec<Evaluated>,
     store: BTreeMap<Digest, EncodedArtifact>,
     heads: BTreeMap<RecordedHead, Digest>,
-    replies: VecDeque<String>,
+    replies: VecDeque<Reply>,
     native_keys: u64,
+    /// The journal time the next entry is recorded at.
+    now_millis: u64,
 }
 
 impl Driver {
-    /// A driver whose turns are answered by `replies`, in order.
+    /// A driver whose turns are answered by 200s carrying `replies`, in order.
     fn new(replies: &[&str]) -> Self {
+        Self::replying(replies.iter().map(|reply| Reply::ok(reply)).collect())
+    }
+
+    /// A driver whose turns are answered by `replies`, in order.
+    fn replying(replies: VecDeque<Reply>) -> Self {
         Self {
             root: Root::new().expect("reactor names"),
             entries: Vec::new(),
             evaluated: Vec::new(),
             store: BTreeMap::new(),
             heads: BTreeMap::new(),
-            replies: replies.iter().map(|reply| (*reply).to_owned()).collect(),
+            replies,
             native_keys: 0,
+            now_millis: 0,
         }
     }
 
@@ -112,7 +145,7 @@ impl Driver {
         let bytes = K::encode_storage(&StorageData::from_value(value.clone())).expect("the entry encodes");
         let distinct: BTreeSet<Digest> = cites.iter().copied().collect();
         let artifacts: Vec<_> = distinct.into_iter().map(|digest| self.artifact(digest)).collect();
-        let entry = JournalEntry { seq, kind: K::ID, cause, recorded_at_millis: 0, bytes, cites };
+        let entry = JournalEntry { seq, kind: K::ID, cause, recorded_at_millis: self.now_millis, bytes, cites };
         self.evaluated.push(self.root.event(Event::new(entry.clone(), artifacts.clone())));
         self.entries.push((entry, artifacts));
         seq
@@ -173,9 +206,27 @@ impl Driver {
             rule: intent.rule().clone(),
             ordinal: 0,
         };
-        let program = ProgramRef::new(bundle(), call.name.clone());
+        let recorded_under = if call.program.as_str() == CLOCK.as_str() {
+            CLOCK_BUNDLE
+        } else {
+            bundle()
+        };
+        let program = ProgramRef::new(recorded_under, call.name.clone());
         let requested = self.append(&Requested { program, input, source }, Some(seq), Vec::new());
         Asked { requested, call, input }
+    }
+
+    /// Fire the wait `asked` requested, as the driver's clock does once journal time reaches its due time; the
+    /// run's seq.
+    fn fire(&mut self, asked: &Asked) -> u64 {
+        let Until { due_millis } = self.value(asked.input);
+        let fired = encoded(&Fired { due_millis });
+        let result = fired.digest();
+        self.stage([fired]);
+        self.now_millis = self.now_millis.max(due_millis);
+        let program = ProgramRef::new(CLOCK_BUNDLE, ProgramName::new(ClockUntil::NAME).expect("program name"));
+        let transition = Transition { program, input: asked.input, result };
+        self.append(&transition, Some(asked.requested), vec![asked.input, result])
     }
 
     /// Run the program the request asked for, and record its transition or its fault; the outcome's seq.
@@ -234,18 +285,12 @@ impl Driver {
 
     /// One turn, answered by the next recorded reply.
     fn turn(&mut self, invoke: Invoke) -> Invoked {
-        let body = self.replies.pop_front().expect("a reply for every turn");
+        let Reply { status, headers, body } = self.replies.pop_front().expect("a reply for every turn");
         let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<MuseTurn>(invoke)
         else {
             panic!("expected the turn to send its one fetch");
         };
-        let reply = FetchResult::Ok {
-            request_id: 1,
-            url: URL.into(),
-            status: 200,
-            headers: Vec::new(),
-            body: body.into_bytes(),
-        };
+        let reply = FetchResult::Ok { request_id: 1, url: URL.into(), status, headers, body: body.into_bytes() };
         session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
         match session.poll() {
             PollResult::Finished(invoked) => invoked,
@@ -736,6 +781,76 @@ fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> 
     driver.settle(resumed_turn);
     let continued: Session = driver.value(driver.head(key));
     assert_eq!(file(&driver, continued.tree(), "docs/notes.md"), b"Iron blooms.\nSlag floats.\n");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+/// How long after the entry at `seq` was recorded the wait that entry asked for is due.
+fn waits_for(driver: &Driver, seq: u64) -> u64 {
+    let wait = asked(driver, seq);
+    assert_eq!((wait.program.as_str(), wait.name.as_str()), (CLOCK.as_str(), ClockUntil::NAME), "a wait");
+    let CallInput::Value(until) = wait.input else {
+        panic!("expected the wait's due time as a value");
+    };
+    let Until { due_millis } = Until::decode_storage(&payload(&until)).expect("an until decodes").value;
+    due_millis - driver.entries[index(seq)].0.recorded_at_millis
+}
+
+#[test]
+fn a_transient_turn_waits_out_retry_after_then_resends_the_same_turn() -> TestResult {
+    // Catches seconds read as millis, a due time taken from an entry other than the refused turn or from a live
+    // clock, a resent turn that is re-encoded or rebuilt instead of naming the stored input, a retry counted
+    // against the turn limit (the next called turn would then rest at the limit), and warm/live divergence in the
+    // wait and retry folds.
+    let replies = [Reply::refused(429, RATE_LIMITED, Some(7)), Reply::ok(CALLED_ECHO), Reply::ok(COMPLETED)];
+    let mut driver = Driver::replying(replies.into());
+    driver.now_millis = 1_000;
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_input = driver.transition(opened).result;
+
+    let asked_turn = driver.request(opened);
+    driver.now_millis = 5_000;
+    let refused = driver.run(&program::<MuseTurn>(), asked_turn.input, asked_turn.requested);
+    let outcome = driver.result::<TurnResult>(refused).outcome().clone();
+    assert_eq!(outcome, TurnOutcome::Transient { retry_after_secs: Some(7) });
+    assert_eq!(driver.intent(refused).rule().as_str(), "call");
+    assert_eq!(waits_for(&driver, refused), 7_000, "the wait is due Retry-After after the refused turn");
+
+    let wait = driver.request(refused);
+    let fired = driver.fire(&wait);
+    let retry = asked(&driver, fired);
+    assert_eq!(driver.intent(fired).rule().as_str(), "retry");
+    assert_eq!(retry.name.as_str(), MuseTurn::NAME);
+    assert_eq!(retry.input, CallInput::Stored(first_input), "the retry resends the stored input");
+
+    driver.settle(fired);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(session.rested(), RestReason::Completed, "the retry spent none of the two turns");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_turn_refused_past_the_retry_cap_ends_the_session() -> TestResult {
+    // Catches an unbounded retry loop, a cap off by one, a backoff that does not grow, and a retry count lost
+    // across waits.
+    let replies = (0..4).map(|_| Reply::refused(503, OVERLOADED, None)).collect();
+    let mut driver = Driver::replying(replies);
+    let (opened, _) = open(&mut driver, 2)?;
+    let mut turn = driver.follow(opened);
+
+    for (retry, backoff) in [1_000, 2_000, 4_000].into_iter().enumerate() {
+        let waited = waits_for(&driver, turn);
+        assert!((backoff..backoff + 1_000).contains(&waited), "retry {retry} waits {waited}");
+        let wait = driver.request(turn);
+        let fired = driver.fire(&wait);
+        assert_eq!(driver.intent(fired).rule().as_str(), "retry", "retry {retry}");
+        turn = driver.follow(fired);
+    }
+    assert!(driver.intents(turn).is_empty(), "the fourth refusal ends the session");
+    assert!(driver.replies.is_empty(), "the turn was sent four times");
 
     assert_warm_and_live_agree(&driver);
     Ok(())

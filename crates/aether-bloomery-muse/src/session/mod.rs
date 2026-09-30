@@ -25,12 +25,19 @@
 //!   turns as its limit allows, resting it with [`RestReason::TurnLimit`].
 //! - `rest` moves the session's head to that record, compare-and-swap from the
 //!   record before it.
+//! - `call` also waits on the driver's clock after a turn the vendor refused
+//!   as transient: `Retry-After` seconds after the refused turn was recorded,
+//!   or a doubling backoff when it sent none. `retry`, when the wait fires,
+//!   sends `muse.turn` again over the same stored turn input, so the resent
+//!   request is byte-identical. A turn is retried at most three times, and a
+//!   retry does not count against the turn limit.
 //!
 //! A session opens on a tree, and a continue picks up the tree its record
 //! rested with. Every record holds the session's latest tree.
 //!
 //! Calls run one at a time. A tool run that faults ends the session, and the
-//! fault is its record.
+//! fault is its record. A turn refused past the retry cap, or a wait the
+//! clock refuses, ends the session the same way.
 
 mod continue_;
 mod conversations;
@@ -39,11 +46,12 @@ pub mod fixture;
 mod open;
 mod record;
 mod replay;
+mod retry;
 mod state;
 mod tools;
 
 use aether_bloomery_kinds::{CallInput, CallProgram, SetHeads, Transition};
-use aether_bloomery_program::{At, Guard, Ran, reactor};
+use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;
@@ -74,6 +82,14 @@ impl Guard<Transition> for Step {
 
     fn resolve(_run: &Transition, at: At, conversations: &Conversations) -> Option<Self> {
         conversations.resume(at).map(Self)
+    }
+}
+
+impl Guard<Ran<ClockUntil>> for Step {
+    type Views = Conversations;
+
+    fn resolve(_run: &Ran<ClockUntil>, at: At, conversations: &Conversations) -> Option<Self> {
+        conversations.step(at).map(Self)
     }
 }
 
@@ -149,6 +165,11 @@ impl Reactor for MuseSession {
 
     #[rule]
     fn resume(&self, _run: Transition, step: Step) -> CallProgram {
+        step.0
+    }
+
+    #[rule]
+    fn retry(&self, _run: Ran<ClockUntil>, step: Step) -> CallProgram {
         step.0
     }
 
