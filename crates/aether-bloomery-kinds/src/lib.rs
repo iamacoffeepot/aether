@@ -28,8 +28,9 @@ pub use artifact::{
 pub use bundle::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
 pub use digest::Digest;
 pub use driver::{
-    AwaitProcessed, Call, CallInput, CallOutcome, CallProgram, CallRefusal, HeadChange, LEGACY_CALL_PROGRAM_ID,
-    LEGACY_SET_HEAD_ID, Processed, SetHeads, decode_call_program, decode_set_heads,
+    AwaitProcessed, BundleDeclarations, Call, CallInput, CallOutcome, CallProgram, CallRefusal, Declarations,
+    DeclarationsResult, HeadChange, LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID, Processed, ProgramDeclaration,
+    SetHeads, decode_call_program, decode_set_heads,
 };
 pub use entry::{DecodeError, Entry, Seq};
 pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};

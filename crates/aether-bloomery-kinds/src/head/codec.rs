@@ -12,6 +12,8 @@ use aether_data::storage::{
     contribute_tagged_element, decode_derived, encode_derived,
 };
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
+#[cfg(not(target_family = "wasm"))]
+use aether_data::{__inventory::inventory, storage::StorageKindEntry};
 use aether_data::{
     Citations, Cites, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageError, StorageLeaves,
 };
@@ -40,6 +42,13 @@ const _: () = assert_unique_storage_leaves(&EVENT_SCHEMA, &[]);
 const _: () = assert_unique_storage_leaves(&HEAD_SCHEMA, &[]);
 
 const HEAD_MOVED_NAME: &str = "bloomery.head_moved";
+
+// The hand-written `bloomery.head_moved` codec bypasses `#[derive(Storage)]`,
+// so it submits its native storage-kind row itself.
+#[cfg(not(target_family = "wasm"))]
+inventory::submit! {
+    StorageKindEntry { name: HEAD_MOVED_NAME, schema: &EVENT_SCHEMA }
+}
 
 fn storage_encode_panic(name: &str) -> ! {
     panic!(

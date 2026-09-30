@@ -29,6 +29,27 @@ pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
     U64_WIDTH + str_len(cow_str_as_str(&labels.kind_label)) + label_node_len(&labels.root)
 }
 
+/// Byte length of a bare [`LabelNode`]'s aether-wire encoding, the
+/// size pass of [`canonical_write_label_node`].
+///
+/// # Panics
+/// Panics on an `Owned` cell or `Cow`, which only a decoded tree holds.
+#[must_use]
+pub const fn canonical_len_label_node(node: &LabelNode) -> usize {
+    label_node_len(node)
+}
+
+/// Write a bare [`LabelNode`]'s aether-wire bytes into `out` at `cursor`,
+/// returning the advanced cursor: the form a record that embeds a kind's
+/// labels beside other fields writes them in, matching the runtime decode
+/// via `wire::take_from_bytes::<LabelNode>`.
+///
+/// # Panics
+/// As [`canonical_len_label_node`] does, and when `out` is too short.
+pub const fn canonical_write_label_node(node: &LabelNode, out: &mut [u8], cursor: usize) -> usize {
+    write_label_node(node, out, cursor)
+}
+
 const fn label_node_len(node: &LabelNode) -> usize {
     match node {
         LabelNode::Anonymous => U32_WIDTH,

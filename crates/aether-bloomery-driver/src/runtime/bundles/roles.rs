@@ -20,6 +20,11 @@ impl Programs {
     pub fn find(&self, name: &ProgramName) -> Option<&Declaration> {
         self.0.iter().find(|declared| declared.program.name == *name)
     }
+
+    /// Every declaration, in record order.
+    pub fn declarations(&self) -> &[Declaration] {
+        &self.0
+    }
 }
 
 /// The roles one bundle declares: at least one.

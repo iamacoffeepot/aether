@@ -20,9 +20,9 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
-    AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, Detail, Digest, DriverRecord, Fault,
-    FaultReason, Invoked, ProgramRef, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEvents,
-    ReadEventsResult, Seq,
+    AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, DeclarationsResult, Detail, Digest,
+    DriverRecord, Fault, FaultReason, Invoked, ProgramRef, ReadArtifact, ReadArtifactResult, ReadClosureResult,
+    ReadEvents, ReadEventsResult, Seq,
 };
 
 use self::artifacts::{ARTIFACT_CACHE_BYTES, ArtifactCache};
@@ -170,6 +170,13 @@ impl ProgramCore {
             }
         }
         (caller, out)
+    }
+
+    /// The programs of every bundle whose sections have decoded, read from the
+    /// bundle table; the answer needs no command.
+    #[must_use]
+    pub fn declarations(&self) -> DeclarationsResult {
+        DeclarationsResult { bundles: self.bundles.declarations() }
     }
 
     /// Feed one journal page. Unknown tickets return no commands.

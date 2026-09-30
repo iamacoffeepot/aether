@@ -50,7 +50,7 @@ impl Program for TreeEdit {
         let unchanged = |summary: String| Ok(Edited::new(tree, summary));
         let args = match read_args(&mut env, input.args()).await? {
             Ok(args) => args,
-            Err(summary) => return unchanged(summary),
+            Err(invalid) => return unchanged(format!("{invalid}, so nothing changed.")),
         };
         let path = args.path.as_str();
         if args.old.len() > MAX_TEXT_BYTES || args.new.len() > MAX_TEXT_BYTES {

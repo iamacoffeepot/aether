@@ -11,6 +11,8 @@ mod invariant;
 mod leaf;
 mod leaves;
 mod record;
+#[cfg(not(target_arch = "wasm32"))]
+mod registry;
 
 pub use cites::{Citation, Citations, Cites};
 pub use element::{
@@ -28,6 +30,8 @@ pub use leaves::{
     StorageLeaves, assemble_bytes, assemble_bytes_with_aliases, assemble_with_aliases, bytes_absent, contribute_bytes,
 };
 pub use record::{RecordReader, RecordWriter, StorageError, UnknownField};
+#[cfg(not(target_arch = "wasm32"))]
+pub use registry::{StorageKindEntry, storage_kind};
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
