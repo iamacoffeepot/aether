@@ -75,8 +75,8 @@ pub struct LifecycleParams {
 /// Components subscribe the `Tick` (and `Render`) stage directly on
 /// `aether.lifecycle` (ADR-0082 §7/§11), so the params wire no initial
 /// subscribers. The desktop chassis and the substrate harness adopt this
-/// graph; headless stays on its tick-only graph (its render cap is a
-/// no-op, so a `Render` / `Present` stage would settle to no GPU work).
+/// graph; headless stays on its tick-only graph (it composes no render
+/// actor, so it has no `Render` / `Present` work).
 ///
 /// The advance timeout is resolved separately through the
 /// [`LifecycleConfig`] `Config` channel.

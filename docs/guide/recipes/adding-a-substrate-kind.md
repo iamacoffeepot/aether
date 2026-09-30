@@ -23,7 +23,7 @@ The clipboard contract is a compact current exemplar:
 
 - kinds: `aether-clipboard/src/kinds.rs`;
 - identity/helpers: `aether-clipboard/src/lib.rs`;
-- real/headless handlers: `aether-clipboard/src/runtime/{mod,headless}.rs`;
+- system/in-memory backends: `aether-clipboard/src/runtime/mod.rs`;
 - live discovery: inventory registry → `describe_kinds`/`describe_handlers`.
 
 ## 2. Declare request and reply

@@ -1,9 +1,10 @@
 //! Struct-hosted `#[actor]` module-path form: `#[actor(singleton,
 //! nested::rt_nested)]` resolves the runtime module *relative to this file*
 //! through the path segments — `nested/rt_nested.rs` — instead of a sibling
-//! flat file. This is the headless-companion layout (`runtime::headless`)
-//! in fixture form; the harvest, marker emission, and `include_bytes!`
-//! rebuild edge must all compile exactly as the sibling-ident form does.
+//! flat file. This is the nested-instance layout (`runtime::instance`, as
+//! `aether_window::WindowInstance` uses) in fixture form; the harvest,
+//! marker emission, and `include_bytes!` rebuild edge must all compile
+//! exactly as the sibling-ident form does.
 
 use aether_actor::actor;
 
