@@ -15,10 +15,10 @@ use std::fs;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
+    LoadComponent, LoadResult,
 };
 use aether_substrate::testing::successor_wasm;
 
@@ -210,20 +210,6 @@ fn drop_boot(harness: &mut SubstrateHarness) {
         .expect("drop boot sequence");
 }
 
-/// Republish `wasm`, returning the host's verdict.
-fn replace(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ReplaceResult {
-    let replaced = harness
-        .execute(vec![(
-            "replace",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm, configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult")
-}
-
 /// Catches a boot torn down when the module's last widget unloads: after
 /// every widget drops, the boot has not run `unwire`, the host still
 /// describes its live guest, and a drop at it still finds it.
@@ -317,13 +303,13 @@ fn a_module_that_declares_a_boot_is_not_replaceable() {
     load_boot_export(&mut harness, &boot_wasm, "aether.test.boot.widget_a");
     settle(&mut harness);
     let booted_once = harness.count_observed(BOOT_OBSERVED);
-    match replace(&mut harness, successor_wasm(&boot_wasm, 1)) {
-        ReplaceResult::Err { error } => assert!(
-            error.contains("declares the boot") && error.contains(BOOT_NAMESPACE),
-            "the refusal names the successor's boot: {error}",
-        ),
-        ReplaceResult::Ok { .. } => panic!("a successor of a boot module must not be republished"),
-    }
+    let Err(SubstrateHarnessError::Publish(error)) = harness.publish(successor_wasm(&boot_wasm, 1)) else {
+        panic!("a successor of a boot module must not be republished");
+    };
+    assert!(
+        error.contains("declares the boot") && error.contains(BOOT_NAMESPACE),
+        "the refusal names the successor's boot: {error}",
+    );
     settle(&mut harness);
     assert_eq!(harness.count_observed(BOOT_OBSERVED), booted_once, "the refused successor spawns no boot");
 
@@ -339,13 +325,13 @@ fn a_module_that_declares_a_boot_is_not_replaceable() {
     settle(&mut harness);
     let booted = harness.count_observed(BOOT_OBSERVED);
     let subject_base_wasm = fs::read(&subject_base_path).expect("read subject base fixture wasm");
-    match replace(&mut harness, subject_base_wasm) {
-        ReplaceResult::Err { error } => assert!(
-            error.contains("test.republish.subject") && error.contains("declares a boot"),
-            "the refusal names the namespace a boot module published: {error}",
-        ),
-        ReplaceResult::Ok { .. } => panic!("a successor that drops a boot must not be republished"),
-    }
+    let Err(SubstrateHarnessError::Publish(error)) = harness.publish(subject_base_wasm) else {
+        panic!("a successor that drops a boot must not be republished");
+    };
+    assert!(
+        error.contains("test.republish.subject") && error.contains("declares a boot"),
+        "the refusal names the namespace a boot module published: {error}",
+    );
 
     settle(&mut harness);
     assert_eq!(

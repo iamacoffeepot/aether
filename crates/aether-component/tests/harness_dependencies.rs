@@ -1,25 +1,24 @@
 //! Declared-dependency load refusal (issue #6277).
 //!
-//! The scenarios use only `HarnessOp` plus ordinary `LoadComponent` /
-//! `ReplaceComponent` values. `DependentProbe` declares
+//! The scenarios use only `HarnessOp` and the harness's load and publish
+//! verbs. `DependentProbe` declares
 //! `depends(ParentPeerTarget)`: loading it alone is a `LoadResult::Err`
 //! naming the target, and loading the target first makes the same load
 //! `Ok`. Every declarable dependency is a root singleton (ADR-0241 §5), so
 //! the check reads the same position wherever the dependent is placed.
 //! Republishing the subject toward a successor that adds
 //! `depends(ClipboardCapability)` while no clipboard is live is a
-//! `ReplaceResult::Err` naming the live instance, and it keeps the running
+//! `PublishResult::Err` naming the live instance, and it keeps the running
 //! module (ADR-0241 §4); with the clipboard composed it succeeds.
 
 use std::fs;
 
 use aether_actor::ErasedActorRef;
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
-use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::LoadComponent;
 use aether_test_fixtures_bundle::DependentProbe;
 use aether_test_fixtures_kinds::Bump;
 
@@ -98,16 +97,6 @@ fn subject_wasm(variant: &str) -> Option<Vec<u8>> {
     Some(fs::read(require_wasm(&format!("republish_subject_{variant}"))?).expect("read fixture wasm"))
 }
 
-/// Republish `wasm` on `harness`, returning the host's verdict.
-fn replace(harness: &mut SubstrateHarness, label: &str, wasm: Vec<u8>) -> ReplaceResult {
-    let operation = HarnessOp::send_and_await_reply(
-        &harness.actor_ref::<ComponentHostCapability>(),
-        &ReplaceComponent { wasm, configs: Vec::new() },
-    );
-    let result = harness.execute(vec![(label, operation)]).expect("replace sequence");
-    result.reply::<ReplaceResult>(label).expect("decode ReplaceResult")
-}
-
 /// Catches a republish whose successor adds a dependency that is not live
 /// reaching the live instance (it would lose its old code for one that
 /// cannot run), a refusal that does not name the instance, and a check that
@@ -123,12 +112,12 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     let (subject, subject_path) = harness.load_any(&load).expect("the subject loads");
     let subject = harness.cast::<SubjectBump>(subject).expect("the subject publishes Bump");
 
-    let ReplaceResult::Err { error } = replace(&mut harness, "replace-absent", depends.clone()) else {
+    let Err(SubstrateHarnessError::Publish(error)) = harness.publish(depends.clone()) else {
         panic!("a republish whose added dependency is not live must be refused");
     };
     assert_eq!(
         error,
-        format!("replace refused: {subject_path} depends on {CLIPBOARD}, which is not live"),
+        format!("{subject_path} depends on {CLIPBOARD}, which is not live"),
         "the refusal names the instance and the missing namespace",
     );
 
@@ -149,8 +138,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
         .build()
         .expect("boot with clipboard");
     satisfied.load_any(&load).expect("the subject loads beside the clipboard");
-    match replace(&mut satisfied, "replace-satisfied", depends) {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("a republish whose added dependency is live must succeed: {error}"),
+    if let Err(error) = satisfied.publish(depends) {
+        panic!("a republish whose added dependency is live must succeed: {error}");
     }
 }

@@ -17,7 +17,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::LoadComponent;
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::{
     InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
@@ -120,19 +120,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // The old instance's `on_dehydrate` composites the child's state; the
     // new instance's `on_rehydrate` reconstructs the child and restores it.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     // Query the reconstructed child's alias: the count must still be 2.
     // A 0 here means the child vanished across the reload (its state lost,
@@ -184,19 +172,7 @@ fn replace_rebuilds_a_private_inline_child() {
     );
 
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     let post = harness
         .execute(vec![("probe", HarnessOp::send_and_await_reply(&child, &InlineProbe))])
@@ -273,19 +249,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     assert_eq!(before.reply::<CountReport>("query").expect("decode nested leaf count"), CountReport { count: 2 },);
 
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace nested lineage fixture");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace nested lineage fixture: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("replace nested lineage fixture: {error}"));
 
     let after = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&leaf, &CountQuery))])
@@ -374,19 +338,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // The tag-spawned child's state must reconstruct — its type tag is in the
     // same export! set the reconstruct arm walks.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     let post = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&child, &CountQuery))])

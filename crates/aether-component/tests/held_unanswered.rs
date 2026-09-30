@@ -21,7 +21,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, Publish, PublishResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::HeldRequester;
 use aether_test_fixtures_kinds::{
@@ -54,9 +54,9 @@ enum BeforeDrop {
 /// keeper (or, for [`BeforeDrop::Reinstated`], the forgetter), run `before`,
 /// drop the holder, and ask the requester how many replies it received,
 /// which must be one. Returns the harness to count reports on and the
-/// replace's result, if one ran, or `None` when the fixture wasm is not
+/// republish's result, if one ran, or `None` when the fixture wasm is not
 /// built.
-fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<ReplaceResult>)> {
+fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<PublishResult>)> {
     let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
 
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
@@ -85,11 +85,11 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
     let host = harness.actor_ref::<ComponentHostCapability>();
     // A successor build of the same module: the republish moves every live
     // instance of the bundle, the holder among them (ADR-0241 §7).
-    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
+    let publish = Publish { code: successor_wasm(&wasm, 1).into(), configs: Vec::new() };
 
     let mut steps = vec![("request", HarnessOp::send_and_settle(&requester, &RunHeldRequest { tag: 1, target }))];
     if !matches!(before, BeforeDrop::Nothing) {
-        steps.push(("replace", HarnessOp::send_and_await_reply(&host, &replace)));
+        steps.push(("publish", HarnessOp::send_and_await_reply(&host, &publish)));
     }
     steps.extend([
         ("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path })),
@@ -103,7 +103,7 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
     let replied = result.reply::<CountReport>("replied").expect("decode CountReport");
     assert_eq!(replied.count, 1, "the requester has its one reply by the time the drop answers");
     let replaced =
-        (!matches!(before, BeforeDrop::Nothing)).then(|| result.reply::<ReplaceResult>("replace").expect("decode"));
+        (!matches!(before, BeforeDrop::Nothing)).then(|| result.reply::<PublishResult>("publish").expect("decode"));
 
     Some((harness, replaced))
 }
@@ -139,7 +139,7 @@ fn a_replaced_holder_answers_unanswered_on_drop() {
         return;
     };
 
-    assert!(matches!(replaced, Some(ReplaceResult::Ok { .. })), "replace_component: {replaced:?}");
+    assert!(matches!(replaced, Some(PublishResult::Ok { .. })), "publish: {replaced:?}");
     assert_one_unanswered(&harness);
 }
 
@@ -151,6 +151,6 @@ fn a_reinstated_holder_answers_unanswered_on_drop() {
         return;
     };
 
-    assert!(matches!(replaced, Some(ReplaceResult::Err { .. })), "replace_component: {replaced:?}");
+    assert!(matches!(replaced, Some(PublishResult::Err { .. })), "publish: {replaced:?}");
     assert_one_unanswered(&harness);
 }

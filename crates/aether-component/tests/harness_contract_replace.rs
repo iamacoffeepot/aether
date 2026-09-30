@@ -16,8 +16,8 @@ use aether_actor::ProtocolRef;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, PublishedType};
 use aether_test_fixtures_kinds::Bump;
 
 const SUBJECT: &str = "test.republish.subject";
@@ -59,13 +59,14 @@ impl Fixture {
         Some(Self { harness, subject, subject_ref })
     }
 
-    /// Republish the `variant` successor, returning the host's verdict.
-    fn replace(&mut self, label: &str, variant: &str) -> ReplaceResult {
+    /// Republish the `variant` successor, returning the host's verdict: the
+    /// published types, or its refusal.
+    fn publish(&mut self, variant: &str) -> Result<Vec<PublishedType>, String> {
         let wasm = subject_wasm(variant).expect("the successor fixture is built with the base");
-        let replace = ReplaceComponent { wasm, configs: Vec::new() };
-        let operation = HarnessOp::send_and_await_reply(&self.harness.actor_ref::<ComponentHostCapability>(), &replace);
-        let result = self.harness.execute(vec![(label, operation)]).expect("replace operation");
-        result.reply::<ReplaceResult>(label).expect("decode ReplaceResult")
+        self.harness.publish(wasm).map_err(|error| match error {
+            SubstrateHarnessError::Publish(refusal) => refusal,
+            other => panic!("publish {variant}: {other}"),
+        })
     }
 
     /// Bump the subject and assert it still serves.
@@ -79,7 +80,7 @@ impl Fixture {
 
 /// The admission refusal for a successor that drops or changes `kind`'s row.
 fn narrowing(kind: &str) -> String {
-    format!("replace refused: module publish refused: {SUBJECT} drops or changes its row for {kind}")
+    format!("module publish refused: {SUBJECT} drops or changes its row for {kind}")
 }
 
 // Catches: the admission preview skipped, so a narrowing successor reaches
@@ -90,7 +91,7 @@ fn a_replace_that_drops_a_row_is_refused_and_the_old_module_keeps_serving() {
         return;
     };
 
-    let ReplaceResult::Err { error } = fixture.replace("replace-dropped", "dropped") else {
+    let Err(error) = fixture.publish("dropped") else {
         panic!("a replace that drops a row must be refused");
     };
     assert!(
@@ -107,7 +108,7 @@ fn a_replace_that_changes_a_reply_is_refused() {
         return;
     };
 
-    let ReplaceResult::Err { error } = fixture.replace("replace-changed", "changed") else {
+    let Err(error) = fixture.publish("changed") else {
         panic!("a replace that changes a reply must be refused");
     };
     assert!(
@@ -124,13 +125,13 @@ fn an_added_row_is_accepted_and_then_binds() {
         return;
     };
 
-    if let ReplaceResult::Err { error } = fixture.replace("replace-extended", "extended") {
+    if let Err(error) = fixture.publish("extended") {
         panic!("a replace that only adds rows must succeed: {error}");
     }
 
     // The predecessor is now the extended module, so returning to the base
     // drops the row the extension added.
-    let ReplaceResult::Err { error } = fixture.replace("replace-back", "base") else {
+    let Err(error) = fixture.publish("base") else {
         panic!("a replace that drops the added row must be refused");
     };
     assert!(error.starts_with(&narrowing(INLINE_PROBE)), "the added row binds the next replace: {error}");
@@ -152,10 +153,10 @@ fn a_replace_after_drop_republishes_and_the_dropped_name_stays_spent() {
         panic!("the subject must drop: {error}");
     }
 
-    let ReplaceResult::Ok { types } = fixture.replace("replace-extended", "extended") else {
+    let Ok(types) = fixture.publish("extended") else {
         panic!("a republish with no live instance must still publish");
     };
-    assert!(types.iter().any(|replaced| replaced.namespace == SUBJECT), "the republish reports {SUBJECT}: {types:?}");
+    assert!(types.iter().any(|published| published.namespace == SUBJECT), "the republish reports {SUBJECT}: {types:?}");
 
     let listed = fixture.harness.list_components().expect("list components");
     assert!(
@@ -170,17 +171,17 @@ fn an_added_fallback_is_accepted_and_a_replace_that_drops_it_is_refused() {
         return;
     };
 
-    if let ReplaceResult::Err { error } = fixture.replace("replace-fallback", "fallback") {
+    if let Err(error) = fixture.publish("fallback") {
         panic!("a replace that only adds a fallback must succeed: {error}");
     }
 
     // The extended module keeps every row and adds one, so only the dropped
     // fallback breaks the contract.
-    let ReplaceResult::Err { error } = fixture.replace("replace-extended", "extended") else {
+    let Err(error) = fixture.publish("extended") else {
         panic!("a replace that drops the fallback must be refused");
     };
     assert!(
-        error.starts_with(&format!("replace refused: module publish refused: {SUBJECT}")) && error.contains("fallback"),
+        error.starts_with(&format!("module publish refused: {SUBJECT}")) && error.contains("fallback"),
         "the refusal names the namespace and the fallback: {error}",
     );
 

@@ -1,71 +1,76 @@
 //! A guest is named as a native actor is (ADR-0241 §5, §6): a declared
-//! dependency is a root singleton a peer reaches by type, and `load_under`
-//! places a guest only beneath a parent its type declares, at
+//! dependency is a root singleton a peer reaches by type, and a spawn with a
+//! parent places a guest only beneath a parent its type declares, at
 //! `parent/NS:key`. A short path's hole beneath a guest parent fills from its
 //! published module's lineage, the way one beneath a native parent does.
-//! Driven through real `LoadComponent` sends to the component host and
+//! Driven through real `Publish` and `Spawn` sends to the component host and
 //! `ResolveAddress` sends to the inventory cap.
 
 use std::fs;
 
-use aether_actor::{Addressable, ErasedActorRef};
-use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, Kind};
+use aether_actor::{Addressable, Root, Singleton};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_inventory::InventoryCapability;
 use aether_inventory::kinds::{ResolveAddress, ResolveAddressResult};
-use aether_kinds::{LoadComponent, LoadResult};
-use aether_test_fixtures_bundle::ParentPeerCaller;
+use aether_kinds::Spawn;
+use aether_test_fixtures_bundle::{
+    InlineParent, MatrixChild, MatrixParent, ParentPeerCaller, ParentPeerTarget, Probe, SourceObserver,
+};
 use aether_test_fixtures_kinds::{Bump, TickObserved};
 use aether_test_fixtures_short_path::{Branch, Host, Leaf, Placed, Trunk};
 
-const CALLER_EXPORT: &str = "test.parent_peer.caller";
-const TARGET_EXPORT: &str = "test.parent_peer.target";
-const PROBE_EXPORT: &str = "test.probe";
-const OBSERVER_EXPORT: &str = "test.source_observer";
-const MATRIX_PARENT_EXPORT: &str = "test.matrix.parent";
-const MATRIX_CHILD_EXPORT: &str = "test.matrix.child";
-const INLINE_PARENT_EXPORT: &str = "test.inline.parent";
+const TARGET_EXPORT: &str = ParentPeerTarget::NAMESPACE;
+const PROBE_EXPORT: &str = Probe::NAMESPACE;
+const MATRIX_PARENT_EXPORT: &str = MatrixParent::NAMESPACE;
+const MATRIX_CHILD_EXPORT: &str = MatrixChild::NAMESPACE;
+const INLINE_PARENT_EXPORT: &str = InlineParent::NAMESPACE;
 const TRUNK_EXPORT: &str = Trunk::NAMESPACE;
 const HOST_EXPORT: &str = Host::NAMESPACE;
-const PLACED_EXPORT: &str = Placed::NAMESPACE;
 
-fn component(wasm: &[u8], name: Option<&str>, export: &str) -> LoadComponent {
-    LoadComponent {
-        wasm: wasm.to_vec(),
-        name: name.map(str::to_owned),
+/// Spawn the published root singleton `R`, returning its canonical path.
+fn spawn<R: Root + Singleton>(harness: &mut SubstrateHarness) -> ErasedActorPath {
+    let (_, path) = harness.spawn::<R>().unwrap_or_else(|error| panic!("spawn {}: {error}", R::NAMESPACE));
+    path
+}
+
+/// Spawn a `MatrixChild` keyed `k` beneath `parent` through the erased door,
+/// which takes a parent whose type the child does not declare.
+fn spawn_matrix_child_under(
+    harness: &mut SubstrateHarness,
+    parent: ErasedActorPath,
+) -> Result<ErasedActorPath, SubstrateHarnessError> {
+    let spawn = Spawn {
+        namespace: MATRIX_CHILD_EXPORT.to_owned(),
+        key: Some("k".to_owned()),
+        parent: Some(parent),
         config: Vec::new(),
-        export: Some(export.to_owned()),
-    }
+    };
+    harness.spawn_any(&spawn).map(|spawned| spawned.path)
 }
 
-fn load(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -> (ErasedActorRef, ErasedActorPath) {
-    harness.load_any(&component(wasm, None, export)).unwrap_or_else(|error| panic!("load {export}: {error}"))
-}
-
-fn load_under(harness: &mut SubstrateHarness, parent: &ErasedActorPath, wasm: &[u8], export: &str) -> LoadResult {
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let operation = HarnessOp::load_component_under(&host, parent.to_string(), component(wasm, Some("k"), export));
-    let result = harness.execute(vec![("load-under", operation)]).expect("component load operation");
-    result.reply::<LoadResult>("load-under").expect("decode LoadResult")
-}
-
-fn fixture() -> Option<(SubstrateHarness, Vec<u8>)> {
-    fixture_of("aether_test_fixtures_bundle")
+fn key() -> LoadName {
+    LoadName::new("k").expect("a valid load name")
 }
 
 /// A harness that also composes the inventory cap, so a scenario resolves
-/// short paths the way an external caller does, and the `stem` module.
-fn fixture_of(stem: &str) -> Option<(SubstrateHarness, Vec<u8>)> {
+/// short paths the way an external caller does, with the `stem` module
+/// published.
+fn fixture_of(stem: &str) -> Option<SubstrateHarness> {
     let wasm = fs::read(require_wasm(stem)?).expect("read fixture wasm");
-    let harness = SubstrateHarness::builder()
+    let mut harness = SubstrateHarness::builder()
         .size(64, 48)
         .with_component_host()
         .with_actor::<InventoryCapability>(())
         .build()
         .expect("boot");
-    Some((harness, wasm))
+    harness.publish(wasm).unwrap_or_else(|error| panic!("publish {stem}: {error}"));
+    Some(harness)
+}
+
+fn fixture() -> Option<SubstrateHarness> {
+    fixture_of("aether_test_fixtures_bundle")
 }
 
 /// Resolve `address` through the inventory cap's `ResolveAddress`.
@@ -87,14 +92,12 @@ fn canonical(path: &str) -> ResolveAddressResult {
 /// at `R`'s published name, or the target never observes the `Bump`.
 #[test]
 fn a_guest_reaches_its_declared_root_dependency_by_type() {
-    let Some((mut harness, wasm)) = fixture() else {
+    let Some(mut harness) = fixture() else {
         return;
     };
 
-    let (_, target) = load(&mut harness, &wasm, TARGET_EXPORT);
-    let (caller, _) = harness
-        .load::<ParentPeerCaller>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load {CALLER_EXPORT}: {error}"));
+    let target = spawn::<ParentPeerTarget>(&mut harness);
+    let (caller, _) = harness.spawn::<ParentPeerCaller>().expect("spawn the caller");
     assert_eq!(target.to_string(), TARGET_EXPORT, "a root singleton guest is named by its namespace");
 
     let baseline = harness.count_observed(TickObserved::NAME);
@@ -109,30 +112,28 @@ fn a_guest_reaches_its_declared_root_dependency_by_type() {
 }
 
 /// Catches placement read from the host rather than the lineage (#6821): a
-/// `load_under` beneath a parent the child's type does not declare is refused
-/// before the module publishes, leaving no route, while the same load beneath
-/// its declared parent lands at `parent/NS:key`.
+/// spawn beneath a parent the child's type does not declare is refused,
+/// leaving no route, while the same spawn beneath its declared parent lands
+/// at `parent/NS:key`.
 #[test]
-fn load_under_places_a_guest_only_beneath_a_declared_parent() {
-    let Some((mut harness, wasm)) = fixture() else {
+fn a_spawn_places_a_guest_only_beneath_a_declared_parent() {
+    let Some(mut harness) = fixture() else {
         return;
     };
 
-    load(&mut harness, &wasm, OBSERVER_EXPORT);
-    let (_, matrix_parent) = load(&mut harness, &wasm, MATRIX_PARENT_EXPORT);
-    let (_, probe) = load(&mut harness, &wasm, PROBE_EXPORT);
+    spawn::<SourceObserver>(&mut harness);
+    let matrix_parent = spawn::<MatrixParent>(&mut harness);
+    let probe = spawn::<Probe>(&mut harness);
 
-    let LoadResult::Err { error } = load_under(&mut harness, &probe, &wasm, MATRIX_CHILD_EXPORT) else {
-        panic!("a load_under beneath an undeclared parent must be refused");
+    let Err(SubstrateHarnessError::Spawn(error)) = spawn_matrix_child_under(&mut harness, probe.clone()) else {
+        panic!("a spawn beneath an undeclared parent must be refused");
     };
     assert!(error.contains(MATRIX_CHILD_EXPORT) && error.contains(PROBE_EXPORT), "the refusal names both: {error}");
     let stray = format!("{probe}/{MATRIX_CHILD_EXPORT}:k");
     let listed = harness.list_components().expect("list components");
-    assert!(!listed.contains(&stray), "the refused load left no route: {listed:?}");
+    assert!(!listed.contains(&stray), "the refused spawn left no route: {listed:?}");
 
-    let LoadResult::Ok { path, .. } = load_under(&mut harness, &matrix_parent, &wasm, MATRIX_CHILD_EXPORT) else {
-        panic!("a load_under beneath the declared parent must succeed");
-    };
+    let path = spawn_matrix_child_under(&mut harness, matrix_parent).expect("a spawn beneath the declared parent");
     assert_eq!(path.to_string(), format!("{MATRIX_PARENT_EXPORT}/{MATRIX_CHILD_EXPORT}:k"));
 }
 
@@ -143,13 +144,11 @@ fn load_under_places_a_guest_only_beneath_a_declared_parent() {
 /// `Bump` handler, so the settled bump has committed both aliases.
 #[test]
 fn holes_beneath_guest_parents_expand_through_private_inline_children() {
-    let Some((mut harness, wasm)) = fixture_of("aether_test_fixtures_short_path") else {
+    let Some(mut harness) = fixture_of("aether_test_fixtures_short_path") else {
         return;
     };
 
-    let (trunk, _) = harness
-        .load::<Trunk>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load {TRUNK_EXPORT}: {error}"));
+    let (trunk, _) = harness.spawn::<Trunk>().expect("spawn the trunk");
     harness.execute(vec![("bump", HarnessOp::send_and_settle(&trunk, &Bump))]).expect("bump the trunk");
 
     let branch = format!("{TRUNK_EXPORT}/{}:branch", Branch::NAMESPACE);
@@ -160,18 +159,16 @@ fn holes_beneath_guest_parents_expand_through_private_inline_children() {
     );
 }
 
-/// Catches guest edges missing for load placement: a hole beneath the guest
-/// a `load_under` placed its child under expands to that child.
+/// Catches guest edges missing for spawn placement: a hole beneath the guest
+/// a spawn placed its child under expands to that child.
 #[test]
-fn a_hole_beneath_a_guest_parent_expands_to_its_load_under_child() {
-    let Some((mut harness, wasm)) = fixture_of("aether_test_fixtures_short_path") else {
+fn a_hole_beneath_a_guest_parent_expands_to_its_spawned_child() {
+    let Some(mut harness) = fixture_of("aether_test_fixtures_short_path") else {
         return;
     };
 
-    let (_, host) = load(&mut harness, &wasm, HOST_EXPORT);
-    let LoadResult::Ok { path, .. } = load_under(&mut harness, &host, &wasm, PLACED_EXPORT) else {
-        panic!("a load_under beneath the declared parent must succeed");
-    };
+    let (host, _) = harness.spawn::<Host>().expect("spawn the host");
+    let (_, path) = harness.spawn_child::<Host, Placed>(&host, &key()).expect("spawn the placed child");
 
     assert_eq!(resolve(&mut harness, &format!("{HOST_EXPORT}/:k")), canonical(&path.to_string()));
 }
@@ -183,11 +180,11 @@ fn a_hole_beneath_a_guest_parent_expands_to_its_load_under_child() {
 /// naming both.
 #[test]
 fn a_composable_sibling_defers_to_the_live_child_under_a_guest_parents_hole() {
-    let Some((mut harness, wasm)) = fixture_of("aether_test_fixtures_bundle") else {
+    let Some(mut harness) = fixture() else {
         return;
     };
 
-    let (_, parent) = load(&mut harness, &wasm, INLINE_PARENT_EXPORT);
+    let parent = spawn::<InlineParent>(&mut harness);
 
     assert_eq!(
         resolve(&mut harness, &format!("{INLINE_PARENT_EXPORT}/:widget")),

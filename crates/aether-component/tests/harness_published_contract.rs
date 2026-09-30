@@ -18,7 +18,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId, LoadName, ReplyContract};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::LoadComponent;
 use aether_substrate::actor::native::{Dispatch, NativeActor};
 use aether_test_fixtures_bundle::{InlineChild, InlineParent, InlineStatefulChild, InlineStatefulParent};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineEcho, InlineProbe};
@@ -89,11 +89,8 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace() {
     let base = sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]);
     assert_eq!(harness.published_contract(subject), Some((base.clone(), false)));
 
-    let replace = ReplaceComponent { wasm: fs::read(extended_path).expect("read successor wasm"), configs: Vec::new() };
-    let operation = HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &replace);
-    let replaced = harness.execute(vec![("replace", operation)]).expect("replace operation");
-    if let ReplaceResult::Err { error } = replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
-        panic!("a replace that only adds a row must succeed: {error}");
+    if let Err(error) = harness.publish(fs::read(extended_path).expect("read successor wasm")) {
+        panic!("a republish that only adds a row must succeed: {error}");
     }
     harness.execute(vec![("bump", HarnessOp::send_and_settle(&subject_bump, &Bump))]).expect("bump the replaced actor");
     harness.await_registry_applied();

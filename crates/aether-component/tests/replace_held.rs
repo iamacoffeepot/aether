@@ -20,7 +20,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{ExecutionError, HarnessOp, SendTarget, SubstrateHarness};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{LoadComponent, Publish, PublishResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::{HeldForgetter, HeldKeeper, HeldRequester, ReplyHolder as CarryReplyHolder};
 use aether_test_fixtures_kinds::{
@@ -82,7 +82,7 @@ impl Holder {
 /// and wait for the requester to match it. Returns the harness to count
 /// reports on and the swap's result, or `None` when the fixture wasm is not
 /// built.
-fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, ReplaceResult)> {
+fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, PublishResult)> {
     let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
 
@@ -104,15 +104,15 @@ fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, ReplaceResult
         Holder::Keeper => HarnessOp::send_and_settle(&keeper, &ReleaseHeld),
         Holder::Forgetter => HarnessOp::send_and_settle(&forgetter, &ReleaseHeld),
     };
-    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
+    let publish = Publish { code: successor_wasm(&wasm, 1).into(), configs: Vec::new() };
     let run = RunHeldRequest { tag: 1, target: holder.target() };
 
-    let swap = run_across_swap(&mut harness, &requester, run, &replace, release)
+    let swap = run_across_swap(&mut harness, &requester, run, &publish, release)
         .unwrap_or_else(|error| panic!("held-reply sequence for {}: {error}", holder.export()));
     Some((harness, swap))
 }
 
-/// Send `run` to `requester`, republish with `replace`, run `release`, and
+/// Send `run` to `requester`, republish with `publish`, run `release`, and
 /// wait for the requester to match the held reply: the held reply lands on
 /// the detached request's chain, which no harness step joins, so the
 /// requester's match count is the barrier. Generic over the requester's
@@ -123,19 +123,19 @@ fn run_across_swap<'r, T, I1, I2>(
     harness: &mut SubstrateHarness,
     requester: &'r T,
     run: RunHeldRequest,
-    replace: &ReplaceComponent,
+    publish: &Publish,
     release: HarnessOp,
-) -> Result<ReplaceResult, ExecutionError>
+) -> Result<PublishResult, ExecutionError>
 where
     &'r T: SendTarget<RunHeldRequest, I1> + SendTarget<CountQuery, I2>,
 {
     let steps = vec![
         ("request", HarnessOp::send_and_settle(requester, &run)),
-        ("swap", HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), replace)),
+        ("swap", HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), publish)),
         ("release", release),
         ("matched", HarnessOp::poll_until(requester, &CountQuery, |report: &CountReport| report.count >= 1)),
     ];
-    Ok(harness.execute(steps)?.reply::<ReplaceResult>("swap").expect("decode ReplaceResult"))
+    Ok(harness.execute(steps)?.reply::<PublishResult>("swap").expect("decode PublishResult"))
 }
 
 fn assert_one_match(harness: &SubstrateHarness) {
@@ -156,7 +156,7 @@ fn a_held_reply_in_a_carried_context_answers_after_replace() {
         return;
     };
 
-    assert!(matches!(swap, ReplaceResult::Ok { .. }), "replace_component: {swap:?}");
+    assert!(matches!(swap, PublishResult::Ok { .. }), "publish: {swap:?}");
     assert_one_match(&harness);
 }
 
@@ -169,7 +169,7 @@ fn a_held_reply_in_saved_state_answers_after_replace() {
         return;
     };
 
-    assert!(matches!(swap, ReplaceResult::Ok { .. }), "replace_component: {swap:?}");
+    assert!(matches!(swap, PublishResult::Ok { .. }), "publish: {swap:?}");
     assert_one_match(&harness);
 }
 
@@ -183,11 +183,11 @@ fn an_unsaved_held_reply_refuses_the_replace_and_the_old_guest_answers() {
     };
 
     match swap {
-        ReplaceResult::Err { error } => assert!(
+        PublishResult::Err { error } => assert!(
             error.contains("a held reply is live and was not saved"),
             "the refusal must name the unsaved held reply: {error}",
         ),
-        ReplaceResult::Ok { .. } => panic!("a replace that strands a live held reply was accepted"),
+        PublishResult::Ok { .. } => panic!("a replace that strands a live held reply was accepted"),
     }
     assert_one_match(&harness);
 }
@@ -224,26 +224,26 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
         .cast::<CarriedHeldRequester>(requester)
         .expect("the held requester publishes RunHeldRequest and CountQuery");
 
-    let replace = ReplaceComponent { wasm: fs::read(v2_path).expect("read republish_carry_v2"), configs: Vec::new() };
+    let publish = Publish { code: fs::read(v2_path).expect("read republish_carry_v2").into(), configs: Vec::new() };
     let release = HarnessOp::send_and_settle(&reply_holder, &ReleaseCarried);
     let swap = run_across_swap(
         &mut harness,
         &requester,
         RunHeldRequest { tag: 1, target: HELD_TARGET_RELAY },
-        &replace,
+        &publish,
         release,
     )
     .unwrap_or_else(|error| panic!("held-reply sequence for the reshaped relay: {error}"));
 
     match swap {
-        ReplaceResult::Err { error } => assert!(
+        PublishResult::Err { error } => assert!(
             error.contains(
                 "replacement does not declare its carried request context \
                  aether.test_fixtures.republish_held_relay_context"
             ),
             "the refusal must name the carried held relay context: {error}",
         ),
-        ReplaceResult::Ok { .. } => panic!("a replacement that changed a carried held reply kind was accepted"),
+        PublishResult::Ok { .. } => panic!("a replacement that changed a carried held reply kind was accepted"),
     }
     assert_one_match(&harness);
 }

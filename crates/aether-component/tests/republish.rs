@@ -30,10 +30,8 @@ use aether_component::ComponentHostCapability;
 use aether_component::component::Prepared;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness};
-use aether_kinds::{
-    DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceConfig, ReplaceResult,
-};
+use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness, SubstrateHarnessError};
+use aether_kinds::{DropComponent, DropResult, InstanceConfig, LoadComponent, LoadResult, Publish, PublishResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, CourierConfig, CourierQuery, CourierQueryResult, GateLabelledConfig, GateProbe,
@@ -126,12 +124,9 @@ fn republish_courier(
     config: &CourierConfig,
 ) -> Vec<String> {
     let (courier, path) = courier;
-    let replace = ReplaceComponent {
-        wasm: v2.to_vec(),
-        configs: vec![ReplaceConfig { path, config: config.encode_into_bytes() }],
-    };
+    let configs = vec![InstanceConfig { path, config: config.encode_into_bytes() }];
 
-    expect_ok(&republish(harness, &replace));
+    expect_ok(&republish(harness, v2, configs));
     let courier = harness.cast::<CourierRow>(courier).expect("the courier publishes CourierQuery");
     call::<_, _, CourierQueryResult>(harness, &courier, &CourierQuery).outcomes
 }
@@ -195,18 +190,20 @@ fn load_peer(harness: &mut SubstrateHarness, wasm: &[u8], trap_on_rehydrate: boo
     harness.load_any(&load).unwrap_or_else(|error| panic!("load peer: {error}")).0
 }
 
-fn replace(wasm: &[u8]) -> ReplaceComponent {
-    ReplaceComponent { wasm: wasm.to_vec(), configs: Vec::new() }
+/// A `Publish` of `wasm` with no configs, for a republish a test holds in
+/// flight.
+fn publish(wasm: &[u8]) -> Publish {
+    Publish { code: wasm.to_vec().into(), configs: Vec::new() }
 }
 
-/// Send `replace` to the component host and await its answer.
-fn republish(harness: &mut SubstrateHarness, replace: &ReplaceComponent) -> ReplaceResult {
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    harness
-        .execute(vec![("replace", HarnessOp::send_and_await_reply(&host, replace))])
-        .expect("replace call")
-        .reply::<ReplaceResult>("replace")
-        .expect("decode ReplaceResult")
+/// Republish `wasm` with `configs` through the harness and answer the host's
+/// verdict.
+fn republish(harness: &mut SubstrateHarness, wasm: &[u8], configs: Vec<InstanceConfig>) -> PublishResult {
+    match harness.publish_configured(wasm.to_vec(), configs) {
+        Ok(types) => PublishResult::Ok { types },
+        Err(SubstrateHarnessError::Publish(error)) => PublishResult::Err { error },
+        Err(error) => panic!("the publish must answer: {error}"),
+    }
 }
 
 fn call<K: Kind + Clone + 'static, I, R: Kind>(
@@ -221,17 +218,17 @@ fn call<K: Kind + Clone + 'static, I, R: Kind>(
         .expect("decode guest reply")
 }
 
-fn expect_ok(result: &ReplaceResult) -> Vec<String> {
+fn expect_ok(result: &PublishResult) -> Vec<String> {
     match result {
-        ReplaceResult::Ok { types } => types.iter().map(|republished| republished.namespace.clone()).collect(),
-        ReplaceResult::Err { error } => panic!("the replace was refused: {error}"),
+        PublishResult::Ok { types } => types.iter().map(|published| published.namespace.clone()).collect(),
+        PublishResult::Err { error } => panic!("the republish was refused: {error}"),
     }
 }
 
-fn expect_err(result: &ReplaceResult) -> &str {
+fn expect_err(result: &PublishResult) -> &str {
     match result {
-        ReplaceResult::Err { error } => error,
-        ReplaceResult::Ok { .. } => panic!("the replace was accepted"),
+        PublishResult::Err { error } => error,
+        PublishResult::Ok { .. } => panic!("the republish was accepted"),
     }
 }
 
@@ -259,7 +256,7 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
         .unwrap_or_else(|error| panic!("load gate a: {error}"));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let pending = harness.send_deferred(host, &replace(&fixtures.v2));
+    let pending = harness.send_deferred(host, &publish(&fixtures.v2));
     harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
 
     // The gate answered `Ready` and the host has not run since, so no commit
@@ -267,7 +264,7 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
     for seq in 1..=5 {
         let _ = harness.send_tracked(&gate, &GateProbe { seq }).expect("send probe");
     }
-    let replaced = harness.await_deferred::<ReplaceResult>(pending).expect("replace reply");
+    let replaced = harness.await_deferred::<PublishResult>(pending).expect("replace reply");
 
     expect_ok(&replaced);
     let report: GateQueryResult = call(&mut harness, &gate, &GateQuery);
@@ -288,7 +285,7 @@ fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
     let _peer = load_peer(&mut harness, &fixtures.v1, true);
     let peer_wired = harness.count_observed(WireObserved::NAME);
 
-    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+    let replaced = republish(&mut harness, &fixtures.v2, Vec::new());
 
     assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the peer's refusal is reported: {replaced:?}");
     assert!(!harness.accepts(gate, GateProbe::ID), "the ready gate is back on its old guest");
@@ -315,7 +312,7 @@ fn an_abort_gives_each_ready_member_its_dehydrated_state_back() {
     // host's prepare.
     let pending = harness.send_deferred_to(&keeper, &HeldRequest { tag: 7 }).expect("send the held request");
 
-    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+    let replaced = republish(&mut harness, &fixtures.v2, Vec::new());
 
     assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the refuser's refusal is reported: {replaced:?}");
     let kept: CountReport = call(&mut harness, &keeper, &CountQuery);
@@ -342,7 +339,7 @@ fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
     // refuses.
     let second = harness.send_deferred_to(&keeper, &HeldRequest { tag: 8 }).expect("send the second held request");
 
-    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+    let replaced = republish(&mut harness, &fixtures.v2, Vec::new());
 
     assert!(
         expect_err(&replaced).contains("held reply is live and was not saved"),
@@ -372,7 +369,7 @@ fn every_live_instance_of_every_namespace_commits_together() {
     let peer = harness.cast::<GroupPeer>(peer).expect("the peer publishes Bump and CountQuery");
     harness.execute(vec![("bump", HarnessOp::send_and_settle(&peer, &Bump))]).expect("bump the peer");
 
-    let replaced = republish(&mut harness, &replace(&fixtures.v2));
+    let replaced = republish(&mut harness, &fixtures.v2, Vec::new());
 
     let mut namespaces = expect_ok(&replaced);
     namespaces.sort();
@@ -396,21 +393,18 @@ fn a_changed_config_kind_needs_a_config_for_each_instance() {
     let (gate_b, path_b) = load_gate(&mut harness, &fixtures.v1, "b");
     let gate_a = harness.cast::<GateRow>(gate_a).expect("gate a publishes GateQuery");
     let gate_b = harness.cast::<GateRow>(gate_b).expect("gate b publishes GateQuery");
-    let config = |path: &ErasedActorPath, label| ReplaceConfig {
+    let config = |path: &ErasedActorPath, label| InstanceConfig {
         path: path.clone(),
         config: GateLabelledConfig { label }.encode_into_bytes(),
     };
 
-    let partial = ReplaceComponent { wasm: fixtures.v3.clone(), configs: vec![config(&path_a, 7)] };
-    let refused = republish(&mut harness, &partial);
+    let refused = republish(&mut harness, &fixtures.v3, vec![config(&path_a, 7)]);
 
     let error = expect_err(&refused);
     assert!(error.contains(path_b.as_str()), "the refusal names the instance with no config: {error}");
     assert!(!error.contains(&format!("{path_a}:")), "the instance with a config is not refused: {error}");
 
-    let complete =
-        ReplaceComponent { wasm: fixtures.v3.clone(), configs: vec![config(&path_a, 7), config(&path_b, 9)] };
-    let replaced = republish(&mut harness, &complete);
+    let replaced = republish(&mut harness, &fixtures.v3, vec![config(&path_a, 7), config(&path_b, 9)]);
 
     expect_ok(&replaced);
     let a: GateQueryResult = call(&mut harness, &gate_a, &GateQuery);
@@ -429,13 +423,13 @@ fn a_second_republish_of_the_module_is_refused() {
     let (gate, _) = load_gate(&mut harness, &fixtures.v1, "a");
 
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let first = harness.send_deferred(host, &replace(&fixtures.v2));
+    let first = harness.send_deferred(host, &publish(&fixtures.v2));
     harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
     let successor = successor_wasm(&fixtures.v2, 1);
-    let second = harness.send_deferred(host, &replace(&successor));
+    let second = harness.send_deferred(host, &publish(&successor));
 
-    let refused = harness.await_deferred::<ReplaceResult>(second).expect("second replace reply");
-    let replaced = harness.await_deferred::<ReplaceResult>(first).expect("first replace reply");
+    let refused = harness.await_deferred::<PublishResult>(second).expect("second replace reply");
+    let replaced = harness.await_deferred::<PublishResult>(first).expect("first replace reply");
 
     assert!(expect_err(&refused).contains("already republishing"), "the second is refused: {refused:?}");
     expect_ok(&replaced);
@@ -455,7 +449,7 @@ fn a_load_and_a_drop_mid_republish_run_against_the_winning_code() {
     let (_, path_b) = load_gate(&mut harness, &fixtures.v1, "b");
 
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let replacing = harness.send_deferred(host, &replace(&fixtures.v2));
+    let replacing = harness.send_deferred(host, &publish(&fixtures.v2));
     harness.step_component_host_through::<Prepared>(2).expect("both gates answer their prepares");
     let dropping = harness.send_deferred(host, &DropComponent { target: path_b });
     let late_load = LoadComponent {
@@ -466,7 +460,7 @@ fn a_load_and_a_drop_mid_republish_run_against_the_winning_code() {
     };
     let loading = harness.send_deferred(host, &late_load);
 
-    let replaced = harness.await_deferred::<ReplaceResult>(replacing).expect("replace reply");
+    let replaced = harness.await_deferred::<PublishResult>(replacing).expect("replace reply");
     let dropped = harness.await_deferred::<DropResult>(dropping).expect("drop reply");
     let loaded = harness.await_deferred::<LoadResult>(loading).expect("load reply");
 
@@ -511,7 +505,7 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
     // still open. A load that skipped the hold would be admitted against the
     // old publication and succeed.
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let replacing = harness.send_deferred(host, &replace(&fixtures.v2));
+    let replacing = harness.send_deferred(host, &publish(&fixtures.v2));
     harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
 
     let guest_load = GuestLoad { wasm: fixtures.v1.clone(), name: Some("c".to_owned()), export: Some(GATE.to_owned()) };
@@ -519,7 +513,7 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
     harness.await_component_host_queued::<LoadComponent>().expect("the loader's load reaches the host");
     harness.step_component_host_through::<LoadComponent>(1).expect("the host takes the load mid-republish");
 
-    let replaced = harness.await_deferred::<ReplaceResult>(replacing).expect("replace reply");
+    let replaced = harness.await_deferred::<PublishResult>(replacing).expect("replace reply");
     let guest_loaded = harness.await_deferred::<LoadResult>(loading).expect("guest load reply");
 
     expect_ok(&replaced);
