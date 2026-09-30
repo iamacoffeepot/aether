@@ -92,7 +92,36 @@ The binaries live in `aether-harness-perf`:
 
 - `aether-perf-trial` runs a sweep and emits JSON;
 - `aether-perf-compare` pairs trial sets and renders a report;
-- `aether-perf-plot` renders plots from report data.
+- `aether-perf-plot` renders plots from report data;
+- `aether-perf-bloomery` drives Muse sessions through the bloomery chassis and
+  driver against a loopback stub vendor and emits the `bloomery.steps` and
+  `bloomery.session` sections.
+
+`aether-perf-bloomery` sits behind the crate's `bloomery` feature, so the
+`aether-perf-trial` build the comparison measures does not link the bloomery
+stack. It needs the Muse bundle wasm built first:
+
+```sh
+cargo xtask build-wasm
+cargo build --release -p aether-harness-perf --features bloomery --bin aether-perf-bloomery
+```
+
+It takes its knobs from the environment, as `aether-perf-trial` does:
+`AETHER_PERF_BLOOMERY_SESSIONS` (concurrent sessions, default 1),
+`AETHER_PERF_BLOOMERY_TURNS` (turns per session, the last one completing it,
+default 8), `AETHER_PERF_BLOOMERY_CALLS` (tool calls per turn, default 4),
+`AETHER_PERF_BLOOMERY_TOOLS` (a comma list of `write`, `list`, `read`, and
+`grep`, default `write`), and `AETHER_PERF_BLOOMERY_TREE` (`<files>x<bytes>`
+generated files, default `64x4096`, or `dir:<path>` to stage a host
+directory). The window opens after boot, bundle load, and reactor warmup, so
+only the sessions' own steps are timed. One process measures one
+(sessions × shape) cell; a sweep is several runs. A paired comparison passes
+the knobs to both sides:
+
+```sh
+aether-perf-compare --base ./base/aether-perf-bloomery --cand ./pr/aether-perf-bloomery \
+    --base-env AETHER_PERF_BLOOMERY_SESSIONS=4 --cand-env AETHER_PERF_BLOOMERY_SESSIONS=4 -k 12
+```
 
 Repository scripts and `.github/workflows/perf-compare.yml` provide the current
 automation. Prefer them over inventing an ad hoc command line, because the

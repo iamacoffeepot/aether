@@ -6,6 +6,7 @@
 //! journal before boot; the `Ref`s staging returns are the handles its
 //! expected values cite. Its **drive** is the mail it sends the mounted
 //! journal owner, bundle driver, and workspace — [`BloomeryHarness::call`],
+//! [`BloomeryHarness::send_call`], which leaves the call in flight,
 //! [`BloomeryHarness::move_head`], [`BloomeryHarness::publish`],
 //! [`BloomeryHarness::watch_head`], and [`BloomeryHarness::settle`], which
 //! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather

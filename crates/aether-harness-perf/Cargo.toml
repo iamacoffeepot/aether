@@ -11,7 +11,24 @@ publish = false
 # base/candidate trials and renders the noise-aware paired comparison
 # (ADR-0085); `aether-perf-plot` renders per-cell sample distributions
 # to PNGs (iamacoffeepot/aether#1155). Binary names unchanged across the move
-# from the chassis bundle.
+# from the chassis bundle. `aether-perf-bloomery` (issue #7281, behind the
+# `bloomery` feature) times a Muse session workload's driver steps over a stub
+# vendor and emits the bloomery sections of a TrialReport.
+
+# The bloomery benchmark's stack. A feature rather than plain dependencies:
+# `aether-harness-bloomery` turns on `aether-substrate/test-support`, and
+# feature unification would carry that into the `aether-perf-trial` build the
+# perf comparison measures, shifting its baseline.
+[features]
+bloomery = [
+    "dep:aether-harness-bloomery",
+    "dep:aether-bloomery-driver",
+    "dep:aether-bloomery-journal",
+    "dep:aether-bloomery-kinds",
+    "dep:aether-bloomery-muse",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 
 [[bin]]
 name = "aether-perf-trial"
@@ -32,6 +49,11 @@ path = "src/bin/perf-plot.rs"
 name = "aether-perf-registry"
 path = "src/bin/perf-registry.rs"
 
+[[bin]]
+name = "aether-perf-bloomery"
+path = "src/bin/perf-bloomery/main.rs"
+required-features = ["bloomery"]
+
 [dependencies]
 # The mail-latency harness + trial-report vocabulary the bins drive.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
@@ -48,6 +70,17 @@ plotters = { version = "0.3", default-features = false, features = [
     "ab_glyph",
     "line_series",
 ] }
+# The bloomery benchmark (`bloomery` feature): the in-process chassis harness
+# and its stub vendor, the driver's step-span target, the journal reads, the
+# kinds it seeds and scans, the Muse session vocabulary, and the subscriber
+# that times the step spans.
+aether-harness-bloomery = { path = "../aether-harness-bloomery", optional = true }
+aether-bloomery-driver = { path = "../aether-bloomery-driver", optional = true }
+aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds", optional = true }
+aether-bloomery-muse = { path = "../aether-bloomery-muse", optional = true }
+tracing = { workspace = true, optional = true, features = ["std"] }
+tracing-subscriber = { version = "0.3", optional = true }
 
 [lints]
 workspace = true

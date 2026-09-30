@@ -4,11 +4,11 @@
 //!
 //! Every request goes out through the embedder's
 //! `BuiltChassis::send_for_reply` with the sink as its reply target and a
-//! correlation the harness minted; a `Call` goes out through
-//! `BuiltChassis::send_tracked` instead, so `call` also waits for the call's
-//! causal chain to settle. A reply that arrives for a request the scenario is
-//! not waiting on yet is kept until it is, so two requests can be in flight at
-//! once.
+//! correlation the harness minted; `call` sends its `Call` through
+//! `BuiltChassis::send_tracked` instead, so it also waits for the call's
+//! causal chain to settle, while `send_call` leaves it in flight. A reply
+//! that arrives for a request the scenario is not waiting on yet is kept
+//! until it is, so two requests can be in flight at once.
 
 mod sink;
 
@@ -232,6 +232,13 @@ impl BloomeryHarness {
             REPLY_TIMEOUT.as_secs()
         );
         outcome
+    }
+
+    /// Send one `Call` to the bundle driver without waiting, for a scenario or
+    /// benchmark that has several in flight. Unlike [`BloomeryHarness::call`],
+    /// it does not wait for the call's causal chain to settle.
+    pub fn send_call(&mut self, call: &Call) -> Pending<CallOutcome> {
+        self.request(self.mounted.driver, call)
     }
 
     /// Send one fenced `MoveHead` to the journal owner and wait for its result.
