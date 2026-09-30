@@ -12,7 +12,7 @@
 
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ProtocolRef;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -25,11 +25,19 @@ const COUNT_QUERY: &str = "aether.test_fixtures.count_query";
 const INLINE_PROBE: &str = "aether.test_fixtures.inline_probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
+/// The subject's row every successor here keeps: a silent `Bump`. Every
+/// successor is a cdylib example, so the fixture casts its `load_any`
+/// reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait SubjectBump {
+    fn bump(mail: Bump);
+}
+
 struct Fixture {
     harness: SubstrateHarness,
     subject: ErasedActorPath,
-    /// The subject's reference, the load reply's stamped sender.
-    subject_ref: ErasedActorRef,
+    /// The subject's reference, cast from the load reply's stamped sender.
+    subject_ref: ProtocolRef<SubjectBump>,
 }
 
 /// The `republish_subject_<variant>` module's bytes, or `None` to skip.
@@ -46,6 +54,7 @@ impl Fixture {
         let load = LoadComponent { wasm, name: None, config: Vec::new(), export: None };
         let (subject_ref, subject) =
             harness.load_any(&load).unwrap_or_else(|error| panic!("the base must load: {error}"));
+        let subject_ref = harness.cast::<SubjectBump>(subject_ref).expect("the base subject publishes Bump");
 
         Some(Self { harness, subject, subject_ref })
     }
@@ -62,7 +71,7 @@ impl Fixture {
     /// Bump the subject and assert it still serves.
     fn assert_serves(&mut self, why: &str) {
         let baseline = self.harness.count_observed(TICK_OBSERVED);
-        let bump = HarnessOp::send_and_settle(self.subject_ref, &Bump);
+        let bump = HarnessOp::send_and_settle(&self.subject_ref, &Bump);
         self.harness.execute(vec![("bump", bump)]).expect("bump the subject");
         assert_eq!(self.harness.count_observed(TICK_OBSERVED), baseline + 1, "{why}");
     }

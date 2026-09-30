@@ -40,6 +40,7 @@ use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LogTailResult};
+use aether_test_fixtures_bundle::{SourceForwarder, SourceObserver};
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
@@ -62,10 +63,12 @@ fn session_source_returns_none() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (reader, _) = load_fixture(&mut harness, wasm, "test.source_observer");
+    let (reader, _) = harness
+        .load::<SourceObserver>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component test.source_observer: {error}"));
 
     let result = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(reader, &SourceQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&reader, &SourceQuery))])
         .expect("send_and_await_reply SourceQuery");
 
     let report = result.reply::<SourceReport>("query").expect("decode SourceReport");
@@ -88,15 +91,17 @@ fn component_source_returns_sender_mailbox() {
     // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
     let (_, reader_path) = load_fixture(&mut harness, wasm.clone(), "test.source_observer");
-    let (sender, sender_path) = load_fixture(&mut harness, wasm, "test.source_forwarder");
+    let (sender, sender_path) = harness
+        .load::<SourceForwarder>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component test.source_forwarder: {error}"));
 
     // `send_and_settle`: the whole chain (forwarder → reader → forwarder)
     // settles before `execute` returns, so the log entry is already in the ring.
     harness
-        .execute(vec![("trigger", HarnessOp::send_and_settle(sender, &SendSourceQuery))])
+        .execute(vec![("trigger", HarnessOp::send_and_settle(&sender, &SendSourceQuery))])
         .expect("SendSourceQuery to the forwarder");
 
-    let logs = harness.log_tail(sender, None, None);
+    let logs = harness.log_tail(&sender, None, None);
     let found = match &logs {
         LogTailResult::Ok { entries, .. } => {
             entries.iter().any(|e| e.message == "source_report_received had_sender=true")

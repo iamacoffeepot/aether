@@ -18,18 +18,19 @@ use aether_test_fixtures_kinds as _;
 
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
+use aether_test_fixtures_fs_demux::FsDemux;
 use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_fs_demux";
 
-fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ErasedActorRef {
+fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ActorRef<FsDemux> {
     harness
-        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.fs_demux".to_owned()) })
+        .load::<FsDemux>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load_component test.fs_demux: {error}"))
         .0
 }
@@ -58,7 +59,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
     harness
         .execute(vec![(
             "trigger",
-            HarnessOp::send_and_settle(fixture, &RunFsDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_and_settle(&fixture, &RunFsDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsDemux to fixture");
 
@@ -93,7 +94,7 @@ fn typed_fs_replies_demux_by_trying_each_context_type() {
     harness
         .execute(vec![(
             "trigger",
-            HarnessOp::send_and_settle(fixture, &RunFsContextDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_and_settle(&fixture, &RunFsContextDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsContextDemux to fixture");
 

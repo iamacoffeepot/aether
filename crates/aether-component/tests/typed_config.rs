@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_data::Kind;
@@ -17,6 +17,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::ProbeWithConfig;
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -27,11 +28,16 @@ use aether_test_fixtures_kinds as _;
 
 /// Load `probe_with_config` with `config` bytes, assert it advertises its
 /// config kind, and hand back the loaded guest's reference and path.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>) -> (ErasedActorRef, ErasedActorPath) {
+fn load_probe(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    config: Vec<u8>,
+) -> (ActorRef<ProbeWithConfig>, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let load = LoadComponent { wasm, name: None, config, export: Some("test.probe_with_config".to_owned()) };
-    let (probe, path) =
-        harness.load_any(&load).unwrap_or_else(|error| panic!("the typed-config guest failed to load: {error}"));
+    let load = LoadComponent { wasm, name: None, config, export: None };
+    let (probe, path) = harness
+        .load::<ProbeWithConfig>(load)
+        .unwrap_or_else(|error| panic!("the typed-config guest failed to load: {error}"));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let described = harness
@@ -53,7 +59,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>)
 }
 
 /// Ask the loaded `probe_with_config` guest which config its `init` saw.
-fn echo_config(harness: &mut SubstrateHarness, probe: ErasedActorRef) -> ConfigEcho {
+fn echo_config(harness: &mut SubstrateHarness, probe: &ActorRef<ProbeWithConfig>) -> ConfigEcho {
     harness
         .execute(vec![("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery))])
         .expect("echo sequence")
@@ -71,7 +77,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (probe, _) = load_probe(&mut harness, &wasm_path, Vec::new());
 
-    let echo = echo_config(&mut harness, probe);
+    let echo = echo_config(&mut harness, &probe);
     let expected = ProbeConfig::default();
     assert_eq!(echo.seed, expected.seed, "default seed reaches init");
     assert_eq!(echo.label, expected.label, "default label reaches init");
@@ -96,7 +102,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
     let (probe, _) = load_probe(&mut harness, &wasm_path, config.encode_into_bytes());
 
-    let echo = echo_config(&mut harness, probe);
+    let echo = echo_config(&mut harness, &probe);
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
     assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
 }
@@ -128,7 +134,7 @@ fn a_replace_without_config_reuses_the_spawn_config() {
     assert!(matches!(replaced, ReplaceResult::Ok { .. }), "the replace commits: {replaced:?}");
 
     assert_eq!(
-        echo_config(&mut harness, probe),
+        echo_config(&mut harness, &probe),
         ConfigEcho { seed: config.seed, label: config.label },
         "the candidate's init sees the spawn config"
     );

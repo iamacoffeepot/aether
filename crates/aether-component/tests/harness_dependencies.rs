@@ -20,12 +20,21 @@ use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_test_fixtures_bundle::DependentProbe;
 use aether_test_fixtures_kinds::Bump;
 
 const TARGET_EXPORT: &str = "test.parent_peer.target";
 const DEPENDENT_EXPORT: &str = "test.parent_peer.dependent";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 const CLIPBOARD: &str = "aether.clipboard";
+
+/// The republish subject's row this file sends: a silent `Bump`. The
+/// subject ships only as a cdylib example, so a test casts its `load_any`
+/// reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait SubjectBump {
+    fn bump(mail: Bump);
+}
 
 fn load(
     harness: &mut SubstrateHarness,
@@ -74,11 +83,13 @@ fn missing_declared_dependency_refuses_the_load() {
     let baseline = harness.count_observed(TICK_OBSERVED);
 
     load(&mut harness, &wasm, None, TARGET_EXPORT).expect("the target loads");
-    let (dependent, _) = load(&mut harness, &wasm, None, DEPENDENT_EXPORT).expect("the satisfied dependent loads");
+    let (dependent, _) = harness
+        .load::<DependentProbe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .expect("the satisfied dependent loads");
 
     // The satisfied load really spawns: the probe answers `Bump` with
     // exactly one `TickObserved`.
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(dependent, &Bump))]).expect("bump the dependent");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&dependent, &Bump))]).expect("bump the dependent");
     assert_eq!(harness.count_observed(TICK_OBSERVED), baseline + 1, "the loaded dependent must answer mail");
 }
 
@@ -110,6 +121,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let load = LoadComponent { wasm: base, name: None, config: Vec::new(), export: None };
     let (subject, subject_path) = harness.load_any(&load).expect("the subject loads");
+    let subject = harness.cast::<SubjectBump>(subject).expect("the subject publishes Bump");
 
     let ReplaceResult::Err { error } = replace(&mut harness, "replace-absent", depends.clone()) else {
         panic!("a republish whose added dependency is not live must be refused");
@@ -123,7 +135,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     // A refused republish keeps the running module: the subject still
     // answers `Bump` at its mailbox with exactly one `TickObserved`.
     let baseline = harness.count_observed(TICK_OBSERVED);
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(subject, &Bump))]).expect("bump the subject");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&subject, &Bump))]).expect("bump the subject");
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
         baseline + 1,

@@ -23,6 +23,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::HeldRequester;
 use aether_test_fixtures_kinds::{
     CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER, HeldReplyMatched, HeldReplyUnanswered,
     RunHeldRequest,
@@ -73,7 +74,9 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
     load(RELAY);
     let (_, keeper_path) = load(KEEPER);
     let (_, forgetter_path) = load(FORGETTER);
-    let (requester, _) = load(REQUESTER);
+    let (requester, _) = harness
+        .load::<HeldRequester>(LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {REQUESTER}: {error}"));
 
     let (export, path, target) = match before {
         BeforeDrop::Nothing | BeforeDrop::Replaced => (KEEPER, keeper_path, HELD_TARGET_KEEPER),
@@ -84,13 +87,13 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Repla
     // instance of the bundle, the holder among them (ADR-0241 §7).
     let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
 
-    let mut steps = vec![("request", HarnessOp::send_and_settle(requester, &RunHeldRequest { tag: 1, target }))];
+    let mut steps = vec![("request", HarnessOp::send_and_settle(&requester, &RunHeldRequest { tag: 1, target }))];
     if !matches!(before, BeforeDrop::Nothing) {
         steps.push(("replace", HarnessOp::send_and_await_reply(&host, &replace)));
     }
     steps.extend([
         ("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path })),
-        ("replied", HarnessOp::send_and_await_reply(requester, &CountQuery)),
+        ("replied", HarnessOp::send_and_await_reply(&requester, &CountQuery)),
     ]);
 
     let result = harness.execute(steps).unwrap_or_else(|error| panic!("drop while held from {export}: {error}"));

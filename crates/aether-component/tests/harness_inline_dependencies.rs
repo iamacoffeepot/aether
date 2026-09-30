@@ -27,6 +27,14 @@ use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_inline_dependency::{Holder, Needy};
 use aether_test_fixtures_kinds::{CountQuery, CountReport, SpawnOutcome, SpawnOutcomeQuery};
 
+/// The republish subject's row this file sends: `CountQuery -> CountReport`.
+/// The subject ships only as a cdylib example, so a test casts its
+/// `load_any` reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait SubjectCount {
+    fn count(mail: CountQuery) -> CountReport;
+}
+
 fn read_wasm(stem: &str) -> Option<Vec<u8>> {
     require_wasm(stem).map(|path| fs::read(path).expect("read fixture wasm"))
 }
@@ -130,6 +138,7 @@ fn a_republish_adding_an_unmet_dependency_to_a_live_inline_instance_is_refused()
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let (subject, path) =
         harness.load_any(&component(&helper)).unwrap_or_else(|error| panic!("the subject must load: {error}"));
+    let subject = harness.cast::<SubjectCount>(subject).expect("the subject publishes CountQuery");
     // The helper's alias batch is queued ahead of the load's answer; the
     // barrier makes it live before the republish reads the inventory.
     harness.await_registry_applied();
@@ -146,7 +155,7 @@ fn a_republish_adding_an_unmet_dependency_to_a_live_inline_instance_is_refused()
     );
 
     let result = harness
-        .execute(vec![("count", HarnessOp::send_and_await_reply(subject, &CountQuery))])
+        .execute(vec![("count", HarnessOp::send_and_await_reply(&subject, &CountQuery))])
         .expect("query the subject");
     assert_eq!(
         result.reply::<CountReport>("count").expect("decode CountReport"),

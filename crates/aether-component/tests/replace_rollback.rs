@@ -18,11 +18,22 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceConfig, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::ProbeWithConfig;
 use aether_test_fixtures_kinds::{
     Bump, ConfigEcho, ConfigQuery, CountQuery, CountReport, PeerConfig, ProbeConfig, TickObserved, WireObserved,
 };
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
+
+/// The `test.republish.peer` rows this file sends: a silent `Bump` and
+/// `CountQuery -> CountReport`. Both the group v1 and v2 peers ship only as
+/// cdylib examples, so the test casts its `load_any` reference to this
+/// instead of naming a type.
+#[aether_actor::protocol]
+trait GroupPeer {
+    fn bump(mail: Bump);
+    fn count(mail: CountQuery) -> CountReport;
+}
 
 /// A republish of `wasm` giving the instance at `path` the config `config`.
 fn replace_configured(wasm: &[u8], path: &ErasedActorPath, config: Vec<u8>) -> ReplaceComponent {
@@ -69,11 +80,11 @@ fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
 
     let config = ProbeConfig { seed: 0x6134_0001, label: "before-replace".to_owned() };
     let (probe, path) = harness
-        .load_any(&LoadComponent {
+        .load::<ProbeWithConfig>(LoadComponent {
             wasm: wasm.clone(),
             name: None,
             config: config.encode_into_bytes(),
-            export: Some("test.probe_with_config".to_owned()),
+            export: None,
         })
         .expect("load test.probe_with_config");
 
@@ -87,7 +98,7 @@ fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
     let result = harness
         .execute(vec![
             ("replace", HarnessOp::send_and_await_reply(&host, &replace)),
-            ("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery)),
+            ("echo", HarnessOp::send_and_await_reply(&probe, &ConfigQuery)),
         ])
         .expect("replace + query sequence");
 
@@ -108,21 +119,22 @@ fn a_replace_whose_candidate_fails_rehydrate_keeps_the_running_guest() {
     };
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
     let (peer, path) = load_trapping_peer(&mut harness, &v1);
+    let peer = harness.cast::<GroupPeer>(peer).expect("the peer publishes Bump and CountQuery");
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let calm = PeerConfig { trap_on_rehydrate: false }.encode_into_bytes();
     let result = harness
         .execute(vec![
-            ("bump_1", HarnessOp::send_and_settle(peer, &Bump)),
-            ("bump_2", HarnessOp::send_and_settle(peer, &Bump)),
-            ("bump_3", HarnessOp::send_and_settle(peer, &Bump)),
+            ("bump_1", HarnessOp::send_and_settle(&peer, &Bump)),
+            ("bump_2", HarnessOp::send_and_settle(&peer, &Bump)),
+            ("bump_3", HarnessOp::send_and_settle(&peer, &Bump)),
             (
                 "trap",
                 HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm: v2.clone(), configs: Vec::new() }),
             ),
-            ("after_trap", HarnessOp::send_and_await_reply(peer, &CountQuery)),
+            ("after_trap", HarnessOp::send_and_await_reply(&peer, &CountQuery)),
             ("calm", HarnessOp::send_and_await_reply(&host, &replace_configured(&v2, &path, calm))),
-            ("after_calm", HarnessOp::send_and_await_reply(peer, &CountQuery)),
+            ("after_calm", HarnessOp::send_and_await_reply(&peer, &CountQuery)),
         ])
         .expect("bump + replace + query sequence");
 
