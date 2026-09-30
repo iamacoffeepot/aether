@@ -42,10 +42,11 @@ pub use journal::{
 };
 pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{
-    ApiCall, ApiCallResult, ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch, ExecutorFault, Fault,
-    FaultReason, Invoke, Invoked, Mode, NativeOrigin, NativeOriginError, Program, ProgramApi, ProgramHeadMoved,
-    ProgramInvoker, ProgramName, ProgramNameError, ProgramRef, ProgramRelay, ProgramRoot, ReactorName,
-    ReactorNameError, Refusal, RequestSource, Requested, RuleName, RuleNameError, Transition, VerifiedRead,
+    ApiCall, ApiCallResult, CLOCK, CLOCK_BUNDLE, ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch,
+    ExecutorFault, Fault, FaultReason, Fired, Invoke, Invoked, MAX_DUE_AHEAD_MILLIS, Mode, NativeOrigin,
+    NativeOriginError, Program, ProgramApi, ProgramHeadMoved, ProgramInvoker, ProgramName, ProgramNameError,
+    ProgramRef, ProgramRelay, ProgramRoot, ReactorName, ReactorNameError, Refusal, RequestSource, Requested, RuleName,
+    RuleNameError, Transition, Until, VerifiedRead,
 };
 pub use reactor::{
     Evaluated, Event, REACTORS_SECTION, ReactorDeclaration, ReactorDeclarationError, ReactorDeclarationsError,

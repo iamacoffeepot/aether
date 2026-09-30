@@ -15,7 +15,7 @@ description = "Append-only journal root: a SQLite log of typed Storage events pl
 # `aether.bloomery.journal` actor's substrate-typed state.
 [features]
 default = ["runtime"]
-runtime = ["dep:aether-substrate", "dep:rusqlite", "dep:tempfile"]
+runtime = ["dep:aether-substrate", "dep:rusqlite", "dep:tempfile", "dep:tracing"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -26,6 +26,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-substrate = { path = "../aether-substrate", optional = true }
 rusqlite = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
+# Native-only: the warning an append logs when the clock reads behind the
+# latest recorded entry (ADR-0245).
+tracing = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }

@@ -21,14 +21,24 @@ use aether_bloomery_program::unreachable_staged;
 use super::api::provided;
 use super::queue::{Active, Step};
 use crate::runtime::bundles::{LoadState, Programs};
+use crate::runtime::clock::is_clock;
 use crate::runtime::core::{ClosureTicket, Command, InvokeTicket, PendingWrite, ProgramCore};
 
 impl ProgramCore {
     /// Queue one recorded request on its bundle's digest queue.
     ///
     /// A request that finds no active request drives the digest from its
-    /// current state; otherwise it waits its turn in the FIFO.
+    /// current state; otherwise it waits its turn in the FIFO. A clock request
+    /// never enters a queue: it is armed on the driver's timer heap and holds
+    /// no slot while it waits (ADR-0245).
     pub(crate) fn enqueue_request(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
+        if is_clock(bundle) {
+            self.arm_clock(seq, out);
+            if !self.aborted {
+                self.pump(out);
+            }
+            return;
+        }
         let idle = {
             let queue = self.queues.entry(bundle).or_default();
             queue.waiting.push_back(seq);

@@ -1,5 +1,5 @@
-//! The bloomery chassis knobs: the unit list, the closure byte budget, and
-//! the read-cache budget.
+//! The bloomery chassis knobs: the unit list, the closure byte budget, the
+//! read-cache budget, and the driver's clock tick.
 //!
 //! [`BloomeryConfig`] is the chassis's own derive-`Config` member, resolved off
 //! the source stack into [`BloomeryEnv`](crate::chassis::BloomeryEnv) and declared
@@ -13,6 +13,7 @@ use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use aether_bloomery_journal::ReadCacheBudget;
 use aether_bloomery_kinds::{ClosureLimit, UnitKey};
@@ -65,6 +66,14 @@ pub struct BloomeryConfig {
     /// read as one slab.
     #[config(default = 2_147_483_648u64)]
     pub read_cache_bytes: u64,
+    /// How often the bundle driver reads the clock while a timer is armed
+    /// (ADR-0245), in milliseconds.
+    ///
+    /// A `clock.until` timer fires within about one tick after its due time
+    /// while the engine is healthy, and never before it. The driver ticks
+    /// only while a timer is armed. `0` is refused: a zero period would spin.
+    #[config(default = 1000u64)]
+    pub clock_tick_millis: u64,
 }
 
 impl Default for BloomeryConfig {
@@ -78,6 +87,7 @@ impl Default for BloomeryConfig {
             units: None,
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
+            clock_tick_millis: 1000,
         }
     }
 }
@@ -111,6 +121,21 @@ impl BloomeryConfig {
             ))))
         })?;
         Ok((units, limit))
+    }
+
+    /// Lower the driver's clock tick period.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] naming `AETHER_BLOOMERY_CLOCK_TICK_MILLIS` when
+    /// the period is `0`.
+    pub(crate) fn clock_tick(&self) -> Result<Duration, BootError> {
+        if self.clock_tick_millis == 0 {
+            return Err(BootError::Other(Box::new(io::Error::other(
+                "AETHER_BLOOMERY_CLOCK_TICK_MILLIS=0 is not a usable clock tick: the period must be at least 1",
+            ))));
+        }
+        Ok(Duration::from_millis(self.clock_tick_millis))
     }
 }
 
@@ -205,6 +230,15 @@ mod tests {
         config.units = Some("primary=journal".to_owned());
         let (_, limit) = config.to_units_and_limit().expect("the default limit lowers");
         assert_eq!(limit.get(), ClosureLimit::MAX_BYTES);
+    }
+
+    #[test]
+    fn a_zero_clock_tick_is_refused_naming_the_key() {
+        // Catches a zero period reaching the driver, where every tick would
+        // re-arm at once and spin, and a refusal that stops naming the knob.
+        let config = BloomeryConfig { clock_tick_millis: 0, ..BloomeryConfig::default() };
+        let error = config.clock_tick().expect_err("a zero tick is refused").to_string();
+        assert!(error.contains("AETHER_BLOOMERY_CLOCK_TICK_MILLIS"), "{error}");
     }
 
     #[test]

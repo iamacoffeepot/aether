@@ -30,6 +30,7 @@ extern crate alloc;
 extern crate self as aether_bloomery_program;
 
 mod bundle;
+mod clock;
 mod program;
 pub mod reactor;
 pub mod view;
@@ -37,6 +38,7 @@ pub mod view;
 #[doc(hidden)]
 pub use aether_bloomery_derive::__bundle_export_generate;
 pub use aether_bloomery_kinds::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
+pub use clock::{ClockUntil, wait, wait_spread};
 #[doc(hidden)]
 pub use program::__macro_internals;
 pub use program::{

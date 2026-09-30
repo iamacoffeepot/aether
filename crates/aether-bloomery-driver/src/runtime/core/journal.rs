@@ -17,6 +17,7 @@ use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, Journal
 use aether_bloomery_program::{Activations, HeadHistory, Heads, Requests};
 
 use super::ticket::{AppendTicket, CallerId, EventsTicket};
+use crate::runtime::clock::Due;
 
 /// Entries per journal page. Matches the journal owner's `MAX_READ_EVENTS`.
 pub const EVENTS_PAGE: u32 = 128;
@@ -80,6 +81,13 @@ pub enum PendingWrite {
         trigger: u64,
         /// Records in append order.
         plan: Vec<PlannedRecord>,
+    },
+    /// Fired timers' `Transition`s, one page per append. Re-derived on
+    /// conflict: a timer whose request the refolded view already answers is
+    /// dropped (ADR-0245).
+    Fired {
+        /// The fired timers, in due order.
+        timers: Vec<Due>,
     },
 }
 

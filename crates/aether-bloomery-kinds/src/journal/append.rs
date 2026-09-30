@@ -52,18 +52,39 @@ pub enum DriverRecord {
 /// or the whole append is refused — the journal checks only that they
 /// exist, never their declared kind prefix. Dedup, and every other
 /// driver-side invariant, is the driver's, not this command's.
+///
+/// `not_before_millis` floors the journal time the records are stamped with
+/// (ADR-0245): the journal stamps them at the greatest of its last recorded
+/// time, its wall clock, and this floor. A batch that records fired timers
+/// sets it to the latest due time it carries, so no timer's `Transition` is
+/// stamped before its due time even when wall time steps backward. It is `0`,
+/// no floor, unless [`Self::not_before`] sets it.
 #[aether_data::kind(name = "aether.bloomery.journal.append_records", eq, no_serde)]
 pub struct AppendRecords {
     artifacts: Vec<EncodedArtifact>,
     records: Vec<DriverRecord>,
     expected_seq: u64,
+    not_before_millis: u64,
 }
 
 impl AppendRecords {
     /// Stage `artifacts` and append `records` if the journal's last stored sequence is still `expected_seq`.
     #[must_use]
     pub fn new(artifacts: Vec<EncodedArtifact>, records: Vec<DriverRecord>, expected_seq: u64) -> Self {
-        Self { artifacts, records, expected_seq }
+        Self { artifacts, records, expected_seq, not_before_millis: 0 }
+    }
+
+    /// Floor the journal time the records are stamped with at `millis`.
+    #[must_use]
+    pub fn not_before(mut self, millis: u64) -> Self {
+        self.not_before_millis = millis;
+        self
+    }
+
+    /// The journal time floor the records are stamped with; `0` for none.
+    #[must_use]
+    pub const fn not_before_millis(&self) -> u64 {
+        self.not_before_millis
     }
 
     /// Artifacts to stage, in request order.

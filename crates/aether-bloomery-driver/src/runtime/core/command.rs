@@ -19,9 +19,10 @@ use super::ticket::{
 /// to a waiting caller, `Processed` delivers an
 /// [`AwaitProcessed`](aether_bloomery_kinds::AwaitProcessed) barrier reply,
 /// `Fetched` delivers a bundle root's fetch-on-miss answer, `ApiAnswered`
-/// delivers the answer to a program API call a bundle root relayed, and `Abort`
-/// reports that the core's journal view cannot be trusted or a required
-/// record cannot be written; the shell maps it to `fatal_abort` (ADR-0063).
+/// delivers the answer to a program API call a bundle root relayed, `ArmTick`
+/// asks for one clock tick, and `Abort` reports that the core's journal view
+/// cannot be trusted or a required record cannot be written; the shell maps
+/// it to `fatal_abort` (ADR-0063).
 ///
 /// It carries [`Invoke`] and [`ReadArtifactResult`], whose closure members
 /// hold `Blob`s, so it has no equality: tests compare fields.
@@ -160,6 +161,10 @@ pub enum Command {
         /// The provider's reply, or the driver's refusal.
         result: ApiCallResult,
     },
+    /// Wait one tick period, then read the clock and feed it to
+    /// [`ProgramCore::tick`](crate::ProgramCore::tick) (ADR-0245). The core
+    /// asks for one tick at a time, and only while a timer is armed.
+    ArmTick,
     /// The journal view cannot be trusted or a required record cannot be written.
     Abort {
         /// Human-readable reason.

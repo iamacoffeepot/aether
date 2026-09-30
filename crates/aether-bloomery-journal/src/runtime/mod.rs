@@ -106,7 +106,7 @@ pub use cache::ReadCacheBudget;
 pub use clock::{Clock, SystemClock};
 pub use closure::Closure;
 pub use draft::{Draft, DraftError};
-pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity};
+pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity, MAX_CLOCK_BEHIND_MILLIS};
 pub use reader::JournalReader;
 pub use store::{ArtifactBatch, ArtifactStore, BlobFile, VerifiedBlob};
 
@@ -388,6 +388,7 @@ impl NativeActor for JournalActor {
         ctx: &mut NativeCtx<'_>,
         request: AppendRecords,
     ) -> AppendRecordsResult {
+        let not_before_millis = request.not_before_millis();
         let (artifacts, records, expected_seq) = request.into_parts();
 
         for record in &records {
@@ -410,6 +411,7 @@ impl NativeActor for JournalActor {
         }
 
         let mut batch = Batch::new();
+        batch.not_before(not_before_millis);
         let artifacts = artifacts.into_iter().map(|artifact| batch.stage_artifact(artifact)).collect();
 
         for record in records {

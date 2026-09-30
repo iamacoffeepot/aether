@@ -30,8 +30,8 @@ use reactor::Reactor;
 /// Byte budget every test core starts under: 1 MiB.
 pub const LIMIT_BYTES: u64 = 1024 * 1024;
 
-/// One journal entry's truth: stored kind, cause, and storage bytes.
-type Truth = (KindId, Option<u64>, Vec<u8>);
+/// One journal entry's truth: stored kind, cause, recorded time, and storage bytes.
+type Truth = (KindId, Option<u64>, u64, Vec<u8>);
 
 fn seq_no(seq: usize) -> u64 {
     u64::try_from(seq).expect("test seq fits in u64")
@@ -43,6 +43,9 @@ pub struct World {
     pub core: ProgramCore,
     /// Journal truth; entry seqs are positions plus one.
     journal: Vec<Truth>,
+    /// The world's clock: the time the journal truth stamps what it records,
+    /// never earlier than the entry before or an append's floor.
+    pub now_millis: u64,
     /// Stored artifacts by digest: kind plus unprefixed payload.
     artifacts: HashMap<Digest, (KindId, Vec<u8>)>,
     /// Scripted closures by root digest.
@@ -131,6 +134,7 @@ impl World {
         let world = Self {
             core,
             journal: Vec::new(),
+            now_millis: 0,
             artifacts: HashMap::new(),
             closures: HashMap::new(),
             oversized: HashSet::new(),
@@ -184,7 +188,8 @@ impl World {
     /// Panics if the record does not storage-encode.
     pub fn seed<K: Kind + Storage + Clone>(&mut self, cause: Option<u64>, value: &K) {
         let bytes = K::encode_storage(&StorageData::from_value(value.clone())).expect("encode seeded record");
-        self.journal.push((K::ID, cause, bytes));
+        let recorded_at_millis = self.stamp(0);
+        self.journal.push((K::ID, cause, recorded_at_millis, bytes));
     }
 
     /// Seed a head move into the journal truth.
@@ -308,9 +313,10 @@ impl World {
                 self.abort = Some(reason);
                 Step::More(Vec::new())
             }
-            command @ (Command::Fetch { .. } | Command::RunWorkspace { .. } | Command::ApiAnswered { .. }) => {
-                Step::Manual(command)
-            }
+            command @ (Command::Fetch { .. }
+            | Command::RunWorkspace { .. }
+            | Command::ApiAnswered { .. }
+            | Command::ArmTick) => Step::Manual(command),
         }
     }
 
@@ -350,13 +356,13 @@ impl World {
             .skip(after)
             .take(request.limit as usize)
             .enumerate()
-            .map(|(index, (kind, cause, bytes))| {
+            .map(|(index, (kind, cause, recorded_at_millis, bytes))| {
                 let seq = seq_no(after + index + 1);
                 JournalEntry {
                     seq,
                     kind: *kind,
                     cause: *cause,
-                    recorded_at_millis: 0,
+                    recorded_at_millis: *recorded_at_millis,
                     bytes: bytes.clone(),
                     cites: self.cites.get(&seq).cloned().unwrap_or_default(),
                 }
@@ -419,14 +425,23 @@ impl World {
             let payload = ClosureArtifact::new(kind, payload).load(digest).expect("a staged payload reads whole");
             self.artifacts.insert(digest, (kind, payload));
         }
+        let recorded_at_millis = self.stamp(request.not_before_millis());
         for record in request.records() {
             let (cause, kind, bytes) = encode_record(record);
-            self.journal.push((kind, cause, bytes));
+            self.journal.push((kind, cause, recorded_at_millis, bytes));
         }
         AppendRecordsResult::Committed {
             head: self.head(),
             artifacts: request.artifacts().iter().map(EncodedArtifact::digest).collect(),
         }
+    }
+
+    /// The time the journal truth stamps its next entries with, as the real
+    /// journal does: the latest of the last entry's stamp, the world clock,
+    /// and the append's floor.
+    fn stamp(&self, not_before_millis: u64) -> u64 {
+        let last = self.journal.last().map_or(0, |(_, _, recorded_at_millis, _)| *recorded_at_millis);
+        last.max(self.now_millis).max(not_before_millis)
     }
 
     /// Wake every parked watch whose boundary the head has passed.

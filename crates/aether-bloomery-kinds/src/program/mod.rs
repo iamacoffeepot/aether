@@ -6,6 +6,7 @@
 //! [`ProgramRef`]: the bundle digest plus the program name.
 
 mod api;
+mod clock;
 mod events;
 mod executor;
 mod fault;
@@ -22,6 +23,7 @@ use alloc::string::String;
 use aether_data::KindId;
 
 pub use api::{ApiCall, ApiCallResult, ProgramApi};
+pub use clock::{CLOCK, CLOCK_BUNDLE, Fired, MAX_DUE_AHEAD_MILLIS, Until};
 pub use events::{ProgramHeadMoved, Transition};
 pub use executor::ExecutorFault;
 pub use fault::{Detail, DetailError, Fault, FaultReason};

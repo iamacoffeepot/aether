@@ -5,7 +5,8 @@
 //! the same name and input answers from its outcome (or waits on it while in
 //! flight), a recorded request with a different name or input is refused
 //! `KeyReused`, and a new key resolves the head — `HeadUnbound` when unbound,
-//! else one uncaused `Requested` pinning the resolved bundle. A repeat
+//! else one uncaused `Requested` pinning the resolved bundle. The reserved
+//! clock head resolves to the clock's own identity, never to a binding. A repeat
 //! compares name and input only, so a retry after the head moved still gets
 //! the first outcome.
 
@@ -14,6 +15,7 @@ use aether_bloomery_kinds::{
 };
 
 use super::outcome::answer_command;
+use crate::runtime::clock::program_bundle;
 use crate::runtime::core::{AppendTicket, CallerId, Command, PendingWrite, ProgramCore, RequestedClaim};
 
 impl ProgramCore {
@@ -72,7 +74,7 @@ impl ProgramCore {
         if self.settle_recorded(&callers, &call, out) {
             return;
         }
-        let Some(binding) = self.journal.heads().get(&call.program) else {
+        let Some(bundle) = program_bundle(self.journal.heads(), &call.program) else {
             for caller in callers {
                 out.push(Command::Answer {
                     caller,
@@ -82,7 +84,7 @@ impl ProgramCore {
             return;
         };
         let requested = Requested {
-            program: ProgramRef::new(binding.digest(), call.name.clone()),
+            program: ProgramRef::new(bundle, call.name.clone()),
             input: call.input,
             source: RequestSource::Native { origin: call.origin.clone(), key: call.key },
         };

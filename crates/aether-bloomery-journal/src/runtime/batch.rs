@@ -28,13 +28,33 @@ pub struct Batch {
     seen: HashSet<Digest>,
     pub(crate) events: Vec<Draft>,
     pub(crate) required: Vec<Digest>,
+    not_before_millis: u64,
 }
 
 impl Batch {
     /// Empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self { staged: Vec::new(), seen: HashSet::new(), events: Vec::new(), required: Vec::new() }
+        Self {
+            staged: Vec::new(),
+            seen: HashSet::new(),
+            events: Vec::new(),
+            required: Vec::new(),
+            not_before_millis: 0,
+        }
+    }
+
+    /// Floor the journal time `append` stamps this batch's entries with at
+    /// `millis` (ADR-0245). A batch with no floor is stamped at the greater of
+    /// the latest recorded time and the clock.
+    pub fn not_before(&mut self, millis: u64) {
+        self.not_before_millis = millis;
+    }
+
+    /// The journal time floor of this batch's entries; `0` for none.
+    #[must_use]
+    pub const fn not_before_millis(&self) -> u64 {
+        self.not_before_millis
     }
 
     /// Stage `payload` as [`OpaqueBytes`]. Identical blob bytes in one batch are one entry.

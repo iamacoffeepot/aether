@@ -47,7 +47,7 @@ pub struct JournalEntry {
     pub kind: KindId,
     /// Optional causing sequence.
     pub cause: Option<u64>,
-    /// Wall clock at insert; folds ignore it.
+    /// Monotone journal time at insert, read only as recorded (ADR-0245).
     pub recorded_at_millis: u64,
     /// Verbatim storage-codec payload.
     #[serde(with = "aether_data::bytes")]

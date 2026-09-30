@@ -169,7 +169,9 @@ impl ProgramCore {
     /// Answer every barrier waiter whose bound is quiescent.
     ///
     /// Routing `Heads` fold `N` when `N` starts, so the seq in progress is
-    /// not yet routed; a batch counts once it is appended and read back.
+    /// not yet routed; a batch counts once it is appended and read back. An
+    /// armed timer waits on time, not work, so it does not count as
+    /// outstanding (ADR-0245): a barrier never waits out a timer.
     pub(crate) fn check_processed(&mut self, out: &mut Vec<Command>) {
         if self.aborted || !self.routing.started || self.routing.committed.is_some() || self.journal.has_routing_write()
         {
@@ -179,7 +181,12 @@ impl ProgramCore {
         let head = self.journal.cursor();
         let (ready, waiting): (Vec<_>, Vec<_>) =
             take(&mut self.routing.awaiters).into_iter().partition(|&(_, through)| {
-                routed >= through && !self.journal.requests().outstanding().any(|request| request.seq().0 <= through)
+                routed >= through
+                    && !self
+                        .journal
+                        .requests()
+                        .outstanding()
+                        .any(|request| request.seq().0 <= through && !self.timers.is_armed(request.seq().0))
             });
         self.routing.awaiters = waiting;
         for (caller, _) in ready {

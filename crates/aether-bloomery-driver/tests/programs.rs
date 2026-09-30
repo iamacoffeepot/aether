@@ -3,13 +3,13 @@
 use std::error::Error;
 use std::fs;
 
-use aether_bloomery_journal::{Batch, Seq};
+use aether_bloomery_journal::{Batch, Clock, JournalReader, Seq, SystemClock};
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, Call, CallOutcome, CallRefusal, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes,
-    ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Transition, Utf8Text,
-    artifact_digest,
+    BUNDLE_NAMESPACE, CLOCK, CLOCK_BUNDLE, Call, CallOutcome, CallRefusal, Digest, EncodedArtifact, Fault, FaultReason,
+    Head, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef, Publish, PublishResult as JournalPublished, RecordedHead,
+    RecordedHeadMove, Ref, RequestSource, Requested, Transition, Until, Utf8Text, artifact_digest,
 };
-use aether_bloomery_program::Heads;
+use aether_bloomery_program::{ClockUntil, Heads, Program};
 use aether_data::Kind;
 use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -340,5 +340,39 @@ fn a_bundle_with_a_process_program_is_refused_where_process_is_not_composed() ->
         other => panic!("expected a BundleUnavailable fault, got {other:?}"),
     }
     harness.assert_appended(Seq(1), &[Record::of::<Requested>(None), Record::of::<Fault>(Some(Seq(2)))]);
+    Ok(())
+}
+
+#[test]
+fn a_native_clock_call_is_answered_once_its_due_time_is_recorded() -> Result<(), Box<dyn Error>> {
+    // Catches a shell that never ticks, a tick that fires on a clock other
+    // than the journal's, and a firing the journal stamps before its due time.
+    let mut harness = BloomeryHarness::start([]);
+    let due_millis = SystemClock.now_millis() + 50;
+    let until = EncodedArtifact::new(&Until { due_millis })?;
+    let input = until.digest();
+    let head = harness.head().0;
+    let staged = harness.publish(&Publish::new(vec![until], Vec::new(), head));
+    assert!(matches!(staged, JournalPublished::Committed { .. }), "the input is stored: {staged:?}");
+
+    let wait = Call {
+        program: CLOCK,
+        name: ProgramName::new(ClockUntil::NAME)?,
+        input,
+        origin: NativeOrigin::new("test.driver")?,
+        key: 1,
+    };
+    let CallOutcome::Transition { key: 1, seq, transition } = harness.call(&wait) else {
+        panic!("the clock call is answered with its recorded run");
+    };
+    assert_eq!(transition.program, ProgramRef::new(CLOCK_BUNDLE, ProgramName::new(ClockUntil::NAME)?));
+    assert_eq!(transition.input, input);
+
+    let entry = JournalReader::open(harness.journal_path())?
+        .read(Seq(seq - 1), 1)?
+        .into_iter()
+        .next()
+        .ok_or("the run is recorded")?;
+    assert!(entry.recorded_at_millis >= due_millis, "{} is before the due time {due_millis}", entry.recorded_at_millis);
     Ok(())
 }

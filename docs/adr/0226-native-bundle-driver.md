@@ -268,7 +268,11 @@ Nothing on main can carry any of this yet:
      retry is up to the graph: a reactor rule can issue a new request
      (ADR-0220: "A retry is a new event"). The reason is that a trap
      kills the substrate. Re-running a trapping program automatically
-     would crash-loop the engine.
+     would crash-loop the engine. The one exception is a `clock.until`
+     request ([ADR-0245](0245-a-timer-is-a-driver-native-program.md)): a
+     timer has no side effects, so the restart re-arms it instead of
+     faulting it, and one whose due time has passed fires on the first
+     tick.
    - **Reactors.** After a restart, every root is gone. Restart
      replays from max(reaction watermark, activation watermark). The
      reaction watermark is the highest cause among reaction-sourced
@@ -328,7 +332,9 @@ Nothing on main can carry any of this yet:
     - `AwaitProcessed { through }` gets `Processed` once its bound is
       quiescent: routing has passed `through`, no routing write is
       queued or in flight, and no request at or below `through` is
-      still outstanding.
+      still outstanding. A `clock.until` request armed on the driver's
+      timer heap does not count as outstanding: it waits on time, not
+      work ([ADR-0245](0245-a-timer-is-a-driver-native-program.md)).
 
     The driver pulls events with `ReadEvents` and uses `WatchHead` to
     wake, and reads what routed entries cite with `ReadArtifacts`. Its

@@ -8,7 +8,8 @@
 //! the shell stores its held reply under the returned [`CallerId`]
 //! before it performs the commands. Each command kind has one typed reply
 //! method, and a reply whose ticket the core is not waiting on returns no
-//! commands.
+//! commands. [`ProgramCore::tick`] answers one [`Command::ArmTick`] with the
+//! clock the shell read.
 
 mod artifacts;
 mod command;
@@ -26,6 +27,7 @@ use aether_bloomery_kinds::{
 
 use self::artifacts::{ARTIFACT_CACHE_BYTES, ArtifactCache};
 use crate::runtime::bundles::BundleTable;
+use crate::runtime::clock::{Timers, is_clock};
 use crate::runtime::programs::DigestQueue;
 use crate::runtime::reactors::{CommittedRouting, Routing};
 
@@ -48,6 +50,8 @@ pub enum ArtifactRead {
     SetHeadsDestination,
     /// One digest bundle roots fetched on a miss, shared by every waiting fetch.
     Fetch(Digest),
+    /// The `Until` input of the clock request at this seq, read to arm it.
+    Until(u64),
 }
 
 /// One committed `Requested` whose pipeline has not started yet.
@@ -84,6 +88,8 @@ pub struct ProgramCore {
     /// Each relayed program API call a provider has yet to answer: its
     /// caller and the invocation's call id.
     pub(crate) api_calls: BTreeMap<ApiTicket, (CallerId, u64)>,
+    /// The armed `clock.until` requests, fired by [`Self::tick`] (ADR-0245).
+    pub(crate) timers: Timers,
 }
 
 impl ProgramCore {
@@ -109,6 +115,7 @@ impl ProgramCore {
             loads: BTreeMap::new(),
             invokes: BTreeMap::new(),
             api_calls: BTreeMap::new(),
+            timers: Timers::default(),
         };
         let mut out = Vec::new();
         core.emit_read(&mut out);
@@ -238,6 +245,12 @@ impl ProgramCore {
             }
             ArtifactRead::Fetch(digest) => {
                 self.continue_fetch(digest, result, &mut out);
+            }
+            ArtifactRead::Until(seq) => {
+                self.continue_clock_input(seq, result, &mut out);
+                if !self.aborted {
+                    self.pump(&mut out);
+                }
             }
         }
         out
@@ -383,6 +396,9 @@ impl ProgramCore {
             PendingWrite::Routing { trigger, .. } => {
                 self.abort(format!("journal refused the routing batch for {trigger}: {message}"), out);
             }
+            PendingWrite::Fired { .. } => {
+                self.abort(format!("journal refused a fired timer batch: {message}"), out);
+            }
         }
     }
 
@@ -442,14 +458,22 @@ impl ProgramCore {
     }
 
     /// Run the caught-up transition: recovery, then the recovered pass and the pump.
+    ///
+    /// Outstanding clock requests need no startup write: recovery re-arms
+    /// them instead of faulting them (ADR-0245).
     fn on_synced(&mut self, out: &mut Vec<Command>) {
         if !self.recovered {
-            if self.journal.requests().outstanding().next().is_some() {
+            let interrupted =
+                self.journal.requests().outstanding().any(|request| !is_clock(request.requested().program.bundle()));
+            if interrupted {
                 if !self.journal.has_startup_queued() {
                     self.journal.queue_back(PendingWrite::Startup);
                 }
             } else {
-                self.recovered = true;
+                self.finish_recovery(out);
+                if self.aborted {
+                    return;
+                }
             }
         }
         if self.recovered {
@@ -502,6 +526,7 @@ impl ProgramCore {
                 }
                 PendingWrite::Startup => self.derive_startup(out),
                 PendingWrite::Routing { trigger, plan } => self.derive_routing(trigger, plan, out),
+                PendingWrite::Fired { timers } => self.derive_fired(timers, out),
             }
             if self.aborted {
                 return;

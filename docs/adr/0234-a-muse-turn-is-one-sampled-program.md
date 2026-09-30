@@ -286,8 +286,8 @@ program is tested without spending money.
 - A `Transient` turn is retried by its caller as a new `Call` under a new
   key (ADR-0226 decisions 9 and 11). The program only translates the
   vendor's signal; whether, how often, and when to retry is the caller's
-  policy. Waiting out `Retry-After` needs a clock no program, reactor, or
-  the driver has, so that mechanism is #6630.
+  policy. A caller waits out `Retry-After` with the driver's
+  `clock.until` timer ([ADR-0245](0245-a-timer-is-a-driver-native-program.md)).
 - Adding `Transient`, then tools, then decoded call inputs and cited call
   results, changed the shapes of
   `muse.turn.input` and `muse.turn.result`. Their storage kind ids hash the
