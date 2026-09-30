@@ -3,11 +3,11 @@
 //!
 //! The image is `aether-workspace-environment:<hex>`. Before every run its
 //! label `aether.workspace.environment` must equal `<hex>`. When the daemon
-//! holds no such image, and only then, the root is prefetched from the run's
-//! source and streams as a filesystem tar to `POST /images/create?fromSrc=-`,
-//! which applies the label, and the image is inspected again. The imported
-//! image has no `Env` of its own, so every variable a step sees is
-//! constructed per step.
+//! holds no such image, and only then, the root is read from the run's source
+//! a window at a time ahead of the archive and streams as a filesystem tar to
+//! `POST /images/create?fromSrc=-`, which applies the label, and the image is
+//! inspected again. The imported image has no `Env` of its own, so every
+//! variable a step sees is constructed per step.
 //!
 //! A daemon that answers but cannot produce the image, and an image whose
 //! label does not match, are `Refused(EnvironmentUnavailable)`, the one place
@@ -16,7 +16,7 @@
 use aether_bloomery_kinds::{Ref, Tree};
 use aether_bloomery_tar::{EncodeError, encode};
 
-use super::{Stop, engine_failed, storage_stop, upload_stop};
+use super::{Stop, engine_failed, upload_stop};
 use crate::runtime::engine::{Engine, EngineError, UploadError};
 use crate::runtime::storage::{StorageError, StorageSession};
 use crate::{Environment, Refusal};
@@ -43,10 +43,6 @@ pub fn ensure(
         return labelled(labels.get(LABEL), &hex).map(|()| reference);
     }
     tracing::info!(target: "aether_bloomery_workspace", image = %reference, "importing the environment image");
-    session
-        .reader()
-        .prefetch(root)
-        .map_err(|error| storage_stop(format!("reading the environment root {}", root.digest()), error))?;
     engine
         .import_image(REPOSITORY, &hex, &[format!("LABEL {LABEL}={hex}")], |out| {
             encode(root, &mut session.reader(), out)

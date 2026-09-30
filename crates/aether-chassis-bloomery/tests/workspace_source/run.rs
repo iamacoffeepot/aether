@@ -470,6 +470,22 @@ fn an_environment_the_journal_lacks_is_input_missing() -> TestResult {
 }
 
 #[test]
+fn a_run_tree_the_journal_lacks_is_input_missing_before_the_daemon() -> TestResult {
+    // Catches resolve losing the pre-daemon refusal now that it no longer reads the tree's closure: the tree is read
+    // only as it is written, so without the root check a missing tree would reach the daemon, which is gone here, and
+    // answer Failed.
+    let inputs = Inputs::new(Vec::new())?;
+    let absent = Digest::from_bytes([7; 32]);
+    let request = RunRequest { tree: Ref::from_digest(absent), ..inputs.request("tool", "target")? };
+    let mut harness = boot_without_daemon(vec![inputs.batch], FLAGS)?;
+
+    let answer = harness.run(&over(&harness, request));
+
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::InputMissing(absent))));
+    Ok(())
+}
+
+#[test]
 fn an_output_holding_a_fifo_answers_failed_naming_it_and_still_cleans_up() -> TestResult {
     // Catches an output decoded under the userland rules or with the refusal swallowed, and a failed output that
     // skips the removals.
@@ -661,12 +677,17 @@ fn work_archive(tree: StageTree, flags: &[&str]) -> Result<Vec<u8>, Box<dyn Erro
 fn a_tree_over_the_prefetch_budget_writes_the_same_archive_as_one_that_fits() -> TestResult {
     // Catches a descend path that skips or reorders members: under an eight-byte budget no closure fits, so every
     // directory is read on its own and every blob on demand, and the archive must still be byte-equal to the one the
-    // one-request closure read writes.
+    // read-ahead writes when every window fits. Under 1 MiB, more than any small member and less than the large one,
+    // the reservations throttle the read-ahead: one sibling waits for budget while an oversized directory is read
+    // node alone, so an answer applied to the wrong directory, a released blob handed out again, or a throttled read
+    // never sent would change or stall the archive.
     let fitting = work_archive(nested_tree, FLAGS)?;
     let descended = work_archive(nested_tree, &[FLAGS, &["--workspace-prefetch-bytes", "8"][..]].concat())?;
+    let throttled = work_archive(nested_tree, &[FLAGS, &["--workspace-prefetch-bytes", "1048576"][..]].concat())?;
 
     assert!(fitting.len() > large_payload().len(), "the archive holds the large file");
     assert!(fitting == descended, "the descended archive differs from the fitting one");
+    assert!(fitting == throttled, "the throttled archive differs from the fitting one");
     Ok(())
 }
 

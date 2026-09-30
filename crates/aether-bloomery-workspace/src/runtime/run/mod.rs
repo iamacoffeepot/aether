@@ -2,11 +2,13 @@
 //! a stored tree in a stored environment, each in its own container, run on
 //! the actor's worker thread.
 //!
-//! 1. [`resolve`] loads the environment and prefetches the run tree and every
-//!    mount from the run's source, checks the tree's `rust-toolchain.toml`
-//!    against what the environment provides, resolves each step's tool to an
-//!    executable in the root, and compares the environment's platform with
-//!    the daemon's.
+//! 1. [`resolve`] loads the environment and the roots of the run tree and
+//!    every mount from the run's source, checks the tree's
+//!    `rust-toolchain.toml` against what the environment provides, resolves
+//!    each step's tool to an executable in the root, and compares the
+//!    environment's platform with the daemon's. A tree's members are read
+//!    only when it is written into a container, a window at a time ahead of
+//!    the archive.
 //! 2. [`environment`] makes sure the daemon holds the environment's image,
 //!    importing the root as a filesystem tar when it does not.
 //! 3. [`volumes`] creates the `/work` volume and one volume per mount, and
@@ -396,14 +398,12 @@ fn engine_failed(call: impl fmt::Display) -> impl FnOnce(EngineError) -> RunErro
     move |error| RunError::Engine { call: call.to_string(), error }
 }
 
-/// Map a failed tree upload: an artifact the source lacks is the input's
-/// fault (`InputMissing`); anything else is the executor's.
+/// Map a failed tree upload onto the executor's fault. Resolution loaded the
+/// tree's root, and a stored tree's members are stored whenever it is, so a
+/// member the source lacks here is a damaged source, never the input's.
 fn upload_stop(call: String, error: UploadError<EncodeError<StorageError>>) -> Stop {
     match error {
         UploadError::Engine(error) => Stop::failed(RunError::Engine { call, error }),
-        UploadError::Body(EncodeError::Source(StorageError::Missing(digest))) => {
-            Stop::refused(Refusal::InputMissing(digest))
-        }
         UploadError::Body(error) => Stop::failed(RunError::Upload { call, error }),
     }
 }
