@@ -5,10 +5,12 @@
 //! through the JSON boot-manifest path, **no hub and no RPC server**, and
 //! asserts the component's trampoline is live when `build` returns: a
 //! `BootManifest` of file paths → `boot_manifest_autoload` →
-//! `AutoloadComponent` → an `aether.component.load` awaited to its `Ok` →
-//! live trampoline (issue #6413). This is the reader a `spawn_substrate`
-//! carrying a component list drives through `AETHER_BOOT_MANIFEST`. A boot
-//! component that fails to load fails the build.
+//! `AutoloadComponent` → one `Publish` of its module and one `Spawn` per
+//! instance key, awaited to `Ok` → live trampoline (issue #6413, issue
+//! #7155). This is the reader a `spawn_substrate` carrying a component list
+//! drives through `AETHER_BOOT_MANIFEST`. A boot component that fails to
+//! load fails the build; a `replicas: N` entry spawns N counter-keyed
+//! instances behind the one publish.
 //!
 //! The probe test is skipped when the probe wasm isn't pre-built (no wgpu
 //! gate — the headless chassis needs no adapter); `AETHER_REQUIRE_RUNTIME=1`
@@ -112,6 +114,51 @@ mod tests {
         let address = ErasedActorPath::new("test.quiet_probe").expect("a well-formed actor path");
         let resolved = built.resolve_address(&address);
         assert!(resolved.is_ok(), "boot component {address} is not live when build returns: {resolved:?}");
+    }
+
+    #[test]
+    fn replicated_boot_component_spawns_every_instance() {
+        // A `replicas: 2` entry must stand up two counter-keyed instances of
+        // its instanced export before `build` returns; the bug this catches
+        // is a fan-out that spawns one instance, or both under one key.
+        // `test.ui.panel` is the first counter-keyed spawn in a fresh
+        // chassis, so its instances are `:0` and `:1`, resolved as the
+        // sibling test resolves its entry.
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: probe.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle`",
+            );
+            return;
+        };
+
+        // The sandbox is shared per process, so this test's manifest carries
+        // its own name.
+        let sandbox = init_save_sandbox("headless-runtime-manifest");
+        let manifest_path = sandbox.join("replicas-boot-manifest.json");
+        let manifest_json = serde_json::json!({
+            "components": [{ "wasm": wasm_path, "export": "test.ui.panel", "replicas": 2 }],
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
+            .expect("write boot manifest");
+
+        let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
+
+        // `build` returns only once every boot component's publish and
+        // every one of its spawns has answered, so both instances resolve
+        // at once, with no wait.
+        let built = HeadlessChassis::build(headless_env(sandbox, autoload)).expect("build headless chassis");
+        for key in ["0", "1"] {
+            let address = ErasedActorPath::new(&format!("test.ui.panel:{key}")).expect("a well-formed actor path");
+            let resolved = built.resolve_address(&address);
+            assert!(resolved.is_ok(), "replica instance {address} is not live when build returns: {resolved:?}");
+        }
     }
 
     #[test]

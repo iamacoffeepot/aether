@@ -221,9 +221,10 @@ pub struct PackageEntry {
     pub name: Option<String>,
     /// Optional export selector (ADR-0096).
     pub export: Option<String>,
-    /// Optional instance count (issue 2626): fanned out at boot by
-    /// [`expand_replicas`] into the bare base plus `{base}-{index}`
-    /// instances.
+    /// Optional instance count (issue 2626): [`expand_replicas`] turns this
+    /// into N counter-keyed instance spawns after one `Publish` of the
+    /// module (issue #7155); `name` is the one instance's key for an
+    /// unreplicated entry and is refused together with `replicas`.
     pub replicas: Option<u32>,
 }
 
@@ -577,10 +578,7 @@ pub fn package_autoload(package_root: &Path) -> Result<(ChassisSettings, Vec<Aut
     // that domain onto the boot fault, then expand replicas.
     let (settings, packed) = read_and_resolve(package_root)
         .map_err(|e| ConfigError::unparseable("AETHER_PACKAGE", package_root.display().to_string(), e))?;
-    let mut components = Vec::new();
-    for entry in packed {
-        components.extend(expand_replicas(entry)?);
-    }
+    let components = packed.into_iter().map(expand_replicas).collect::<Result<_, _>>()?;
     Ok((settings, components))
 }
 
@@ -796,8 +794,8 @@ mod tests {
             entries: vec![PackageEntry {
                 object: wasm,
                 config: Some(cfg),
-                name: Some("handler".to_owned()),
-                export: None,
+                name: None,
+                export: Some("handler".to_owned()),
                 replicas: Some(2),
             }],
         };
@@ -805,15 +803,13 @@ mod tests {
 
         let (returned_settings, components) = package_autoload(&root).expect("autoload");
         assert_eq!(returned_settings, settings, "the manifest's chassis settings surface to the depot boot path");
-        assert_eq!(components.len(), 2, "replicas: 2 fans out to two components");
-        assert_eq!(
-            components.iter().map(|component| component.name.clone()).collect::<Vec<_>>(),
-            vec![Some("handler".to_owned()), Some("handler-1".to_owned())],
-        );
-        for component in &components {
-            assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
-            assert_eq!(component.config, vec![7, 8, 9]);
-        }
+        let [component] = components.as_slice() else {
+            panic!("one entry is one module: {} components", components.len());
+        };
+        assert_eq!(component.keys, vec![None, None], "replicas: 2 is two counter keys");
+        assert_eq!(component.namespace.as_deref(), Some("handler"));
+        assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
+        assert_eq!(component.config, vec![7, 8, 9]);
 
         fs::remove_dir_all(&root).ok();
     }

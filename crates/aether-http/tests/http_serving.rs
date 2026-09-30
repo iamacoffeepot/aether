@@ -385,9 +385,9 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: None,
+                keys: vec![None],
                 // `HttpHandler` is a non-entry actor in the bundle.
-                export: Some(HANDLER_NAMESPACE.to_owned()),
+                namespace: Some(HANDLER_NAMESPACE.to_owned()),
             }],
         };
 
@@ -483,8 +483,8 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: None,
-                export: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
+                keys: vec![None],
+                namespace: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
             }],
         };
 
@@ -577,8 +577,8 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: None,
-                export: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+                keys: vec![None],
+                namespace: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
             }],
         };
 
@@ -676,8 +676,8 @@ mod tests {
             autoload: vec![AutoloadComponent {
                 wasm,
                 config: Vec::new(),
-                name: None,
-                export: Some(WS_HANDLER_NAMESPACE.to_owned()),
+                keys: vec![None],
+                namespace: Some(WS_HANDLER_NAMESPACE.to_owned()),
             }],
         };
 
@@ -894,10 +894,15 @@ mod tests {
                 AutoloadComponent {
                     wasm: wasm.clone(),
                     config: Vec::new(),
-                    name: None,
-                    export: Some(HANDLER_NAMESPACE.to_owned()),
+                    keys: vec![None],
+                    namespace: Some(HANDLER_NAMESPACE.to_owned()),
                 },
-                AutoloadComponent { wasm, config: Vec::new(), name: None, export: Some(ROUTED_NAMESPACE.to_owned()) },
+                AutoloadComponent {
+                    wasm,
+                    config: Vec::new(),
+                    keys: vec![None],
+                    namespace: Some(ROUTED_NAMESPACE.to_owned()),
+                },
             ],
         };
 
