@@ -816,7 +816,7 @@ connection with `ctx.spawn_child`
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one through
 the reference that spawn returned, kept in its own child map. A subname is
 never folded at a send site: an instance is reached through the reference its
-spawn returned or through a `child` / `child_as` relative.
+spawn returned or through `child_as`.
 
 `ctx.spawn_child` is the native verb. A native capability names only the child
 type, and can spawn an `Instanced` native actor when that child declares

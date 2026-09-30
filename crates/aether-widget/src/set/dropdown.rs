@@ -86,10 +86,8 @@ impl DropdownEffects {
 
     /// The choice first, the open edge second: a consumer sees the value it
     /// asked for before the list reports itself gone.
-    fn emit<A>(self, ctx: &WasmCtx<'_, A>) {
-        let Some(parent) = ctx.parent() else {
-            return;
-        };
+    fn emit(self, ctx: &WasmCtx<'_, DropdownWidget>) {
+        let parent = ctx.parent();
         if let Some(index) = self.selected {
             parent.send(&DropdownSelected { index });
         }
@@ -206,19 +204,16 @@ impl DropdownWidget {
     /// pointer — the pointer itself, an arrow key scrolling the realized
     /// window, and every close — so what the host is told stays true while the
     /// list moves under a pointer that has not.
-    fn settle_hovered_option<A>(&mut self, ctx: &WasmCtx<'_, A>) {
+    fn settle_hovered_option(&mut self, ctx: &WasmCtx<'_, Self>) {
         let next = self.pointer_option();
         if self.hovered_option == next {
             return;
         }
         self.hovered_option = next;
-        let Some(parent) = ctx.parent() else {
-            return;
-        };
         let frame = next
             .and_then(|index| self.option_row_frame(index))
             .map_or_else(PlacementBounds::default, |row| (&row).into());
-        parent.send(&DropdownHover { index: next.and_then(|index| u32::try_from(index).ok()), frame });
+        ctx.parent().send(&DropdownHover { index: next.and_then(|index| u32::try_from(index).ok()), frame });
     }
 
     /// Open the list on the current choice. Refused for a read-only or
@@ -583,7 +578,7 @@ impl WidgetDefaults for DropdownWidget {
 /// closes an open list. Send it [`SetSelection`] to move the choice. It reports the width its widest option needs on its draw list's
 /// `intrinsic` once the theme font's metrics resolve, so a host can size the
 /// cell it sits in to the control rather than to a share of the row.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DropdownWidget {
     type Config = DropdownConfig;
     const NAMESPACE: &'static str = "aether.widget.dropdown";
@@ -640,7 +635,7 @@ impl WasmActor for DropdownWidget {
 
         closed.emit(ctx);
         if self.state.replace(state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         self.settle_hovered_option(ctx);
         pump_text_font_metrics(ctx, &mut self.font_metrics);
@@ -663,7 +658,7 @@ impl WasmActor for DropdownWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         if !self.state.can_mutate() {
             self.arms.clear();
@@ -759,7 +754,7 @@ impl WasmActor for DropdownWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
         // `intrinsic` measures and caches, so it takes `&mut self` and cannot
@@ -767,11 +762,9 @@ impl WasmActor for DropdownWidget {
         // this handler off `reply_draw`.
         let intrinsic = self.intrinsic();
 
-        if let Some(parent) = ctx.parent() {
-            parent.send(
-                &WidgetDrawList::items(self.draw_items()).with_intrinsic(intrinsic).with_overlay(self.overlay_items()),
-            );
-        }
+        ctx.parent().send(
+            &WidgetDrawList::items(self.draw_items()).with_intrinsic(intrinsic).with_overlay(self.overlay_items()),
+        );
     }
 }
 

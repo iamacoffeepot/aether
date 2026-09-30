@@ -32,7 +32,7 @@ use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
 pub use self::declared::{
-    Declared, DependencyLink, DependencyList, Gap, Here, ListIndex, RowIndex, There, declared_dependencies,
+    AllHandle, Declared, DependencyLink, DependencyList, Gap, Here, ListIndex, RowIndex, There, declared_dependencies,
 };
 #[doc(hidden)]
 pub use self::declared::{dependency_records_len, write_dependency_records};
@@ -550,7 +550,7 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 /// (e.g. `NetCapability`) accepts connections and spawns one
 /// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders reach
 /// an instance through the reference its spawn returned, or through a
-/// `child` / `child_as` relative; text never names one (ADR-0230).
+/// `child_as` lookup; text never names one (ADR-0230).
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)

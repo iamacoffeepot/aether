@@ -108,8 +108,8 @@ impl TextFieldWidget {
         text_control_theme_state(&self.state, self.dragging)
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
-        apply_text_control_state(ctx, &mut self.state, &mut self.edit, &mut self.dragging, next);
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
+        apply_text_control_state(&ctx.parent(), &mut self.state, &mut self.edit, &mut self.dragging, next);
     }
 }
 
@@ -133,7 +133,6 @@ impl WidgetDefaults for TextFieldWidget {
 /// what it holds.
 #[actor(
     instanced,
-    root,
     child_of(WidgetPanel, ScrollWidget),
     handler_set(WidgetDefaults),
     depends(TextCapability, ClipboardCapability)
@@ -209,10 +208,8 @@ impl WasmActor for TextFieldWidget {
             return;
         }
         if key.code == KEY_ENTER {
-            if self.state.can_mutate()
-                && let Some(parent) = ctx.parent()
-            {
-                parent.send(&TextCommitted { text: String::from(self.edit.value()) });
+            if self.state.can_mutate() {
+                ctx.parent().send(&TextCommitted { text: String::from(self.edit.value()) });
             }
             return;
         }
@@ -298,7 +295,7 @@ impl WasmActor for TextFieldWidget {
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_single_line_edit(
-            ctx,
+            &ctx.parent(),
             SingleLineEdit::new(
                 &self.edit.displayed(),
                 self.font_metrics.resolved(),

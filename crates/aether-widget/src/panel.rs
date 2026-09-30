@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Instanced, ReplyMode, Sends,
-    Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Instanced, ReplyMode, Sends, Spawns, Subname,
+    WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -81,14 +81,14 @@ use crate::{
     ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, EditorRegion, FocusGained,
     FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig, NumericChanged,
     NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual,
-    ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig, TabStripSelected,
-    TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListActivated,
-    VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
-    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind, WidgetOpenChanged,
-    WidgetStateChanged,
+    ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, SplitterChanged, SplitterHover,
+    TabStripConfig, TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged,
+    ToggleConfig, TooltipShed, VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame,
+    WidgetKind, WidgetOpenChanged, WidgetPlaced, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
-use crate::{accept_open_child_list, emit, flush_membership};
+use crate::{accept_open_child_list, emit};
 
 /// One spawned child's lanes plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
@@ -129,14 +129,13 @@ pub struct SpawnedChild {
 
 /// What a host needs to place and route one spawned child, apart from the
 /// lanes it sends through: its size, its eligibility for pointer, keyboard,
-/// and wheel input, and its type's namespace for the membership record.
+/// and wheel input.
 pub struct ChildProfile {
     pub width_pixels: Option<f32>,
     pub height_pixels: f32,
     pub pointer_eligible: bool,
     pub focusable: bool,
     pub state: WidgetControlState,
-    pub type_namespace: &'static str,
     pub scroll_viewport: Option<ScrollExtent>,
     /// The gap units of the clear column this child draws in **beside** its
     /// frame, `None` when everything it draws is inside it. A virtual list
@@ -154,17 +153,16 @@ pub struct ChildProfile {
 }
 
 impl ChildProfile {
-    /// The profile of a `C` laid out as one full-width row of `height_pixels`
+    /// The profile of a child laid out as one full-width row of `height_pixels`
     /// that draws only inside its frame and does not scroll itself: every stock
     /// control but the virtual list, the composite, and the scroll container.
-    fn row<C: Addressable>(height_pixels: f32, eligibility: FocusEligibility, state: WidgetControlState) -> Self {
+    fn row(height_pixels: f32, eligibility: FocusEligibility, state: WidgetControlState) -> Self {
         Self {
             width_pixels: None,
             height_pixels,
             pointer_eligible: eligibility.pointer,
             focusable: eligibility.keyboard,
             state,
-            type_namespace: C::NAMESPACE,
             scroll_viewport: None,
             host_scroll_strip_units: None,
             wheel_eligible: false,
@@ -226,9 +224,7 @@ impl WidgetPanel {
         };
 
         // Decode the concrete config, spawn the kind's actor, and derive the
-        // row height + focusability from that config — plus the spawned
-        // type's `NAMESPACE` for the membership record, carried as data
-        // because the type is erased past that match. `None` from any arm
+        // row height + focusability from that config. `None` from any arm
         // (an undecodable config, a spawn failure, or a rejected container)
         // skips the slot entirely so the stack stays honest.
         let spawned: Vec<(SpawnedChild, String)> = specs
@@ -282,8 +278,6 @@ impl WidgetPanel {
             key,
             Vec2::new(assigned.x, assigned.y),
             Some(WidgetClipRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height }),
-            &name,
-            profile.type_namespace,
         );
         self.focus.register(
             key,
@@ -534,7 +528,7 @@ fn spawn_content_child<A: SpawnsWidgets, M: ReplyMode>(
             let lanes = spawn::<LabelWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<LabelWidget>(
+                profile: ChildProfile::row(
                     row,
                     // Pointer-eligible for hover only: a label whose text is wider
                     // than its slot reveals the rest on a raised plate while the
@@ -550,22 +544,14 @@ fn spawn_content_child<A: SpawnsWidgets, M: ReplyMode>(
             let lanes = spawn::<ImageWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<ImageWidget>(
-                    row,
-                    FocusEligibility { pointer: false, keyboard: false },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: false, keyboard: false }, config.state),
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
             let lanes = spawn::<SliderWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<SliderWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
@@ -573,22 +559,14 @@ fn spawn_content_child<A: SpawnsWidgets, M: ReplyMode>(
             let lanes = spawn::<RadioGroupWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<RadioGroupWidget>(
-                    height,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(height, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
             let lanes = spawn::<TextFieldWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<TextFieldWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
@@ -596,11 +574,7 @@ fn spawn_content_child<A: SpawnsWidgets, M: ReplyMode>(
             let lanes = spawn::<TextAreaWidget, A, M>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<TextAreaWidget>(
-                    height,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(height, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         _ => None,
@@ -616,11 +590,7 @@ fn spawn_button_child<A: Spawns<ButtonWidget>, M: ReplyMode>(
     let lanes = spawn::<ButtonWidget, A, M>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
         lanes,
-        profile: ChildProfile::row::<ButtonWidget>(
-            row,
-            FocusEligibility { pointer: true, keyboard: true },
-            config.state,
-        ),
+        profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
     })
 }
 
@@ -641,7 +611,6 @@ fn spawn_virtual_list_child<A: Spawns<VirtualListWidget>, M: ReplyMode>(
             pointer_eligible: profile.eligible,
             focusable: profile.eligible,
             state,
-            type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
             host_scroll_strip_units,
             wheel_eligible: true,
             scroll_viewport: None,
@@ -723,7 +692,6 @@ fn spawn_composite_child<A: Spawns<Widget>, M: ReplyMode>(
                 pointer_eligible: false,
                 focusable: false,
                 state: WidgetControlState::default(),
-                type_namespace: <Widget as Addressable>::NAMESPACE,
                 host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: None,
@@ -759,7 +727,6 @@ fn spawn_scroll_child<A: Spawns<ScrollWidget>, M: ReplyMode>(
                 pointer_eligible: false,
                 focusable: false,
                 state: WidgetControlState::default(),
-                type_namespace: <ScrollWidget as Addressable>::NAMESPACE,
                 host_scroll_strip_units: None,
                 wheel_eligible: false,
                 scroll_viewport: Some(viewport),
@@ -780,61 +747,37 @@ fn spawn_row_control_child<A: SpawnsWidgets, M: ReplyMode>(
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
             spawn::<ToggleWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<ToggleWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
             spawn::<SegmentedWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<SegmentedWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
             spawn::<NumericWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<NumericWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
             spawn::<DropdownWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<DropdownWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
             spawn::<TabStripWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<TabStripWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
             spawn::<MenuBarWidget, A, M>(ctx, &spec.subname, &config).map(|lanes| SpawnedChild {
                 lanes,
-                profile: ChildProfile::row::<MenuBarWidget>(
-                    row,
-                    FocusEligibility { pointer: true, keyboard: true },
-                    config.state,
-                ),
+                profile: ChildProfile::row(row, FocusEligibility { pointer: true, keyboard: true }, config.state),
             })
         }),
         _ => None,
@@ -1058,7 +1001,6 @@ impl WasmActor for WidgetPanel {
     #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.ensure_spawned(ctx);
-        flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         self.frame_discharge.begin_frame();
         let background = quad(self.config.x, self.config.y, self.config.width, self.panel_height, self.theme.surface);
@@ -1486,6 +1428,66 @@ impl WasmActor for WidgetPanel {
             value = changed.value,
             committed = changed.committed,
             "widget numeric changed",
+        );
+    }
+
+    /// An overlay widget's placement — a dialog's plate or a toast region's
+    /// stack — moved or resized. The map-editor seam; the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::tell]
+    fn on_widget_placed(&mut self, ctx: &mut WasmCtx<'_, Erased>, placed: WidgetPlaced) {
+        tracing::info!(
+            target: "aether_widget",
+            widget = self.child_name(ctx.sender()),
+            frame = ?placed.frame,
+            content = ?placed.content,
+            "widget placed",
+        );
+    }
+
+    /// A tooltip shed lines to fit its plate. The map-editor seam; the
+    /// reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::tell]
+    fn on_tooltip_shed(&mut self, ctx: &mut WasmCtx<'_, Erased>, shed: TooltipShed) {
+        tracing::info!(
+            target: "aether_widget",
+            widget = self.child_name(ctx.sender()),
+            dropped = shed.dropped,
+            "widget tooltip shed",
+        );
+    }
+
+    /// A splitter's handle gained or lost the pointer. The map-editor seam;
+    /// the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::tell]
+    fn on_splitter_hover(&mut self, ctx: &mut WasmCtx<'_, Erased>, hover: SplitterHover) {
+        tracing::info!(
+            target: "aether_widget",
+            widget = self.child_name(ctx.sender()),
+            entered = hover.entered,
+            "widget splitter hover",
+        );
+    }
+
+    /// A splitter's divider moved. The map-editor seam; the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::tell]
+    fn on_splitter_changed(&mut self, ctx: &mut WasmCtx<'_, Erased>, changed: SplitterChanged) {
+        tracing::info!(
+            target: "aether_widget",
+            widget = self.child_name(ctx.sender()),
+            position_pixels = changed.position_pixels,
+            "widget splitter changed",
         );
     }
 

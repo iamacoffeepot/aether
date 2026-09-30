@@ -377,10 +377,8 @@ impl NumericWidget {
         NumericEmission { value, committed: true }
     }
 
-    fn emit<A>(ctx: &WasmCtx<'_, A>, emission: NumericEmission) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&NumericChanged { value: emission.value, committed: emission.committed });
-        }
+    fn emit(ctx: &WasmCtx<'_, Self>, emission: NumericEmission) {
+        ctx.parent().send(&NumericChanged { value: emission.value, committed: emission.committed });
     }
 
     fn resolved_metrics(&self) -> Option<&CachedFontMetrics> {
@@ -516,7 +514,7 @@ impl NumericWidget {
         }
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.edit.clear_composition();
@@ -527,7 +525,7 @@ impl NumericWidget {
                 self.hovered_stepper = None;
                 self.pressed_stepper = None;
             }
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 }
@@ -567,7 +565,6 @@ impl WidgetDefaults for NumericWidget {
 /// reports preview and committed [`NumericChanged`] events.
 #[actor(
     instanced,
-    root,
     child_of(WidgetPanel, ScrollWidget),
     handler_set(WidgetDefaults),
     depends(TextCapability, ClipboardCapability)
@@ -771,7 +768,7 @@ impl WasmActor for NumericWidget {
             edit.gutter = column.width;
             edit.gutter_items = self.stepper_items(column, single_line_box_fill(&self.theme, theme_state));
         }
-        reply_single_line_edit(ctx, edit);
+        reply_single_line_edit(&ctx.parent(), edit);
     }
 }
 

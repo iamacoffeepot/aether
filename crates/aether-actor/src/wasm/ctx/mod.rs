@@ -17,9 +17,9 @@
 //! `send` (its outbound mail surface), `sends` (that surface again with the
 //! reply-class marker dropped, for helpers), `subscribe` (the flat subscribe
 //! verbs that name their publisher), `held` (the typed deferred reply a
-//! single handler holds past its return), `relative` (positional cluster-relative
-//! addressing), `child` (its typed counterpart) and `spawn` (detached and
-//! inline child creation), `address` (proving an actor path that arrived
+//! single handler holds past its return), `parent` (the typed parent door
+//! a declared `child_of(..)` list opens), `child` (typed child and sibling
+//! lookup) and `spawn` (detached and inline child creation), `address` (proving an actor path that arrived
 //! in config or mail), and `cast` (typing a held reference as a protocol).
 
 mod address;
@@ -28,8 +28,8 @@ mod child;
 mod drop;
 mod held;
 mod init;
+mod parent;
 mod receive;
-mod relative;
 mod send;
 mod sends;
 mod spawn;
@@ -44,8 +44,8 @@ pub use child::InlineChild;
 pub use drop::WasmDropCtx;
 pub use held::{Held, Pending};
 pub use init::WasmInitCtx;
+pub use parent::{HasParent, InlineParent};
 pub use receive::{NO_INBOUND_SOURCE, WasmCtx};
-pub use relative::RelativeMailbox;
 pub use sends::Sends;
 pub use spawn::{ActorTypeTag, SpawnError};
 pub use wire::WireCtx;

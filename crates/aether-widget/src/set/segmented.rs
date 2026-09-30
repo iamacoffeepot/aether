@@ -112,18 +112,15 @@ impl SegmentedWidget {
         true
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.adopt_control_state(next) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
-    fn emit<A>(ctx: &WasmCtx<'_, A>, selected: usize) {
-        if let Some(parent) = ctx.parent() {
-            #[allow(clippy::cast_possible_truncation)]
-            let index = selected as u32;
-            parent.send(&SegmentedSelected { index });
-        }
+    fn emit(ctx: &WasmCtx<'_, Self>, selected: usize) {
+        let index = u32::try_from(selected).unwrap_or(u32::MAX);
+        ctx.parent().send(&SegmentedSelected { index });
     }
 
     /// The run one option shows, cut to what its own bucket holds.
@@ -257,7 +254,7 @@ impl WidgetDefaults for SegmentedWidget {
 
 /// A segmented widget. Spawned inline by a panel root with a
 /// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SegmentedWidget {
     type Config = SegmentedConfig;
     const NAMESPACE: &'static str = "aether.widget.segmented";
@@ -355,7 +352,9 @@ impl WasmActor for SegmentedWidget {
 
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
+        reply_draw(&ctx.parent(), &self.state, || {
+            WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic())
+        });
     }
 }
 

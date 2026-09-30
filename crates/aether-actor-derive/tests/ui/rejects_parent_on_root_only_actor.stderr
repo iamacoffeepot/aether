@@ -1,0 +1,16 @@
+error[E0599]: the method `parent` exists for mutable reference `&mut WasmCtx<'_, Lonely>`, but its trait bounds were not satisfied
+  --> tests/ui/rejects_parent_on_root_only_actor.rs:25:21
+   |
+13 | struct Lonely;
+   | ------------- doesn't satisfy `Lonely: HasParent`
+...
+25 |         let _ = ctx.parent();
+   |                     ^^^^^^ method cannot be called on `&mut WasmCtx<'_, Lonely>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `Lonely: HasParent`
+note: the trait `HasParent` must be implemented
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/parent.rs
+   |
+   | pub trait HasParent: Declared + Sized {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

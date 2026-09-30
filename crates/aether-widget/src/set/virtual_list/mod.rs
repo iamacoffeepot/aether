@@ -390,9 +390,9 @@ impl VirtualListWidget {
         changed
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.replace_control_state(next) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
             self.settle_hovered_row(ctx);
         }
     }
@@ -451,7 +451,7 @@ impl WidgetDefaults for VirtualListWidget {
 /// for a figure derived from the one above it, `with_space_before` to open a
 /// block, `with_rule_above` for the hairline over that space. Any of them
 /// makes every row of the list as tall as what it holds.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
     const NAMESPACE: &'static str = "aether.widget.virtual_list";
@@ -507,10 +507,8 @@ impl WasmActor for VirtualListWidget {
         }
         self.apply_control_state(ctx, config.state);
         let next_eligible = content_eligible(self.items.len(), self.visible_row_count);
-        if previous_eligible != next_eligible
-            && let Some(parent) = ctx.parent()
-        {
-            parent.send(&WidgetEligibilityChanged { pointer: next_eligible, keyboard: next_eligible });
+        if previous_eligible != next_eligible {
+            ctx.parent().send(&WidgetEligibilityChanged { pointer: next_eligible, keyboard: next_eligible });
         }
         // A fresh vector under a still pointer is a different row under it.
         self.settle_hovered_row(ctx);
@@ -650,16 +648,14 @@ impl WasmActor for VirtualListWidget {
     /// stands at.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
         self.refresh_row_layout();
         let intrinsic = self.intrinsic();
         let content_height = self.content_height();
         let items = self.draw_items();
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_content_height(content_height));
-        }
+        ctx.parent().send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_content_height(content_height));
     }
 }
 

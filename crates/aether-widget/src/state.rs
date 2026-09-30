@@ -5,7 +5,7 @@
 //! sources separate prevents a restyle or availability update from resetting a
 //! value while still giving every control one fill-priority rule.
 
-use aether_actor::WasmCtx;
+use aether_actor::{AllHandle, Declared, InlineParent};
 use aether_math::Rgba;
 
 use crate::theme::{Theme, ThemeState};
@@ -147,10 +147,13 @@ impl InteractionState {
     }
 }
 
-pub fn emit_state_changed<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState) {
-    if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetStateChanged { state: state.control().clone() });
-    }
+/// Report the widget's control state up to its parent, which every declared
+/// parent handles.
+pub fn emit_state_changed<A: Declared<Parents: AllHandle<WidgetStateChanged>>>(
+    parent: &InlineParent<'_, A>,
+    state: &InteractionState,
+) {
+    parent.send(&WidgetStateChanged { state: state.control().clone() });
 }
 
 #[cfg(test)]

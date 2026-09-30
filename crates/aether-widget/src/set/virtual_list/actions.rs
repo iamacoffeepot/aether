@@ -52,14 +52,12 @@ impl ActionRect {
 impl VirtualListWidget {
     /// Report one row's verb. Not a selection, and never accompanied by one:
     /// the press that fires this chose nothing.
-    pub(super) fn emit_action<A>(ctx: &WasmCtx<'_, A>, index: RowActionIndex) {
+    pub(super) fn emit_action(ctx: &WasmCtx<'_, Self>, index: RowActionIndex) {
         let (Ok(row_index), Ok(action_index)) = (u32::try_from(index.row_index), u32::try_from(index.action_index))
         else {
             return;
         };
-        if let Some(parent) = ctx.parent() {
-            parent.send(&VirtualListActivated { index: row_index, action: action_index });
-        }
+        ctx.parent().send(&VirtualListActivated { index: row_index, action: action_index });
     }
 
     /// One verb's width: its measured label plus one `pad` each side — exactly

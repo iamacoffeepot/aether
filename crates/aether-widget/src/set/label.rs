@@ -181,7 +181,7 @@ fn align_x(align: TextAlign, frame_width: f32, text_width: Option<f32>) -> f32 {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), depends(TextCapability))]
 impl WasmActor for LabelWidget {
     type Config = LabelConfig;
     const NAMESPACE: &'static str = "aether.widget.label";
@@ -215,7 +215,7 @@ impl WasmActor for LabelWidget {
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         self.pump_font_metrics(ctx);
     }
@@ -223,7 +223,7 @@ impl WasmActor for LabelWidget {
     /// Update external availability without changing the label or theme.
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        apply_static_control_state(ctx, &mut self.state, set.state);
+        apply_static_control_state(&ctx.parent(), &mut self.state, set.state);
     }
 
     /// Restyle: adopt the fanned theme and request metrics for its font.
@@ -276,7 +276,7 @@ impl WasmActor for LabelWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
         let size = self.theme.text_size_pixels(self.role);
@@ -302,9 +302,7 @@ impl WasmActor for LabelWidget {
 
         let overlay = self.overflow_overlay(size, measured);
         let intrinsic = measured.map(|text_width| [text_width, self.theme.row_height]);
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_overlay(overlay));
-        }
+        ctx.parent().send(&WidgetDrawList::items(items).with_intrinsic(intrinsic).with_overlay(overlay));
     }
 
     /// A hover-eligible label sits in the root's pointer hit table, so raw

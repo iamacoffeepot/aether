@@ -13,8 +13,8 @@
 //! compares `ctx.sender()` with the proof it holds of the expected sender, so
 //! the verdict is computed in the guest and no position leaves the cluster:
 //!
-//! - parent → child\[a\] (in place): child\[a\]'s sender is `ctx.parent()`'s
-//!   proof.
+//! - parent → child\[a\] (in place, through the `InlineChild` the parent's
+//!   spawn returned): child\[a\]'s sender is `ctx.parent()`'s proof.
 //! - child\[a\] → parent (in place): the parent's sender is
 //!   `ctx.child_as::<MatrixChild>("a")`'s proof.
 //! - child\[a\] → sibling child\[b\] (in place): child\[b\]'s sender is
@@ -47,8 +47,7 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, RelativeMailbox, Subname, WasmActor, WasmCtx,
-    WasmInitCtx, actor,
+    ActorInitError, ActorRef, Erased, ErasedActorRef, InlineChild, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
@@ -178,7 +177,11 @@ fn snapshot_report() -> MatrixReport {
 /// inline children in `wire`, drives the sweep on `RunMatrix`, records the
 /// child\[a\] → parent cell when it arrives, counts the observer reports
 /// that land on it, and answers `CollectMatrix`.
-pub struct MatrixParent;
+pub struct MatrixParent {
+    /// Child\[a\], from the spawn in `wire`: the proof the fan-out ping goes
+    /// down through.
+    a: Option<InlineChild<MatrixChild>>,
+}
 
 // The cross-cluster recipient is a declared dependency, which is what turns
 // it into a reference the parent can hold: a dependency is a root singleton
@@ -189,13 +192,13 @@ impl WasmActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(MatrixParent)
+        Ok(Self { a: None })
     }
 
     /// Co-locate two inline children under the `Named` subnames `a` and `b`,
     /// the cluster's leaf nodes.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("a"), &());
+        self.a = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("a"), &()).ok();
         let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("b"), &());
     }
 
@@ -212,8 +215,8 @@ impl WasmActor for MatrixParent {
         record_observer(ctx.actor_ref::<SourceObserver>());
         ctx.send::<SourceObserver>(&SourceQuery);
 
-        let child_a = ctx.child("a").expect("inline child a is resident");
-        child_a.send(&MatrixPing { cell: MATRIX_CELL_PARENT_TO_CHILD, fan_out: 1 });
+        let child_a = self.a.expect("inline child a is resident");
+        child_a.send(ctx, &MatrixPing { cell: MATRIX_CELL_PARENT_TO_CHILD, fan_out: 1 });
     }
 
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
@@ -261,9 +264,9 @@ impl WasmActor for MatrixChild {
     /// (parent → child\[a\]), drive the child-origin cells and the
     /// cross-cluster send, all in place.
     #[handler::tell]
-    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased>, ping: MatrixPing) {
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: MatrixPing) {
         let expected = match ping.cell {
-            MATRIX_CELL_PARENT_TO_CHILD => ctx.parent().as_ref().map(RelativeMailbox::reference),
+            MATRIX_CELL_PARENT_TO_CHILD => Some(ctx.parent().reference()),
             MATRIX_CELL_CHILD_TO_SIBLING | MATRIX_CELL_CHILD_TO_SELF => {
                 ctx.sibling_as::<MatrixChild>("a").map(InlineChild::erase)
             }
@@ -276,20 +279,18 @@ impl WasmActor for MatrixChild {
         }
 
         // child[a] → parent (in place): the parent records its own cell.
-        if let Some(parent) = ctx.parent() {
-            parent.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_PARENT, fan_out: 0 });
-        }
+        ctx.parent().send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_PARENT, fan_out: 0 });
 
         // child[a] → sibling child[b] (in place): the sibling records its cell.
-        if let Some(sibling) = ctx.sibling("b") {
-            sibling.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SIBLING, fan_out: 0 });
+        if let Some(sibling) = ctx.sibling_as::<MatrixChild>("b") {
+            sibling.send(ctx, &MatrixPing { cell: MATRIX_CELL_CHILD_TO_SIBLING, fan_out: 0 });
         }
 
         // child[a] → self (in place): a child resolves itself as the child
         // of its own parent named with its own subname (`a`), routed in place
         // back to its own alias.
-        if let Some(self_handle) = ctx.sibling("a").or_else(|| ctx.child("a")) {
-            self_handle.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SELF, fan_out: 0 });
+        if let Some(self_handle) = ctx.sibling_as::<MatrixChild>("a") {
+            self_handle.send(ctx, &MatrixPing { cell: MATRIX_CELL_CHILD_TO_SELF, fan_out: 0 });
         }
 
         // Cross-cluster send *during the in-place drain*: addressed through

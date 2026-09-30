@@ -1,10 +1,8 @@
 //! Typed cluster-child addressing — [`InlineChild`] and the
 //! [`WasmCtx::child_as`] / [`WasmCtx::sibling_as`] verbs that resolve one.
 //!
-//! The typed counterpart of `super::relative`: a
-//! [`RelativeMailbox`](super::RelativeMailbox) is positional and therefore
-//! type-erased, while an [`InlineChild<C>`] names the child type it addresses,
-//! so every send through it is checked against `C`'s handler set.
+//! An [`InlineChild<C>`] names the child type it addresses, so every send
+//! through it is checked against `C`'s handler set.
 
 use core::fmt::{Debug, Formatter, Result as FmtResult};
 use core::marker::PhantomData;
@@ -134,8 +132,7 @@ impl<C: Addressable> InlineChild<C> {
 }
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
-    /// The typed form of [`WasmCtx::child`]: this actor's inline child whose
-    /// subname is `name`, as an [`InlineChild<C>`], or `None` when no such
+    /// This actor's inline child whose subname is `name`, as an [`InlineChild<C>`], or `None` when no such
     /// child resides **or** the resident one is not a `C`.
     ///
     /// The type half is answered from the registry's recorded
@@ -148,8 +145,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         self.typed_child::<C>(self.inline.child_of(MailboxId(self.mailbox), name)?)
     }
 
-    /// The typed form of [`WasmCtx::sibling`]: the child of this actor's
-    /// parent whose subname is `name`, as an [`InlineChild<C>`], or `None`
+    /// The child of this actor's parent whose subname is `name`, as an [`InlineChild<C>`], or `None`
     /// when this actor has no recorded parent, no such sibling resides, or the
     /// resident one is not a `C`. Same recorded-[`ActorTypeTag`] check
     /// [`Self::child_as`] makes.

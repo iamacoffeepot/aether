@@ -58,11 +58,11 @@ pub use local::Local;
 pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract, Contracts,
-    CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap, HandlesKind,
-    Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol, Publisher,
-    Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo, Silent,
-    SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
+    Actor, Addressable, AllHandle, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract,
+    Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap,
+    HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol,
+    Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo,
+    Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
     validate_namespace_segment,
 };
 pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError};
@@ -85,8 +85,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, Held, InlineChild, Pending, Rebuildable, RelativeMailbox, Sends,
-    SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, HasParent, Held, InlineChild, InlineParent, Pending, Rebuildable,
+    Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

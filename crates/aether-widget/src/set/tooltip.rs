@@ -466,7 +466,7 @@ impl WidgetDefaults for TooltipWidget {
 /// Hide it with `aether.widget.set_state`. A line's `icon` is a texture id
 /// the host got from `aether.render.create_texture`; register the image first
 /// and pass the texture's own pixel size, not the size you want it drawn at.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TooltipWidget {
     type Config = TooltipConfig;
     const NAMESPACE: &'static str = "aether.widget.tooltip";
@@ -514,7 +514,7 @@ impl WasmActor for TooltipWidget {
         self.font_metrics.set_desired(config.theme.font_id);
         self.theme = config.theme;
         if self.state.replace(config.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
@@ -524,7 +524,7 @@ impl WasmActor for TooltipWidget {
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
         if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
@@ -545,19 +545,15 @@ impl WasmActor for TooltipWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
         let (overlay, dropped) = self.overlay_items();
         if self.shed_count != dropped {
             self.shed_count = dropped;
-            if let Some(parent) = ctx.parent() {
-                parent.send(&TooltipShed { dropped });
-            }
+            ctx.parent().send(&TooltipShed { dropped });
         }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList::overlay(overlay));
-        }
+        ctx.parent().send(&WidgetDrawList::overlay(overlay));
     }
 }
 

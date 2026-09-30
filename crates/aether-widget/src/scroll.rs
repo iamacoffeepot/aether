@@ -13,7 +13,10 @@
 //! painting and hit testing from drifting under non-zero panel origins or
 //! ancestor offsets.
 
-use aether_actor::{ActorInitError, Erased, ErasedActorRef, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, AllHandle, Declared, ErasedActorRef, ReplyMode, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
+use aether_data::ActorMail;
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
 
@@ -27,10 +30,14 @@ use crate::set::{
 };
 use crate::theme::SetTheme;
 use crate::{
-    Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, Widget,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetPanel,
+    ButtonActivated, Collect, DropdownHover, DropdownSelected, MenuBarActivated, NumericChanged, RadioSelected,
+    ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SegmentedSelected,
+    SliderChanged, SplitterChanged, SplitterHover, TabStripSelected, TextCommitted, ToggleChanged, TooltipShed,
+    VirtualListActivated, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
+    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetOpenChanged, WidgetPanel,
+    WidgetPlaced, WidgetStateChanged,
 };
-use crate::{FrameDischarge, accept_open_child_list, flush_membership};
+use crate::{FrameDischarge, accept_open_child_list};
 
 /// The content root's identity and routing facts. Its lanes are kept apart,
 /// in `ScrollWidget::content_lanes`, because every decision below reads
@@ -217,8 +224,6 @@ impl ScrollWidget {
             lanes.key(),
             self.local_content_origin(),
             Some(viewport_clip(self.viewport_extent)),
-            &self.content_spec.subname,
-            profile.type_namespace,
         );
         self.content = Some(ScrollContent::new(lanes.key(), &profile));
         self.content_lanes = Some(lanes);
@@ -280,9 +285,8 @@ impl ScrollWidget {
         }
     }
 
-    fn drive_frame<A: SpawnsWidgets, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+    fn drive_frame<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
         self.ensure_spawned(ctx);
-        flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         self.frame_discharge.begin_frame();
         if let Some(lanes) = self.content_lanes {
@@ -293,7 +297,7 @@ impl ScrollWidget {
         }
     }
 
-    fn finish<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+    fn finish<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -308,7 +312,7 @@ impl ScrollWidget {
         debug_assert!(closed, "an open scroll frame closes exactly once");
     }
 
-    fn apply_delta<A, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>, delta: ScrollDelta) {
+    fn apply_delta<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>, delta: ScrollDelta) {
         let outcome = apply_scroll(self.viewport_extent, self.content_extent, self.offset, delta);
         self.offset = outcome.offset;
         self.sync_layout(ctx);
@@ -317,6 +321,17 @@ impl ScrollWidget {
             if has_residual(outcome.residual) {
                 parent.send(&outcome.residual);
             }
+        }
+    }
+
+    /// Relay a content child's value-up event unchanged to this scroll's
+    /// parent, when it has one.
+    fn relay<K: ActorMail, M: ReplyMode>(ctx: &WasmCtx<'_, Self, M>, event: &K)
+    where
+        <Self as Declared>::Parents: AllHandle<K>,
+    {
+        if let Some(parent) = ctx.parent() {
+            parent.send(event);
         }
     }
 
@@ -401,7 +416,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::tell]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased>, list: WidgetDrawList) {
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
@@ -436,7 +451,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::tell]
-    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased>, outcome: ScrollOutcome) {
+    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_>, outcome: ScrollOutcome) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll outcome from non-child source");
             return;
@@ -447,13 +462,157 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::tell]
-    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased>, residual: ScrollResidual) {
+    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_>, residual: ScrollResidual) {
         if !self.nested_source(ctx.sender()) {
             tracing::warn!(target: "aether_widget", "ignored scroll residual from non-child source");
             return;
         }
         self.apply_delta(ctx, ScrollDelta { x_pixels: residual.x_pixels, y_pixels: residual.y_pixels });
     }
+
+    /// Relay a content child's `SliderChanged` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_>, changed: SliderChanged) {
+        Self::relay(ctx, &changed);
+    }
+
+    /// Relay a content child's `TextCommitted` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_>, committed: TextCommitted) {
+        Self::relay(ctx, &committed);
+    }
+
+    /// Relay a content child's `RadioSelected` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_>, selected: RadioSelected) {
+        Self::relay(ctx, &selected);
+    }
+
+    /// Relay a content child's `VirtualListSelected` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_>, selected: VirtualListSelected) {
+        Self::relay(ctx, &selected);
+    }
+
+    /// Relay a content child's `VirtualListActivated` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_>, action: VirtualListActivated) {
+        Self::relay(ctx, &action);
+    }
+
+    /// Relay a content child's `VirtualListHover` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_>, hover: VirtualListHover) {
+        Self::relay(ctx, &hover);
+    }
+
+    /// Relay a content child's `DropdownHover` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_>, hover: DropdownHover) {
+        Self::relay(ctx, &hover);
+    }
+
+    /// Relay a content child's `DropdownSelected` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_>, selected: DropdownSelected) {
+        Self::relay(ctx, &selected);
+    }
+
+    /// Relay a content child's `ButtonActivated` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_>, clicked: ButtonActivated) {
+        Self::relay(ctx, &clicked);
+    }
+
+    /// Relay a content child's `ToggleChanged` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_>, changed: ToggleChanged) {
+        Self::relay(ctx, &changed);
+    }
+
+    /// Relay a content child's `SegmentedSelected` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_>, selected: SegmentedSelected) {
+        Self::relay(ctx, &selected);
+    }
+
+    /// Relay a content child's `WidgetOpenChanged` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_>, changed: WidgetOpenChanged) {
+        Self::relay(ctx, &changed);
+    }
+
+    /// Relay a content child's `MenuBarActivated` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_>, activated: MenuBarActivated) {
+        Self::relay(ctx, &activated);
+    }
+
+    /// Relay a content child's `TabStripSelected` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_>, selected: TabStripSelected) {
+        Self::relay(ctx, &selected);
+    }
+
+    /// Relay a content child's `NumericChanged` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_>, changed: NumericChanged) {
+        Self::relay(ctx, &changed);
+    }
+
+    /// Relay a content child's `WidgetPlaced` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_widget_placed(&mut self, ctx: &mut WasmCtx<'_>, placed: WidgetPlaced) {
+        Self::relay(ctx, &placed);
+    }
+
+    /// Relay a content child's `TooltipShed` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_tooltip_shed(&mut self, ctx: &mut WasmCtx<'_>, shed: TooltipShed) {
+        Self::relay(ctx, &shed);
+    }
+
+    /// Relay a content child's `SplitterHover` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_splitter_hover(&mut self, ctx: &mut WasmCtx<'_>, hover: SplitterHover) {
+        Self::relay(ctx, &hover);
+    }
+
+    /// Relay a content child's `SplitterChanged` to this scroll's own parent, which
+    /// attributes it to the scroll slot.
+    #[handler::tell]
+    fn on_splitter_changed(&mut self, ctx: &mut WasmCtx<'_>, changed: SplitterChanged) {
+        Self::relay(ctx, &changed);
+    }
+
+    /// Consume the content child's adopted control state. The parent's focus
+    /// tracks the scroll slot, not its content, so relaying it would re-key
+    /// the slot's state to the content's.
+    #[handler::tell]
+    fn on_widget_state_changed(&mut self, _ctx: &mut WasmCtx<'_>, _changed: WidgetStateChanged) {}
+
+    /// Consume the content child's eligibility change, for the same reason as
+    /// [`Self::on_widget_state_changed`].
+    #[handler::tell]
+    fn on_widget_eligibility_changed(&mut self, _ctx: &mut WasmCtx<'_>, _changed: WidgetEligibilityChanged) {}
 }
 
 #[cfg(test)]
@@ -502,7 +661,6 @@ mod tests {
             pointer_eligible: true,
             focusable: true,
             state: WidgetControlState::default(),
-            type_namespace: "aether.widget.virtual_list",
             scroll_viewport: None,
             wheel_eligible: true,
             host_scroll_strip_units: None,

@@ -245,7 +245,7 @@ fn finite_f32(value: f64) -> Option<f32> {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ImageConfig` again to replace texture or presentation in place.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget))]
 impl WasmActor for ImageWidget {
     type Config = ImageConfig;
     const NAMESPACE: &'static str = "aether.widget.image";
@@ -268,14 +268,14 @@ impl WasmActor for ImageWidget {
     #[handler::tell]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: ImageConfig) {
         if self.apply_config(config) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
     /// Update external availability without changing image presentation.
     #[handler::tell]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        apply_static_control_state(ctx, &mut self.state, set.state);
+        apply_static_control_state(&ctx.parent(), &mut self.state, set.state);
     }
 
     /// Restyle disabled presentation.
@@ -294,9 +294,7 @@ impl WasmActor for ImageWidget {
     /// Reply with valid intrinsic size and at most one fitted textured item.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&self.draw_list());
-        }
+        ctx.parent().send(&self.draw_list());
     }
 }
 

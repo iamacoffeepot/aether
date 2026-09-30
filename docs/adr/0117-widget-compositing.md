@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
+- **Amended:** 2026-09-30 — `Collect` goes down through the `InlineChild` each spawn returned, held in the node's state; the draw list goes up through the typed `ctx.parent()`, which every declared parent handles. `ScrollWidget` relays its content's value-up events to its own parent, and the `aether.widget.children_changed` membership event, which nothing read, is removed (#7206).
 - **Date:** 2026-06-15
 
 ## Context

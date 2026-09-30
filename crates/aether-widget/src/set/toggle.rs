@@ -72,16 +72,14 @@ impl ToggleWidget {
         true
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.adopt_control_state(next) {
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 
-    fn emit<A>(ctx: &WasmCtx<'_, A>, on: bool) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&ToggleChanged { on });
-        }
+    fn emit(ctx: &WasmCtx<'_, Self>, on: bool) {
+        ctx.parent().send(&ToggleChanged { on });
     }
 
     /// The colour the track is filled with: the accent when on, the raised
@@ -180,7 +178,7 @@ impl WidgetDefaults for ToggleWidget {
 
 /// A toggle widget. Spawned inline by a panel root with a [`ToggleConfig`];
 /// reports [`ToggleChanged`] after each completed activation.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToggleWidget {
     type Config = ToggleConfig;
     const NAMESPACE: &'static str = "aether.widget.toggle";
@@ -253,7 +251,7 @@ impl WasmActor for ToggleWidget {
 
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()));
+        reply_draw(&ctx.parent(), &self.state, || WidgetDrawList::items(self.draw_items()));
     }
 }
 

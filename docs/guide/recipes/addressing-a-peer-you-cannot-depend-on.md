@@ -176,9 +176,11 @@ load the shell first, and a region loaded before it is refused.
 ### Talking back to the actor that loaded you
 
 No door proves the actor that loaded a component, so the loader hands the
-component its reference. A guest's `ctx.parent()` answers only inside its own
-module: it finds an inline parent in the module's cluster, and the module's
-entry actor gets `None`. The entry actor's lineage parent is the component
+component its reference. A guest's `ctx.parent()` exists only for an actor
+that declares `child_of(..)`, and answers only inside its own module: it finds
+the inline parent in the module's cluster. A root-only entry actor has no
+`ctx.parent()` at all, and one that is both `root` and a child gets `None`
+when it is placed at the root. The entry actor's lineage parent is the component
 host, which spawned the component's trampoline, not the actor that sent
 `aether.component.load`, and no ctx proves either
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)

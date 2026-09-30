@@ -162,18 +162,16 @@ impl SliderWidget {
 
     /// Emit the current value up to the panel root, `committed` distinguishing
     /// a drag stream from a settled value.
-    fn emit<A>(&self, ctx: &WasmCtx<'_, A>, committed: bool) {
-        if let Some(parent) = ctx.parent() {
-            parent.send(&SliderChanged { value: self.value, committed });
-        }
+    fn emit(&self, ctx: &WasmCtx<'_, Self>, committed: bool) {
+        ctx.parent().send(&SliderChanged { value: self.value, committed });
     }
 
-    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_, Self>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.dragging = false;
             }
-            emit_state_changed(ctx, &self.state);
+            emit_state_changed(&ctx.parent(), &self.state);
         }
     }
 }
@@ -192,7 +190,7 @@ impl WidgetDefaults for SliderWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `SliderConfig` again to reconfigure the range or theme in place.
-#[actor(instanced, root, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
+#[actor(instanced, child_of(WidgetPanel, ScrollWidget), handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SliderWidget {
     type Config = SliderConfig;
     const NAMESPACE: &'static str = "aether.widget.slider";
@@ -299,7 +297,7 @@ impl WasmActor for SliderWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::tell]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
+        if reply_if_hidden(&ctx.parent(), &self.state) {
             return;
         }
         let width = self.frame.width;
@@ -319,9 +317,7 @@ impl WasmActor for SliderWidget {
             self.theme.fill(self.theme.accent, theme_state),
         ));
         push_control_outlines(&mut items, width, height, &self.state, &self.theme);
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList::items(items));
-        }
+        ctx.parent().send(&WidgetDrawList::items(items));
     }
 }
 

@@ -72,19 +72,19 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the macro
 // emits the wasm32 FFI shims and the `aether.kinds` custom section for every
 // listed actor. This is a grab-bag widget module (ADR-0241 §9), so the `public`
-// list has no unselected entry: every actor is selector-only by `module@actor`
-// selector (`aether_widget@aether.widget.*` /
-// `aether_widget@aether.widget.editor`), never by list position. ADR-0114
-// §5 reconstructs inline children from this same list, so every instanced
-// child widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
-// Dialog, and Splitter — must appear here; omitting one drops that type from
-// named load and from replace_component reconstruct.
+// list has no unselected entry: every exported actor is selector-only by
+// `module@actor` selector (`aether_widget@aether.widget` /
+// `aether_widget@aether.widget.editor`), never by list position.
 //
-// The rule is **every stock widget**, not a chosen few: a widget the panel can
-// spawn by `WidgetKind` is a widget a host can also load on its own by
-// `module@actor` selector, and the seven that were missing from this list were
-// indistinguishable from an oversight. The roots (`Widget`, `ScrollWidget`,
-// `EditorShell`, `EditorRegion`, `WidgetPanel`) are listed on the same rule.
+// The rule is **every stock widget is listed so a replace rebuilds it; only
+// the roots are exported**. ADR-0114 §5 reconstructs inline children from
+// this same list, so every instanced child widget — including Dropdown,
+// TabStrip, MenuBar, Tooltip, Toast, Dialog, and Splitter — must appear in
+// it; omitting one drops that type from replace_component reconstruct. The
+// set widgets declare no `root`: a root-loaded one would have no in-cluster
+// parent to send its draw list to, so they are `private` and a host reaches
+// them only by spawning them under a panel or a scroll. The roots (`Widget`,
+// `ScrollWidget`, `EditorShell`, `EditorRegion`, `WidgetPanel`) are `public`.
 //
 // The `export!` macro itself gates its emitted entry surface behind the invoking
 // crate's `library` feature, so a consuming cdylib (`aether-test-fixtures-bundle`) links
@@ -92,9 +92,8 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // inheriting a second copy of the `receive_p32` / `init` FFI shims that would
 // collide with its own `export!`. The call sites stay the same either way.
 aether_actor::export!(
-    public = [
-        Widget,
-        ScrollWidget,
+    public = [Widget, ScrollWidget, EditorShell, EditorRegion, WidgetPanel],
+    private = [
         set::SliderWidget,
         set::TextFieldWidget,
         set::TextAreaWidget,
@@ -113,14 +112,11 @@ aether_actor::export!(
         set::ToastWidget,
         set::TooltipWidget,
         set::SplitterWidget,
-        EditorShell,
-        EditorRegion,
-        WidgetPanel,
-    ]
+    ],
 );
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, ReplyMode, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, DependsOn, InlineChild, ReplyMode, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
@@ -145,6 +141,9 @@ pub struct Widget {
     composite: Composite,
     frame_discharge: FrameDischarge,
     spawned: bool,
+    /// The children [`Self::ensure_spawned`] spawned, in `config.children`
+    /// order: the spawn proofs `Collect` goes down through each frame.
+    children: Vec<InlineChild<Self>>,
 }
 
 /// One-shot completion state shared by every composite owner. A frame starts
@@ -210,7 +209,7 @@ impl Widget {
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
-    fn ensure_spawned<A: Spawns<Self>, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
+    fn ensure_spawned<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
         if self.spawned {
             return;
         }
@@ -220,13 +219,10 @@ impl Widget {
                 continue;
             };
             match ctx.spawn_inline::<Self>(Subname::Named(&spec.subname), &child_config) {
-                Ok(child) => self.composite.register_slot(
-                    child.erase(),
-                    Vec2::new(spec.origin[0], spec.origin[1]),
-                    spec.clip,
-                    &spec.subname,
-                    <Self as Addressable>::NAMESPACE,
-                ),
+                Ok(child) => {
+                    self.composite.register_slot(child.erase(), Vec2::new(spec.origin[0], spec.origin[1]), spec.clip);
+                    self.children.push(child);
+                }
                 Err(error) => tracing::warn!(
                     target: "aether_widget",
                     subname = %spec.subname,
@@ -241,19 +237,13 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability> + Spawns<Self>, M: ReplyMode>(
-        &mut self,
-        ctx: &mut WasmCtx<'_, A, M>,
-    ) {
+    fn drive_frame<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
         self.ensure_spawned(ctx);
-        flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
         self.frame_discharge.begin_frame();
         self.composite.extend_chrome(self.config.chrome.iter().cloned());
-        for spec in &self.config.children {
-            if let Some(child) = ctx.child(&spec.subname) {
-                child.send(&Collect);
-            }
+        for child in &self.children {
+            child.send(ctx, &Collect);
         }
         if self.composite.is_complete() {
             self.finish(ctx);
@@ -262,10 +252,7 @@ impl Widget {
 
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
-    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>, M: ReplyMode>(
-        &mut self,
-        ctx: &mut WasmCtx<'_, A, M>,
-    ) {
+    fn finish<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -279,20 +266,6 @@ impl Widget {
         }
         let closed = self.frame_discharge.close_frame();
         debug_assert!(closed, "an open widget frame closes exactly once");
-    }
-}
-
-/// Drain any buffered membership change and emit it up the parent lane. The
-/// first-spawn burst of the whole stack drains as one batched
-/// `ChildrenChanged`; a later single add/remove as one event. A loaded root
-/// has no up-lane consumer, so the drain is a harmless no-send there (kept
-/// mechanical for uniformity and future re-parenting). Shared by the
-/// compositing node and the reference panel, which both own a `Composite`.
-pub(crate) fn flush_membership<A, M: ReplyMode>(composite: &mut Composite, ctx: &mut WasmCtx<'_, A, M>) {
-    if let Some(changed) = composite.take_membership_changes()
-        && let Some(parent) = ctx.parent()
-    {
-        parent.send(&changed);
     }
 }
 
@@ -1043,9 +1016,9 @@ mod tests {
         let ok = proven(3);
 
         let mut composite = Composite::new();
-        composite.register_slot(background, Vec2::ZERO, None, "sheet_numeric", "aether.widget");
-        composite.register_slot(title, Vec2::ZERO, None, "picker_title", "aether.widget");
-        composite.register_slot(ok, Vec2::ZERO, None, "picker_ok", "aether.widget");
+        composite.register_slot(background, Vec2::ZERO, None);
+        composite.register_slot(title, Vec2::ZERO, None);
+        composite.register_slot(ok, Vec2::ZERO, None);
         composite.set_slot_overlay(title, true);
         composite.set_slot_overlay(ok, true);
         composite.begin_frame();
@@ -1431,7 +1404,13 @@ impl WasmActor for Widget {
     const NAMESPACE: &'static str = "aether.widget";
 
     fn init(config: WidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Widget { config, composite: Composite::new(), frame_discharge: FrameDischarge::default(), spawned: false })
+        Ok(Widget {
+            config,
+            composite: Composite::new(),
+            frame_discharge: FrameDischarge::default(),
+            spawned: false,
+            children: Vec::new(),
+        })
     }
 
     /// The root subscribes the frame stage once (the root-subscribes-once

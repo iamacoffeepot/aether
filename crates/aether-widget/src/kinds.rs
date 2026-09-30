@@ -51,33 +51,6 @@ use crate::theme::{TextInk, TextRole, Theme};
 #[aether_data::kind(name = "aether.widget.collect")]
 pub struct Collect;
 
-/// One added child's identity in a [`ChildrenChanged`] event: its inline
-/// `subname` and `type_namespace` — the spawned actor's `NAMESPACE` lineage
-/// string, the same address vocabulary lineage addressing speaks. Both are
-/// strings, not tags, because the observers this event serves (a debugger, an
-/// MCP agent) read identity, not an opaque number. Not a kind on its own; only
-/// addressable inside [`ChildrenChanged::added`].
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct MembershipEntry {
-    pub subname: String,
-    pub type_namespace: String,
-}
-
-/// `aether.widget.children_changed` — a compositing node's membership
-/// delta, emitted up the lane whenever its slot set changes. `added` names
-/// each child that appeared (with its type); `removed` names each departed
-/// child by subname. The widget runtime buffers deltas at the slot
-/// chokepoints and drains them once per activation, so the initial spawn of a
-/// stack drains as one batched event carrying all N adds, and a later single
-/// despawn as one event with one `removed` entry. It is the discovery signal a
-/// lane observer (a debugger, an MCP agent) reads to know what a node contains
-/// and when that changed.
-#[aether_data::kind(name = "aether.widget.children_changed", eq)]
-pub struct ChildrenChanged {
-    pub added: Vec<MembershipEntry>,
-    pub removed: Vec<String>,
-}
-
 /// A clip rectangle in the current widget composition space.
 ///
 /// On a [`WidgetDrawItem`] the rectangle is local to that item's widget. On a
