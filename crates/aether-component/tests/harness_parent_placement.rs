@@ -2,11 +2,11 @@
 //!
 //! The refusal scenarios pin the parent boundary: a spawn beneath an address
 //! that does not resolve, and beneath one that resolves to a parent still
-//! `Starting`, both answer `Err` before any guest is staged. Root placement is pinned the same way (ADR-0241
-//! §5): a root load of a type whose only declared placement is `child_of(P)`
-//! answers `Err` naming it, before the module publishes or its route is
-//! staged. `harness_guest_addresses` covers a placement beneath a live
-//! parent.
+//! `Starting`, both answer `Err` before any guest is staged. Root placement
+//! is pinned the same way (ADR-0241 §5): a root load of a type whose only
+//! declared placement is `child_of(P)` answers `Err` naming it, before the
+//! module publishes or its route is staged. `harness_guest_addresses` covers
+//! a placement beneath a live parent.
 
 use std::fs;
 use std::sync::{Condvar, Mutex, PoisonError};
