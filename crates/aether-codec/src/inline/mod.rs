@@ -38,9 +38,9 @@ use crate::DecodeError;
 mod tests;
 
 /// The deepest schema nesting the walk follows before it refuses the payload
-/// as malformed. Real kinds nest a handful of levels; the cap only keeps a
-/// pathological descriptor from overflowing the stack.
-pub const MAX_SCHEMA_DEPTH: usize = 128;
+/// as malformed: the same cap the wire decode of a schema enforces, so a
+/// schema that decodes is one the walk follows.
+pub use aether_data::MAX_SCHEMA_DEPTH;
 
 /// Bytes of a tag-1 field: the tag, then the 32-byte hash.
 const HASH_FIELD_BYTES: usize = 1 + 32;

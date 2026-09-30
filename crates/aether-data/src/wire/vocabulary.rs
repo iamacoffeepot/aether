@@ -11,12 +11,171 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::Error;
-use super::owned::{WireDecode, WireEncode};
+use super::owned::{WireDecode, WireEncode, take_array};
 use crate::schema::{
     ActorLineageRecord, EnumVariant, InputsRecord, KindDescriptor, KindLabels, KindShape, LabelCell, LabelNode,
-    MailboxCategory, MailboxDescriptor, NamedField, Primitive, ReplyContract, SchemaCell, SchemaShape, SchemaType,
-    VariantLabel, VariantShape,
+    MAX_SCHEMA_DEPTH, MailboxCategory, MailboxDescriptor, NamedField, Primitive, ReplyContract, SchemaCell,
+    SchemaShape, SchemaType, VariantLabel, VariantShape,
 };
+
+/// A `u32`-counted sequence whose elements `item` decodes. The recursive
+/// schema families read their child lists through this instead of the
+/// generic `Vec` / `Cow<[T]>` decode, which could only call `T::decode` and
+/// would restart the nesting depth at 0.
+fn seq<'de, T>(
+    cursor: &mut &'de [u8],
+    mut item: impl FnMut(&mut &'de [u8]) -> Result<T, Error>,
+) -> Result<Vec<T>, Error> {
+    let count = u32::from_le_bytes(take_array(cursor)?) as usize;
+    let mut items = Vec::with_capacity(count.min(cursor.len()));
+    for _ in 0..count {
+        items.push(item(cursor)?);
+    }
+    Ok(items)
+}
+
+/// Refuses a schema node at `depth` past [`MAX_SCHEMA_DEPTH`]. The root is
+/// depth 0 and each nested schema adds one, as in `aether-codec`'s walks, so
+/// every schema this decode accepts is one those walks follow.
+fn check_depth(depth: usize) -> Result<(), Error> {
+    if depth > MAX_SCHEMA_DEPTH {
+        Err(Error::SchemaTooDeep)
+    } else {
+        Ok(())
+    }
+}
+
+fn schema_type(cursor: &mut &[u8], depth: usize) -> Result<SchemaType, Error> {
+    check_depth(depth)?;
+    let child = |cursor: &mut &[u8]| schema_type(cursor, depth + 1).map(SchemaCell::owned);
+    match u32::decode(cursor)? {
+        0 => Ok(SchemaType::Unit),
+        1 => Ok(SchemaType::Bool),
+        2 => Ok(SchemaType::Scalar(Primitive::decode(cursor)?)),
+        3 => Ok(SchemaType::String),
+        4 => Ok(SchemaType::Bytes),
+        5 => Ok(SchemaType::Option(child(cursor)?)),
+        6 => Ok(SchemaType::Vec(child(cursor)?)),
+        7 => Ok(SchemaType::Array { element: child(cursor)?, len: u32::decode(cursor)? }),
+        8 => Ok(SchemaType::Struct {
+            fields: Cow::Owned(seq(cursor, |cursor| named_field(cursor, depth + 1))?),
+            repr_c: bool::decode(cursor)?,
+        }),
+        9 => Ok(SchemaType::Enum { variants: Cow::Owned(seq(cursor, |cursor| enum_variant(cursor, depth + 1))?) }),
+        10 => Ok(SchemaType::Map { key: child(cursor)?, value: child(cursor)? }),
+        11 => Ok(SchemaType::TypeId(u64::decode(cursor)?)),
+        12 => Ok(SchemaType::Blob),
+        13 => Ok(SchemaType::Ticket { reply: crate::KindId::decode(cursor)? }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
+
+/// A struct field whose type sits at `depth`, which its parent has already
+/// counted.
+fn named_field(cursor: &mut &[u8], depth: usize) -> Result<NamedField, Error> {
+    Ok(NamedField { name: Cow::decode(cursor)?, ty: schema_type(cursor, depth)? })
+}
+
+/// An enum variant whose field types sit at `depth`, which its parent has
+/// already counted.
+fn enum_variant(cursor: &mut &[u8], depth: usize) -> Result<EnumVariant, Error> {
+    match u32::decode(cursor)? {
+        0 => Ok(EnumVariant::Unit { name: Cow::decode(cursor)?, discriminant: u32::decode(cursor)? }),
+        1 => Ok(EnumVariant::Tuple {
+            name: Cow::decode(cursor)?,
+            discriminant: u32::decode(cursor)?,
+            fields: Cow::Owned(seq(cursor, |cursor| schema_type(cursor, depth))?),
+        }),
+        2 => Ok(EnumVariant::Struct {
+            name: Cow::decode(cursor)?,
+            discriminant: u32::decode(cursor)?,
+            fields: Cow::Owned(seq(cursor, |cursor| named_field(cursor, depth))?),
+        }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
+
+fn schema_shape(cursor: &mut &[u8], depth: usize) -> Result<SchemaShape, Error> {
+    check_depth(depth)?;
+    let child = |cursor: &mut &[u8]| schema_shape(cursor, depth + 1).map(Box::new);
+    match u32::decode(cursor)? {
+        0 => Ok(SchemaShape::Unit),
+        1 => Ok(SchemaShape::Bool),
+        2 => Ok(SchemaShape::Scalar(Primitive::decode(cursor)?)),
+        3 => Ok(SchemaShape::String),
+        4 => Ok(SchemaShape::Bytes),
+        5 => Ok(SchemaShape::Option(child(cursor)?)),
+        6 => Ok(SchemaShape::Vec(child(cursor)?)),
+        7 => Ok(SchemaShape::Array { element: child(cursor)?, len: u32::decode(cursor)? }),
+        8 => Ok(SchemaShape::Struct {
+            fields: seq(cursor, |cursor| schema_shape(cursor, depth + 1))?,
+            repr_c: bool::decode(cursor)?,
+        }),
+        9 => Ok(SchemaShape::Enum { variants: seq(cursor, |cursor| variant_shape(cursor, depth + 1))? }),
+        10 => Ok(SchemaShape::Map { key: child(cursor)?, value: child(cursor)? }),
+        11 => Ok(SchemaShape::TypeId(u64::decode(cursor)?)),
+        12 => Ok(SchemaShape::Blob),
+        13 => Ok(SchemaShape::Ticket { reply: crate::KindId::decode(cursor)? }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
+
+/// A variant shape whose field shapes sit at `depth`, which its parent has
+/// already counted.
+fn variant_shape(cursor: &mut &[u8], depth: usize) -> Result<VariantShape, Error> {
+    match u32::decode(cursor)? {
+        0 => Ok(VariantShape::Unit { discriminant: u32::decode(cursor)? }),
+        1 => Ok(VariantShape::Tuple {
+            discriminant: u32::decode(cursor)?,
+            fields: seq(cursor, |cursor| schema_shape(cursor, depth))?,
+        }),
+        2 => Ok(VariantShape::Struct {
+            discriminant: u32::decode(cursor)?,
+            fields: seq(cursor, |cursor| schema_shape(cursor, depth))?,
+        }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
+
+fn label_node(cursor: &mut &[u8], depth: usize) -> Result<LabelNode, Error> {
+    check_depth(depth)?;
+    let child = |cursor: &mut &[u8]| label_node(cursor, depth + 1).map(LabelCell::owned);
+    match u32::decode(cursor)? {
+        0 => Ok(LabelNode::Anonymous),
+        1 => Ok(LabelNode::Option(child(cursor)?)),
+        2 => Ok(LabelNode::Vec(child(cursor)?)),
+        3 => Ok(LabelNode::Array(child(cursor)?)),
+        4 => Ok(LabelNode::Struct {
+            type_label: Option::decode(cursor)?,
+            field_names: Cow::decode(cursor)?,
+            fields: Cow::Owned(seq(cursor, |cursor| label_node(cursor, depth + 1))?),
+        }),
+        5 => Ok(LabelNode::Enum {
+            type_label: Option::decode(cursor)?,
+            variants: Cow::Owned(seq(cursor, |cursor| variant_label(cursor, depth + 1))?),
+        }),
+        6 => Ok(LabelNode::Map { key: child(cursor)?, value: child(cursor)? }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
+
+/// A variant label whose field labels sit at `depth`, which its parent has
+/// already counted.
+fn variant_label(cursor: &mut &[u8], depth: usize) -> Result<VariantLabel, Error> {
+    match u32::decode(cursor)? {
+        0 => Ok(VariantLabel::Unit { name: Cow::decode(cursor)? }),
+        1 => Ok(VariantLabel::Tuple {
+            name: Cow::decode(cursor)?,
+            fields: Cow::Owned(seq(cursor, |cursor| label_node(cursor, depth))?),
+        }),
+        2 => Ok(VariantLabel::Struct {
+            name: Cow::decode(cursor)?,
+            field_names: Cow::decode(cursor)?,
+            fields: Cow::Owned(seq(cursor, |cursor| label_node(cursor, depth))?),
+        }),
+        other => Err(Error::InvalidEnum(other)),
+    }
+}
 
 macro_rules! unit_enum {
     ($ty:ty, $($variant:ident = $idx:literal),+ $(,)?) => {
@@ -52,7 +211,7 @@ impl WireEncode for SchemaCell {
 
 impl<'de> WireDecode<'de> for SchemaCell {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        SchemaType::decode(cursor).map(Self::owned)
+        schema_type(cursor, 0).map(Self::owned)
     }
 }
 
@@ -64,7 +223,7 @@ impl WireEncode for LabelCell {
 
 impl<'de> WireDecode<'de> for LabelCell {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        LabelNode::decode(cursor).map(Self::owned)
+        label_node(cursor, 0).map(Self::owned)
     }
 }
 
@@ -77,7 +236,7 @@ impl WireEncode for NamedField {
 
 impl<'de> WireDecode<'de> for NamedField {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        Ok(Self { name: Cow::decode(cursor)?, ty: SchemaType::decode(cursor)? })
+        named_field(cursor, 0)
     }
 }
 
@@ -107,20 +266,7 @@ impl WireEncode for EnumVariant {
 
 impl<'de> WireDecode<'de> for EnumVariant {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Unit { name: Cow::decode(cursor)?, discriminant: u32::decode(cursor)? }),
-            1 => Ok(Self::Tuple {
-                name: Cow::decode(cursor)?,
-                discriminant: u32::decode(cursor)?,
-                fields: Cow::decode(cursor)?,
-            }),
-            2 => Ok(Self::Struct {
-                name: Cow::decode(cursor)?,
-                discriminant: u32::decode(cursor)?,
-                fields: Cow::decode(cursor)?,
-            }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        enum_variant(cursor, 0)
     }
 }
 
@@ -177,23 +323,7 @@ impl WireEncode for SchemaType {
 
 impl<'de> WireDecode<'de> for SchemaType {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Unit),
-            1 => Ok(Self::Bool),
-            2 => Ok(Self::Scalar(Primitive::decode(cursor)?)),
-            3 => Ok(Self::String),
-            4 => Ok(Self::Bytes),
-            5 => Ok(Self::Option(SchemaCell::decode(cursor)?)),
-            6 => Ok(Self::Vec(SchemaCell::decode(cursor)?)),
-            7 => Ok(Self::Array { element: SchemaCell::decode(cursor)?, len: u32::decode(cursor)? }),
-            8 => Ok(Self::Struct { fields: Cow::decode(cursor)?, repr_c: bool::decode(cursor)? }),
-            9 => Ok(Self::Enum { variants: Cow::decode(cursor)? }),
-            10 => Ok(Self::Map { key: SchemaCell::decode(cursor)?, value: SchemaCell::decode(cursor)? }),
-            11 => Ok(Self::TypeId(u64::decode(cursor)?)),
-            12 => Ok(Self::Blob),
-            13 => Ok(Self::Ticket { reply: crate::KindId::decode(cursor)? }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        schema_type(cursor, 0)
     }
 }
 
@@ -250,23 +380,7 @@ impl WireEncode for SchemaShape {
 
 impl<'de> WireDecode<'de> for SchemaShape {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Unit),
-            1 => Ok(Self::Bool),
-            2 => Ok(Self::Scalar(Primitive::decode(cursor)?)),
-            3 => Ok(Self::String),
-            4 => Ok(Self::Bytes),
-            5 => Ok(Self::Option(Box::decode(cursor)?)),
-            6 => Ok(Self::Vec(Box::decode(cursor)?)),
-            7 => Ok(Self::Array { element: Box::decode(cursor)?, len: u32::decode(cursor)? }),
-            8 => Ok(Self::Struct { fields: Vec::decode(cursor)?, repr_c: bool::decode(cursor)? }),
-            9 => Ok(Self::Enum { variants: Vec::decode(cursor)? }),
-            10 => Ok(Self::Map { key: Box::decode(cursor)?, value: Box::decode(cursor)? }),
-            11 => Ok(Self::TypeId(u64::decode(cursor)?)),
-            12 => Ok(Self::Blob),
-            13 => Ok(Self::Ticket { reply: crate::KindId::decode(cursor)? }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        schema_shape(cursor, 0)
     }
 }
 
@@ -293,12 +407,7 @@ impl WireEncode for VariantShape {
 
 impl<'de> WireDecode<'de> for VariantShape {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Unit { discriminant: u32::decode(cursor)? }),
-            1 => Ok(Self::Tuple { discriminant: u32::decode(cursor)?, fields: Vec::decode(cursor)? }),
-            2 => Ok(Self::Struct { discriminant: u32::decode(cursor)?, fields: Vec::decode(cursor)? }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        variant_shape(cursor, 0)
     }
 }
 
@@ -384,20 +493,7 @@ impl WireEncode for LabelNode {
 
 impl<'de> WireDecode<'de> for LabelNode {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Anonymous),
-            1 => Ok(Self::Option(LabelCell::decode(cursor)?)),
-            2 => Ok(Self::Vec(LabelCell::decode(cursor)?)),
-            3 => Ok(Self::Array(LabelCell::decode(cursor)?)),
-            4 => Ok(Self::Struct {
-                type_label: Option::decode(cursor)?,
-                field_names: Cow::decode(cursor)?,
-                fields: Cow::decode(cursor)?,
-            }),
-            5 => Ok(Self::Enum { type_label: Option::decode(cursor)?, variants: Cow::decode(cursor)? }),
-            6 => Ok(Self::Map { key: LabelCell::decode(cursor)?, value: LabelCell::decode(cursor)? }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        label_node(cursor, 0)
     }
 }
 
@@ -425,16 +521,7 @@ impl WireEncode for VariantLabel {
 
 impl<'de> WireDecode<'de> for VariantLabel {
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, Error> {
-        match u32::decode(cursor)? {
-            0 => Ok(Self::Unit { name: Cow::decode(cursor)? }),
-            1 => Ok(Self::Tuple { name: Cow::decode(cursor)?, fields: Cow::decode(cursor)? }),
-            2 => Ok(Self::Struct {
-                name: Cow::decode(cursor)?,
-                field_names: Cow::decode(cursor)?,
-                fields: Cow::decode(cursor)?,
-            }),
-            other => Err(Error::InvalidEnum(other)),
-        }
+        variant_label(cursor, 0)
     }
 }
 

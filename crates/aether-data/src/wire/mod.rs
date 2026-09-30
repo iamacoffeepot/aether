@@ -119,6 +119,10 @@ pub enum Error {
     /// A granted [`HeldLedger`] does not accept `ticket` as an obligation to
     /// answer `reply` (ADR-0243).
     HeldUnclaimed { ticket: u64, reply: KindId },
+    /// A decoded schema ([`SchemaType`](crate::SchemaType),
+    /// [`SchemaShape`](crate::SchemaShape), or [`LabelNode`](crate::LabelNode))
+    /// nests deeper than [`MAX_SCHEMA_DEPTH`](crate::MAX_SCHEMA_DEPTH).
+    SchemaTooDeep,
 }
 
 impl fmt::Display for Error {
@@ -153,6 +157,7 @@ impl fmt::Display for Error {
             Self::HeldUnclaimed { ticket, reply } => {
                 write!(f, "aether wire: held ticket {ticket} answering `{reply}` is not in the granted ledger")
             }
+            Self::SchemaTooDeep => write!(f, "aether wire: schema nests deeper than {}", crate::MAX_SCHEMA_DEPTH),
         }
     }
 }

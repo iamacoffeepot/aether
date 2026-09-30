@@ -325,3 +325,42 @@ fn held_ticket_parks_through_a_ledger_encoder_and_claims_through_the_context() {
     );
     assert!(ledger.parked.is_empty());
 }
+
+/// Bytes of a schema `levels` deep: `open` per level, the `0u32` leaf
+/// (`Unit` / `Anonymous`), then `close` per level on the way back out.
+fn schema_chain(open: &[u32], close: &[u8], levels: usize) -> Vec<u8> {
+    let open: Vec<u8> = open.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let mut bytes = open.repeat(levels);
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&close.repeat(levels));
+    bytes
+}
+
+// Catches a schema decode with no depth cap (the 100_000-level chain
+// overflows the test thread's stack), a cap off by one against
+// `aether-codec`'s walks, and a struct field, enum variant, or label child
+// that restarts the depth at 0 and slips its chain past the cap.
+#[test]
+fn a_schema_nested_past_the_cap_refuses_instead_of_overflowing() {
+    use core::fmt::Debug;
+
+    use crate::{LabelNode, MAX_SCHEMA_DEPTH, SchemaShape, SchemaType};
+
+    fn check<T: for<'de> WireDecode<'de> + Debug>(open: &[u32], close: &[u8]) {
+        assert!(decode_from_slice::<T>(&schema_chain(open, close, MAX_SCHEMA_DEPTH)).is_ok());
+        for levels in [MAX_SCHEMA_DEPTH + 1, 100_000] {
+            assert_eq!(decode_from_slice::<T>(&schema_chain(open, close, levels)).unwrap_err(), Error::SchemaTooDeep);
+        }
+    }
+
+    // An `Option` level: selector 5.
+    check::<SchemaType>(&[5], &[]);
+    // A one-field struct level: selector 8, one field, empty name; `repr_c` after the field.
+    check::<SchemaType>(&[8, 1, 0], &[0]);
+    // A one-variant enum level: selector 9, one variant, tuple selector 1,
+    // empty name, discriminant 0, one field.
+    check::<SchemaType>(&[9, 1, 1, 0, 0, 1], &[]);
+    check::<SchemaShape>(&[5], &[]);
+    // A label `Option` level: selector 1.
+    check::<LabelNode>(&[1], &[]);
+}
