@@ -9,7 +9,7 @@
 //!   placements. The spawn runs in a handler, so the alias batches ride the
 //!   bump's chain and a settled bump has committed them.
 //! - `Placed` (exported, instanced) declares `child_of(Host)`, so a
-//!   `load_under` beneath the exported root `Host` lands at
+//!   `Spawn` naming the exported root `Host` as its parent lands at
 //!   `test.short_path.host/test.short_path.placed:NAME`.
 //!
 //! Every type counts the bumps it receives, so each handler reads its state.
@@ -102,7 +102,7 @@ impl WasmActor for Host {
     }
 }
 
-/// Exported instanced child a `load_under` places beneath `Host`.
+/// Exported instanced child a `Spawn` naming `Host` as its parent places.
 pub struct Placed {
     bumps: u32,
 }

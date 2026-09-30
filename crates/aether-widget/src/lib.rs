@@ -71,8 +71,8 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the macro
 // emits the wasm32 FFI shims and the `aether.kinds` custom section for every
-// listed actor. This is a grab-bag widget module (ADR-0138), so the `public`
-// list names NO `default`: every actor is selector-only by `module@actor`
+// listed actor. This is a grab-bag widget module (ADR-0241 §9), so the `public`
+// list has no unselected entry: every actor is selector-only by `module@actor`
 // selector (`aether_widget@aether.widget.*` /
 // `aether_widget@aether.widget.editor`), never by list position. ADR-0114
 // §5 reconstructs inline children from this same list, so every instanced

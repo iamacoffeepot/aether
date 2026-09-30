@@ -7,7 +7,7 @@ publish = false
 
 # ADR-0241 §5 fixture: guest parents whose children resolve by short path.
 # `Trunk` spawns a private inline `Branch`, which spawns a private inline
-# `Leaf`, and `Placed` is a `load_under` child of `Host`. It is standalone
+# `Leaf`, and `Placed` is placed by a `Spawn` naming `Host` as its parent. It is standalone
 # because a short-path hole fills only beneath a parent with one instanced
 # child type: in the shared bundle a child type lists several parents, so a
 # hole there can be ambiguous. The `rlib` lets host tests name

@@ -1063,8 +1063,8 @@ macro_rules! __export_internal {
 
         // Issue 525 Phase 1B: pin the actor's `Addressable::NAMESPACE` bytes
         // into a sibling `aether.namespace` custom section. The
-        // substrate reads this at load time as the default mailbox
-        // name when the load payload omits an explicit `name`.
+        // host reads it to name a single-actor module's implicit export
+        // group (`read_selectable_exports_from_bytes`, ADR-0241 §9).
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$component as $crate::Addressable>::NAMESPACE.len()] = {
