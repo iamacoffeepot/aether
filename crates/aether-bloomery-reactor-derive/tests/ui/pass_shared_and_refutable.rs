@@ -2,7 +2,7 @@
 
 use aether_bloomery_kinds::{Digest, Head, HeadMoved, Ref, SetHeads, Tree};
 use aether_bloomery_reactor::{Guard, Reactor, reactor};
-use aether_bloomery_view::Heads;
+use aether_bloomery_view::{At, Heads};
 
 const SOURCE: Head<Tree> = Head::new("source");
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -19,7 +19,7 @@ struct BoundSource;
 impl Guard<HeadMoved<Tree>> for BoundSource {
     type Views = Heads;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, heads: &Heads) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<Tree>, _at: At, heads: &Heads) -> Option<Self> {
         heads.get(&SOURCE).map(|_| Self)
     }
 }
@@ -27,7 +27,7 @@ impl Guard<HeadMoved<Tree>> for BoundSource {
 impl Guard<Compilation> for BoundSource {
     type Views = Heads;
 
-    fn resolve(_trigger: &Compilation, heads: &Heads) -> Option<Self> {
+    fn resolve(_trigger: &Compilation, _at: At, heads: &Heads) -> Option<Self> {
         heads.get(&SOURCE).map(|_| Self)
     }
 }

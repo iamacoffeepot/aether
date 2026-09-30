@@ -42,8 +42,23 @@ struct Fold {
     method: ImplItemFn,
     event_ty: Type,
     fallible: bool,
-    /// The fold takes a third `cited: &Cited` parameter.
-    cites: bool,
+    /// The optional parameters after the event, in declared order.
+    extras: Vec<Extra>,
+}
+
+impl Fold {
+    fn cites(&self) -> bool {
+        self.extras.contains(&Extra::Cited)
+    }
+}
+
+/// An optional fold parameter after the event, classified by shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Extra {
+    /// A shared reference: `cited: &Cited`, the entry's citations.
+    Cited,
+    /// An owned value: `at: At`, the entry's own position.
+    At,
 }
 
 /// Generate an ordinary View implementation from typed #[fold] methods on a
@@ -184,10 +199,11 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(&sig.generics, "#[fold] methods cannot be generic"));
     }
-    if !(2..=3).contains(&sig.inputs.len()) {
+    if !(2..=4).contains(&sig.inputs.len()) {
         return Err(syn::Error::new_spanned(
             &sig.inputs,
-            "#[fold] methods take exactly `&mut self`, one owned typed event, and optionally `cited: &Cited`",
+            "#[fold] methods take exactly `&mut self`, one owned typed event, and optionally `cited: &Cited` and \
+             `at: At` in either order",
         ));
     }
 
@@ -207,17 +223,30 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
         return Err(syn::Error::new_spanned(&event.ty, "#[fold] event parameters are owned values"));
     }
 
-    let cites = match sig.inputs.iter().nth(2) {
-        None => false,
-        Some(FnArg::Typed(cited)) if is_shared_reference(&cited.ty) => true,
-        Some(other) => {
-            return Err(syn::Error::new_spanned(other, "a #[fold] method's third parameter is `cited: &Cited`"));
+    let mut extras = Vec::new();
+    for input in sig.inputs.iter().skip(2) {
+        let extra = match input {
+            FnArg::Typed(typed) if is_shared_reference(&typed.ty) => Extra::Cited,
+            FnArg::Typed(typed) if !matches!(&*typed.ty, Type::Reference(_)) => Extra::At,
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "a #[fold] method's parameters after the event are `cited: &Cited` and `at: At`",
+                ));
+            }
+        };
+        if extras.contains(&extra) {
+            return Err(syn::Error::new_spanned(
+                input,
+                "a #[fold] method takes `cited: &Cited` and `at: At` at most once each",
+            ));
         }
-    };
+        extras.push(extra);
+    }
 
     let event_ty = (*event.ty).clone();
     let fallible = classify_output(&sig.output)?;
-    Ok(Fold { method, event_ty, fallible, cites })
+    Ok(Fold { method, event_ty, fallible, extras })
 }
 
 fn classify_output(output: &ReturnType) -> syn::Result<bool> {
@@ -266,10 +295,15 @@ fn expand(def: ViewDef) -> TokenStream2 {
     let ViewDef { attrs, self_ty, cursor, folds } = def;
     let methods = folds.iter().map(|fold| &fold.method);
     let dispatches = folds.iter().map(expand_dispatch);
-    let advance = if folds.iter().any(|fold| fold.cites) {
-        expand_cited_advance(&cursor, dispatches)
+    let bind_at = if folds.iter().any(|fold| fold.extras.contains(&Extra::At)) {
+        quote! { let entry_at = ::aether_bloomery_view::__macro_internals::At::from(entry); }
     } else {
-        expand_advance(&cursor, dispatches)
+        TokenStream2::new()
+    };
+    let advance = if folds.iter().any(Fold::cites) {
+        expand_cited_advance(&cursor, &bind_at, dispatches)
+    } else {
+        expand_advance(&cursor, &bind_at, dispatches)
     };
 
     quote! {
@@ -297,7 +331,11 @@ fn expand(def: ViewDef) -> TokenStream2 {
 
 /// `advance` for a view none of whose folds read citations: the trait's
 /// default `advance_cited` calls it.
-fn expand_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+fn expand_advance(
+    cursor: &Ident,
+    bind_at: &TokenStream2,
+    dispatches: impl Iterator<Item = TokenStream2>,
+) -> TokenStream2 {
     quote! {
         fn advance(
             &mut self,
@@ -305,6 +343,7 @@ fn expand_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>
         ) -> ::core::result::Result<(), Self::Error> {
             for entry in entries {
                 ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                #bind_at
                 #(#dispatches)*
                 self.#cursor.set(entry.seq);
             }
@@ -315,7 +354,11 @@ fn expand_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>
 
 /// `advance_cited` for a view with a fold that reads citations, handing each
 /// entry its own; `advance` is the same walk over entries that cite nothing.
-fn expand_cited_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+fn expand_cited_advance(
+    cursor: &Ident,
+    bind_at: &TokenStream2,
+    dispatches: impl Iterator<Item = TokenStream2>,
+) -> TokenStream2 {
     quote! {
         fn advance(
             &mut self,
@@ -333,6 +376,7 @@ fn expand_cited_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenSt
             for (index, entry) in entries.iter().enumerate() {
                 let entry_cited = cited.get(index).unwrap_or(&uncited);
                 ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                #bind_at
                 #(#dispatches)*
                 self.#cursor.set(entry.seq);
             }
@@ -344,11 +388,11 @@ fn expand_cited_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenSt
 fn expand_dispatch(fold: &Fold) -> TokenStream2 {
     let ident = &fold.method.sig.ident;
     let event_ty = &fold.event_ty;
-    let args = if fold.cites {
-        quote! { event, entry_cited }
-    } else {
-        quote! { event }
-    };
+    let extras = fold.extras.iter().map(|extra| match extra {
+        Extra::Cited => quote! { entry_cited },
+        Extra::At => quote! { entry_at },
+    });
+    let args = quote! { event #(, #extras)* };
     let call = if fold.fallible {
         quote_spanned! { ident.span() =>
             if let ::core::result::Result::Err(source) = self.#ident(#args) {

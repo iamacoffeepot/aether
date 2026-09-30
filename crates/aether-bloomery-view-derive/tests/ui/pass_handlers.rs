@@ -1,7 +1,7 @@
 use core::convert::Infallible;
 
 use aether_bloomery_kinds::Ref;
-use aether_bloomery_view::{Cited, CitedError, View, ViewCursor, view};
+use aether_bloomery_view::{At, Cited, CitedError, View, ViewCursor, view};
 
 #[derive(Clone, aether_data::Storage)]
 #[kind(name = "test.view.pass.event")]
@@ -52,10 +52,35 @@ impl View for Reads {
     }
 }
 
+#[derive(Default)]
+struct Positions {
+    cursor: ViewCursor,
+    last: Option<At>,
+}
+
+#[view(cursor = cursor)]
+impl View for Positions {
+    #[fold]
+    fn placed(&mut self, _event: Event, at: At) {
+        self.last = Some(at);
+    }
+
+    #[fold]
+    fn read(&mut self, event: CitedEvent, at: At, cited: &Cited) -> Result<(), CitedError> {
+        cited.get(event.cites)?;
+        self.last = Some(at);
+        Ok(())
+    }
+}
+
 fn main() {
     let aggregate = Aggregate::empty();
     let _ = aggregate.cursor();
 
     let mut reads = Reads::empty();
     let _ = reads.advance_cited(&[], &[]);
+
+    let mut positions = Positions::empty();
+    let _ = positions.advance(&[]);
+    let _ = positions.last;
 }

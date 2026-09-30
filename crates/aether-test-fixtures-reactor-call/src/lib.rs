@@ -3,7 +3,7 @@
 
 use aether_bloomery_kinds::{CallInput, CallProgram, Head, HeadMoved, ProgramName, Ref, Utf8Text};
 use aether_bloomery_reactor::{Guard, NoViews, reactor};
-use aether_bloomery_view::{ViewCursor, view};
+use aether_bloomery_view::{At, ViewCursor, view};
 use aether_test_fixtures_kinds::{SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 struct SummarizeName(ProgramName);
@@ -11,7 +11,7 @@ struct SummarizeName(ProgramName);
 impl Guard<HeadMoved<SummarizeInput>> for SummarizeName {
     type Views = NoViews;
 
-    fn resolve(_trigger: &HeadMoved<SummarizeInput>, (): ()) -> Option<Self> {
+    fn resolve(_trigger: &HeadMoved<SummarizeInput>, _at: At, (): ()) -> Option<Self> {
         ProgramName::new(SUMMARIZE_PROGRAM).ok().map(Self)
     }
 }
@@ -41,7 +41,7 @@ struct FreshSummarizeCall(CallProgram);
 impl Guard<HeadMoved<Utf8Text>> for FreshSummarizeCall {
     type Views = SelectedText;
 
-    fn resolve(change: &HeadMoved<Utf8Text>, selected: &SelectedText) -> Option<Self> {
+    fn resolve(change: &HeadMoved<Utf8Text>, _at: At, selected: &SelectedText) -> Option<Self> {
         if change.head() != &TEXT {
             return None;
         }

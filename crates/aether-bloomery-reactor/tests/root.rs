@@ -1,18 +1,19 @@
 //! Native `Root` state machine: contiguity, poison, attribution, shared views.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, Entry, Evaluated, Event, Head, HeadChange, HeadMoved, JournalEntry, Mode, ProgramName,
-    ProgramRef, Ref, RuleRecord, Seq, SetHeads, Transition, Tree, Warm, WarmEntries, Warmed, reactor_record_len,
-    write_reactor_record,
+    ProgramRef, ReactorName, Ref, RequestSource, Requested, RuleName, RuleRecord, Seq, SetHeads, Transition, Tree,
+    Warm, WarmEntries, Warmed, reactor_record_len, write_reactor_record,
 };
 use aether_bloomery_program::{Program, Ran};
 use aether_bloomery_reactor::{Guard, Nil, Owner, PrepareError, Reactor, Root, reactor};
-use aether_bloomery_view::{Cited, CitedError, Publish, PublishError, View, ViewCursor, view};
+use aether_bloomery_view::{At, Cited, CitedError, Publish, PublishError, View, ViewCursor, view};
 use aether_data::{Kind, KindId, Storage, StorageData};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -324,7 +325,7 @@ struct Previous(Option<Ref<Tree>>);
 impl Guard<Ran<Summarize>> for Previous {
     type Views = Summaries;
 
-    fn resolve(_run: &Ran<Summarize>, summaries: &Summaries) -> Option<Self> {
+    fn resolve(_run: &Ran<Summarize>, _at: At, summaries: &Summaries) -> Option<Self> {
         Some(Self(summaries.trees.iter().rev().nth(1).copied()))
     }
 }
@@ -349,17 +350,20 @@ fn summary_artifact(tree: u8) -> (Digest, ClosureArtifact) {
     (Ref::of_encoded(&summary).expect("digest").digest(), ClosureArtifact::new(Summary::ID, payload))
 }
 
-/// A recorded run of `Summarize` at `seq` whose result names `tree`, and the
-/// two artifacts it cites.
-fn ran(seq: u64, tree: u8) -> (JournalEntry, Vec<ClosureArtifact>) {
+fn summarize_ref() -> ProgramRef {
+    ProgramRef::new(Digest::from_bytes([9; 32]), ProgramName::new(Summarize::NAME).expect("name"))
+}
+
+/// A recorded run of `Summarize` at `seq`, reacting to `cause`, whose result
+/// names `tree`, and the two artifacts it cites.
+fn ran(seq: u64, cause: Option<u64>, tree: u8) -> (JournalEntry, Vec<ClosureArtifact>) {
     let (input, input_artifact) = summary_artifact(tree + 100);
     let (result, result_artifact) = summary_artifact(tree);
-    let program = ProgramRef::new(Digest::from_bytes([9; 32]), ProgramName::new(Summarize::NAME).expect("name"));
-    let transition = Transition { program, input, result };
+    let transition = Transition { program: summarize_ref(), input, result };
     let entry = JournalEntry {
         seq,
         kind: Transition::ID,
-        cause: None,
+        cause,
         recorded_at_millis: 0,
         bytes: Transition::encode_storage(&StorageData::from_value(transition)).expect("storage encode"),
         cites: vec![input, result],
@@ -374,8 +378,8 @@ fn warm_and_live_delivery_hand_folds_and_rules_the_same_citations() {
     // Catches a warm that drops or mis-scopes an entry's citations, so a
     // fold that reads them diverges from live delivery, and a rule that
     // cannot read the result its triggering run cites.
-    let (first, first_artifacts) = ran(1, 1);
-    let (second, second_artifacts) = ran(2, 2);
+    let (first, first_artifacts) = ran(1, None, 1);
+    let (second, second_artifacts) = ran(2, None, 2);
 
     let mut all_live = Summarized::new().expect("names");
     let opening = all_live.event(Event::new(first.clone(), first_artifacts.clone()));
@@ -403,8 +407,119 @@ fn warm_and_live_delivery_hand_folds_and_rules_the_same_citations() {
 fn a_run_delivered_without_its_citations_poisons_the_fold() {
     // Catches a fold that folds past an entry whose cited result it could
     // not read, leaving its state silently short.
-    let (first, _) = ran(1, 1);
+    let (first, _) = ran(1, None, 1);
     let mut root = Summarized::new().expect("names");
     let poisoned = root.event(live(first));
     assert!(matches!(poisoned, Evaluated::Poisoned { seq: 1, last_trusted: 0, .. }), "{poisoned:?}");
+}
+
+/// Each `Requested` entry's seq and the seq it reacts to, read from the
+/// entry's own position.
+#[derive(Default)]
+struct RequestCauses {
+    cursor: ViewCursor,
+    causes: BTreeMap<Seq, Option<Seq>>,
+}
+
+#[view(cursor = cursor)]
+impl View for RequestCauses {
+    #[fold]
+    fn requested(&mut self, _request: Requested, at: At) {
+        self.causes.insert(at.seq, at.cause);
+    }
+}
+
+/// The entry that asked for the triggering run: the run's cause is its
+/// `Requested` entry, and that request's cause is the asker.
+struct AskedBy(Seq);
+
+impl Guard<Ran<Summarize>> for AskedBy {
+    type Views = RequestCauses;
+
+    fn resolve(_run: &Ran<Summarize>, at: At, causes: &RequestCauses) -> Option<Self> {
+        causes.causes.get(&at.cause?).copied().flatten().map(Self)
+    }
+}
+
+const ASKER: Head<Tree> = Head::new("asker");
+const ANSWER: Head<Tree> = Head::new("answer");
+
+struct AskerPublisher;
+
+#[reactor]
+impl Reactor for AskerPublisher {
+    const NAMESPACE: &'static str = "test.bloomery.root.askers";
+
+    #[rule]
+    fn publish_asker(&self, _run: Ran<Summarize>, at: At, asked: AskedBy) -> SetHeads {
+        SetHeads::new(vec![
+            HeadChange::new(&ASKER, None, seq_ref(asked.0)),
+            HeadChange::new(&ANSWER, None, seq_ref(at.seq)),
+        ])
+    }
+}
+
+/// A tree ref standing for `seq`, so an intent can name a journal position.
+fn seq_ref(seq: Seq) -> Ref<Tree> {
+    digest_ref(u8::try_from(seq.0).expect("small seq"))
+}
+
+/// A `Requested` run of `Summarize` at `seq`, reacting to `cause`.
+fn requested(seq: u64, cause: u64) -> JournalEntry {
+    let request = Requested {
+        program: summarize_ref(),
+        input: Digest::from_bytes([7; 32]),
+        source: RequestSource::Reaction {
+            bundle: Digest::from_bytes([8; 32]),
+            reactor: ReactorName::new("test.bloomery.root.asker").expect("reactor name"),
+            rule: RuleName::new("ask").expect("rule name"),
+            ordinal: 0,
+        },
+    };
+    JournalEntry {
+        seq,
+        kind: Requested::ID,
+        cause: Some(cause),
+        recorded_at_millis: 0,
+        bytes: Requested::encode_storage(&StorageData::from_value(request)).expect("storage encode"),
+        cites: Vec::new(),
+    }
+}
+
+type Askers = Root<(AskerPublisher, Nil)>;
+
+#[test]
+fn warm_and_live_delivery_hand_folds_and_guards_the_same_position() {
+    // Catches a warm path or derive walk that hands a fold or guard a wrong
+    // or missing position (the trigger's instead of the folded entry's, or
+    // an off-by-one in the retained prefix), so following a run's cause back
+    // to the entry that asked for it diverges between warmup and live.
+    let asker = journal_moved(1, digest_ref(40));
+    let request = requested(2, 1);
+    let (run, run_artifacts) = ran(3, Some(2), 3);
+
+    let mut all_live = Askers::new().expect("names");
+    for entry in [asker.clone(), request.clone()] {
+        let quiet = all_live.event(live(entry));
+        assert!(matches!(&quiet, Evaluated::Completed { intents, .. } if intents.is_empty()), "{quiet:?}");
+    }
+    let live_run = all_live.event(Event::new(run.clone(), run_artifacts.clone()));
+
+    let mut warmed = Askers::new().expect("names");
+    let folded = warmed.warm(warm_of(vec![asker, request]));
+    assert!(matches!(folded, Warmed::Folded { through: 2 }), "{folded:?}");
+    let warmed_run = warmed.event(Event::new(run, run_artifacts));
+
+    assert_eq!(live_run, warmed_run);
+    let Evaluated::Completed { seq: 3, intents } = &live_run else {
+        panic!("{live_run:?}");
+    };
+    let [intent] = intents.as_slice() else {
+        panic!("one intent: {intents:?}");
+    };
+    let published = SetHeads::decode_from_bytes(intent.bytes()).expect("set heads");
+    assert_eq!(
+        published.changes(),
+        [HeadChange::new(&ASKER, None, seq_ref(Seq(1))), HeadChange::new(&ANSWER, None, seq_ref(Seq(3)))]
+    );
 }

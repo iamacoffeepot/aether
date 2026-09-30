@@ -70,6 +70,17 @@ stay synchronous: there is no second hop, no resolver, and no suspended
 fold. A rule that reacts to a program's run triggers on `Ran<P>`, the typed
 `Transition` of program `P`, whose input and result are among its citations.
 
+A fold, a guard, and a rule may also read their entry's own position. An
+`At { seq, cause }` holds the entry's `seq` and the `seq` it reacts to,
+copied from the entry: it fetches nothing and cannot fail. A `#[view]` fold
+takes it as an optional `at: At` parameter after the event, in either order
+with `cited: &Cited`; a rule takes `at: At`, inferred as the trigger's
+position the way `cited` is; and `Guard::resolve(trigger, at, views)`
+receives the trigger's. Warmup and live delivery fold the same retained
+entries, so a fold sees the same `At` either way. A rule on `Ran<P>` follows
+`at.cause` back to the `Requested` entry that asked for the run through a
+view that folded it; resolving the cause entry itself is not part of `At`.
+
 ## Consequences
 
 - Rebuilding a source library creates new bundle content; it does not change

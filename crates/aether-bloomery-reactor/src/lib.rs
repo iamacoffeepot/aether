@@ -8,9 +8,11 @@
 //!
 //! Authors write `#[reactor] impl Reactor for Name` with `const NAMESPACE` and
 //! `#[rule]` methods. The first parameter after `&self` is a typed stored-event
-//! trigger; later parameters are direct published views, named [`Guard`]s, or
+//! trigger; later parameters are direct published views, named [`Guard`]s,
 //! `cited: Cited`, the artifacts the trigger entry cites directly
-//! ([`aether_bloomery_view::Cited`]), which the driver read before delivery.
+//! ([`aether_bloomery_view::Cited`]), which the driver read before delivery,
+//! or `at: At`, the trigger entry's own `seq` and `cause`
+//! ([`aether_bloomery_view::At`]), which a [`Guard`] also receives.
 //! Rust infers each parameter's role from the [`Arg`] impls — the macro emits
 //! `Arg<_, T, Rest>` and does not classify type names. A refutable trigger
 //! pattern, a well-formed event of a different typed specialization, or
@@ -116,7 +118,7 @@ pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
 pub use guard::Guard;
 pub use owner::Owner;
-pub use params::{Arg, AsCited, AsGuard, AsView, CitedArg, GuardArg, Nil, Params, ViewArg};
+pub use params::{Arg, AsAt, AsCited, AsGuard, AsView, AtArg, CitedArg, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};
 pub use reactors::{EvaluateFail, ReactorList};
 pub use root::Root;

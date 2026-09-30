@@ -1,5 +1,7 @@
 //! Named guard resolved from a trigger and its inferred views.
 
+use aether_bloomery_view::At;
+
 use crate::trigger::Trigger;
 use crate::views::{NoViews, ViewSet};
 
@@ -11,14 +13,15 @@ pub trait Guard<T: Trigger>: Sized + 'static {
     /// Views this guard reads. Tuples are allowed; each concrete type folds once.
     type Views: ViewSet;
 
-    /// Resolve this guard, or decline.
-    fn resolve(trigger: &T, views: <Self::Views as ViewSet>::Refs<'_>) -> Option<Self>;
+    /// Resolve this guard from the trigger, the trigger entry's own [`At`],
+    /// and the folded views, or decline.
+    fn resolve(trigger: &T, at: At, views: <Self::Views as ViewSet>::Refs<'_>) -> Option<Self>;
 }
 
 impl<T: Trigger> Guard<T> for () {
     type Views = NoViews;
 
-    fn resolve(_trigger: &T, (): ()) -> Option<Self> {
+    fn resolve(_trigger: &T, _at: At, (): ()) -> Option<Self> {
         Some(())
     }
 }

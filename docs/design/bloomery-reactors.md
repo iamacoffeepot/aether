@@ -190,17 +190,19 @@ the arm. A missing source or compiler can decline the first arm; a stale
 compilation can decline the second. The already-recorded compilation result
 remains available even when it is not published.
 
-The guard contract from the handoff is:
+The guard contract is:
 
 ```rust
-trait Guard<T: Trigger> {
-    type Views;
+trait Guard<T: Trigger>: Sized {
+    type Views: ViewSet;
 
-    fn resolve(trigger: &T, views: &Self::Views) -> Option<Self>
-    where
-        Self: Sized;
+    fn resolve(trigger: &T, at: At, views: <Self::Views as ViewSet>::Refs<'_>) -> Option<Self>;
 }
 ```
+
+`at` is the trigger entry's own `seq` and the `cause` it reacts to, copied
+from the entry, so a guard can follow the causal chain the driver records
+through the views it names.
 
 For example, `CurrentCompilation` implements `Guard<Ran<CompileScene>>`
 with `type Views = (Heads,)`. The source/compiler comparisons belong in that

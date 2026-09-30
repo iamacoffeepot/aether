@@ -8,7 +8,7 @@ use std::slice;
 
 use aether_bloomery_kinds::{Entry, Seq};
 use aether_bloomery_reactor::{And, Guard, GuardArg, Owner, PrepareError};
-use aether_bloomery_view::{View, ViewCursor, view};
+use aether_bloomery_view::{At, View, ViewCursor, view};
 use aether_data::{Kind, Storage, StorageData};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
@@ -56,7 +56,7 @@ struct PlayerTotal(u64);
 impl Guard<Score> for PlayerTotal {
     type Views = And<PlayerScores, PlayerScores>;
 
-    fn resolve(trigger: &Score, (left, right): (&PlayerScores, &PlayerScores)) -> Option<Self> {
+    fn resolve(trigger: &Score, _at: At, (left, right): (&PlayerScores, &PlayerScores)) -> Option<Self> {
         assert!(ptr::eq(left, right), "duplicate dependencies share one aggregate");
         left.totals.get(&trigger.player).copied().map(Self)
     }
