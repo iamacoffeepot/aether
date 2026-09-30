@@ -215,7 +215,7 @@ trait Poking {
 /// An instanced actor that is never spawned.
 struct Absent;
 
-#[aether_actor::actor(instanced)]
+#[aether_actor::actor(instanced, root)]
 impl NativeActor for Absent {
     type Config = ();
     const NAMESPACE: &'static str = "test.decode_refusal.absent";

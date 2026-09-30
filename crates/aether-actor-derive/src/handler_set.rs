@@ -221,16 +221,20 @@ impl SetTransport {
                 let matches_kind = quote! { __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 };
                 // ADR-0238 decision 3: resolve tag-1 `Blob` fields against the
                 // inbound envelope's attachments, as the `#[actor]` arm does.
-                let refuse = match answer {
-                    Some(answer) => quote! {
-                        if __aether_ctx.__refuse_inbound::<#kind_ty, _>(&__aether_error, #answer).is_some() {
-                            return ::aether_actor::DISPATCH_HANDLED;
+                let refuse = answer.map_or_else(
+                    || {
+                        quote! {
+                            let _ = __aether_ctx.__refuse_inbound_unanswered::<#kind_ty>(&__aether_error);
                         }
                     },
-                    None => quote! {
-                        let _ = __aether_ctx.__refuse_inbound_unanswered::<#kind_ty>(&__aether_error);
+                    |answer| {
+                        quote! {
+                            if __aether_ctx.__refuse_inbound::<#kind_ty, _>(&__aether_error, #answer).is_some() {
+                                return ::aether_actor::DISPATCH_HANDLED;
+                            }
+                        }
                     },
-                };
+                );
                 let body = quote! {
                     match __aether_ctx.__decode_inbound::<#kind_ty>(__aether_payload) {
                         ::core::result::Result::Ok(__aether_decoded) => {

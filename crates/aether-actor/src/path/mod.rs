@@ -320,7 +320,7 @@ mod tests {
             plain: Plain,
         }
 
-        assert!(<NestedKind as Kind>::PROVES_ROUTES, "a nested protocol path proves a route");
-        assert!(!<ErasedKind as Kind>::PROVES_ROUTES, "an erased path proves nothing");
+        const { assert!(<NestedKind as Kind>::PROVES_ROUTES, "a nested protocol path proves a route") };
+        const { assert!(!<ErasedKind as Kind>::PROVES_ROUTES, "an erased path proves nothing") };
     }
 }
