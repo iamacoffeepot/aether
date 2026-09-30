@@ -16,13 +16,9 @@ use crate::PathRefused;
 /// The selector over a request kind's path marker.
 pub struct Refusal<const PROVES_ROUTES: bool>;
 
-/// How a dispatch arm answers a request whose typed path did not prove.
-#[diagnostic::on_unimplemented(
-    message = "`{O}` cannot answer a request whose typed path failed to prove",
-    label = "this reply cannot name a refused path",
-    note = "a request carrying a ProtocolPath replies with a kind that implements `From<PathRefused>`, \
-            its `Err` arm naming the refusal (ADR-0231 §3)"
-)]
+/// How a dispatch arm answers a request whose typed path did not prove. A
+/// path-carrying request whose reply is not `From<PathRefused>` fails here,
+/// naming that missing impl on the reply.
 pub trait RefusalAnswer<O> {
     /// The reply for `refused`, or `None` when the kind carries no path and
     /// the refusal is dropped.

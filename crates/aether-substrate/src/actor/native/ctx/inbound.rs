@@ -185,7 +185,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The reply target for the mail currently being dispatched.
     /// Useful when a handler wants to inspect the originator (audit
     /// trails, multi-tenant routing) without going through
-    /// [`OutboundReply::reply`](aether_actor::OutboundReply::reply). `target == SourceAddr::None` means the
+    /// [`OutboundReply::reply`]. `target == SourceAddr::None` means the
     /// inbound was broadcast or peer-component mail with no reply
     /// destination.
     #[must_use]
