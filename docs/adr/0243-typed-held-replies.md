@@ -173,7 +173,7 @@ held.answer(ctx, &WatchHeadResult { .. });
 
    The `Undeclared` row and ADR-0231 §6 are unchanged.
 
-9. **A task takes its context the way a reply does.** Work an actor stages — an offload dispatch, a child birth, a registry batch — is a request to the engine. It gets a `RequestId` from the same counter as outbound requests, and its context is an ADR-0139 request context stored under that id. The completion wake is delivered correlated to that id and on the staging turn's chain, so the completion handler takes its context with the same `ctx.take_context::<C>()` a reply handler uses, and the §7 untaken-context guard covers it.
+9. **A task takes its context the way a reply does.** Work an actor stages — an offload dispatch, a child birth, a registry batch — is a request to the engine. It gets a `RequestId` from the same counter as outbound requests, and its context is an ADR-0139 request context stored under that id. The completion wake is delivered correlated to that id and on the staging turn's chain, so the completion handler takes its context with the same `ctx.take_context::<C>()` a reply handler uses, and the §7 untaken-context guard covers it. A reply handler can instead take its context as a parameter (§10).
 
    ```rust
    // main: the context is a generic of the completion, and the debt is converted into the work
@@ -197,6 +197,28 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **A task takes its chain when it is staged.** Staging holds the chain of the turn that stages it, if that turn had one, until the completion is handled, so a completion that stages the next step stays in the causal tree. Staging is separate from starting: a bounded queue stages a request's work in that request's turn and starts it when a slot frees, from whichever turn frees it, so each task holds the chain of the request it serves and never the chain of the turn that happens to start it.
    - **`hand_off` is the one way a debt leaves its actor.** `held.hand_off(ctx, target, &payload)` sends `payload` to an actor the holder staged, with the requester as its reply target, and ends the entry, so that actor answers in its own name and the requester keeps its stamped sender as its reference (ADR-0230 §3). The target is a proven reference whose row for the payload's kind replies `R`: an `ActorRef<T>` whose handler for that kind returns `R`, or a `ProtocolRef<P>` whose row for it is `Row<K, R>`, so the requester is answered with the kind it waits for. An `ErasedActorRef` proves no row and does not compile (#6895). The component host's load hand-off to the guest it staged, through the guest's control reference, is the one consumer.
    - **Removed:** `HandlerSpawnBuilder::continue_from`, `NativeCtx::stage_registry_batch_from`, `IntoDeferredReply`, `dispatch_blocking_held_with`, the `dispatch_blocking` variants that arm a reply, and `TaskDone`'s `resolve`, `resolve_with`, `resolve_value`, `resolve_err`, `release_no_reply`, `hand_off`, and `forward_tracked`. `stage_with` and `stage_registry_batch` take the context alone, and a failed stage hands the context back. `DeferredReply` and `defer_reply_to` remain for unchecked handlers only.
+
+10. **A response takes its context as a parameter.** A `#[handler::response]` handles the answer to this actor's own request, and may take the context that request stored as a fourth parameter (#7201). The `#[actor]` arm takes it on the dispatch ctx before the call, with the same `take_context::<C>()`, and passes it:
+
+    ```rust
+    // main: the take is written by hand, and an absent context drops the reply without a word
+    #[handler::single]
+    fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
+        let Some(context) = ctx.take_context::<MeshLoadContext>() else { return };
+        context.held.answer(ctx, &MeshLoadResult::from(result));
+    }
+
+    // decision: the context is a parameter the arm fills
+    #[handler::response]
+    fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult, context: MeshLoadContext) {
+        context.held.answer(ctx, &MeshLoadResult::from(result));
+    }
+    ```
+
+    - **`context: C` runs only with its context.** When the reply arrives without a `C` — it was uncorrelated, its context was stored as another kind, or none was stored — the arm does not run the handler. It logs an error in the actor's own log ring (ADR-0081 §7) naming the handler, the reply kind, the context kind, and the request id, and counts the mail as handled, so it does not fall through to a `#[fallback]`.
+    - **It is not a panic.** A reply kind is mail any sender can send, so a panic would let one uncorrelated mail trap a wasm component or fail a native dispatch. §7 panics only for a debt the actor stranded itself, and it still runs after the arm: a context of another kind holding a `Held` that is left behind is still named.
+    - **`context: Option<C>` runs either way.** It is for a handler that is correct with and without its context, and receives the take as it is. With no fourth parameter a handler may still call `ctx.take_context` itself, for example to try several context kinds in turn.
+    - **The successful path costs what the hand-written take cost.** The arm adds the one take the handler made itself, and the intent word is not published: the row, the manifest record, and the wire are unchanged.
 
 ## Consequences
 

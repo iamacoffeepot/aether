@@ -5,10 +5,11 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, attr_is_fallback,
-    attr_is_handler, classify_handler_reply, ctx_names_actor, extract_handler_kind_type, fill_ctx_actor, handler_cfgs,
-    parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
-    validate_addressable_consts, validate_fallback_sig,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, allow_context_by_value,
+    attr_is_fallback, attr_is_handler, check_intent_signature, classify_handler_reply, ctx_names_actor,
+    extract_handler_kind_type, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
+    reject_duplicate_handler_kinds, rename_lifecycle_hooks, silent_call, validate_addressable_consts,
+    validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -116,7 +117,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // dispatch yet. Reject `#[handler(task)]` here with a
                     // clear diagnostic rather than letting it expand into
                     // a guest dispatch table that can't satisfy it.
+                    //
+                    // ADR-0112 / ADR-0134 / #7201: the reply class and the intent
+                    // are read off the marker path first, so an intent word
+                    // refuses a `task` argument in its own words. An intent word
+                    // may carry a fourth parameter, which
+                    // `check_intent_signature` judges.
                     let args = parse_handler_args(&f.attrs[idx])?;
+                    let (class, intent) = parse_handler_class(&f.attrs[idx], &args)?;
                     if args.variant == HandlerVariant::Task {
                         return Err(syn::Error::new_spanned(
                             &f,
@@ -124,17 +132,17 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                              `#[handler(task)]` is not supported in wasm components",
                         ));
                     }
-                    let kind_ty = extract_handler_kind_type(&f.sig)?;
+                    let kind_ty = extract_handler_kind_type(&f.sig, intent.is_some())?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     let reply = classify_handler_reply(&f.sig.output);
-                    // ADR-0112 / ADR-0134: read the reply class off the marker
-                    // path.
-                    let class = parse_handler_class(&f.attrs[idx], &args)?;
+                    let response_context =
+                        intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
                     let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
+                    allow_context_by_value(&mut f.attrs, response_context.as_ref());
                     fill_ctx_actor(&mut f.sig);
                     allow_abi_receiver(&mut f);
                     handlers.push(HandlerFn {
@@ -145,6 +153,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                         class,
                         unchecked_reason: args.reason,
                         cfgs,
+                        response_context,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -921,12 +930,15 @@ fn build_dispatch_body(
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
             ),
-            (HandlerClass::Single, HandlerReply::None) => (
-                quote! {
-                    self.#method(#ctx.as_single(), __aether_decoded);
-                },
-                quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
-            ),
+            // ADR-0243 §10: a response arm takes its stored context on the full
+            // dispatch ctx and passes it as the fourth argument.
+            (HandlerClass::Single, HandlerReply::None) => {
+                let rc = quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE };
+                let call = silent_call(h.response_context.as_ref(), method, k, &rc, |context| {
+                    quote! { self.#method(#ctx.as_single(), __aether_decoded #context); }
+                });
+                (call, rc)
+            }
             (HandlerClass::Single, HandlerReply::Deferred(_)) => (
                 quote! {
                     let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);

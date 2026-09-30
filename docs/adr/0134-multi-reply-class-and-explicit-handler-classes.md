@@ -4,6 +4,7 @@
 - **Date:** 2026-07-05
 - **Amended (#6440):** 2026-09-23 — the multi class is removed: `#[handler::multi]`, the `Multi<K>` reply mode, `Emit`, and `ReplyContract::Multi` are gone, and a mail handler declares `single` or `manual`. Emissions were detached roots, so a settlement-awaiting caller returned before they arrived and their order against the request was undefined. A bounded result is one reply whose kind carries a list; incremental or unbounded delivery uses publish/subscribe. `ReplyContract` selector 2 stays reserved.
 - **Amended (#7193):** 2026-09-29 — terminology: the manual class is renamed **unchecked**. `#[handler::manual]` is now `#[handler::unchecked(reason = "…")]`, whose required reason states why the handler gives up the reply check; the `Manual` reply mode is `Unchecked`, and `ReplyContract::Manual` is `ReplyContract::Unchecked` (wire selector 3 unchanged). The body below is left as recorded.
+- **Amended (#7201):** 2026-09-29 — the single class gains four intent spellings, request / tell / event / response, with signature checks and a response context parameter (ADR-0243 §10); single is retired by #7202. The body below is left as recorded.
 
 Amends **ADR-0112** (handler reply classes): the reserved `stream` class is renamed **multi** and goes live on the detached-emission model **ADR-0133** established for the HTTP server data phase, and the bare `#[handler]` default is removed — every mail handler spells its reply class. Builds on the causal-chain model of **ADR-0080** and the settlement discharge of **ADR-0106**.
 

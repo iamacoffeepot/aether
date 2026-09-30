@@ -8,11 +8,11 @@ use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
-    TaskReplyMode, allow_abi_receiver, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    classify_task_reply_mode, erase_unless_ctx_names_actor, extract_native_actor_handler_kind,
-    extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq,
-    validate_addressable_consts, validate_native_fallback_sig,
+    TaskReplyMode, allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler,
+    check_intent_signature, classify_handler_reply, classify_task_reply_mode, erase_unless_ctx_names_actor,
+    extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_args,
+    parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
+    silent_call, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -173,7 +173,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path. A task handler always receives the downgraded
                     // `Single` ctx, so it carries no class field.
-                    let class = parse_handler_class(&f.attrs[idx], &args)?;
+                    let (class, intent) = parse_handler_class(&f.attrs[idx], &args)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -181,8 +181,16 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {
-                            let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, is_split)?;
+                            let (kind_ty, is_slice) =
+                                extract_native_actor_handler_kind(&f.sig, is_split, intent.is_some())?;
                             let reply = classify_handler_reply(&f.sig.output);
+                            // #7201: an intent word's signature check, and a
+                            // response's context parameter (ADR-0243 §10).
+                            let response_context = intent
+                                .map(|i| check_intent_signature(i, &reply, &f.sig, is_slice))
+                                .transpose()?
+                                .flatten();
+                            allow_context_by_value(&mut f.attrs, response_context.as_ref());
                             fill_ctx_actor(&mut f.sig);
                             allow_abi_receiver(&mut f);
                             handlers.push(NativeActorHandlerFn {
@@ -193,6 +201,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                                 class,
                                 unchecked_reason: args.reason,
                                 cfgs,
+                                response_context,
                             });
                         }
                         HandlerVariant::Task => {
@@ -480,9 +489,20 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     __aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
-            (HandlerClass::Single, HandlerReply::None) => quote! {
-                #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
-            },
+            // ADR-0243 §10: a response arm takes its stored context before the
+            // call and passes it as the fourth argument.
+            (HandlerClass::Single, HandlerReply::None) => silent_call(
+                h.response_context.as_ref(),
+                method_ident,
+                kind_ty,
+                &quote! { ::core::option::Option::Some(()) },
+                |context| {
+                    quote! {
+                        #self_ty::#method_ident(
+                            __aether_state, __aether_ctx.as_single() #erase, __aether_decoded #context);
+                    }
+                },
+            ),
             (HandlerClass::Single, HandlerReply::Deferred(_)) => quote! {
                 let __aether_pending = #self_ty::#method_ident(
                     __aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
@@ -1716,8 +1736,10 @@ fn harvest_native_actor_impl(
         if args.variant == HandlerVariant::Task {
             continue;
         }
-        let class = parse_handler_class(handler_attr, &args).map_err(remap)?;
-        let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
+        // #7201: the harvest reads markers only, so an intent word's fourth
+        // parameter is allowed here and judged where `#[runtime]` expands.
+        let (class, intent) = parse_handler_class(handler_attr, &args).map_err(remap)?;
+        let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true, intent.is_some()).map_err(remap)?;
         let handler_reply = classify_handler_reply(&f.sig.output);
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
