@@ -326,6 +326,7 @@ impl Spawner {
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
         // succeed.
+        let preloaded = !after_init.is_empty();
         for env in after_init {
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
@@ -377,21 +378,21 @@ impl Spawner {
             .lock()
             .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
             .insert(id, InstancedSlotEntry { slot: slot_dyn, wake: teardown_wake });
+        // Mail relayed through the closure before this install recorded
+        // its miss on `wake_slot`, and `set` fires one wake for it (#7106).
         // Pre-loaded `after_init` mail (lines above) was sent straight to
-        // the inbox via `tx.send`, which bypasses the closure's wake
-        // hook. Fire one wake now so the slot enters the ready queue and
-        // the worker drains those envelopes; subsequent peer sends route
-        // through the closure and wake on their own.
-        let manual_wake = wake.clone();
+        // the inbox via `tx.send`, bypassing the closure, so it gets its
+        // own wake — only when there was some: an empty inbox stays Idle.
+        let preload_wake = preloaded.then(|| wake.clone());
         wake_slot.set(Arc::new(move || {
             // Inbox-sender hook: the CAS-win bool would tell us whether
             // *this* sender owns the schedule push, but the scheduler
             // self-deduplicates so either outcome is fine.
             let _ = wake.wake();
         }));
-        // Unchecked catch-up wake for inbox mail that landed before the
-        // closure was installed (see comment above).
-        let _ = manual_wake.wake();
+        if let Some(wake) = preload_wake {
+            let _ = wake.wake();
+        }
 
         Ok(SpawnCommit {
             mailbox_id: id,

@@ -300,19 +300,16 @@ where
         drop(slot_dyn);
         let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
         // Issue 697 multi-pass: mail addressed at this actor during the
-        // wire pass landed in its inbox before the wake hook was
-        // installed, so the closure-side wake fired against an empty
-        // `wake_slot`. Fire one wake here so a populated inbox enters the
-        // ready queue. Mirrors the same fix `Spawner::spawn_actor`'s
-        // Pooled branch carries (issue 635 Phase 3).
-        let manual_wake = wake.clone();
+        // wire pass lands in its inbox before the wake hook is installed.
+        // Each such delivery records its miss on `wake_slot`, and `set`
+        // fires one wake for them (#7106); a slot whose inbox stayed empty
+        // is left Idle, never scheduled for nothing.
         wake_slot.set(Arc::new(move || {
             // Inbox-sender hook — same fire-and-forget shape as the
             // spawn.rs analogue: scheduler deduplicates the CAS, so the
             // bool is irrelevant here.
             let _ = wake.wake();
         }));
-        let _ = manual_wake.wake();
         // ADR-0230: the boot claim published this capability's route, and
         // `init` and `wire` succeeded, so the actor is `Live` and its dispatcher
         // slot is installed. Record the reference the chassis handle's

@@ -615,6 +615,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
         let Self { spawner, id, token, sender, strong_sender, binding, slot, finalizer, failure: _, wire_root } = *self;
+        let preloaded = !bootstrap.is_empty() || !parked.is_empty();
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -687,13 +688,20 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             // root when it was buffered and is routed now, so the hold may
             // go; the root settles once those mails have been handled.
             drop(wire_root);
+            // Mail relayed before this install recorded its miss on
+            // `wake_slot`, and `set` fires one wake for it (#7106). The
+            // bootstrap and parked mail pushed straight onto the channel
+            // above bypassed the relay, so it gets its own wake — only when
+            // there was some: an empty inbox stays Idle.
             wake_slot.set(Arc::new({
                 let wake = wake.clone();
                 move || {
                     let _ = wake.wake();
                 }
             }));
-            let _ = wake.wake();
+            if preloaded {
+                let _ = wake.wake();
+            }
             assert!(seize_cell.set(seize).is_ok(), "fresh activation seize cell accepts its handle");
             if let Some(finalizer) = finalizer {
                 finalizer.promote();

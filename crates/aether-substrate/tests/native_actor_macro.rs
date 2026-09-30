@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aether_actor::OutboundReply;
 use aether_data::Kind;
@@ -43,7 +43,6 @@ use aether_substrate::{
     ReplyTarget, Unchecked,
 };
 use crossbeam_channel::Sender;
-use std::thread;
 
 /// Structured-shape kind via the derive — exercises the
 /// `decode_from_bytes` structured path the macro's dispatch arm uses.
@@ -155,22 +154,15 @@ fn seize_and_run_dispatches_seed_in_place() {
 
     let id = chassis.actor_ref::<MacroProbeCap>().erase();
 
-    // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
-    // Resolve the seize handle off the `Inbox` entry's deferred cell (the
-    // #1135 surfacing) and wait for the slot to be seizable.
+    // The cap boots with no pre-load mail, so its slot is `Idle` from birth
+    // and never scheduled (#7106). Resolve the seize handle off the `Inbox`
+    // entry's deferred cell (the #1135 surfacing) and seize it.
     let MailboxEntry::Inbox { seize, .. } = registry.entry(id).expect("entry exists") else {
         panic!("expected an Inbox entry for the Pooled cap");
     };
     let seize = seize.get().expect("a Pooled actor exposes a seize handle");
 
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let slot = loop {
-        if let Some(slot) = seize.try_seize() {
-            break slot;
-        }
-        assert!(Instant::now() < deadline, "Pooled slot should quiesce to Idle and become seizable");
-        thread::sleep(Duration::from_millis(5));
-    };
+    let slot = seize.try_seize().expect("a mail-less actor is Idle from birth");
     // The seize put the slot in `Running`.
     assert_eq!(seize.state().current(), SlotStateLabel::Running);
 

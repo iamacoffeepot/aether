@@ -28,6 +28,7 @@ use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::WakeSink;
 use std::fmt;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // iamacoffeepot/aether#848 PR 3: the `build_envelope(&MailDispatch)`
 // helper retired. Production cap registration closures now take
@@ -170,14 +171,39 @@ pub struct DropOnShutdownClaim {
 /// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
 /// at registration time; the spawn path populates it once the
 /// [`crate::scheduler::Drainable`] slot exists.
-#[derive(Default)]
+///
+/// `state` remembers whether a delivery landed before the hook was
+/// installed, so [`MailboxWakeSlot::set`] can fire exactly the wake that
+/// delivery could not. Every race between a delivery in the boot window and
+/// the install resolves on that one atomic: whichever of the sender's
+/// `EMPTY → MISSED` step and the installer's `→ INSTALLED` swap comes
+/// second sees the other and fires the hook. Both sides only ever
+/// read-modify-write `state`, which is what orders every missed delivery's
+/// channel send before the wake that covers it.
 pub struct MailboxWakeSlot {
     inner: OnceLock<MailboxWakeFn>,
+    state: AtomicU8,
 }
+
+impl Default for MailboxWakeSlot {
+    fn default() -> Self {
+        Self { inner: OnceLock::new(), state: AtomicU8::new(WAKE_EMPTY) }
+    }
+}
+
+/// No hook yet, and no delivery has found it missing.
+const WAKE_EMPTY: u8 = 0;
+/// A delivery landed before the hook was installed; `set` owes it a wake.
+const WAKE_MISSED: u8 = 1;
+/// The hook is installed; deliveries fire it themselves.
+const WAKE_INSTALLED: u8 = 2;
 
 impl fmt::Debug for MailboxWakeSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MailboxWakeSlot").field("installed", &self.inner.get().is_some()).finish()
+        f.debug_struct("MailboxWakeSlot")
+            .field("installed", &self.inner.get().is_some())
+            .field("state", &self.state.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
@@ -185,11 +211,37 @@ impl fmt::Debug for MailboxWakeSlot {
 pub type MailboxWakeFn = Arc<dyn Fn() + Send + Sync + 'static>;
 
 impl MailboxWakeSlot {
-    /// Install the wake hook. Idempotent on re-call (silently ignores
-    /// the second set), but in production every claim is paired with
-    /// a single set.
+    /// Install the wake hook, and fire it once if a delivery landed before
+    /// it was installed (that delivery found no hook to fire). A slot whose
+    /// inbox received nothing in the boot window is left unwoken. Idempotent
+    /// on re-call (the second set is ignored and fires nothing), but in
+    /// production every claim is paired with a single set.
     pub fn set(&self, fn_: MailboxWakeFn) {
         let _ = self.inner.set(fn_);
+        if self.state.swap(WAKE_INSTALLED, Ordering::AcqRel) == WAKE_MISSED
+            && let Some(wake) = self.inner.get()
+        {
+            wake();
+        }
+    }
+
+    /// Record a delivery that found no hook installed. If the hook was
+    /// installed since this delivery's [`Self::get`] missed it, fire it
+    /// now; otherwise mark the miss so [`Self::set`] fires it. Reached only
+    /// while no hook is installed, so a hooked delivery never pays for it.
+    ///
+    /// Always a read-modify-write, never a bare load: every write to
+    /// `state` is then an `AcqRel` RMW, so the installer's swap
+    /// synchronizes with each delivery that recorded a miss before it —
+    /// not only the first — and the wake it fires happens after all of
+    /// their channel sends. `fetch_max` leaves `MISSED` and `INSTALLED`
+    /// as they are and moves `EMPTY` to `MISSED`.
+    pub(crate) fn missed(&self) {
+        if self.state.fetch_max(WAKE_MISSED, Ordering::AcqRel) == WAKE_INSTALLED
+            && let Some(wake) = self.inner.get()
+        {
+            wake();
+        }
     }
 
     /// Borrow the installed hook. Returns `None` only during the boot
@@ -266,8 +318,10 @@ pub(crate) fn relay_or_transfer(
         settle_discarded(&env, mailer);
         return RelayOutcome::ReceiverGone { kind: env.kind };
     }
-    if let Some(wake) = wake.get() {
-        wake();
+    match wake.get() {
+        Some(wake) => wake(),
+        // No hook yet: record the miss, or fire a hook installed since.
+        None => wake.missed(),
     }
     RelayOutcome::Delivered
 }
@@ -764,6 +818,7 @@ impl<'a> ChassisCtx<'a> {
 mod tests {
     use super::*;
     use crate::testing::boot_authority;
+    use std::sync::atomic::AtomicUsize;
 
     use aether_actor::Local;
 
@@ -1112,5 +1167,67 @@ mod tests {
         let env = rx.recv().expect("delivered envelope is on the channel");
         env.discharge();
         drop(tx);
+    }
+
+    /// A wake slot whose hook counts its fires.
+    fn counting_hook() -> (MailboxWakeFn, Arc<AtomicUsize>) {
+        let fires = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&fires);
+        let hook: MailboxWakeFn = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        (hook, fires)
+    }
+
+    /// #7106: a delivery in the boot window finds no hook, so the slot must
+    /// remember it — `set` owes that delivery exactly one wake, or the mail
+    /// strands in an inbox no worker is scheduled to drain.
+    #[test]
+    fn delivery_before_set_is_woken_once_by_set() {
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let tx = Arc::new(tx);
+        let wake = MailboxWakeSlot::default();
+        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
+        for _ in 0..2 {
+            match relay_or_transfer(
+                armed_subscribe_self(MailboxId(0x7106)),
+                &Arc::downgrade(&tx),
+                &wake,
+                &Arc::downgrade(&mailer),
+            ) {
+                RelayOutcome::Delivered => {}
+                other => panic!("expected Delivered, got {other:?}"),
+            }
+        }
+
+        let (hook, fires) = counting_hook();
+        wake.set(hook);
+        assert_eq!(fires.load(Ordering::SeqCst), 1, "two missed deliveries owe one wake");
+
+        for env in rx.try_iter() {
+            env.discharge();
+        }
+    }
+
+    /// #7106: a birth whose inbox received nothing before its hook was
+    /// installed stays unwoken, so it never takes a pool cycle for nothing.
+    #[test]
+    fn set_without_a_missed_delivery_fires_nothing() {
+        let wake = MailboxWakeSlot::default();
+        let (hook, fires) = counting_hook();
+        wake.set(hook);
+        assert_eq!(fires.load(Ordering::SeqCst), 0);
+    }
+
+    /// #7106: a delivery whose `get` ran before the install but whose miss
+    /// is recorded after it sees `INSTALLED` and fires the hook itself —
+    /// `set` already passed its check, so no one else would.
+    #[test]
+    fn missed_after_set_fires_the_installed_hook() {
+        let wake = MailboxWakeSlot::default();
+        let (hook, fires) = counting_hook();
+        wake.set(hook);
+        wake.missed();
+        assert_eq!(fires.load(Ordering::SeqCst), 1);
     }
 }
