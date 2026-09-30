@@ -99,8 +99,8 @@ fn import_then_run() -> TestResult {
     let (hex, template) = (inputs.hex(), inputs.request("tool", "target")?);
     let stub = StubDaemon::bind()?;
 
-    #[allow(clippy::disallowed_methods)]
-    // on-demand bench knob read from the shell; the harness boots hermetically // aether-suppression-request: the hermetic harness never sees the process env, so the bench forwards its own knob (#7218)
+    // On-demand bench knob read from the shell; the harness boots hermetically and never sees the process env.
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: bench knob, harness env is hermetic (#7218)
     let prefetch = env::var("AETHER_WORKSPACE_PREFETCH_BYTES").ok();
     let mut flags: Vec<&str> = FLAGS.to_vec();
     if let Some(bytes) = prefetch.as_deref() {
@@ -126,8 +126,8 @@ fn import_then_run() -> TestResult {
         ImportResult::Failed { detail } => return Err(format!("the import failed: {}", detail.as_str()).into()),
     };
 
-    #[allow(clippy::disallowed_methods)]
-    // on-demand bench knob read from the shell; the harness boots hermetically // aether-suppression-request: the hermetic harness never sees the process env, so the bench forwards its own knob (#7218)
+    // On-demand bench knob read from the shell; the harness boots hermetically and never sees the process env.
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: bench knob, harness env is hermetic (#7218)
     let import_only = env::var("AETHER_BENCH_PHASE").is_ok_and(|phase| phase == "import");
     if import_only {
         return Ok(());
