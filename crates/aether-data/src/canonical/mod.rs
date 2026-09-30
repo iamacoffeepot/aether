@@ -54,7 +54,7 @@ pub use inputs::{
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use schema::{
-    canonical_kind_bytes, canonical_len_kind, canonical_len_schema, canonical_serialize_kind,
+    canonical_kind_bytes, canonical_len_kind, canonical_len_schema, canonical_schema_bytes, canonical_serialize_kind,
     canonical_serialize_schema, kind_id_from_parts, kind_id_from_shape,
 };
 

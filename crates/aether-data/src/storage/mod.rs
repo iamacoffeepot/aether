@@ -20,7 +20,7 @@ pub use element::{
 pub use hash::{
     BYTES_SCHEMA, MAX_STORAGE_DEPTH, U64_SCHEMA, UNIT_SCHEMA, VARIANT_LEAF, assert_unique_storage_leaves, count_leaves,
     field_hash, field_path_root, fold_dotted_path, fold_index_segment, fold_path_segment, nth_leaf_hash,
-    terminate_field_hash, variant_hash,
+    terminate_field_hash, terminate_field_hash_runtime, variant_hash, variant_hash_runtime,
 };
 pub use invariant::Invariant;
 pub use leaf::{LeafBody, decode_stream_leaf};

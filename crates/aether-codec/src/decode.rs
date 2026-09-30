@@ -28,7 +28,7 @@
 
 use std::fmt;
 
-use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
+use aether_data::{EnumVariant, NamedField, Primitive, SchemaType, StorageError};
 use serde_json::{Map, Value};
 
 use crate::cast::{align_of_primitive, non_cast_variant_error};
@@ -99,6 +99,29 @@ pub enum DecodeError {
     ActorReach {
         path: String,
     },
+    /// A storage record the schema requires is absent
+    /// ([`crate::decode_storage_schema`]).
+    MissingRecord {
+        path: String,
+    },
+    /// A storage record the schema does not bind. A schema-only reader has
+    /// no typed value to carry it on, so it refuses rather than drop it.
+    UnboundRecord {
+        path: String,
+        hash: u64,
+    },
+    /// A storage enum or `Option` discriminant naming no variant of the
+    /// schema.
+    UnknownVariant {
+        path: String,
+        hash: u64,
+    },
+    /// A storage record stream that does not parse: a truncated header or
+    /// body, or one field tag twice.
+    Records {
+        path: String,
+        error: StorageError,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -131,6 +154,14 @@ impl fmt::Display for DecodeError {
             Self::ActorReach { path } => {
                 write!(f, "held-reply ticket at {path} never crosses outside its actor")
             }
+            Self::MissingRecord { path } => write!(f, "stored value has no record for required {path}"),
+            Self::UnboundRecord { path, hash } => {
+                write!(f, "stored value at {path} holds record {hash:#018x} the schema does not bind")
+            }
+            Self::UnknownVariant { path, hash } => {
+                write!(f, "stored value at {path} names variant {hash:#018x} the schema does not have")
+            }
+            Self::Records { path, error } => write!(f, "stored records at {path}: {error}"),
         }
     }
 }
@@ -221,6 +252,25 @@ pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeE
 /// the codec's wider compatibility domain still has it.
 pub fn decode_schema_strict(bytes: &[u8], schema: &SchemaType, maximum_values: usize) -> Result<Value, DecodeError> {
     decode_root(Cursor::strict(bytes, maximum_values), schema)
+}
+
+/// One wire value from the front of `bytes` under the strict policy,
+/// advancing `bytes` past it and charging `values_left` out of `budget`.
+/// The storage codec decodes every leaf body and positional element
+/// through this, so one ceiling spans the whole stored value.
+pub fn decode_wire_prefix_strict(
+    bytes: &mut &[u8],
+    schema: &SchemaType,
+    path: &str,
+    budget: usize,
+    values_left: &mut usize,
+) -> Result<Value, DecodeError> {
+    let source = *bytes;
+    let mut cur = Cursor { bytes: source, pos: 0, policy: Policy::Strict, budget, values_left: *values_left };
+    let value = decode_wire_value(&mut cur, schema, path)?;
+    *values_left = cur.values_left;
+    *bytes = &source[cur.pos..];
+    Ok(value)
 }
 
 fn decode_root(mut cur: Cursor<'_>, schema: &SchemaType) -> Result<Value, DecodeError> {
@@ -548,7 +598,7 @@ fn decode_enum_body(cur: &mut Cursor<'_>, variant: &EnumVariant, path: &str) -> 
 /// is `UnsupportedSchema` — the `BTreeMap`<K: Ord, V> bound at the Rust
 /// layer makes those unreachable, but the codec rejects them defensively
 /// in case a descriptor lands here from an external source.
-fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Result<String, DecodeError> {
+pub fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Result<String, DecodeError> {
     match (key_schema, key_value) {
         (SchemaType::String, Value::String(s)) => Ok(s.clone()),
         (SchemaType::Bool, Value::Bool(b)) => Ok(if *b {
