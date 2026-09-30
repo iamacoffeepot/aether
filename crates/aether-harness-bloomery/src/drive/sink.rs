@@ -7,7 +7,9 @@
 
 use std::sync::mpsc;
 
-use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult, WatchHeadResult};
+use aether_bloomery_kinds::{
+    CallOutcome, DeclarationsResult, MoveHeadResult, Processed, PublishResult, WatchHeadResult,
+};
 use aether_bloomery_workspace::{ImportResult, RunResult};
 use aether_kinds::{ListComponentsResult, LoadResult, SpawnResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -25,6 +27,8 @@ pub enum Reply {
     Publish(PublishResult),
     /// The bundle driver's answer to an `AwaitProcessed`.
     Processed(Processed),
+    /// The bundle driver's answer to a `Declarations`.
+    Declarations(DeclarationsResult),
     /// The component host's answer to a `LoadComponent`, boxed: it carries
     /// the component's whole receive surface.
     Load(Box<LoadResult>),
@@ -88,6 +92,11 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::response]
     fn on_processed(&mut self, ctx: &mut NativeCtx<'_>, processed: Processed) {
         self.forward(ctx, Reply::Processed(processed));
+    }
+
+    #[aether_actor::handler::response]
+    fn on_declarations_result(&mut self, ctx: &mut NativeCtx<'_>, result: DeclarationsResult) {
+        self.forward(ctx, Reply::Declarations(result));
     }
 
     #[aether_actor::handler::response]

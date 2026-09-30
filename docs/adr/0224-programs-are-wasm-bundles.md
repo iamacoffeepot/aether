@@ -78,7 +78,11 @@ Bloomery rewrite has not been deployed.
    on its impl, and its input's doc tree, a `///` doc for every field and
    variant the input exposes. Together they describe the program as a
    tool a model can call. The docs never enter a kind id: they travel
-   beside the schema, as the kind labels do.
+   beside the schema, as the kind labels do. Each record also carries its
+   input and result kinds' names and schemas, as the canonical shape and
+   labels the `aether.kinds` and `aether.kinds.labels` sections use, so a
+   reader that does not link the kinds' Rust types can still decode the
+   program's input and result values.
 
 5. **Addressing.** The driver loads each bundle once per engine with
    `aether.component.load` (`LoadComponent`), using `name` set to the

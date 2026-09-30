@@ -77,8 +77,9 @@ use aether_actor::{ActorPath, ActorRef, ProtocolPath, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
-    ClosureLimit, Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadArtifactsResult,
-    ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
+    ClosureLimit, Declarations, DeclarationsResult, Digest, Evaluated, Invoked, Processed, ReadArtifact,
+    ReadArtifactResult, ReadArtifactsResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed,
+    WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
@@ -208,6 +209,17 @@ impl NativeActor for BundleDriver {
         state.callers.insert(caller, Caller::Processed(held));
         state.perform(ctx, commands);
         pending
+    }
+
+    /// Answers inline from the bundle table: every decoded bundle's programs
+    /// with their input and result kinds' names and schemas.
+    #[handler::request]
+    fn on_declarations(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _request: Declarations,
+    ) -> DeclarationsResult {
+        state.core.declarations()
     }
 
     #[handler::response]

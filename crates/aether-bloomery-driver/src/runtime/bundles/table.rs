@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{Detail, Digest};
+use aether_bloomery_kinds::{BundleDeclarations, Detail, Digest, ProgramDeclaration};
+use aether_bloomery_program::Declaration;
+use aether_data::{SchemaType, wire};
 
 use super::{DeclaredRoles, LoadState};
 use crate::runtime::core::{LoadOutcome, RootRoles};
@@ -38,6 +40,19 @@ impl BundleTable {
     /// Whether the digest's read or load is in flight (`Reading` or `Loading`).
     pub fn pending(&self, bundle: &Digest) -> bool {
         matches!(self.states.get(bundle), Some(LoadState::Reading | LoadState::Loading { .. }))
+    }
+
+    /// Every bundle whose sections have decoded and declare programs, each
+    /// program with its input and result kinds' names and schemas, in digest
+    /// order. A bundle still reading, or unavailable, is left out.
+    pub fn declarations(&self) -> Vec<BundleDeclarations> {
+        self.states
+            .iter()
+            .filter_map(|(bundle, state)| {
+                let programs = state.roles()?.programs()?.declarations().iter().map(program_declaration).collect();
+                Some(BundleDeclarations { bundle: *bundle, programs })
+            })
+            .collect()
     }
 
     /// Insert `Reading` for an unseen digest; `true` when the caller must issue the read.
@@ -110,5 +125,24 @@ impl BundleTable {
                 Err(OutOfStep)
             }
         }
+    }
+}
+
+/// One decoded record as the declarations reply carries it: each schema as
+/// its `SchemaType` wire bytes.
+fn program_declaration(declared: &Declaration) -> ProgramDeclaration {
+    let schema_bytes = |schema: &SchemaType| {
+        wire::to_vec(schema).expect("a decoded schema encodes: wire encoding into a Vec fails only past u32")
+    };
+    ProgramDeclaration {
+        name: declared.program.name.clone(),
+        mode: declared.program.mode,
+        intent: declared.program.intent.clone(),
+        input: declared.program.input,
+        input_name: declared.input_kind.name.clone(),
+        input_schema: schema_bytes(&declared.input_kind.schema),
+        result: declared.program.result,
+        result_name: declared.result_kind.name.clone(),
+        result_schema: schema_bytes(&declared.result_kind.schema),
     }
 }

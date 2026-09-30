@@ -55,7 +55,8 @@ pub fn declared_roles(wasm: &[u8]) -> Result<DeclaredRoles, Detail> {
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{OpaqueBytes, ProgramName, Utf8Text};
-    use aether_data::Kind;
+    use aether_data::canonical::canonical_kind_bytes;
+    use aether_data::{Kind, LabelNode, SchemaType, wire};
 
     use super::declared_roles;
 
@@ -72,7 +73,7 @@ mod tests {
     }
 
     fn record(name: &[u8], input: u64, result: u64, intent: &[u8]) -> Vec<u8> {
-        let mut out = vec![3];
+        let mut out = vec![4];
         out.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
         out.extend_from_slice(name);
         out.extend_from_slice(&input.to_le_bytes());
@@ -84,6 +85,11 @@ mod tests {
         // An empty doc, then a leaf doc tree: its wire variant index, 0.
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
+        // The input and result kinds, each a unit: its canonical shape, then anonymous labels.
+        for kind in ["test.program.input", "test.program.result"] {
+            out.extend(canonical_kind_bytes(kind, &SchemaType::Unit));
+            out.extend(wire::to_vec(&LabelNode::Anonymous).expect("anonymous labels encode"));
+        }
         out
     }
 
