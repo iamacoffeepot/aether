@@ -43,13 +43,13 @@ pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed
 pub use program::{
     ApiCall, ApiCallResult, ClaimedDigest, ClosureArtifact, Detail, DetailError, DigestMismatch, ExecutorFault, Fault,
     FaultReason, Invoke, Invoked, Mode, NativeOrigin, NativeOriginError, Program, ProgramApi, ProgramHeadMoved,
-    ProgramName, ProgramNameError, ProgramRef, ReactorName, ReactorNameError, Refusal, RequestSource, Requested,
-    RuleName, RuleNameError, Transition, VerifiedRead,
+    ProgramInvoker, ProgramName, ProgramNameError, ProgramRef, ProgramRelay, ProgramRoot, ReactorName,
+    ReactorNameError, Refusal, RequestSource, Requested, RuleName, RuleNameError, Transition, VerifiedRead,
 };
 pub use reactor::{
     Evaluated, Event, REACTORS_SECTION, ReactorDeclaration, ReactorDeclarationError, ReactorDeclarationsError,
-    ReactorIntent, ReactorSet, ReactorSetError, RuleDeclaration, RuleRecord, Status, StatusQuery, Warm, WarmEntries,
-    WarmEntriesError, Warmed, reactor_declarations, reactor_record_len, write_reactor_record,
+    ReactorIntent, ReactorRoot, ReactorSet, ReactorSetError, RuleDeclaration, RuleRecord, Status, StatusQuery, Warm,
+    WarmEntries, WarmEntriesError, Warmed, reactor_declarations, reactor_record_len, write_reactor_record,
 };
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree};

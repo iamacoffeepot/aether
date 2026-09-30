@@ -8,6 +8,8 @@
 use aether_bloomery_kinds::{ProgramName, ReactorDeclaration};
 use aether_bloomery_program::Declaration;
 
+use crate::runtime::core::RootRoles;
+
 /// A bundle's program declarations, each with the APIs its `run` binds:
 /// never empty.
 #[derive(Debug, Clone)]
@@ -56,5 +58,10 @@ impl DeclaredRoles {
             Self::Programs(_) => false,
             Self::Reactors | Self::Both(_) => true,
         }
+    }
+
+    /// The roles the shell casts the bundle's root to.
+    pub fn root_roles(&self) -> RootRoles {
+        RootRoles { programs: self.programs().is_some(), reactors: self.declares_reactors() }
     }
 }

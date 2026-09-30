@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use aether_bloomery_kinds::{Detail, Digest};
 
 use super::{DeclaredRoles, LoadState};
-use crate::runtime::core::LoadOutcome;
+use crate::runtime::core::{LoadOutcome, RootRoles};
 
 /// The load step a transition expected was not the digest's current state.
 #[derive(Debug)]
@@ -73,12 +73,14 @@ impl BundleTable {
         }
     }
 
-    /// `Declared` -> `Loading`, handing back the wasm; `None` (state unchanged) when not `Declared`.
-    pub fn begin_load(&mut self, bundle: &Digest) -> Option<Vec<u8>> {
+    /// `Declared` -> `Loading`, handing back the roles the root is cast to
+    /// and the wasm; `None` (state unchanged) when not `Declared`.
+    pub fn begin_load(&mut self, bundle: &Digest) -> Option<(RootRoles, Vec<u8>)> {
         match self.states.remove(bundle) {
             Some(LoadState::Declared { roles, wasm }) => {
+                let root = roles.root_roles();
                 self.states.insert(*bundle, LoadState::Loading { roles });
-                Some(wasm)
+                Some((root, wasm))
             }
             other => {
                 if let Some(state) = other {

@@ -22,12 +22,12 @@ impl ProgramCore {
 
     /// Issue the digest's one load; `true` when the load was issued.
     pub(crate) fn issue_load(&mut self, bundle: Digest, out: &mut Vec<Command>) -> bool {
-        let Some(wasm) = self.bundles.begin_load(&bundle) else {
+        let Some((roles, wasm)) = self.bundles.begin_load(&bundle) else {
             return false;
         };
         let ticket = self.mint(LoadTicket::mint);
         self.loads.insert(ticket, bundle);
-        out.push(Command::Load { ticket, bundle, wasm });
+        out.push(Command::Load { ticket, bundle, roles, wasm });
         true
     }
 

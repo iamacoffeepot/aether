@@ -365,12 +365,13 @@ chassis, and external tooling key roots from the same value.
   loads each bundle with `LoadComponent { name: Some(unit), export:
   Some(BUNDLE_NAMESPACE) }` sent to `aether.component`. `LoadComponent` is
   unchanged.
-- The driver keeps each load reply's stamped sender in
-  `roots: HashMap<Digest, ErasedActorRef>`, as it does on `main`. The erased
-  form stays only as the key-side proof: the driver types each root before it
-  sends to it, by the cast ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md)
-  §4), because no send goes through an erased reference (#6895). The name is
-  for placement and for readers; routing never parses it.
+- The driver receives each root untyped, as its load reply's stamped
+  sender. It casts each root at its spawn reply, once per declared role, to
+  `ProgramRoot` and `ReactorRoot` ([ADR-0231](0231-protocol-typed-references-and-reply-checks.md)
+  §4), and keeps the typed references in `roots: HashMap<Digest, BundleRoot>`,
+  because no send goes through an erased reference (#6895). A root that does
+  not publish a role its bundle declares fails the load. The name is for
+  placement and for readers; routing never parses it.
 
 This amends ADR-0226:
 

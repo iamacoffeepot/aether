@@ -11,6 +11,7 @@ use super::root::RolePieces;
 use crate::classify::ProgramEntry;
 
 const INVOCATION_IDENT: &str = "__AetherBloomeryBundleInvocation";
+const LIVE_IDENT: &str = "__AetherBloomeryBundleLiveInvocation";
 const STATE_IDENT: &str = "__AetherBloomeryBundleProgramState";
 const TABLE_IDENT: &str = "__AETHER_BLOOMERY_BUNDLE_PROGRAM_TABLE";
 
@@ -25,19 +26,20 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     let table = format_ident!("{TABLE_IDENT}");
     let invocation = invocation_ident();
     let state = format_ident!("{STATE_IDENT}");
+    let live = format_ident!("{LIVE_IDENT}");
     let field = quote! {
         programs: #state,
     };
     let init = quote! {
         let programs = #state {
             root: #program::Root::new(&#table),
-            invokers: #program::__macro_internals::BTreeMap::new(),
+            invocations: #program::__macro_internals::BTreeMap::new(),
             fetches: #program::__macro_internals::BTreeMap::new(),
             calls: #program::__macro_internals::BTreeMap::new(),
         };
     };
-    let handlers = expand_handlers(root, &invocation, &program);
-    let state_struct = expand_state(&state, &program);
+    let handlers = expand_handlers(root, &invocation, &live, &program);
+    let state_struct = expand_state(&state, &live, &invocation, &program);
     let table_static = expand_table(&table, programs, &program);
     let invocation_actor = expand_invocation(root, &invocation, &table, &program);
     let sections = programs.iter().map(|entry| expand_section(entry, &program));
@@ -55,34 +57,45 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
 /// fetch-on-miss and a program API call travel through. An invocation's fetch
 /// or API call goes to its root, which sends it to whoever sent that
 /// invocation's `Invoke` (the driver) and relays the answer back to the
-/// invocation (ADR-0240 D6).
-fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
+/// invocation (ADR-0240 D6). The root keeps each invocation as the typed
+/// child its spawn returned and each invoker as a `ProgramInvoker`, cast once
+/// when the `Invoke` arrives (ADR-0231 §4), so every relay sends through a
+/// typed reference.
+fn expand_state(state: &Ident, live: &Ident, invocation: &Ident, program: &TokenStream2) -> TokenStream2 {
     quote! {
         struct #state {
             root: #program::Root<::aether_actor::Held<#program::Invoked>>,
-            /// Each live invocation's `Invoke` sender, keyed by the invocation.
-            invokers: #program::__macro_internals::BTreeMap<
-                ::aether_actor::ErasedActorRef,
-                ::aether_actor::ErasedActorRef,
-            >,
+            /// Each live invocation, keyed by its erased reference, the
+            /// sender its relays and its `Invoked` report arrive from.
+            invocations: #program::__macro_internals::BTreeMap<::aether_actor::ErasedActorRef, #live>,
             /// The invocation each relayed fetch answers to, keyed by the
             /// root's own request.
             fetches: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
-                ::aether_actor::ErasedActorRef,
+                ::aether_actor::InlineChild<#invocation>,
             >,
             /// The invocation each relayed API call answers to, keyed by the
             /// root's own request.
             calls: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
-                ::aether_actor::ErasedActorRef,
+                ::aether_actor::InlineChild<#invocation>,
             >,
+        }
+
+        /// One live invocation: the child the root spawned, and the
+        /// `ProgramInvoker` its `Invoke` came from, `None` when that sender
+        /// is not one (a harness rather than a driver), so its relays are
+        /// refused.
+        #[derive(Clone, Copy)]
+        struct #live {
+            child: ::aether_actor::InlineChild<#invocation>,
+            invoker: ::core::option::Option<::aether_actor::ProtocolRef<#program::kinds::ProgramInvoker>>,
         }
     }
 }
 
-fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> TokenStream2 {
-    let relays = expand_relay_handlers(program);
+fn expand_handlers(root: &Ident, invocation: &Ident, live: &Ident, program: &TokenStream2) -> TokenStream2 {
+    let relays = expand_relay_handlers(live, program);
     quote! {
         /// Admit `invoke` and run it on a per-seq invocation child. The
         /// `Invoked` reply is held: a rejection answers it at once, and a
@@ -106,9 +119,10 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
                     ) {
                         ::core::result::Result::Ok(child) => {
                             admission.start(child.id(), held);
-                            if let Some(invoker) = ctx.sender() {
-                                self.programs.invokers.insert(child.erase(), invoker);
-                            }
+                            let invoker = ctx
+                                .sender()
+                                .and_then(|sender| ctx.cast::<#program::kinds::ProgramInvoker>(sender));
+                            self.programs.invocations.insert(child.erase(), #live { child, invoker });
                             child.send(ctx, &invoke);
                         }
                         ::core::result::Result::Err(_) => held.answer(ctx, &admission.spawn_failed()),
@@ -132,7 +146,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             let Some((_, held)) = self.programs.root.finish(&invoked, Some(sender.id())) else {
                 return;
             };
-            self.programs.invokers.remove(&sender);
+            self.programs.invocations.remove(&sender);
             held.answer(ctx, &invoked);
             ctx.despawn_inline_child(sender);
         }
@@ -142,9 +156,13 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
 }
 
 /// The root's relay handlers: an invocation's fetch-on-miss and program API
-/// call go to the `Invoke`'s sender, and each answer returns to the
-/// invocation that asked, keyed by the root's own request (ADR-0240 D6).
-fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
+/// call go to the `ProgramInvoker` its `Invoke` came from, and each answer
+/// returns to the invocation that asked, keyed by the root's own request
+/// (ADR-0240 D6). A live invocation whose `Invoke` came from no invoker is
+/// refused through its typed child. A sender that is no live invocation is
+/// refused through the reply when it asked for one; otherwise nothing typed
+/// names it and no reply is owed, so the request is dropped with a warning.
+fn expand_relay_handlers(live: &Ident, program: &TokenStream2) -> TokenStream2 {
     quote! {
         #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
         fn on_read_artifact(
@@ -153,24 +171,29 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             request: #program::kinds::ReadArtifact,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};
-            let Some(sender) = ctx.sender() else {
-                return;
+            let refused = |message: &str| #program::kinds::ReadArtifactResult::Err {
+                digest: request.digest,
+                message: #program::__macro_internals::ToString::to_string(message),
             };
-            let Some(invoker) = self.programs.invokers.get(&sender).copied() else {
-                let refused = #program::kinds::ReadArtifactResult::Err {
-                    digest: request.digest,
-                    message: #program::__macro_internals::ToString::to_string("no live invocation sent this fetch"),
-                };
-                if ctx.reply_target().is_some() {
-                    ctx.reply(&refused);
-                } else {
-                    ctx.send_to(sender, &refused);
+            let live = ctx.sender().and_then(|sender| self.programs.invocations.get(&sender).copied());
+            match live {
+                ::core::option::Option::Some(#live { child, invoker: ::core::option::Option::Some(invoker) }) => {
+                    ctx.send_to(invoker, &request);
+                    let fetch = #program::__macro_internals::RequestId(ctx.prev_correlation());
+                    self.programs.fetches.insert(fetch, child);
                 }
-                return;
-            };
-            ctx.send_to(invoker, &request);
-            let fetch = #program::__macro_internals::RequestId(ctx.prev_correlation());
-            self.programs.fetches.insert(fetch, sender);
+                ::core::option::Option::Some(#live { child, invoker: ::core::option::Option::None }) => {
+                    child.send(ctx, &refused("the invocation's Invoke came from no program invoker"));
+                }
+                ::core::option::Option::None if ctx.reply_target().is_some() => {
+                    ctx.reply(&refused("no live invocation sent this fetch"));
+                }
+                ::core::option::Option::None => {
+                    ::aether_actor::__macro_internals::tracing::warn!(
+                        "program root dropped a fetch no live invocation sent"
+                    );
+                }
+            }
         }
 
         #[handler::single]
@@ -185,7 +208,7 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             let Some(invocation) = self.programs.fetches.remove(&fetch) else {
                 return;
             };
-            ctx.send_to(invocation, &result);
+            invocation.send(ctx, &result);
         }
 
         #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
@@ -195,26 +218,29 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             request: #program::kinds::ApiCall,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};
-            let Some(sender) = ctx.sender() else {
-                return;
+            let refused = |reason: &str| #program::kinds::ApiCallResult::Refused {
+                call: request.call,
+                refusal: #program::Refusal::Refused { reason: #program::kinds::Detail::new(reason) },
             };
-            let Some(invoker) = self.programs.invokers.get(&sender).copied() else {
-                let refused = #program::kinds::ApiCallResult::Refused {
-                    call: request.call,
-                    refusal: #program::Refusal::Refused {
-                        reason: #program::kinds::Detail::new("no live invocation sent this call"),
-                    },
-                };
-                if ctx.reply_target().is_some() {
-                    ctx.reply(&refused);
-                } else {
-                    ctx.send_to(sender, &refused);
+            let live = ctx.sender().and_then(|sender| self.programs.invocations.get(&sender).copied());
+            match live {
+                ::core::option::Option::Some(#live { child, invoker: ::core::option::Option::Some(invoker) }) => {
+                    ctx.send_to(invoker, &request);
+                    let call = #program::__macro_internals::RequestId(ctx.prev_correlation());
+                    self.programs.calls.insert(call, child);
                 }
-                return;
-            };
-            ctx.send_to(invoker, &request);
-            let call = #program::__macro_internals::RequestId(ctx.prev_correlation());
-            self.programs.calls.insert(call, sender);
+                ::core::option::Option::Some(#live { child, invoker: ::core::option::Option::None }) => {
+                    child.send(ctx, &refused("the invocation's Invoke came from no program invoker"));
+                }
+                ::core::option::Option::None if ctx.reply_target().is_some() => {
+                    ctx.reply(&refused("no live invocation sent this call"));
+                }
+                ::core::option::Option::None => {
+                    ::aether_actor::__macro_internals::tracing::warn!(
+                        "program root dropped an API call no live invocation sent"
+                    );
+                }
+            }
         }
 
         #[handler::single]
@@ -229,7 +255,7 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             let Some(invocation) = self.programs.calls.remove(&call) else {
                 return;
             };
-            ctx.send_to(invocation, &result);
+            invocation.send(ctx, &result);
         }
     }
 }
@@ -257,7 +283,10 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
-            parent: ::core::option::Option<::aether_actor::ErasedActorRef>,
+            /// The root that spawned this invocation, cast once from its
+            /// `Invoke`'s sender; its fetches, API calls, and `Invoked`
+            /// report go through it.
+            parent: ::core::option::Option<::aether_actor::ProtocolRef<#program::kinds::ProgramRelay>>,
             /// Each relayed API call awaiting its answer, keyed by the call
             /// id this invocation minted.
             waiting: #program::__macro_internals::BTreeMap<u64, #program::__macro_internals::PendingCall>,
@@ -290,7 +319,7 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
                 ctx: &mut ::aether_actor::WasmCtx<'_>,
                 invoke: #program::Invoke,
             ) {
-                self.parent = ctx.sender();
+                self.parent = ctx.sender().and_then(|sender| ctx.cast::<#program::kinds::ProgramRelay>(sender));
                 match #program::__macro_internals::start_invocation(&#table, invoke) {
                     #program::__macro_internals::Started::Finished(invoked) => {
                         self.reply_invoked(ctx, &invoked);
@@ -338,7 +367,7 @@ fn expand_fetch_reply(program: &TokenStream2) -> TokenStream2 {
             ctx: &mut ::aether_actor::WasmCtx<'_>,
             result: #program::kinds::ReadArtifactResult,
         ) {
-            if self.parent.is_none() || ctx.sender() != self.parent {
+            if self.parent.is_none() || ctx.sender() != self.parent.map(::aether_actor::ProtocolRef::erase) {
                 return;
             }
             let digest = match &result {
@@ -372,7 +401,7 @@ fn expand_api_reply(program: &TokenStream2) -> TokenStream2 {
             ctx: &mut ::aether_actor::WasmCtx<'_>,
             result: #program::kinds::ApiCallResult,
         ) {
-            if self.parent.is_none() || ctx.sender() != self.parent {
+            if self.parent.is_none() || ctx.sender() != self.parent.map(::aether_actor::ProtocolRef::erase) {
                 return;
             }
             let Some(pending) = self.waiting.remove(&result.call()) else {
