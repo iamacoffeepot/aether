@@ -490,8 +490,8 @@ as a subscriber, a handler, a callback, or a source, is a typed path, never an
 `ActorPath<R>` when the holder needs one concrete actor type, and a
 `ProtocolPath<P>` when it needs only a protocol, such as a subscriber the
 publisher cannot name. The receiver proves it once on receipt, by its decode,
-and stores the typed proof `resolve` returns. Sending through an erased
-reference is being removed (#6895), so an `ErasedActorPath` is left to name,
+and stores the typed proof `resolve` returns. An erased reference has no
+send verb (#6895, ADR-0231 §4), so an `ErasedActorPath` is left to name,
 render, compare, or monitor an actor, and to name a recipient at the untyped
 MCP and RPC boundary.
 

@@ -4,7 +4,7 @@
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, Unchecked};
 use crate::model::{Addressable, HandlesKind, One, Protocol, Row, Silent};
-use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
+use crate::reference::{ActorRef, ProtocolRef};
 use crate::wasm::inline::{ChildRecord, drain_cluster_queue};
 use alloc::string::String;
 
@@ -48,7 +48,7 @@ fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
         ChildRecord { full_subname: String::from("test.wasm.sends_child"), parent: root.0, ..ChildRecord::default() },
         probe.actor,
     );
-    let target = ErasedActorRef::new(target_id);
+    let target = ProtocolRef::<UnitRow>::new(target_id);
 
     let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
 

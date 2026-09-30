@@ -1942,9 +1942,11 @@ with an ordered `EditorConfig { regions }`. Each `RegionSpec` contains a name, a
 pixel rectangle, keyboard eligibility, `RegionInputLanes`, and an optional exact
 `EditorKeyChord`; it carries no address. Then load each region actor. As it
 wires, the region mails `RegionAttach { region }` to the shell, and the shell
-keeps that mail's sender as the address it forwards to — so nothing the shell
-sends to is a position anyone computed. Input to a region that has not
-announced is dropped. Later entries are topmost. A
+casts that mail's sender once to `EditorInput`, the protocol of the nine
+input rows it forwards, and keeps the result as the address it forwards to —
+so nothing the shell sends to is a position anyone computed. A sender that
+does not publish every `EditorInput` row is refused with a warning. Input to a
+region that has not announced is dropped. Later entries are topmost. A
 topmost region that rejects a lane blocks that event; routing does not fall
 through to a covered region.
 

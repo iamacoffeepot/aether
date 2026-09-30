@@ -154,9 +154,11 @@ The successful reply is sent by the loaded component itself: the component host
 waits with the load's held reply until the guest's birth completes, then hands
 it off to the guest (as `aether.component.load_delivered`,
 [ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
-§9), and the guest answers the requester in its own name. An actor that loaded a component therefore keeps `ctx.sender()`
-from the reply as its proven reference; an embedder reads the stamped sender off
-the reply event
+§9), and the guest answers the requester in its own name. An actor that loaded a component therefore takes `ctx.sender()`
+from the reply as its proven reference, and casts it once, there, to the
+protocol it will send the component, since an erased reference has no send
+verb (ADR-0231 §4); an embedder reads the stamped sender off the reply event
+and casts it the same way
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 `LoadResult::Err` comes from the host, since no actor was loaded.
 

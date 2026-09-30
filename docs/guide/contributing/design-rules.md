@@ -421,8 +421,7 @@ itself a reason for a change.
 ### R-0015: Hold proofs in stored state, never positions {#r-0015}
 
 Actor state and capability tables that outlive a handler hold an
-`ActorRef<R>`, a `ProtocolRef<P>`, or an `ErasedActorRef`, and tables are keyed
-by the proof. A position that arrives in a payload is proven once, at receipt,
+`ActorRef<R>` or a `ProtocolRef<P>`, and tables are keyed by the proof. A position that arrives in a payload is proven once, at receipt,
 in the handler that received it, and the proof is stored. A proof's id is
 never unwrapped as the argument of the send, monitor, or close it exists for.
 
@@ -439,7 +438,7 @@ never unwrapped as the argument of the send, monitor, or close it exists for.
 Actor state and capability tables that outlive a handler hold an
 `ActorRef<R>` or a `ProtocolRef<P>` for every actor they will send to, and
 tables are keyed by the proof. They never hold an `ErasedActorRef` for that
-purpose, because erased actor sending is being removed (#6895). An
+purpose, because an erased reference has no send verb (#6895, ADR-0231 §4). An
 `ErasedActorRef` is kept only where nothing is sent through it: comparing
 identity, keying a table, naming its canonical path, monitoring, and
 ADR-0231 §4's cast, which types a reference that arrived untyped. A position
@@ -464,7 +463,7 @@ that outlive a handler hold an `ActorRef<R>` or a `ProtocolRef<P>` for every
 actor they will send to, and tables are keyed by the proof. The core engine's
 own registry, routing, and reply tables key by `MailboxId`
 ([R-0043](#r-0043)). Stored state never holds an `ErasedActorRef` for
-sending, because erased actor sending is being removed (#6895). An
+sending, because an erased reference has no send verb (#6895, ADR-0231 §4). An
 `ErasedActorRef` is kept only where nothing is sent through it: comparing
 identity, keying a table, naming its canonical path, monitoring, and
 ADR-0231 §4's cast, which types a reference that arrived untyped. A position

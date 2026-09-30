@@ -15,6 +15,7 @@ use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, CoveredBy, HandlesKind};
 use crate::reference::{ErasedActorRef, ProtocolRef};
+use crate::wasm::inline::ChainMode;
 
 /// A typed sendable handle to an inline child of type `C` — what
 /// [`WasmCtx::spawn_inline_child`] hands back, and what
@@ -77,26 +78,26 @@ impl<C: Addressable> InlineChild<C> {
 
     /// Send `payload` to this child, checked against `C`'s handler set.
     ///
-    /// Routes exactly as [`WasmCtx::send_to`] does — through the inline
+    /// Routes as [`WasmCtx::send_to`] does — through the inline
     /// registry's cluster router, in place through the membrane for a resident
     /// child, inheriting the handler's causal chain (ADR-0080 §7).
     pub fn send<K: ActorMail, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
     where
         C: HandlesKind<K>,
     {
-        ctx.send_to(self.erase(), payload);
+        ctx.push(self.erase(), payload, ChainMode::Inherit);
     }
 
     /// This child as an [`ErasedActorRef`] — the ADR-0230 §3 spawn-result door
     /// for a heterogeneous child set's identity. The erased reference drops
     /// `C` but keeps the fact that the spawn registered the child, so it is
     /// the key a table of children compares, monitors, and purges by
-    /// (ADR-0231 §4) and what `despawn_inline_child` takes. A parent that
-    /// sends to the child sends through [`Self::send`] or a reference
-    /// [`Self::narrow`] yields instead.
+    /// (ADR-0231 §4) and what `despawn_inline_child` takes. It is never a send
+    /// target: a parent that sends to the child sends through [`Self::send`]
+    /// or a reference [`Self::narrow`] yields.
     ///
-    /// Consumed by [`Self::send`] above, by `aether-widget`'s lane keys, and
-    /// by its composite node's spawn. The *reference* erasure: unrelated to
+    /// Consumed by `aether-widget`'s lane keys and by its composite node's
+    /// spawn. The *reference* erasure: unrelated to
     /// the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {

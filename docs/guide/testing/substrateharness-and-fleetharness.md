@@ -283,8 +283,10 @@ the kind fit:
   which the dispatch loop answers for every actor whether or not its type
   declares a handler for them. `log_tail` sends through any typed reference.
 
-An `ErasedActorRef` is still accepted unchecked until #6932 removes that door;
-new tests use the typed doors.
+An `ErasedActorRef` is not a send target: an erased reference has no send
+verb (ADR-0231 §4). A test holding one, such as `load_any`'s answer, casts it
+once with `SubstrateHarness::cast` against a test-local `#[protocol]` and
+sends through the `ProtocolRef<P>`.
 
 A loaded wasm component's reference comes from the load itself:
 `SubstrateHarness::load::<R>` types the reply's stamped sender as the export

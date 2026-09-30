@@ -7,15 +7,18 @@
 //! each run one verb. Its mail lands either in a finishing sink, whose caught
 //! envelope shows what was attached, or in a live pooled [`Keeper`], whose
 //! own dispatch decodes it and whose values keep their entries until it
-//! closes. The raw-forward tests have the courier mail itself a blob kind and
-//! forward the bytes its next turn handles through a raw verb, which resolves
-//! their tag-1 fields against that turn's attachments (resolve on send).
+//! closes. A finishing sink's route takes any kind, so its proof is typed as
+//! the never-spawned [`Sink`] it stands in for. The raw-forward tests have the
+//! courier forward itself a blob kind and relay the bytes its next turn
+//! handles to the caller as a deferred reply envelope, the native door that
+//! still carries runtime bytes, which resolves their tag-1 fields against that
+//! turn's attachments (resolve on send).
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind};
-use aether_data::{Blob, BlobReader, ErasedActorPath, Kind, KindDescriptor, MailId, Schema, SessionToken, Uuid};
+use aether_actor::{ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, Unchecked};
+use aether_data::{Blob, BlobReader, Kind, KindDescriptor, Schema, SessionToken, Uuid};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Subname};
@@ -85,11 +88,25 @@ trait KeepsSetBlobs {
     }
 }
 
+/// What the courier's typed sends and a keeper's forward carry to a peer that
+/// may be a keeper or a sink: the silent blob rows both cover.
+#[aether_actor::protocol]
+trait Carries {
+    fn carrier(mail: Carrier);
+    fn set_carrier(mail: SetCarrier);
+    fn pair(mail: Pair);
+}
+
+/// The terminal reply that closes a raw forward's deferred reply, after its
+/// envelope.
+#[aether_data::kind(name = "test.blob_mail.forwarded")]
+struct Forwarded;
+
 /// A pooled peer that keeps every blob its arms decode, forwards each carried
 /// blob to `forward` when set, and answers an [`Ask`] with a carried blob.
 struct Keeper {
     kept: Mutex<Vec<Blob>>,
-    forward: Option<ErasedActorRef>,
+    forward: Option<ProtocolRef<Carries>>,
 }
 
 impl KeepsSetBlobs for Keeper {
@@ -102,9 +119,9 @@ impl KeepsSetBlobs for Keeper {
 impl NativeActor for Keeper {
     const NAMESPACE: &'static str = "test.blob_mail.keeper";
     type Config = ();
-    type Params = Option<ErasedActorRef>;
+    type Params = Option<ProtocolRef<Carries>>;
 
-    fn init((): (), forward: Option<ErasedActorRef>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), forward: Option<ProtocolRef<Carries>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { kept: Mutex::new(Vec::new()), forward })
     }
 
@@ -139,6 +156,35 @@ impl NativeActor for Keeper {
     }
 }
 
+/// What a finishing sink stands in for: every kind the courier and its keepers
+/// send a sink. Never spawned; a sink's route answers for it, as `send.rs`'s
+/// relay sink answers for its relay.
+struct Sink;
+
+#[aether_actor::actor(instanced)]
+impl NativeActor for Sink {
+    const NAMESPACE: &'static str = "test.blob_mail.sink";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    fn on_carrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Carrier) {}
+
+    #[handler::single]
+    fn on_set_carrier(&mut self, _ctx: &mut NativeCtx<'_>, _mail: SetCarrier) {}
+
+    #[handler::single]
+    fn on_pair(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Pair) {}
+
+    #[handler::single]
+    fn on_note(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Note) {}
+}
+
+impl HandlesKind<CastOnly> for Sink {}
+
 /// Sends a [`Carrier`] of the courier's blob to each recipient.
 #[aether_data::kind(name = "test.blob_mail.send_carrier")]
 struct SendCarrier;
@@ -147,7 +193,7 @@ struct SendCarrier;
 #[aether_data::kind(name = "test.blob_mail.fan_out")]
 struct FanOut;
 
-/// Sends the first recipient an [`Ask`].
+/// Sends the asked keeper an [`Ask`].
 #[aether_data::kind(name = "test.blob_mail.send_ask")]
 struct SendAsk;
 
@@ -155,7 +201,7 @@ struct SendAsk;
 #[aether_data::kind(name = "test.blob_mail.reply_carrier")]
 struct ReplyCarrier;
 
-/// Sends the first recipient a [`Note`], then a [`CastOnly`].
+/// Sends the noted sink a [`Note`], then a [`CastOnly`].
 #[aether_data::kind(name = "test.blob_mail.send_blob_free")]
 struct SendBlobFree;
 
@@ -167,17 +213,19 @@ struct SendSetCarrier;
 #[aether_data::kind(name = "test.blob_mail.send_pair")]
 struct SendPair;
 
-/// Sends the courier itself a [`Carrier`] of its blob.
+/// Forwards the courier itself a [`Carrier`] of its blob, the reply target
+/// pinned to this mail's caller.
 #[aether_data::kind(name = "test.blob_mail.relay_carrier")]
 struct RelayCarrier;
 
-/// Sends the courier itself a [`Note`].
+/// Forwards the courier itself a [`Note`], the reply target pinned to this
+/// mail's caller.
 #[aether_data::kind(name = "test.blob_mail.relay_note")]
 struct RelayNote;
 
-/// A raw forward a [`Courier`] makes from each [`Carrier`] or [`Note`] turn.
+/// A raw forward a [`Courier`] makes from each [`Carrier`] or [`Note`] turn to
+/// that turn's caller.
 struct RawForward {
-    to: ErasedActorRef,
     /// The bytes it forwards as a [`Carrier`]: the handled payload's own when
     /// `None`.
     bytes: Option<Vec<u8>>,
@@ -186,8 +234,12 @@ struct RawForward {
 /// What a [`Courier`] sends, and to whom.
 #[derive(Default)]
 struct Routes {
-    /// The recipients of every typed send, in order.
-    to: Vec<ErasedActorRef>,
+    /// The recipients of every typed blob send, in order.
+    to: Vec<ProtocolRef<Carries>>,
+    /// The keeper a [`SendAsk`] asks.
+    asked: Option<ActorRef<Keeper>>,
+    /// The sink a [`SendBlobFree`] sends to.
+    noted: Option<ActorRef<Sink>>,
     /// The blob its carriers carry: a fresh owned copy of [`SHARED`] when
     /// `None`.
     blob: Option<Blob>,
@@ -199,9 +251,10 @@ struct Routes {
 /// its routes say to.
 struct Courier {
     routes: Routes,
+    /// This courier's own proof, which the rig hands it from the boot's record
+    /// once the boot returns: a relay turn forwards itself mail through it.
+    me: Option<ActorRef<Self>>,
     kept: Vec<Blob>,
-    /// What each raw forward returned.
-    forwarded: Vec<Option<MailId>>,
 }
 
 impl Courier {
@@ -209,21 +262,21 @@ impl Courier {
         self.routes.blob.clone().unwrap_or_else(|| Blob::from(SHARED.to_vec()))
     }
 
-    /// This courier's own proof, through the path its namespace names.
-    fn me(ctx: &NativeCtx<'_, Self>) -> ErasedActorRef {
-        ctx.resolve_path(&ErasedActorPath::new(Self::NAMESPACE).expect("a canonical path"))
-            .expect("the courier is live")
+    fn me(&self) -> ActorRef<Self> {
+        self.me.expect("the rig hands the courier its proof at boot")
     }
 
-    /// Raw-forward the configured bytes, or this turn's own, as a
-    /// [`Carrier`].
-    fn forward_raw(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+    /// Raw-forward the configured bytes, or this turn's own, as a [`Carrier`]
+    /// envelope to the turn's caller, then close the deferred reply.
+    fn forward_raw(&self, ctx: &mut NativeCtx<'_, Self, Unchecked>) {
         let Some(raw) = &self.routes.raw else {
             return;
         };
         let handled = ctx.inbound().expect("a handler turn has its inbound").payload.bytes().to_vec();
-        let sent = ctx.send_envelope_tracked_to(raw.to, Carrier::ID, raw.bytes.as_deref().unwrap_or(&handled));
-        self.forwarded.push(sent);
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+
+        owed.reply_envelope(ctx, Carrier::ID, raw.bytes.as_deref().unwrap_or(&handled));
+        owed.reply(ctx, &Forwarded);
     }
 }
 
@@ -234,24 +287,24 @@ impl NativeActor for Courier {
     type Params = Routes;
 
     fn init((): (), routes: Routes, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { routes, kept: Vec::new(), forwarded: Vec::new() })
+        Ok(Self { routes, me: None, kept: Vec::new() })
     }
 
     #[handler::single]
     fn on_send_carrier(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendCarrier) {
-        for &to in &self.routes.to {
+        for to in &self.routes.to {
             ctx.send_to(to, &Carrier { blob: self.blob() });
         }
     }
 
     #[handler::single]
     fn on_fan_out(&mut self, ctx: &mut NativeCtx<'_>, _trigger: FanOut) {
-        ctx.fanout(self.routes.to.iter().copied(), &Carrier { blob: self.blob() });
+        ctx.fanout(self.routes.to.iter(), &Carrier { blob: self.blob() });
     }
 
     #[handler::single]
     fn on_send_ask(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendAsk) {
-        ctx.send_to(self.routes.to[0], &Ask { tag: 1 });
+        ctx.send_to(self.routes.asked.expect("a keeper to ask"), &Ask { tag: 1 });
     }
 
     #[handler::single]
@@ -261,13 +314,14 @@ impl NativeActor for Courier {
 
     #[handler::single]
     fn on_send_blob_free(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendBlobFree) {
-        ctx.send_to(self.routes.to[0], &Note { text: "no blobs here".into() });
-        ctx.send_to(self.routes.to[0], &CastOnly { code: 0x6748 });
+        let noted = self.routes.noted.expect("a sink to note");
+        ctx.send_to(noted, &Note { text: "no blobs here".into() });
+        ctx.send_to(noted, &CastOnly { code: 0x6748 });
     }
 
     #[handler::single]
     fn on_send_set_carrier(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendSetCarrier) {
-        for &to in &self.routes.to {
+        for to in &self.routes.to {
             ctx.send_to(to, &SetCarrier { blob: self.blob() });
         }
     }
@@ -275,30 +329,29 @@ impl NativeActor for Courier {
     #[handler::single]
     fn on_send_pair(&mut self, ctx: &mut NativeCtx<'_>, _trigger: SendPair) {
         let pair = Pair { first: Blob::from(SHARED.to_vec()), second: Blob::from(SHARED.to_vec()) };
-        for &to in &self.routes.to {
+        for to in &self.routes.to {
             ctx.send_to(to, &pair);
         }
     }
 
-    #[handler::single]
-    fn on_relay_carrier(&mut self, ctx: &mut NativeCtx<'_>, _trigger: RelayCarrier) {
-        ctx.send_to(Self::me(ctx), &Carrier { blob: self.blob() });
+    #[handler::unchecked(reason = "test: forwards itself the carrier, reply target pinned to the caller")]
+    fn on_relay_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: RelayCarrier) {
+        ctx.forward_to(self.me(), &Carrier { blob: self.blob() });
     }
 
-    #[handler::single]
-    fn on_relay_note(&mut self, ctx: &mut NativeCtx<'_>, _trigger: RelayNote) {
-        let _ = self;
-        ctx.send_to(Self::me(ctx), &Note { text: "no blobs here".into() });
+    #[handler::unchecked(reason = "test: forwards itself the note, reply target pinned to the caller")]
+    fn on_relay_note(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _trigger: RelayNote) {
+        ctx.forward_to(self.me(), &Note { text: "no blobs here".into() });
     }
 
-    #[handler::single]
-    fn on_carrier(&mut self, ctx: &mut NativeCtx<'_>, mail: Carrier) {
+    #[handler::unchecked(reason = "test: relays its bytes to the caller as a deferred reply envelope")]
+    fn on_carrier(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Carrier) {
         self.forward_raw(ctx);
         self.kept.push(mail.blob);
     }
 
-    #[handler::single]
-    fn on_note(&mut self, ctx: &mut NativeCtx<'_>, _mail: Note) {
+    #[handler::unchecked(reason = "test: relays its bytes to the caller as a deferred reply envelope")]
+    fn on_note(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: Note) {
         self.forward_raw(ctx);
     }
 }
@@ -348,9 +401,16 @@ impl Stage {
         sink(&self.registry, &self.mailer, name)
     }
 
+    /// A [`sink`] typed as the [`Sink`] it stands in for.
+    fn stand_in(&self, name: &str) -> (ActorRef<Sink>, Receiver<Envelope>) {
+        let (reference, rx) = self.sink(name);
+
+        (Registry::declared_dependency::<Sink>(reference.id()), rx)
+    }
+
     /// A [`Keeper`] spawned under `key`, forwarding each carrier to
     /// `forward`.
-    fn keeper(&self, key: &str, forward: Option<ErasedActorRef>) -> ActorRef<Keeper> {
+    fn keeper(&self, key: &str, forward: Option<ProtocolRef<Carries>>) -> ActorRef<Keeper> {
         self.chassis
             .spawn_actor_for_test::<Keeper>(Subname::Named(key), (), forward)
             .finish()
@@ -359,7 +419,9 @@ impl Stage {
 
     fn boot(self, routes: Routes) -> Rig {
         let caller = sink(&self.registry, &self.mailer, "test.blob_mail.caller");
-        let driver = PumpedDriver::boot(self.chassis, (), routes);
+        let mut driver = PumpedDriver::boot(self.chassis, (), routes);
+        let me = driver.chassis().actor_ref::<Courier>();
+        driver.host_turn(|courier: &mut Courier, _ctx| courier.me = Some(me));
 
         Rig { driver, mailer: self.mailer, egress: self.egress, caller }
     }
@@ -404,7 +466,7 @@ impl Rig {
 fn a_sent_owned_blob_is_shared_with_the_recipient_until_its_value_drops() {
     let stage = Stage::new();
     let b = stage.keeper("a-b", None);
-    let mut rig = stage.boot(Routes { to: vec![b.erase()], ..Routes::default() });
+    let mut rig = stage.boot(Routes { to: vec![b.narrow()], ..Routes::default() });
 
     rig.run(&SendCarrier, None);
 
@@ -425,11 +487,11 @@ fn a_resent_shared_blob_attaches_its_entry_without_copying() {
     let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
     let entry = foreign.check_in(Box::from(SHARED));
     let stage = Stage::new();
-    let (d_ref, d_rx) = stage.sink("test.blob_mail.b.d");
-    let c = stage.keeper("b-c", Some(d_ref));
-    let b = stage.keeper("b-b", Some(c.erase()));
+    let (d_ref, d_rx) = stage.stand_in("test.blob_mail.b.d");
+    let c = stage.keeper("b-c", Some(d_ref.narrow()));
+    let b = stage.keeper("b-b", Some(c.narrow()));
     let mut rig =
-        stage.boot(Routes { to: vec![b.erase()], blob: Some(Arc::clone(&entry).into_blob()), ..Routes::default() });
+        stage.boot(Routes { to: vec![b.narrow()], blob: Some(Arc::clone(&entry).into_blob()), ..Routes::default() });
 
     rig.run(&SendCarrier, None);
 
@@ -448,7 +510,7 @@ fn a_resent_shared_blob_attaches_its_entry_without_copying() {
 fn a_fanout_keeps_the_entry_until_every_recipient_drops_its_value() {
     let stage = Stage::new();
     let (b, c) = (stage.keeper("c-b", None), stage.keeper("c-c", None));
-    let mut rig = stage.boot(Routes { to: vec![b.erase(), c.erase()], ..Routes::default() });
+    let mut rig = stage.boot(Routes { to: vec![b.narrow(), c.narrow()], ..Routes::default() });
 
     rig.run(&FanOut, None);
 
@@ -470,7 +532,7 @@ fn a_fanout_keeps_the_entry_until_every_recipient_drops_its_value() {
 fn a_component_reply_shares_its_blob_and_a_session_reply_carries_bytes() {
     let stage = Stage::new();
     let keeper = stage.keeper("d-keeper", None);
-    let mut rig = stage.boot(Routes { to: vec![keeper.erase()], ..Routes::default() });
+    let mut rig = stage.boot(Routes { asked: Some(keeper), ..Routes::default() });
 
     rig.run(&SendAsk, None);
 
@@ -502,8 +564,8 @@ fn a_component_reply_shares_its_blob_and_a_session_reply_carries_bytes() {
 #[test]
 fn a_blob_free_send_attaches_nothing_and_writes_the_plain_bytes() {
     let stage = Stage::new();
-    let (b_ref, b_rx) = stage.sink("test.blob_mail.e.b");
-    let mut rig = stage.boot(Routes { to: vec![b_ref], ..Routes::default() });
+    let (b_ref, b_rx) = stage.stand_in("test.blob_mail.e.b");
+    let mut rig = stage.boot(Routes { noted: Some(b_ref), ..Routes::default() });
 
     rig.run(&SendBlobFree, None);
 
@@ -525,7 +587,7 @@ fn a_blob_free_send_attaches_nothing_and_writes_the_plain_bytes() {
 fn a_handler_set_arm_decodes_a_shared_blob() {
     let stage = Stage::new();
     let b = stage.keeper("f-b", None);
-    let mut rig = stage.boot(Routes { to: vec![b.erase()], ..Routes::default() });
+    let mut rig = stage.boot(Routes { to: vec![b.narrow()], ..Routes::default() });
 
     rig.run(&SendSetCarrier, None);
 
@@ -539,9 +601,9 @@ fn a_handler_set_arm_decodes_a_shared_blob() {
 #[test]
 fn two_fields_with_equal_bytes_attach_one_entry_both_resolve() {
     let stage = Stage::new();
-    let (sink_ref, sink_rx) = stage.sink("test.blob_mail.g.sink");
+    let (sink_ref, sink_rx) = stage.stand_in("test.blob_mail.g.sink");
     let b = stage.keeper("g-b", None);
-    let mut rig = stage.boot(Routes { to: vec![sink_ref, b.erase()], ..Routes::default() });
+    let mut rig = stage.boot(Routes { to: vec![sink_ref.narrow(), b.narrow()], ..Routes::default() });
 
     rig.run(&SendPair, None);
 
@@ -567,61 +629,73 @@ fn naming(hash: aether_data::BlobHash) -> Vec<u8> {
     payload
 }
 
-/// What the courier's raw forwards returned.
-fn forwarded(rig: &Rig) -> Vec<Option<MailId>> {
-    rig.driver.read_state(|courier| courier.forwarded.clone()).expect("the courier is live")
+/// A reply target at `to` for a relay's caller.
+fn answered_to(to: ErasedActorRef) -> ReplyTarget {
+    ReplyTarget::Actor { to, correlation: 0 }
 }
 
-/// (h) The courier, handling an attached mail, raw-forwards its bytes to C:
-/// the forward attaches the entry the handled mail carried, C decodes a value
-/// over it and forwards that value to a sink, and the engine's store does not
-/// grow. The entry lives in a second store, so a forward that copied the
-/// bytes in would show up there. Catches a raw forward that drops its
-/// attachments, leaving C a hash it must refuse.
+/// What a raw forward's caller caught: the forwarded [`Carrier`] envelopes,
+/// and whether the deferred reply closed with its terminal [`Forwarded`].
+fn caught(rx: &Receiver<Envelope>) -> (Vec<Envelope>, bool) {
+    let (carriers, rest): (Vec<Envelope>, Vec<Envelope>) =
+        rx.try_iter().partition(|envelope| envelope.kind == Carrier::ID);
+
+    (carriers, rest.iter().any(|envelope| envelope.kind == Forwarded::ID))
+}
+
+/// (h) The courier, handling an attached mail, raw-forwards its bytes to its
+/// caller as a deferred reply envelope: the forward attaches the entry the
+/// handled mail carried, and the engine's store does not grow. The entry lives
+/// in a second store, so a forward that copied the bytes in would show up
+/// there. Catches a raw forward that drops its attachments, leaving the caller
+/// a hash it must refuse.
 #[test]
 fn a_raw_forward_of_attached_bytes_shares_their_entries() {
     let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
     let entry = foreign.check_in(Box::from(SHARED));
     let stage = Stage::new();
     let (d_ref, d_rx) = stage.sink("test.blob_mail.h.d");
-    let c = stage.keeper("h-c", Some(d_ref));
     let mut rig = stage.boot(Routes {
         blob: Some(Arc::clone(&entry).into_blob()),
-        raw: Some(RawForward { to: c.erase(), bytes: None }),
+        raw: Some(RawForward { bytes: None }),
         ..Routes::default()
     });
 
-    rig.run(&RelayCarrier, None);
+    rig.run(&RelayCarrier, Some(answered_to(d_ref)));
 
-    assert!(forwarded(&rig)[0].is_some(), "the forward is sent");
-    assert_eq!(rig.kept(c), vec![SHARED.to_vec()], "C decodes the forwarded hash");
-    let to_d = d_rx.try_recv().expect("C's forward reaches the sink");
+    let (carriers, closed) = caught(&d_rx);
+    assert!(closed, "the deferred reply closes");
+    let [to_d] = carriers.as_slice() else {
+        panic!("the forward reaches the caller once: {}", carriers.len())
+    };
     assert_eq!(to_d.attachments().len(), 1);
-    assert!(Arc::ptr_eq(&to_d.attachments()[0], &entry), "C's value is the entry the handled mail carried");
+    assert!(Arc::ptr_eq(&to_d.attachments()[0], &entry), "the forward attaches the entry the handled mail carried");
     assert_eq!(rig.resident_bytes(), 0, "no hop checked the bytes into the engine store");
 }
 
 /// (i) The courier, handling an attached mail, raw-forwards bytes naming a
-/// hash its mail does not carry: the verb refuses with `None` and nothing is
-/// dispatched. Catches an unresolved hash leaving the sender, where no
-/// recipient could resolve it and egress would let it out unrewritten.
+/// hash its mail does not carry: the forward is refused and nothing but the
+/// terminal reply is dispatched. Catches an unresolved hash leaving the
+/// sender, where no recipient could resolve it and egress would let it out
+/// unrewritten.
 #[test]
 fn a_raw_forward_naming_a_hash_the_handled_mail_lacks_is_refused() {
     let foreign = BlobStore::new().expect("spawn the second store's reclaim thread");
     let other = foreign.check_in(Box::from(b"bytes B never received".as_slice()));
     let stage = Stage::new();
     let (c_ref, c_rx) = stage.sink("test.blob_mail.i.c");
-    let mut rig = stage
-        .boot(Routes { raw: Some(RawForward { to: c_ref, bytes: Some(naming(other.hash())) }), ..Routes::default() });
+    let mut rig =
+        stage.boot(Routes { raw: Some(RawForward { bytes: Some(naming(other.hash())) }), ..Routes::default() });
 
-    rig.run(&RelayCarrier, None);
+    rig.run(&RelayCarrier, Some(answered_to(c_ref)));
 
-    assert!(forwarded(&rig)[0].is_none(), "the forward is refused at the sender");
-    assert!(c_rx.try_recv().is_err(), "nothing is dispatched");
+    let (carriers, closed) = caught(&c_rx);
+    assert!(closed, "the deferred reply closes");
+    assert!(carriers.is_empty(), "the forward is refused at the sender");
 }
 
 /// (j) A handler whose mail has no attachments holds no blob, so its raw
-/// send of a tag-1 payload goes out unwalked and unattached, and the
+/// forward of a tag-1 payload goes out unwalked and unattached, and the
 /// recipient's decode refuses the detached hash. Pins ADR-0238 decision 3's
 /// boundary: a change that starts walking blob-free senders (this send would
 /// be refused) or starts attaching for them shows up here.
@@ -631,13 +705,16 @@ fn a_raw_send_from_a_handler_holding_no_blob_goes_out_unwalked() {
     let entry = foreign.check_in(Box::from(SHARED));
     let stage = Stage::new();
     let (c_ref, c_rx) = stage.sink("test.blob_mail.j.c");
-    let mut rig = stage
-        .boot(Routes { raw: Some(RawForward { to: c_ref, bytes: Some(naming(entry.hash())) }), ..Routes::default() });
+    let mut rig =
+        stage.boot(Routes { raw: Some(RawForward { bytes: Some(naming(entry.hash())) }), ..Routes::default() });
 
-    rig.run(&RelayNote, None);
+    rig.run(&RelayNote, Some(answered_to(c_ref)));
 
-    assert!(forwarded(&rig)[0].is_some(), "a blob-free handler's raw send is not walked");
-    let to_c = c_rx.try_recv().expect("the send reaches C");
+    let (carriers, closed) = caught(&c_rx);
+    assert!(closed, "the deferred reply closes");
+    let [to_c] = carriers.as_slice() else {
+        panic!("a blob-free handler's raw send is not walked: {}", carriers.len())
+    };
     assert!(to_c.attachments().is_empty(), "nothing is attached");
     assert!(Carrier::decode_from_bytes(to_c.payload.bytes()).is_none(), "the recipient refuses the detached hash");
 }

@@ -152,12 +152,12 @@ impl Dispatch<Self> for Relay {
         // scattering children across workers pay off — the contention the
         // trivial harness can't exhibit (iamacoffeepot/aether#1074).
         busy_spin(state.work_iters);
-        // Forward the bytes verbatim to each downstream. Each push
-        // stamps its own `t_sent`, so later children in a fan-out reveal
-        // any per-child enqueue skew.
-        for down in state.downstreams.iter() {
-            let _ = ctx.send_envelope_tracked_to(down.erase(), Ping::ID, payload);
-            state.sent += 1;
+        // Forward the ping to each downstream: one encode per turn, one push
+        // per child. Each push stamps its own `t_sent`, so later children in
+        // a fan-out reveal any per-child enqueue skew.
+        if !state.downstreams.is_empty() {
+            ctx.fanout(state.downstreams.iter(), &Ping::decode_from_bytes(payload)?);
+            state.sent += state.downstreams.len() as u64;
         }
         Some(())
     }

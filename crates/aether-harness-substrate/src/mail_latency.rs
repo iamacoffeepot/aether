@@ -28,7 +28,7 @@ use std::env;
 use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ActorRef, ErasedActorRef};
+use aether_actor::{ActorRef, ProtocolRef, protocol};
 use aether_data::{Kind, KindId, MailId, ReplyContract};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
@@ -51,18 +51,29 @@ use crate::perf::harness::{
 /// serialization vs settlement).
 ///
 /// The ring is a cycle, so no spawn order hands every relay its
-/// successor's proof at spawn. Relay 0 spawns first with neither field;
+/// successor's proof at spawn. Relay 0 spawns first with neither proof;
 /// relays `n - 1` down to `1` then spawn holding their successor's proof,
-/// and relay 1 also holds relay 0's as `close`. A [`RingLink`] the harness
-/// settles at relay 1 is forwarded to relay 0, which keeps the envelope
-/// sender — relay 1 — as its `next`, closing the ring before any token is
+/// and relay 1 also holds relay 0's as `close`. Each of those casts its
+/// successor to [`RingHop`] once, at `wire`. A [`RingLink`] the harness
+/// settles at relay 1 is forwarded to relay 0, which casts the envelope
+/// sender — relay 1 — to its `next`, closing the ring before any token is
 /// seeded. The relay is its own spawn config.
 struct RingRelay {
-    /// The successor's proof. `None` only on relay 0 before the link, which
-    /// drops a `Ping` rather than forwarding it.
-    next: Option<ErasedActorRef>,
+    /// The successor's proof from the spawn, cast to `next` at `wire`.
+    successor: Option<ActorRef<Self>>,
+    /// The successor as a [`RingHop`]. `None` only on relay 0 before the
+    /// link, which drops a `Ping` rather than forwarding it.
+    next: Option<ProtocolRef<RingHop>>,
     /// Relay 0's proof, held by relay 1 alone: where it forwards the link.
     close: Option<ActorRef<Self>>,
+}
+
+/// What a [`RingRelay`] sends its successor: the circulating token. A relay's
+/// dispatch is hand-written, so it has no contract rows to narrow through,
+/// and each relay casts its successor to this protocol once.
+#[protocol]
+trait RingHop {
+    fn ping(mail: Ping);
 }
 
 /// The fieldless mail that closes the [`RingRelay`] cycle: the harness
@@ -85,6 +96,9 @@ impl aether_actor::Lifecycle<Self> for RingRelay {
     type Ctx<'a> = NativeCtx<'a, Self>;
     fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(config)
+    }
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+        state.next = state.successor.and_then(|successor| ctx.cast(successor.erase()));
     }
 }
 impl aether_actor::Declared for RingRelay {
@@ -132,7 +146,7 @@ impl Dispatch<Self> for RingRelay {
                 ctx.send_to(close, &RingLink);
             }
             if state.next.is_none() {
-                state.next = ctx.sender();
+                state.next = ctx.sender().and_then(|sender| ctx.cast(sender));
             }
             return Some(());
         }
@@ -143,8 +157,7 @@ impl Dispatch<Self> for RingRelay {
         if ping.seq > 0
             && let Some(next) = state.next
         {
-            let bytes = Ping { seq: ping.seq - 1 }.encode_into_bytes();
-            let _ = ctx.send_envelope_tracked_to(next, Ping::ID, &bytes);
+            ctx.send_to(next, &Ping { seq: ping.seq - 1 });
         }
         Some(())
     }
@@ -288,12 +301,12 @@ fn mail_saturation_profile() {
     let spawn = |i: usize, relay: RingRelay| {
         tb.spawn_actor::<RingRelay>(Subname::Named(&i.to_string()), relay, ()).finish().expect("spawn ring relay")
     };
-    let first = spawn(0, RingRelay { next: None, close: None });
+    let first = spawn(0, RingRelay { successor: None, next: None, close: None });
     let mut ring = vec![first; n];
     let mut successor = first;
     for i in (1..n).rev() {
         let close = (i == 1).then_some(first);
-        successor = spawn(i, RingRelay { next: Some(successor.erase()), close });
+        successor = spawn(i, RingRelay { successor: Some(successor), next: None, close });
         ring[i] = successor;
     }
 
