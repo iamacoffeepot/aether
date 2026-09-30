@@ -531,11 +531,9 @@ section 2's type constructors.
   the typed boundary for MCP, RPC, and the harness. *Migrate*: one change per
   crate converting its kinds and stored state. *Contract*: one deletion per
   item in section 5, each landable only when its call-site count is zero.
-  During expand and migrate, a change that raises the count of old-door call
-  sites or of `#[allow(clippy::disallowed_methods)]` lines does not land, and
-  the rule is `scripts/check-raw-mailbox-ratchet.py` against the counts in
-  `scripts/raw-mailbox-baseline.json` — a required check rather than a step
-  in each issue's plan.
+  The types close the old doors, and the new-suppression scan requires an
+  owner sign-off for every new `#[allow(clippy::disallowed_methods)]` line, so
+  no separate count is kept.
 - The inline-child alias (`RouteLifecycle::Alias`) remains a second id for
   one actor. A reference to an alias is valid under this decision; unifying
   the alias with its trampoline for monitoring (issue 4202) is separate work.
