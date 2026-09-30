@@ -21,9 +21,8 @@ publish = false
 #   dependency-free inline child that the inline-dependency successor
 #   republishes.
 # - `republish_group_v{1,2}`: the instanced `test.republish.gate` and the root
-#   `test.republish.peer`. Only v2's gate (the lib's `ProbeGate`, issue 7143)
-#   handles `GateProbe`, and v2's peer traps in `on_rehydrate` when its config
-#   says so.
+#   `test.republish.peer`. Only v2's gate handles `GateProbe`, and v2's peer
+#   traps in `on_rehydrate` when its config says so.
 # - `republish_carry_v{1,2}`: a correlation-carry requester, held relay and
 #   held requester beside the shared `test.republish.carry.holder`. v2 reshapes
 #   the requester's carried context and the relay's held reply kind.
