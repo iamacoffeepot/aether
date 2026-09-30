@@ -119,12 +119,11 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
         }
 
         /// A child's `Invoked` report: answer the seq's held reply and
-        /// retire the child. Manual because it answers another request's
-        /// debt, not its own inbound.
-        #[handler::manual]
+        /// retire the child.
+        #[handler::single]
         fn on_invoked(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
             invoked: #program::Invoked,
         ) {
             let Some(sender) = ctx.sender() else {
@@ -174,10 +173,10 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             self.programs.fetches.insert(fetch, sender);
         }
 
-        #[handler::manual]
+        #[handler::single]
         fn on_read_artifact_result(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
             result: #program::kinds::ReadArtifactResult,
         ) {
             let Some(fetch) = ctx.in_reply_to() else {
@@ -218,10 +217,10 @@ fn expand_relay_handlers(program: &TokenStream2) -> TokenStream2 {
             self.programs.calls.insert(call, sender);
         }
 
-        #[handler::manual]
+        #[handler::single]
         fn on_api_call_result(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased>,
             result: #program::kinds::ApiCallResult,
         ) {
             let Some(call) = ctx.in_reply_to() else {
@@ -285,10 +284,10 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
                 })
             }
 
-            #[handler::manual]
+            #[handler::single]
             fn on_invoke(
                 &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Manual>,
+                ctx: &mut ::aether_actor::WasmCtx<'_>,
                 invoke: #program::Invoke,
             ) {
                 self.parent = ctx.sender();
