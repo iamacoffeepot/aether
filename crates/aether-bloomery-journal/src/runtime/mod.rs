@@ -58,7 +58,11 @@
 //! `ReadArtifacts` all run off the actor's thread, each on its own task
 //! queue (ADR-0093), so a large artifact, closure, or batch never holds up
 //! the actor's other requests. All three reuse members the journal still
-//! holds, under the [`ReadCacheBudget`], and read only the misses.
+//! holds, under the [`ReadCacheBudget`], and read only the misses. None of
+//! them hashes a member: each answers it claiming the digest it was stored
+//! under, and the receiver verifies the bytes before relying on them
+//! (ADR-0238 decision 11), so a stored file whose bytes do not hash to its
+//! digest is answered and fails at the receiver's check.
 //!
 //! [`Stage`] is the one unfenced write: it stores encoded artifacts
 //! content-addressed, with no event and no head move, through an
@@ -474,10 +478,6 @@ impl JournalActorState {
 fn artifact_reply(digest: Digest, outcome: Result<Option<ClosureArtifact>, JournalError>) -> ReadArtifactResult {
     match outcome {
         Ok(Some(artifact)) => ReadArtifactResult::Found { artifact },
-        Err(JournalError::ArtifactDigestMismatch(_)) => ReadArtifactResult::Err {
-            digest,
-            message: "stored artifact bytes do not match the requested digest".into(),
-        },
         Ok(None) => ReadArtifactResult::Missing { digest },
         Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
     }

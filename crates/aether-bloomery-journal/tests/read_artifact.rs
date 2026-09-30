@@ -1,4 +1,5 @@
-//! Named journal owners return exact stored artifacts and refuse corrupt blob files.
+//! Named journal owners return exact stored artifacts, answer a forged blob file for its receiver to
+//! refuse, and refuse a short one.
 
 mod actor_support;
 
@@ -10,8 +11,8 @@ use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    ArtifactDigests, ClosureLimit, Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult,
-    ReadArtifacts, ReadArtifactsResult, Utf8Text, artifact_blob, artifact_digest,
+    ArtifactDigests, ClosureLimit, Digest, DigestMismatch, Head, OpaqueBytes, ReactorSet, ReadArtifact,
+    ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, Utf8Text, artifact_blob, artifact_digest,
 };
 use aether_data::{Kind, KindId, Storage, StorageData};
 use aether_substrate::Subname;
@@ -187,19 +188,25 @@ fn text_kind_and_absent_digest_are_distinct_from_opaque_or_empty_bytes() {
 }
 
 #[test]
-fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
+fn a_forged_payload_is_answered_for_its_receiver_to_refuse_and_a_short_prefix_is_an_error_without_journal_writes() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
     let mismatch_path = temp.path().join("mismatch");
     let short_path = temp.path().join("short");
     let mismatch = seed(&mismatch_path, b"original component").blob;
     let short = seed(&short_path, b"another component").blob;
-    // Same length as the original, so the file passes the size check and only the digest check catches it.
+    // Same length as the original, so the file passes the size check and only the receiver's digest check catches it.
     overwrite_blob(&mismatch_path, mismatch, &artifact_blob(OpaqueBytes::ID, b"modified component"));
     overwrite_blob(&short_path, short, b"short");
 
     let (registry, mailer) = bare_substrate();
     let (caller_id, rx) = caller(&registry, "test.journal_actor.corruption_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let (arrivals, probe_rx) = mpsc::channel();
+    let probe = chassis
+        .spawn_actor::<BlobProbe>(Subname::Named("corruption_probe"), (), arrivals)
+        .finish()
+        .expect("probe birth")
+        .erase();
     let mismatch_owner = chassis
         .spawn_actor::<JournalActor>(
             Subname::Named("artifact_mismatch"),
@@ -216,16 +223,19 @@ fn changed_payload_and_short_prefix_are_errors_without_journal_writes() {
         )
         .finish()
         .expect("short owner birth");
-    request(&registry, mismatch_owner, caller_id, 81, &ReadArtifact { digest: mismatch });
+
+    request(&registry, mismatch_owner, probe, 81, &ReadArtifact { digest: mismatch });
+    let forged = probed_by_correlation(&probe_rx, &[81]);
+    let Some(Probed::Artifact(member)) = forged.get(&81) else {
+        panic!("the forged payload is answered Found, got {forged:?}");
+    };
+    assert_eq!(member.digest, mismatch, "the answer claims the requested digest, so the receiver checks that key");
+    assert_eq!(member.payload.as_ref().map_err(DigestMismatch::expected), Err(mismatch));
+
     request(&registry, short_owner, caller_id, 82, &ReadArtifact { digest: short });
-    let replies = replies_by_correlation(&rx, &[81, 82]);
     assert!(matches!(
-        replies.get(&81),
-        Some(ReadArtifactResult::Err { digest, message }) if *digest == mismatch && message.contains("digest")
-    ));
-    assert!(matches!(
-        replies.get(&82),
-        Some(ReadArtifactResult::Err { digest, message }) if *digest == short && message.contains("shorter")
+        reply::<ReadArtifactResult>(&rx, 82),
+        ReadArtifactResult::Err { digest, message } if digest == short && message.contains("shorter")
     ));
     assert_no_events(&mismatch_path);
     assert_no_events(&short_path);

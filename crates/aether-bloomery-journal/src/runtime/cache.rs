@@ -1,4 +1,4 @@
-//! The journal actor's read cache: verified members it checked in, kept
+//! The journal actor's read cache: stored members it checked in, kept
 //! resident across reads under a byte budget.
 //!
 //! This is a cache, so eviction is correct: no reply depends on an entry,
@@ -15,16 +15,17 @@
 //! eviction removes whole groups, least recently used first, so the members
 //! of one slab still live and die together.
 //!
-//! A hit is not verified again. Its claim was computed from the bytes and
-//! compared with the stored digest when it entered ([`Verified::check`]), a
-//! blob's bytes are immutable from check-in (ADR-0238 decision 1), and the
-//! journal never deletes or rewrites a stored artifact, so the claim stays
-//! true for as long as the entry lives. The receiver still checks every
-//! member it loads (ADR-0238 decision 11).
+//! An entry's claim equals its key by construction: every [`Stored`] claims
+//! the digest it was read under. Neither the cache nor the read that filled
+//! it hashes the bytes; the receiver checks every member it loads (ADR-0238
+//! decision 11). A blob's bytes are immutable from check-in (ADR-0238
+//! decision 1) and the journal never deletes or rewrites a stored artifact,
+//! so a stored file whose bytes do not hash to its digest is cached like any
+//! other until eviction, and every read of it fails the same way at its
+//! receiver.
 //!
 //! The workers share one [`ReadCache`] and lock it only for map work: disk
-//! reads, hashing, check-in, and dropping released members all run outside
-//! the lock.
+//! reads, check-in, and dropping released members all run outside the lock.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -34,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use aether_bloomery_kinds::ClosureArtifact;
 
 use crate::Digest;
-use crate::runtime::closure::Verified;
+use crate::runtime::closure::Stored;
 
 /// The journal actor's read-cache budget in bytes, charged per check-in
 /// allocation rather than per member.
@@ -106,7 +107,7 @@ impl ReadCache {
     /// evicting the least recently used groups until it fits. A digest
     /// already cached keeps its entry, and a group that adds no new member,
     /// or is larger than the whole budget, is not cached.
-    pub(crate) fn insert(&self, members: Vec<Verified>) {
+    pub(crate) fn insert(&self, members: Vec<Stored>) {
         let released = self.lock().insert(members);
         // Dropped here, after the guard: the last reference to a slab frees it.
         drop(released);
@@ -186,13 +187,13 @@ impl State {
     /// Cache `members` as one group and return every member the cache no
     /// longer holds, evicted or refused, for the caller to drop after
     /// unlocking.
-    fn insert(&mut self, members: Vec<Verified>) -> Vec<ClosureArtifact> {
+    fn insert(&mut self, members: Vec<Stored>) -> Vec<ClosureArtifact> {
         let charge_bytes = members.iter().map(|member| member.artifact().len()).fold(0, u64::saturating_add);
         if self.budget_bytes == 0
             || charge_bytes > self.budget_bytes
             || members.iter().all(|member| self.entries.contains_key(&member.digest()))
         {
-            return members.into_iter().map(Verified::into_artifact).collect();
+            return members.into_iter().map(Stored::into_artifact).collect();
         }
 
         let mut released = Vec::new();
@@ -243,12 +244,12 @@ mod tests {
 
     use super::{ReadCache, ReadCacheBudget};
     use crate::Digest;
-    use crate::runtime::closure::Verified;
+    use crate::runtime::closure::Stored;
 
     const KIND: KindId = KindId(1);
 
-    fn member(payload: &[u8]) -> Verified {
-        Verified::check(artifact_digest(KIND, payload), KIND, Blob::from(payload.to_vec())).expect("claim matches")
+    fn member(payload: &[u8]) -> Stored {
+        Stored::claimed(artifact_digest(KIND, payload), KIND, Blob::from(payload.to_vec()))
     }
 
     /// Whether `digest` is cached, read without touching its group.
