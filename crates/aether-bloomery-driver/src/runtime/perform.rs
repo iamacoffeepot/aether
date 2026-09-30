@@ -1,6 +1,6 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
-use aether_actor::{DependsOn, ReplyMode};
+use aether_actor::{DependsOn, ProtocolRef, ReplyMode, Target};
 use aether_bloomery_kinds::{Digest, StatusQuery};
 use aether_bloomery_workspace::Run;
 use aether_component::ComponentHostCapability;
@@ -9,15 +9,18 @@ use aether_http::HttpCapability;
 use aether_kinds::{Publish, Spawn};
 use aether_substrate::actor::native::NativeCtx;
 
-use super::{BundleDriverState, Caller, CallerId, Command, LoadTicket};
+use super::{BundleDriverState, BundleRoot, Caller, CallerId, Command, LoadTicket};
 
 impl BundleDriverState {
     /// Perform each [`Command`] in order, then return.
     ///
     /// Journal reads and appends go to the handed-over journal reference, a
     /// load publishes the bundle's code to the component host (its reply
-    /// spawns the root under the unit key), root commands go to the
-    /// reference the digest's spawn reply was stamped with, a program's
+    /// spawns the root under the unit key), an `Invoke` goes to the digest's
+    /// root as its [`ProgramRoot`](aether_bloomery_kinds::ProgramRoot) and the
+    /// reactor commands to it as its
+    /// [`ReactorRoot`](aether_bloomery_kinds::ReactorRoot), each cast from its
+    /// spawn reply when it loaded, a program's
     /// relayed `Http` call goes to the http capability and its `Workspace` call
     /// to the held workspace reference, and answers, fetch answers, and API
     /// answers release the held reply. Every send carries its ticket as the request
@@ -44,20 +47,28 @@ impl BundleDriverState {
                 Command::Append { ticket, request } => {
                     let _ = ctx.send_to_with_context(self.journal, &request, ticket);
                 }
-                Command::Load { ticket, bundle, wasm } => {
-                    self.loading.insert(ticket, bundle);
+                Command::Load { ticket, bundle, roles, wasm } => {
+                    self.loading.insert(ticket, (bundle, roles));
                     let _ = ctx.send_with_context::<ComponentHostCapability>(
                         &Publish { code: wasm.into(), configs: Vec::new() },
                         ticket,
                     );
                 }
-                Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
+                Command::Invoke { ticket, bundle, request } => {
+                    self.send_to_root(ctx, bundle, "program", |root| root.program, &request, ticket);
+                }
                 Command::WatchHead { ticket, request } => {
                     let _ = ctx.send_detached_to_with_context(self.journal, &request, ticket);
                 }
-                Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
-                Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, ticket),
-                Command::QueryStatus { ticket, bundle } => self.send_to_root(ctx, bundle, &StatusQuery, ticket),
+                Command::Warm { ticket, bundle, request } => {
+                    self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &request, ticket);
+                }
+                Command::Evaluate { ticket, bundle, request } => {
+                    self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &request, ticket);
+                }
+                Command::QueryStatus { ticket, bundle } => {
+                    self.send_to_root(ctx, bundle, "reactor", |root| root.reactor, &StatusQuery, ticket);
+                }
                 // A second answer for one caller drops: the caller already
                 // holds its exactly-once outcome, so no reply is owed.
                 Command::Answer { caller, outcome } => match self.callers.remove(&caller) {
@@ -105,18 +116,25 @@ impl BundleDriverState {
         let _ = ctx.send_with_context::<ComponentHostCapability>(&spawn, ticket);
     }
 
-    /// Send `request` to `bundle`'s loaded root with `ticket` as the request
-    /// context. The core addresses only a digest it saw load, so a digest
-    /// with no kept root is a broken invariant and aborts (ADR-0063).
-    fn send_to_root<M: ReplyMode, A, K: ActorMail, C: Kind>(
+    /// Send `request` to `bundle`'s loaded root as its `role`, the typed
+    /// reference `as_role` picks, with `ticket` as the request context. The
+    /// core addresses only a digest it saw load, and a load whose root does
+    /// not publish a declared role fails, so a digest with no kept root, or a
+    /// kept root without the addressed role, is a broken invariant and aborts
+    /// (ADR-0063).
+    fn send_to_root<M: ReplyMode, A, P, K: ActorMail, I, C: Kind>(
         &self,
         ctx: &mut NativeCtx<'_, A, M>,
         bundle: Digest,
+        role: &str,
+        as_role: impl FnOnce(&BundleRoot) -> Option<ProtocolRef<P>>,
         request: &K,
         ticket: C,
-    ) {
-        let Some(root) = self.roots.get(&bundle) else {
-            ctx.fatal_abort(format!("the core addressed bundle {bundle}, whose root the driver never kept"));
+    ) where
+        ProtocolRef<P>: Target<K, I>,
+    {
+        let Some(root) = self.roots.get(&bundle).and_then(as_role) else {
+            ctx.fatal_abort(format!("the core addressed bundle {bundle} as a {role} root the driver never kept"));
         };
         let _ = ctx.send_to_with_context(root, request, ticket);
     }

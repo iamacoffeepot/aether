@@ -3,6 +3,7 @@
 mod declaration;
 mod intent;
 mod mail;
+mod protocols;
 mod set;
 
 pub use declaration::{
@@ -11,4 +12,5 @@ pub use declaration::{
 };
 pub use intent::ReactorIntent;
 pub use mail::{Evaluated, Event, Status, StatusQuery, Warm, WarmEntries, WarmEntriesError, Warmed};
+pub use protocols::ReactorRoot;
 pub use set::{ReactorSet, ReactorSetError};

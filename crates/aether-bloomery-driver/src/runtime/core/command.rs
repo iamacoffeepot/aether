@@ -62,6 +62,8 @@ pub enum Command {
         ticket: LoadTicket,
         /// Content digest the bundle loads under.
         bundle: Digest,
+        /// The roles the bundle declares, which the shell casts its root to.
+        roles: RootRoles,
         /// The bundle's wasm bytes.
         wasm: Vec<u8>,
     },
@@ -157,13 +159,26 @@ pub enum Command {
     },
 }
 
+/// The roles a loading bundle declares, as the shell needs them: which
+/// protocols it casts the bundle's root to at the spawn reply. A root that
+/// does not publish a role it declares fails its load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootRoles {
+    /// The bundle declares programs, so its root is a
+    /// [`ProgramRoot`](aether_bloomery_kinds::ProgramRoot).
+    pub programs: bool,
+    /// The bundle declares reactors, so its root is a
+    /// [`ReactorRoot`](aether_bloomery_kinds::ReactorRoot).
+    pub reactors: bool,
+}
+
 /// Shell-mapped outcome of [`Command::Load`].
 ///
 /// The shell maps the component host's `PublishResult` and `SpawnResult`
 /// onto this type so the core does not depend on `aether-kinds`. The core
 /// names a loaded bundle by its digest alone; the shell keeps the root's
-/// proven reference, taken from the spawn reply's stamped sender, keyed by
-/// that digest.
+/// typed references, cast from the spawn reply's stamped sender once per
+/// declared role, keyed by that digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadOutcome {
     /// The spawn stood the bundle's root up; the shell holds it.
