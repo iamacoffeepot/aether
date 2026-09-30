@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use crate::Digest;
 use crate::runtime::blobs::BlobDir;
 use crate::runtime::cache::ReadCache;
-use crate::runtime::closure::{Closure, PlannedMember, Verified, plan_closure, read_slab};
+use crate::runtime::closure::{Closure, PlannedMember, Stored, plan_closure, read_slab};
 use crate::runtime::journal::{BUSY_TIMEOUT, JournalError, RootLock};
 
 /// The recorded stored length of one artifact row.
@@ -52,16 +52,18 @@ impl WorkerReader {
 
     /// As [`crate::Journal::read_closure`], over a read-only connection opened
     /// on the calling thread. Members already in `cache` are reused without
-    /// reading their files or hashing them. The misses are checked in through
-    /// `check_in` as one slab of just their lengths, each member file read
-    /// straight into its region, and the slab's members enter `cache` as one
-    /// group, so they live and die together, which is what a slab asks for.
-    /// The reply lists every member in walk order either way.
+    /// reading their files. No member is hashed: each claims the digest it
+    /// was stored under, and the receiver verifies it. The misses are checked
+    /// in through `check_in` as one slab of just their lengths, each member
+    /// file read straight into its region, and the slab's members enter
+    /// `cache` as one group, so they live and die together, which is what a
+    /// slab asks for. The reply lists every member in walk order either way.
     ///
     /// # Errors
     ///
-    /// As [`crate::Journal::read_closure`], plus [`JournalError::Backend`] when
-    /// the connection cannot be opened.
+    /// As [`crate::Journal::read_closure`], except that a member whose stored
+    /// bytes do not hash to its digest is answered rather than refused, plus
+    /// [`JournalError::Backend`] when the connection cannot be opened.
     pub fn read_closure(
         &self,
         root: &Digest,
@@ -101,10 +103,10 @@ impl WorkerReader {
     ///
     /// # Errors
     ///
-    /// [`JournalError::Backend`] when the connection or a row read fails, as
-    /// [`BlobDir::read_payload`] for a member's file, and
-    /// [`JournalError::ArtifactDigestMismatch`] when a member's stored kind
-    /// and payload do not hash to its digest.
+    /// [`JournalError::Backend`] when the connection or a row read fails, and
+    /// as [`BlobDir::read_payload`] for a member's file. A member's bytes are
+    /// not hashed, so one that does not hash to its digest is answered and
+    /// fails at its receiver's check.
     pub fn read_artifacts(
         &self,
         digests: &[Digest],
@@ -152,20 +154,18 @@ impl WorkerReader {
         Ok(ReadPrefix::Found(answered.into_iter().filter_map(|hit| hit.or_else(|| read.next())).collect()))
     }
 
-    /// The verified artifact stored under `digest`, or `None` when it has no
-    /// row. A member already in `cache` is returned without opening a
-    /// connection. Otherwise, over a read-only connection opened on the
-    /// calling thread, the payload is read straight into one buffer of its
-    /// exact length, checked in through `check_in` once, and cached as a
-    /// group of its own. There is no slab: a single artifact lives and dies
-    /// alone.
+    /// The artifact stored under `digest`, claiming `digest` unhashed for its
+    /// receiver to verify, or `None` when it has no row. A member already in
+    /// `cache` is returned without opening a connection. Otherwise, over a
+    /// read-only connection opened on the calling thread, the payload is read
+    /// straight into one buffer of its exact length, checked in through
+    /// `check_in` once, and cached as a group of its own. There is no slab: a
+    /// single artifact lives and dies alone.
     ///
     /// # Errors
     ///
     /// [`JournalError::Backend`] when the connection or the row read fails,
-    /// as [`BlobDir::read_payload`] for the artifact's file, and
-    /// [`JournalError::ArtifactDigestMismatch`] when its stored kind and
-    /// payload do not hash to `digest`.
+    /// and as [`BlobDir::read_payload`] for the artifact's file.
     pub fn read_artifact(
         &self,
         digest: &Digest,
@@ -186,7 +186,7 @@ impl WorkerReader {
 
         let size_bytes = u64::try_from(size).map_err(|_| JournalError::IntegerRange)?;
         let (kind, payload) = self.blobs.read_payload(digest, size_bytes)?;
-        let member = Verified::check(*digest, kind, check_in.check_in(payload))?;
+        let member = Stored::claimed(*digest, kind, check_in.check_in(payload));
         let artifact = member.artifact().clone();
         cache.insert(vec![member]);
         Ok(Some(artifact))

@@ -420,13 +420,18 @@ fn read_request(reader: &mut impl BufRead) -> io::Result<StubRequest> {
     Ok(StubRequest { method, target, body })
 }
 
-/// A chunked request body, decoded; a malformed one is an error.
+/// A chunked request body, decoded; a malformed one is an error. A client
+/// that abandons its body between chunks, as an upload whose source fails
+/// does when it drops the connection, leaves the chunks that arrived as the
+/// recorded body.
 fn read_chunked(reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
     let mut body = Vec::new();
     let mut line = String::new();
     loop {
         line.clear();
-        reader.read_line(&mut line)?;
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(body);
+        }
         let size = usize::from_str_radix(line.trim_end(), 16).map_err(io::Error::other)?;
         let start = body.len();
         body.resize(start + size, 0);

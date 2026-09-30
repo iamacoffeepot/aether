@@ -1,10 +1,11 @@
 //! `Run` over the unit's journal: the Engine API sequence, the sandbox, provisioning, refusals, and the output tree.
 
 use std::error::Error;
+use std::fs;
 use std::thread;
 
 use aether_bloomery_journal::Batch;
-use aether_bloomery_kinds::{Digest, Node, ReadArtifacts, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Node, OpaqueBytes, ReadArtifacts, Ref, Tree, artifact_blob};
 use aether_bloomery_workspace::testing::{
     RUN_CONTAINER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
 };
@@ -13,6 +14,7 @@ use aether_bloomery_workspace::{
     Resource, Run, RunError, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools,
     TreePath,
 };
+use aether_data::Kind;
 use aether_data::wire::encode_to_vec;
 use aether_harness_bloomery::BloomeryHarness;
 
@@ -318,6 +320,42 @@ fn a_transport_failure_mid_run_still_removes_everything_and_answers_failed_namin
             format!("DELETE /v1.44/containers/{RUN_CONTAINER}?force=true&v=true"),
             format!("DELETE /v1.44/volumes/{RUN_VOLUME}?force=true"),
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stored_blob_forged_on_disk_fails_the_run_before_any_step_starts_and_still_cleans_up() -> TestResult {
+    // Catches a change that drops the workspace's own check on the blobs it streams into `/work`, believing the
+    // journal checked them: the journal answers the stored file under the digest it was read by, unhashed, so only
+    // the workspace's check stands between a forged file and a container.
+    let inputs = Inputs::new(vec![("forged.txt", b"original bytes")])?;
+    let (hex, request) = (inputs.hex(), inputs.request("tool", "target")?);
+    let forged = Ref::of_bytes(b"original bytes").digest().to_string();
+    let mut replies = script(&hex, &[]).replies();
+    replies.truncate(5);
+    replies.extend([StubReply::with_length(204, ""), StubReply::with_length(204, "")]);
+    let stub = StubDaemon::bind()?;
+    let mut harness = inputs.boot(&stub, FLAGS)?;
+    // Same length and kind prefix as the original, so only a digest check over the bytes catches it.
+    fs::write(
+        harness.journal_path().join("blobs").join(&forged[..2]).join(&forged),
+        artifact_blob(OpaqueBytes::ID, b"modified bytes"),
+    )?;
+
+    let run = over(&harness, request);
+    let (answer, requests) = serving(stub, replies, || harness.run(&run))?;
+
+    let detail = detail(&answer)?;
+    assert!(detail.contains("reading a blob failed"), "{detail}");
+    assert_eq!(
+        lines(&requests[4..]),
+        [
+            format!("PUT /v1.44/containers/{RUN_CONTAINER}/archive?path=/work"),
+            format!("DELETE /v1.44/containers/{RUN_CONTAINER}?force=true&v=true"),
+            format!("DELETE /v1.44/volumes/{RUN_VOLUME}?force=true"),
+        ],
+        "no step started, and cleanup still removed the container and its volume"
     );
     Ok(())
 }

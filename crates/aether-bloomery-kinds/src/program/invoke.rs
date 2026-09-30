@@ -18,7 +18,8 @@ use crate::{Digest, EncodedArtifact};
 /// The digest a sender claims for the bytes beside it. Nothing checked it on
 /// decode, and it cannot be read as a proven [`Digest`].
 ///
-/// Only [`ClosureArtifact::new`], which computes it, and decode build one.
+/// [`ClosureArtifact::new`] computes one; [`ClosureArtifact::claiming`] and
+/// decode take one on the sender's word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Schema)]
 pub struct ClaimedDigest(Digest);
 
@@ -51,6 +52,15 @@ impl ClosureArtifact {
     pub fn new(kind: KindId, bytes: impl Into<Blob>) -> Self {
         let bytes = bytes.into();
         Self { claimed: ClaimedDigest(blob_digest(kind, &bytes)), kind, bytes }
+    }
+
+    /// Carry `bytes` under `kind`, claiming `claimed` without hashing
+    /// anything. The claim is the caller's word, exactly what decode yields,
+    /// so it adds no trust: a receiver verifies the bytes with [`Self::load`]
+    /// or [`Self::verified_reader`] before relying on them.
+    #[must_use]
+    pub fn claiming(claimed: Digest, kind: KindId, bytes: impl Into<Blob>) -> Self {
+        Self { claimed: ClaimedDigest(claimed), kind, bytes: bytes.into() }
     }
 
     /// The digest the sender claims. It is unverified until [`Self::load`].

@@ -7,8 +7,11 @@
 //! are read, into one slab through a [`BlobCheckIn`] ([`read_slab`], called
 //! by the crate's worker reader); [`crate::Journal::read_closure`] reads
 //! every member into its own buffer. Either way a member is built only as a
-//! [`Verified`], whose claim was checked against the digest it was stored
-//! under.
+//! [`Stored`], which claims the digest it was stored under. The worker's
+//! members answer mail, so they are not hashed here: a claim crosses mail
+//! unverified by type, and every receiver verifies the bytes before relying
+//! on them (ADR-0238 decision 11). [`crate::Journal::read_closure`] answers
+//! in process, so it checks each member's claim itself.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -128,7 +131,7 @@ pub fn read_each(
         .iter()
         .map(|member| {
             let (kind, payload) = blobs.read_payload(&member.digest, member.size_bytes)?;
-            Verified::check(member.digest, kind, check_in(payload)).map(Verified::into_artifact)
+            Stored::check(member.digest, kind, check_in(payload)).map(Stored::into_artifact)
         })
         .collect()
 }
@@ -137,12 +140,13 @@ pub fn read_each(
 /// through `check_in`, then build each member over its [`Blob`]. The slab is
 /// exactly the given members' lengths, so a caller passes only the members
 /// it has to read. An error before the slab is finished drops it, which
-/// frees it.
+/// frees it. Nothing is hashed: each member claims the digest it was read
+/// under, and its receiver verifies it.
 pub fn read_slab(
     blobs: &BlobDir,
     members: &[&PlannedMember],
     check_in: &BlobCheckIn,
-) -> Result<Vec<Verified>, JournalError> {
+) -> Result<Vec<Stored>, JournalError> {
     let lens = members.iter().map(|member| blobs::payload_len(member.size_bytes)).collect::<Result<Vec<_>, _>>()?;
     let mut slab = check_in.slab(&lens);
     let kinds = members
@@ -151,26 +155,37 @@ pub fn read_slab(
         .map(|(member, region)| blobs.read_payload_into(&member.digest, member.size_bytes, region))
         .collect::<Result<Vec<_>, _>>()?;
 
-    members
+    Ok(members
         .iter()
         .zip(kinds)
         .zip(slab.finish())
-        .map(|((member, kind), blob)| Verified::check(member.digest, kind, blob))
-        .collect()
+        .map(|((member, kind), blob)| Stored::claimed(member.digest, kind, blob))
+        .collect())
 }
 
-/// A member whose claim has been checked against the digest it was stored
-/// under. [`Self::check`] is the one constructor, so a `Verified` always
-/// carries a claim equal to its digest, which is what lets the read cache
-/// key an entry by that digest.
-pub struct Verified {
+/// A member read from the file named by its digest, claiming that digest.
+/// Its two constructors both claim the `digest` it was stored under, so a
+/// `Stored` always carries a claim equal to its digest, which is all the read
+/// cache needs to key an entry by that digest. The claim is not proof:
+/// [`Self::claimed`] hashes nothing, and a receiver verifies the bytes with
+/// [`ClosureArtifact::load`] or [`ClosureArtifact::verified_reader`].
+pub struct Stored {
     digest: Digest,
     artifact: ClosureArtifact,
 }
 
-impl Verified {
-    /// The member of `kind` over `blob`, once its claim is checked against
-    /// the `digest` it was stored under.
+impl Stored {
+    /// The member of `kind` over `blob`, claiming the `digest` it was stored
+    /// under without hashing it. For a member that answers mail, whose
+    /// receiver verifies it.
+    #[must_use]
+    pub(crate) fn claimed(digest: Digest, kind: KindId, blob: Blob) -> Self {
+        Self { digest, artifact: ClosureArtifact::claiming(digest, kind, blob) }
+    }
+
+    /// The member of `kind` over `blob`, once `kind` and `blob` are checked to
+    /// hash to the `digest` it was stored under. For a member answered in
+    /// process, which no receiver checks.
     ///
     /// # Errors
     ///
@@ -191,13 +206,13 @@ impl Verified {
         self.digest
     }
 
-    /// The checked member.
+    /// The member.
     #[must_use]
     pub const fn artifact(&self) -> &ClosureArtifact {
         &self.artifact
     }
 
-    /// The checked member, by value.
+    /// The member, by value.
     #[must_use]
     pub fn into_artifact(self) -> ClosureArtifact {
         self.artifact
