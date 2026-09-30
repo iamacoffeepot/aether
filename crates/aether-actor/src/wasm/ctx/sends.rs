@@ -4,12 +4,12 @@
 //!
 //! [`WasmCtx<'_, A, M>`](WasmCtx) is generic over its reply class (ADR-0112,
 //! ADR-0134) because the marker selects which reply surface the handler is
-//! allowed to reach: `reply` / `reply_to` exist only on `Manual`, not on
+//! allowed to reach: `reply` / `reply_to` exist only on `Unchecked`, not on
 //! `Single`. That is load-bearing at the handler
 //! boundary — a `#[handler::single]` whose body calls `ctx.reply` must not
 //! compile. It is pure friction one call deeper: a helper factored out of a
 //! handler to *send* something inherits a type parameter it never reads, and
-//! the author discovers that through a mismatched-`Single`/`Manual` error.
+//! the author discovers that through a mismatched-`Single`/`Unchecked` error.
 //!
 //! `ctx.sends()` hands out this view: the ctx's by-proof outbound-mail verbs,
 //! none of the reply channel. The view keeps the actor of the ctx it
@@ -71,7 +71,7 @@ pub struct Sends<'a, A = Erased> {
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// The reply-class-free view of this ctx's outbound surface (see
     /// [`Sends`]). Hand it to a helper that only sends mail, so the helper
-    /// stays callable from a `single` and a `manual` handler alike
+    /// stays callable from a `single` and a `unchecked` handler alike
     /// without a `M: ReplyMode` parameter of its own.
     #[must_use]
     pub fn sends(&mut self) -> Sends<'_, A> {

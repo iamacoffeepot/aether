@@ -153,7 +153,7 @@ impl HeldLedger for NativeParkLedger<'_> {
 mod tests {
     use std::sync::mpsc;
 
-    use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply};
+    use aether_actor::{ErasedActorRef, MailSender, OutboundReply, Unchecked};
     use aether_kinds::Tick;
 
     use super::*;
@@ -165,13 +165,13 @@ mod tests {
     use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use crate::testing::{PumpedDriver, boot_bare_test_chassis, fresh_substrate, registered_ref};
 
-    /// Asks [`Replier`] to reply `replies` times from one manual turn.
+    /// Asks [`Replier`] to reply `replies` times from one unchecked turn.
     #[aether_data::kind(name = "test.binding.reply.ask", copy)]
     struct Ask {
         replies: u32,
     }
 
-    /// A pumped root whose manual handler replies by hand through
+    /// A pumped root whose unchecked handler replies by hand through
     /// `ctx.reply`, the verb that reaches `send_reply_for_handler`.
     struct Replier {
         /// The replies its turns have sent.
@@ -187,8 +187,8 @@ mod tests {
             Ok(Self { replied: 0 })
         }
 
-        #[handler::manual]
-        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, ask: Ask) {
+        #[handler::unchecked(reason = "test: replies more than once")]
+        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, ask: Ask) {
             for _ in 0..ask.replies {
                 ctx.reply(&Tick::default());
                 self.replied += 1;

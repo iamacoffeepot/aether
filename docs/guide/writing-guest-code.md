@@ -33,9 +33,10 @@ declares the reply kind `R`
 and keeps the `Held<R>` ticket to answer from any later handler with
 `held.answer(ctx, &reply)`. The host keeps the request's reply handle and holds
 its settlement open until the ticket answers. This still declares one reply
-kind and answers it exactly once — `#[handler::manual]` is for a handler that
-replies more than once, replies from outside the actor, or relays a request,
-and is never a default.
+kind and answers it exactly once — `#[handler::unchecked(reason = "…")]` gives
+up the reply check; it is only for a handler that replies more than once,
+replies from outside the actor, or relays a request, its `reason` says which,
+and it is never a default.
 
 ```rust
 #[handler::single]

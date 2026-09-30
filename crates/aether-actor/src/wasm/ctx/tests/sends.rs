@@ -2,7 +2,7 @@
 //! outbound mail exactly as the [`WasmCtx`] it was taken from.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
-use crate::model::ctx::{Erased, Manual};
+use crate::model::ctx::{Erased, Unchecked};
 use crate::model::{Addressable, HandlesKind, One, Protocol, Row, Silent};
 use crate::reference::{ActorRef, ErasedActorRef, ProtocolRef};
 use crate::wasm::inline::{ChildRecord, drain_cluster_queue};
@@ -50,7 +50,7 @@ fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
     );
     let target = ErasedActorRef::new(target_id);
 
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
 
     ctx.send_to(target, &());
     drain_to_members(&registry, "the ctx send");
@@ -95,7 +95,7 @@ fn send_to_sends_through_a_proven_reference_on_ctx_and_view() {
         probe.actor,
     );
 
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
     let reference = ActorRef::<SendsPeer>::new(target);
 
     ctx.send_to(reference, &());

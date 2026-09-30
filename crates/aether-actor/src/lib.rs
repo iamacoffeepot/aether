@@ -54,7 +54,7 @@ pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 pub use blob::guest::__mint_guest_blob;
 pub use held_reply::HeldReply;
 pub use local::Local;
-pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
+pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract, Contracts,
@@ -94,7 +94,7 @@ pub use wasm::{
 // (native).
 
 /// Return code the `#[actor]`-synthesized dispatcher sends back up
-/// through `receive_p32` when a `#[handler::manual]` arm matched or the
+/// through `receive_p32` when a `#[handler::unchecked(..)]` arm matched or the
 /// `#[fallback]` ran (which by definition handles anything). Either may
 /// keep the dispatch's reply handle and answer it later, so the handle
 /// stays live until answered. Propagated verbatim by the consumer's FFI

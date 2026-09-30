@@ -255,7 +255,7 @@ fn load_panel_with_children(
     font_id: u32,
     children: Vec<WidgetChildSpec>,
 ) -> ActorRef<WidgetPanel> {
-    let (panel, path) = harness
+    let panel = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -263,6 +263,7 @@ fn load_panel_with_children(
             export: None,
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    let path = harness.actor_path(&panel);
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
     panel
 }
@@ -279,7 +280,7 @@ fn load_editor_region(
     children: Vec<WidgetChildSpec>,
 ) -> ActorRef<WidgetPanel> {
     let config = PanelConfig { editor_region: "panel".to_owned(), ..panel_config(font_id, children) };
-    let (region, path) = harness
+    let region = harness
         .load::<EditorRegion>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -287,6 +288,7 @@ fn load_editor_region(
             export: Some(EditorRegion::NAMESPACE.to_owned()),
         })
         .unwrap_or_else(|error| panic!("load EditorRegion: {error}"));
+    let path = harness.actor_path(&region);
     assert!(path.to_string().ends_with(":panel"), "the editor region should register under :panel; got {path}");
 
     // The region spawns its panel in `wire`, which runs after the load reply.
@@ -308,15 +310,14 @@ fn load_editor_region(
 }
 
 fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<EditorRegionProbe> {
-    let (probe, _) = harness
+    harness
         .load::<EditorRegionProbe>(LoadComponent {
             wasm: fs::read(wasm_path).expect("read fixture wasm"),
             name: Some("region-b".to_owned()),
             config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
             export: None,
         })
-        .unwrap_or_else(|error| panic!("load editor region probe: {error}"));
-    probe
+        .unwrap_or_else(|error| panic!("load editor region probe: {error}"))
 }
 
 /// Load the shell under its **default** name, so the editor region and the

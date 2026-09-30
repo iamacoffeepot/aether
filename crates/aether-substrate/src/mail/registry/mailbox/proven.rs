@@ -350,7 +350,7 @@ impl Registry {
     ///
     /// [`Self::published_rows_at`] reads the rows the route `reference` proves
     /// published while it is `Live`; `T::admits` decides whether those rows
-    /// answer `T`: the subscriber arm's silent-or-manual rule or the protocol
+    /// answer `T`: the subscriber arm's silent-or-unchecked rule or the protocol
     /// arm's exact-rows rule (ADR-0231 §4), both fixed in `aether-actor`. A
     /// `Starting`, `Dropped`, or unknown route answers `None`, as does a live
     /// one whose rows `T` does not admit, such as a closure route's empty

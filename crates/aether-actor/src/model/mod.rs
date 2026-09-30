@@ -647,7 +647,7 @@ pub trait HandlesKind<K: Kind>: Addressable {}
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not reply to `{K}` with a single typed kind",
     label = "this reply bound is not satisfied",
-    note = "the handler may be silent, manual, or reply with a different kind"
+    note = "the handler may be silent, unchecked, or reply with a different kind"
 )]
 pub trait Replies<K: Kind>: HandlesKind<K> {
     type Reply: Kind;

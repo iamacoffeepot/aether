@@ -133,7 +133,8 @@ Use:
 
 - `single` for zero-or-one typed return;
 - a single reply whose kind carries a list for a bounded repeated result;
-- `manual` only when reply timing/type cannot be expressed as a return;
+- `unchecked(reason = "…")` only when reply timing/type cannot be expressed as
+  a return, with the reason saying which;
 - `task` completion for sanctioned off-thread work.
 
 Do not copy an old low-level `send_reply` signature. Returning the reply from a

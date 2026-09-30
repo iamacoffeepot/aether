@@ -170,10 +170,10 @@ subscriber off the inbound's host-stamped `Source`, so you name neither the stag
 id nor your own mailbox. It is checked at compile time three ways: `P` must
 publish `K` (`LifecycleCapability` publishes the stage kinds), the actor must
 declare `depends(P)`, and the actor's handler for `K` must not declare a reply (a
-`-> ()` handler, or a manual one), because a broadcast stage has no one waiting
+`-> ()` handler, or an unchecked one), because a broadcast stage has no one waiting
 for a reply. Any one of them missing
 is an error at the call. The cap checks the last one again at run time: it
-refuses a sender whose published rows lack a silent or manual handler for the
+refuses a sender whose published rows lack a silent or unchecked handler for the
 stage. `ctx.unsubscribe::<P, K>()` is the teardown twin, with
 the first two checks. You don't unsubscribe on the way out — the host clears your
 subscriptions when the component drops.
@@ -194,7 +194,7 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
 with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 `aether-kit`'s `camera` export subscribes `Tick` and `Render` — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on

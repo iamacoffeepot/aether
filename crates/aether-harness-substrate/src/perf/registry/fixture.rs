@@ -136,6 +136,7 @@ impl Dispatch<Self> for CommitChild {
                 name: <CloseChild as Kind>::NAME.to_owned(),
                 doc: None,
                 reply: ReplyContract::None,
+                reason: None,
             }],
             ..ComponentCapabilities::default()
         }
@@ -143,7 +144,7 @@ impl Dispatch<Self> for CommitChild {
 
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -207,18 +208,21 @@ impl Dispatch<Self> for CommitParent {
                     name: <StageBurst as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
                 HandlerCapability {
                     id: CloseBurst::ID,
                     name: <CloseBurst as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
                 HandlerCapability {
                     id: CommitQuery::ID,
                     name: <CommitQuery as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::One(CommitReport::ID),
+                    reason: None,
                 },
             ],
             ..ComponentCapabilities::default()
@@ -238,7 +242,7 @@ impl Dispatch<Self> for CommitParent {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -286,7 +290,7 @@ impl CommitParent {
     /// draws from the spawner's monotonic sequence, so bursts never collide
     /// with each other and a name conflict cannot be mistaken for owner
     /// backpressure.
-    fn stage_burst(&mut self, ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>, count: u32) {
+    fn stage_burst(&mut self, ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>, count: u32) {
         for _ in 0..count {
             match ctx.spawn_child::<CommitChild>(Subname::Counter, (), ()).stage() {
                 Ok(_) => {

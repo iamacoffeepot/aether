@@ -44,7 +44,7 @@ fn boot_bench() -> SubstrateHarness {
 
 /// Load the bundle's singleton `test.probe` export at its published name,
 /// typed as `Probe`.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> (ActorRef<Probe>, ErasedActorPath) {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Probe> {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
         .load::<Probe>(LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.probe".to_owned()) })
@@ -198,7 +198,7 @@ fn unsubscribe_stops_delivery() {
         return;
     };
     let mut harness = boot_bench();
-    let (probe, _) = load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -230,7 +230,8 @@ fn drop_clears_subscriptions() {
         return;
     };
     let mut harness = boot_bench();
-    let (_, probe) = load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path);
+    let probe_path = harness.actor_path(&probe);
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -242,7 +243,7 @@ fn drop_clears_subscriptions() {
     );
     let pre_drop = harness.count_observed(KeyObserved::NAME);
 
-    drop_component(&mut harness, probe);
+    drop_component(&mut harness, probe_path);
     send_keys(&mut harness, 2);
     assert_eq!(
         harness.count_observed(KeyObserved::NAME),

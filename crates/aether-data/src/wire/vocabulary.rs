@@ -464,7 +464,7 @@ impl WireEncode for ReplyContract {
                 1u32.encode(out)?;
                 id.encode(out)
             }
-            Self::Manual => 3u32.encode(out),
+            Self::Unchecked => 3u32.encode(out),
         }
     }
 }
@@ -475,7 +475,7 @@ impl<'de> WireDecode<'de> for ReplyContract {
             0 => Ok(Self::None),
             1 => Ok(Self::One(crate::KindId::decode(cursor)?)),
             // Selector 2 is reserved (retired by #6440) and never reused.
-            3 => Ok(Self::Manual),
+            3 => Ok(Self::Unchecked),
             other => Err(Error::InvalidEnum(other)),
         }
     }
@@ -484,12 +484,13 @@ impl<'de> WireDecode<'de> for ReplyContract {
 impl WireEncode for InputsRecord {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         match self {
-            Self::Handler { id, name, doc, reply } => {
+            Self::Handler { id, name, doc, reply, reason } => {
                 0u32.encode(out)?;
                 id.encode(out)?;
                 name.encode(out)?;
                 doc.encode(out)?;
-                reply.encode(out)
+                reply.encode(out)?;
+                reason.encode(out)
             }
             Self::Fallback { doc } => {
                 1u32.encode(out)?;
@@ -526,6 +527,7 @@ impl<'de> WireDecode<'de> for InputsRecord {
                 name: Cow::decode(cursor)?,
                 doc: Option::decode(cursor)?,
                 reply: ReplyContract::decode(cursor)?,
+                reason: Option::decode(cursor)?,
             }),
             1 => Ok(Self::Fallback { doc: Option::decode(cursor)? }),
             2 => Ok(Self::Component { doc: Cow::decode(cursor)? }),

@@ -12,7 +12,7 @@
 //! `CoveredBy`, `CoversRows`, `RowSet`, or `CastTarget` impl to get wrong.
 //!
 //! Each method is one row: `fn name(mail: K) -> O;` is a single row,
-//! `fn name(mail: K);` (or `-> ()`) a silent one, and `-> Undeclared` a manual
+//! `fn name(mail: K);` (or `-> ()`) a silent one, and `-> Undeclared` an unchecked
 //! row. The explicit return type follows the same parser and emission path as
 //! any other reply shape. Every grammar violation is reported, each at its own
 //! span, in one combined error.

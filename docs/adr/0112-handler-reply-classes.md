@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — the reply-class migration + lock, #1850 / #1874–#1879)
 - **Date:** 2026-06-14
+- **Amended (#7193):** 2026-09-29 — terminology: the manual class is renamed **unchecked**. `#[handler::manual]` is now `#[handler::unchecked(reason = "…")]`, whose required reason states why the handler gives up the reply check; the `Manual` reply mode is `Unchecked`, and `ReplyContract::Manual` is `ReplyContract::Unchecked` (wire selector 3 unchanged). The body below is left as recorded.
 
 ## Context
 

@@ -389,7 +389,7 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
    tracks the send as a chassis root and pumps the slot until that root
    settles, so the mail runs through the cap's `#[actor]`-generated dispatch
    exactly as production would — including a `-> Pending<R>` handler's
-   `Manual` arm, which accepts the returned receipt itself. The test never
+   `Unchecked` arm, which accepts the returned receipt itself. The test never
    hand-disarms a `Pending`.
 3. Assert what the handler *sent* by reading the stand-in's channel (the
    `registered_ref` closure forwards each dispatch it receives), and assert

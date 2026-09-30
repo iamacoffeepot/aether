@@ -9,7 +9,7 @@ use crate::blob::guest::{EncodedGuestMail, encode_guest};
 use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
-use crate::model::ctx::reply_mode::{Manual, ReplyMode};
+use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{Addressable, CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
 use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
@@ -206,11 +206,11 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     }
 }
 
-// ADR-0112: the reply surface is per-mode. `Manual` carries it (a
-// manual-class handler issues its own replies); `Single` deliberately
+// ADR-0112: the reply surface is per-mode. `Unchecked` carries it (a
+// unchecked-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
+impl<A> OutboundReply for WasmCtx<'_, A, Unchecked> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {

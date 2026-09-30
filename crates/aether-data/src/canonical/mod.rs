@@ -370,15 +370,16 @@ mod tests {
         // — `(tag = 1, id)`.
         const REPLY_TAG: u8 = 1;
         const REPLY_ID: u64 = 0x00c0_ffee_0bad_f00d;
-        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         match decoded {
-            InputsRecord::Handler { id, name, doc, reply } => {
+            InputsRecord::Handler { id, name, doc, reply, reason } => {
                 assert_eq!(id, KindId(ID));
                 assert_eq!(name, NAME);
                 assert_eq!(doc.as_deref(), DOC);
                 assert_eq!(reply, ReplyContract::One(KindId(REPLY_ID)));
+                assert_eq!(reason, None);
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -394,12 +395,18 @@ mod tests {
         // — `(tag = 0, id = 0)`.
         const REPLY_TAG: u8 = 0;
         const REPLY_ID: u64 = 0;
-        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
-        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
-            InputsRecord::Handler { id: KindId(ID), name: NAME.into(), doc: None, reply: ReplyContract::None }
+            InputsRecord::Handler {
+                id: KindId(ID),
+                name: NAME.into(),
+                doc: None,
+                reply: ReplyContract::None,
+                reason: None
+            }
         );
     }
 
@@ -409,7 +416,7 @@ mod tests {
         // ADR-0112 / ADR-0118: the const-fn `(tag, id)` encoder matches
         // `wire::to_vec(ReplyContract)` byte-for-byte. The selector is
         // a `u32` LE, so its low byte (buf[0]) is the selector —
-        // `None` = 0, `One` = 1, `Manual` = 3 (2 is reserved).
+        // `None` = 0, `One` = 1, `Unchecked` = 3 (2 is reserved).
         fn check(tag: u8, id: u64, expect: ReplyContract, expect_disc: u8) {
             // Reuse a fixed-cap scratch buffer; `reply_contract_len` <= 12.
             let len = reply_contract_len(tag, id);
@@ -424,7 +431,7 @@ mod tests {
         }
         check(0, 0, ReplyContract::None, 0);
         check(1, 0xabcd, ReplyContract::One(KindId(0xabcd)), 1);
-        check(3, 0, ReplyContract::Manual, 3);
+        check(3, 0, ReplyContract::Unchecked, 3);
     }
 
     #[test]
@@ -520,22 +527,54 @@ mod tests {
         // produce byte-identical output to the serde-driven
         // `wire::to_vec` over the equivalent `InputsRecord::Handler`.
         // It exercises every wire primitive a record uses — `u32` selector,
-        // bare `u64` id, length-prefixed name, option-presence doc, and the
-        // nested `ReplyContract` enum.
+        // bare `u64` id, length-prefixed name, option-presence doc, the
+        // nested `ReplyContract` enum, and the trailing option-presence
+        // reason.
         const ID: u64 = 0xdead_beef_cafe_f00d;
         const NAME: &str = "aether.tick";
         const DOC: Option<&str> = Some("Not useful to send manually.");
         const REPLY_TAG: u8 = 1;
         const REPLY_ID: u64 = 0x00c0_ffee_0bad_f00d;
-        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
-        const CONST_BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
+        const N: usize = inputs_handler_len(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
+        const CONST_BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID, None);
         let record = InputsRecord::Handler {
             id: KindId(ID),
             name: Cow::Borrowed(NAME),
             doc: DOC.map(Cow::Borrowed),
             reply: ReplyContract::One(KindId(REPLY_ID)),
+            reason: None,
         };
         let runtime = wire::to_vec(&record).expect("encode");
         assert_eq!(&CONST_BYTES[..], runtime.as_slice());
+    }
+
+    #[test]
+    fn inputs_unchecked_handler_const_matches_wire_runtime() {
+        use crate::schema::ReplyContract;
+        use alloc::borrow::Cow;
+        // Tripwire: the v0x07 `Handler` layout (issue 7193) — an unchecked
+        // row is reply selector 3 with no id, followed by its stated reason as
+        // presence byte 1, a `u32` LE length, and the UTF-8 bytes, last in the
+        // record. The derive writes these bytes at const time and the
+        // substrate reads them through `wire::from_bytes`, so a drift in
+        // either encoder breaks every unchecked handler's manifest.
+        const ID: u64 = 7;
+        const NAME: &str = "t.relay";
+        const REASON: &str = "relays";
+        const N: usize = inputs_handler_len(ID, NAME, None, 3, 0, Some(REASON));
+        const CONST_BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, None, 3, 0, Some(REASON));
+        let mut expected: Vec<u8> = vec![0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0];
+        expected.extend_from_slice(NAME.as_bytes());
+        expected.extend_from_slice(&[0, 3, 0, 0, 0, 1, 6, 0, 0, 0]);
+        expected.extend_from_slice(REASON.as_bytes());
+        assert_eq!(&CONST_BYTES[..], expected.as_slice());
+        let record = InputsRecord::Handler {
+            id: KindId(ID),
+            name: Cow::Borrowed(NAME),
+            doc: None,
+            reply: ReplyContract::Unchecked,
+            reason: Some(Cow::Borrowed(REASON)),
+        };
+        assert_eq!(&CONST_BYTES[..], wire::to_vec(&record).expect("encode").as_slice());
     }
 }

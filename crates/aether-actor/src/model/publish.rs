@@ -19,8 +19,8 @@ use super::{Addressable, Protocol, SendableTo, Silent};
 /// compiles only for `K`. An explicit subscribe request carries a
 /// [`ProtocolPath<Subscriber<K>>`](crate::ProtocolPath), which decodes only
 /// against a route that publishes the exact silent row. A reflexive request
-/// types its sender with the native `ctx.cast`, which also admits a manual
-/// row for `K`: the one place a manual handler passes as silent, because a
+/// types its sender with the native `ctx.cast`, which also admits an unchecked
+/// row for `K`: the one place an unchecked handler passes as silent, because a
 /// published event has no one waiting for a reply either way.
 ///
 /// A type-level label only, never constructed.
@@ -33,11 +33,12 @@ impl<K: ActorMail> Protocol for Subscriber<K> {
 impl<K: ActorMail> cast_sealed::Sealed for Subscriber<K> {}
 
 /// A route answers `Subscriber<K>` when it publishes a row for `K` that is
-/// silent or manual. A replying row is refused, since the publisher would
+/// silent or unchecked. A replying row is refused, since the publisher would
 /// drop every reply.
 impl<K: ActorMail> CastTarget for Subscriber<K> {
     fn admits(rows: &[(KindId, ReplyContract)]) -> bool {
-        rows.iter().any(|&(kind, reply)| kind == K::ID && matches!(reply, ReplyContract::None | ReplyContract::Manual))
+        rows.iter()
+            .any(|&(kind, reply)| kind == K::ID && matches!(reply, ReplyContract::None | ReplyContract::Unchecked))
     }
 }
 
@@ -123,7 +124,7 @@ mod tests {
         let admits = |rows: &[_]| <Subscriber<Ping> as CastTarget>::admits(rows);
 
         assert!(admits(&[(Pong::ID, ReplyContract::None), (Ping::ID, ReplyContract::None)]));
-        assert!(admits(&[(Ping::ID, ReplyContract::Manual)]));
+        assert!(admits(&[(Ping::ID, ReplyContract::Unchecked)]));
         assert!(!admits(&[(Ping::ID, ReplyContract::One(Pong::ID))]));
         assert!(!admits(&[(Pong::ID, ReplyContract::None)]));
         assert!(!admits(&[]));

@@ -428,7 +428,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 
     // Load the `Counter` actor (a non-entry actor in the bundle) and capture
     // its proven reference.
-    let (counter, _path) = harness
+    let counter = harness
         .load::<Counter>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 
@@ -594,7 +594,7 @@ fn childless_component_hot_reloads_unchanged() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (counter, _path) = harness
+    let counter = harness
         .load::<Counter>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 

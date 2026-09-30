@@ -14,7 +14,7 @@ use super::config::ProxyTarget;
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-use aether_actor::{Manual, OutboundReply, Single, runtime};
+use aether_actor::{OutboundReply, Single, Unchecked, runtime};
 pub use aether_data::EngineId;
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
@@ -247,7 +247,7 @@ impl NativeActor for FleetProxy {
 
     /// Answer every forward still open with a `CallSettled::Err`, since
     /// this actor is closing and its engine can no longer settle the call
-    /// (ADR-0243 §1). The relay is manual (ADR-0243 §8), so the proxy answers
+    /// (ADR-0243 §1). The relay is unchecked (ADR-0243 §8), so the proxy answers
     /// with the terminal it knows. The hub's RPC server closes the wire call
     /// on that answer, and its monitor of this proxy then finds the call
     /// already closed.
@@ -316,8 +316,8 @@ impl NativeActor for FleetProxy {
     /// relays to the sender of this `ForwardEnvelope`, and a
     /// `CallSettled` ends the exchange, a `CallSettled::Err` naming the
     /// failure when the call cannot be written to the engine.
-    #[handler::manual]
-    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
+    #[handler::unchecked(reason = "relays a remote call: many replies, kinds chosen at run time")]
+    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: ForwardEnvelope) {
         let envelope = MailEnvelope { to: Recipient::local(mail.recipient), kind: mail.kind, payload: mail.payload };
         match state.conn.client.call(envelope) {
             Ok(cid) => {

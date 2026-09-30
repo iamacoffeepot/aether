@@ -222,8 +222,9 @@ freshness-sensitive use with `list_engines` and a harmless bounded live probe.
 Handler and component docs default to the first rustdoc line; pass `full: true`
 for the complete strings. `describe_handlers` reads the selected engine's
 native handler inventory, including reply contracts: each handler carries
-`reply_class` (`none`, `one`, or `manual`), and `reply_id` / `reply_name` are
-set only for `one`. `describe_transforms`
+`reply_class` (`none`, `one`, or `unchecked`), and `reply_id` / `reply_name` are
+set only for `one`; an `unchecked` handler also carries its stated `reason`.
+`describe_component` shows the same `reason` beside an `Unchecked` reply. `describe_transforms`
 lists the native transforms linked into the current `aether-mcp` process; it
 does not query an engine.
 

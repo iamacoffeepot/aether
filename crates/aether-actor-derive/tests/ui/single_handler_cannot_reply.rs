@@ -3,7 +3,7 @@
 //! so a hand-call to `ctx.reply` is a compile error. This locks `-> ()`
 //! as provably silent (the manifest's `ReplyContract::None` is true by
 //! construction). A handler that needs to reply by hand declares
-//! `#[handler::manual]` and takes the `Manual` ctx.
+//! `#[handler::unchecked(..)]` and takes the `Unchecked` ctx.
 
 use aether_actor::{WasmCtx, OutboundReply, actor};
 

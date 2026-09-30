@@ -140,7 +140,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> Acto
         owns_input: true,
         editor_region: String::new(),
     };
-    let (panel, path) = harness
+    let panel = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -148,6 +148,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> Acto
             export: Some("aether.widget.panel".to_owned()),
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    let path = harness.actor_path(&panel);
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
     panel
 }

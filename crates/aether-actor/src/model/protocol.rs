@@ -30,8 +30,8 @@
 //!
 //! A target covers a row only through a [`Contract<K>`] row with the same kind
 //! and the exact reply type. A `#[fallback]` emits no row. A
-//! `#[handler::manual]` handler's row is [`Undeclared`], and covers only an
-//! explicit manual protocol row with that same reply shape.
+//! `#[handler::unchecked(..)]` handler's row is [`Undeclared`], and covers only an
+//! explicit unchecked protocol row with that same reply shape.
 
 use core::marker::PhantomData;
 
@@ -61,7 +61,7 @@ mod reply_sealed {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be a protocol row's reply",
     label = "not a reply kind, `Silent`, or `Undeclared`",
-    note = "a protocol row is single (`-> O`), silent (no return), or manual (`-> Undeclared`) (ADR-0231 §6)"
+    note = "a protocol row is single (`-> O`), silent (no return), or unchecked (`-> Undeclared`) (ADR-0231 §6)"
 )]
 pub trait RowReply: ReplyShape + reply_sealed::Sealed {}
 
@@ -86,7 +86,7 @@ mod rows_sealed {
 pub trait RowSet: rows_sealed::Sealed {
     /// The rows as `(kind, reply)` pairs in the manifest's [`ReplyContract`]
     /// vocabulary, in tuple order: `One(O::ID)` for a row `O`, `None` for a
-    /// [`Silent`] row, and `Manual` for an [`Undeclared`] row. The same mapping
+    /// [`Silent`] row, and `Unchecked` for an [`Undeclared`] row. The same mapping
     /// `#[actor]` uses for
     /// [`Contracts::CONTRACTS`](crate::Contracts::CONTRACTS), so the two lists
     /// compare directly.
@@ -213,7 +213,7 @@ mod covered_sealed {
 /// Rows match by kind and exact reply type, never by method name. A silent row
 /// is covered only by a silent handler, a row `O` only by a handler that
 /// replies `O` directly or deferred, and an [`Undeclared`] row only by a
-/// manual handler. A kind the target handles only through `#[fallback]` has
+/// unchecked handler. A kind the target handles only through `#[fallback]` has
 /// no row.
 ///
 /// Sealed: the one impl is the blanket over [`Protocol`] and [`CoversRows`].
@@ -247,7 +247,7 @@ pub(super) mod cast_sealed {
 /// protocol whose rule admits rows of its own choosing.
 ///
 /// Two arms implement it: [`Subscriber<K>`](crate::Subscriber), whose silent
-/// subscription rule also admits a manual row for its published kind, and
+/// subscription rule also admits an unchecked row for its published kind, and
 /// every protocol
 /// `#[protocol]` declares (through [`ProtocolCast`]), whose rule is ADR-0231
 /// §4's exact-rows check.
@@ -266,8 +266,8 @@ pub trait CastTarget: Protocol + cast_sealed::Sealed {
 pub trait ProtocolCast: Protocol {}
 
 /// Whether `rows` contains every row of `P`, each with the same kind and the
-/// same [`ReplyContract`] (ADR-0231 §4). A [`ReplyContract::Manual`] row
-/// covers exactly an explicit manual protocol row, and extra rows are ignored.
+/// same [`ReplyContract`] (ADR-0231 §4). A [`ReplyContract::Unchecked`] row
+/// covers exactly an explicit unchecked protocol row, and extra rows are ignored.
 fn covers_exact_rows<P: Protocol>(rows: &[(KindId, ReplyContract)]) -> bool {
     <P::Rows as RowSet>::CONTRACTS.iter().all(|row| rows.contains(row))
 }
@@ -325,17 +325,17 @@ mod tests {
         assert!(admits(&[(Tick::ID, ReplyContract::None), request, notice]));
         assert!(!admits(&[request]));
         assert!(!admits(&[(Ping::ID, ReplyContract::None), notice]));
-        assert!(!admits(&[request, (Pong::ID, ReplyContract::Manual)]));
-        assert!(!admits(&[(Ping::ID, ReplyContract::Manual), notice]));
+        assert!(!admits(&[request, (Pong::ID, ReplyContract::Unchecked)]));
+        assert!(!admits(&[(Ping::ID, ReplyContract::Unchecked), notice]));
     }
 
-    // A manual protocol row must be admitted by the same exact-row rule as
-    // every other protocol row. Treating Manual as silence or a wildcard
+    // An unchecked protocol row must be admitted by the same exact-row rule as
+    // every other protocol row. Treating Unchecked as silence or a wildcard
     // would mint a proof for a route whose response contract differs, while
     // checking only one row would mint an incomplete mixed protocol.
     #[test]
     fn a_manual_protocol_cast_requires_the_exact_manual_row_and_every_other_row() {
-        let request = (Ping::ID, ReplyContract::Manual);
+        let request = (Ping::ID, ReplyContract::Unchecked);
         let notice = (Pong::ID, ReplyContract::None);
 
         assert!(<ManualPing as CastTarget>::admits(&[request]));

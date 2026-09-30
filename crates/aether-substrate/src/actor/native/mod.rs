@@ -124,8 +124,8 @@ pub use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapabil
 /// table; for an un-split cap `S = Self`, so `&mut S == &mut self`. Native-only
 /// (the wasm counterpart is [`aether_actor::WasmDispatch`]).
 pub trait Dispatch<S> {
-    // ADR-0112: the dispatch seam carries the most-permissive `Manual` ctx so a
-    // `#[handler::manual]` arm reaches the reply surface; the macro downgrades
+    // ADR-0112: the dispatch seam carries the most-permissive `Unchecked` ctx so a
+    // `#[handler::unchecked(..)]` arm reaches the reply surface; the macro downgrades
     // to `Single` per single-class handler. Issue 4158: it is also typed by
     // `Self`, the actor being dispatched, so a handler parents its children
     // under the actor the runtime is actually running. A handler whose ctx
@@ -135,7 +135,7 @@ pub trait Dispatch<S> {
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
     fn dispatch(
         state: &mut S,
-        ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()>
@@ -145,7 +145,7 @@ pub trait Dispatch<S> {
     /// Catch-all for envelopes no `#[handler]` matched (issue 576). Default
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
-    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, Self, crate::Manual>, _envelope: &Envelope) -> bool
+    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>, _envelope: &Envelope) -> bool
     where
         Self: Sized,
     {

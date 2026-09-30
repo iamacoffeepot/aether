@@ -39,8 +39,8 @@ use aether_substrate::testing::{
     PumpedDriver, TestChassis, await_settled, await_signal, bare_substrate, boot_bare_test_chassis, registered_ref,
 };
 use aether_substrate::{
-    Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
-    ReplyTarget,
+    Addressable, BootError, Builder, Dispatch, Erased, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
+    ReplyTarget, Unchecked,
 };
 use crossbeam_channel::Sender;
 use std::thread;
@@ -878,7 +878,7 @@ impl NativeActor for InstancedChildCap {
 /// ADR-0109 §5 / ADR-0231 §4: the macro emits a link-time `HandlerEntry`
 /// for each native `#[handler]`, carrying the owning `NAMESPACE`, the input
 /// kind (id + name), and the handler's `ReplyContract`. A `-> Pong` handler
-/// reads `One(Pong)`, a `#[handler::manual]` handler reads `Manual` (decided
+/// reads `One(Pong)`, a `#[handler::unchecked(..)]` handler reads `Unchecked` (decided
 /// by its class, not its `()` return), and a silent handler reads `None`. The
 /// actor's `capabilities()` row for the same kind carries the same contract,
 /// so the two native surfaces cannot drift apart.
@@ -913,14 +913,26 @@ fn macro_emits_native_handler_reply_manifest() {
         "the `-> Pong` return type is captured as the reply contract (In -> Out)",
     );
 
-    let manual = manifest_reply(ManualReplyCap::NAMESPACE, <ManualPing as Kind>::ID);
-    assert_eq!(manual, ReplyContract::Manual, "a manual handler reads Manual, not the silent None");
+    let unchecked = manifest_reply(UncheckedReplyCap::NAMESPACE, <UncheckedPing as Kind>::ID);
+    assert_eq!(unchecked, ReplyContract::Unchecked, "an unchecked handler reads Unchecked, not the silent None");
+    // #7193: the stated reason rides the inventory row and the capability row.
+    let reason = handler_entries()
+        .find(|e| e.namespace == UncheckedReplyCap::NAMESPACE && e.id == <UncheckedPing as Kind>::ID)
+        .and_then(|e| e.reason);
+    assert_eq!(reason, Some("test: replies through ctx.reply"), "the unchecked row carries its reason");
+    let capability_reason = UncheckedReplyCap::capabilities()
+        .handlers
+        .into_iter()
+        .find(|h| h.id == <UncheckedPing as Kind>::ID)
+        .and_then(|h| h.reason);
+    assert_eq!(capability_reason.as_deref(), reason, "capabilities() carries the same reason");
+    assert_eq!(entry.reason, None, "a single handler carries no reason");
 
     let silent = manifest_reply(InstancedChildCap::NAMESPACE, <Greet as Kind>::ID);
     assert_eq!(silent, ReplyContract::None, "a `-> ()` handler reads None");
 
     assert_eq!(capability_reply::<ReplyMacroCap>(<Greet as Kind>::ID), entry.reply);
-    assert_eq!(capability_reply::<ManualReplyCap>(<ManualPing as Kind>::ID), manual);
+    assert_eq!(capability_reply::<UncheckedReplyCap>(<UncheckedPing as Kind>::ID), unchecked);
     assert_eq!(capability_reply::<InstancedChildCap>(<Greet as Kind>::ID), silent);
 }
 
@@ -1281,76 +1293,79 @@ impl NativeActor for DeferredReplyCap {
     }
 }
 
-/// ADR-0112 manual reply class: input kind for the manual handler.
+/// ADR-0112 unchecked reply class: input kind for the unchecked handler.
 #[repr(C)]
-#[aether_data::kind(name = "test.macro_native_actor.manual_ping", pod, eq)]
-struct ManualPing {
+#[aether_data::kind(name = "test.macro_native_actor.unchecked_ping", pod, eq)]
+struct UncheckedPing {
     seq: u32,
 }
 
-/// ADR-0112 manual reply class: the kind the manual handler replies with.
+/// ADR-0112 unchecked reply class: the kind the unchecked handler replies with.
 #[repr(C)]
-#[aether_data::kind(name = "test.macro_native_actor.manual_ack", pod, eq)]
-struct ManualAck {
+#[aether_data::kind(name = "test.macro_native_actor.unchecked_ack", pod, eq)]
+struct UncheckedAck {
     seq: u32,
 }
 
-/// ADR-0112: a manual-class cap — it receives the `Manual` ctx and issues
+/// ADR-0112: an unchecked-class cap — it receives the `Unchecked` ctx and issues
 /// its own reply by hand via `OutboundReply::reply`, rather than via a
 /// `-> R` return value.
-struct ManualReplyCap;
+struct UncheckedReplyCap;
 
 #[aether_actor::actor(singleton, root)]
-impl NativeActor for ManualReplyCap {
-    const NAMESPACE: &'static str = "test.macro_native_actor.manual_reply";
+impl NativeActor for UncheckedReplyCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.unchecked_reply";
     type Config = ();
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
 
-    #[aether_actor::handler::manual]
-    fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, ping: ManualPing) {
-        ctx.reply(&ManualAck { seq: ping.seq });
+    #[aether_actor::handler::unchecked(reason = "test: replies through ctx.reply")]
+    fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Erased, Unchecked>, ping: UncheckedPing) {
+        ctx.reply(&UncheckedAck { seq: ping.seq });
     }
 }
 
-/// ADR-0112: a `#[handler::manual]` handler receives the `Manual` ctx and
+/// ADR-0112: a `#[handler::unchecked(..)]` handler receives the `Unchecked` ctx and
 /// replies through `ctx.reply` — drive it through a real turn on a booted
 /// cap and assert the ack lands at the caller carrying the declared
 /// correlation before the chain settles.
 #[test]
-fn manual_handler_replies_through_ctx() {
+fn unchecked_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller =
-        registered_ref(&registry, "test.macro_native_actor.manual_caller", forward_to(reply_tx, Arc::clone(&mailer)));
-    let mut driver = PumpedDriver::<ManualReplyCap>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
+    let caller = registered_ref(
+        &registry,
+        "test.macro_native_actor.unchecked_caller",
+        forward_to(reply_tx, Arc::clone(&mailer)),
+    );
+    let mut driver = PumpedDriver::<UncheckedReplyCap>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
 
     driver.send_and_settle(
-        driver.chassis().actor_ref::<ManualReplyCap>(),
-        &ManualPing { seq: 9 },
+        driver.chassis().actor_ref::<UncheckedReplyCap>(),
+        &UncheckedPing { seq: 9 },
         Some(ReplyTarget::Actor { to: caller, correlation: 91 }),
     );
 
-    let reply = reply_rx.try_recv().expect("the manual handler replied to the inbound sender via ctx.reply");
-    assert_eq!(reply.kind, ManualAck::ID, "the reply carries the manual handler's ack kind");
-    assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the manual reply");
-    let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
-    assert_eq!(ack, ManualAck { seq: 9 }, "the manual reply carries the ping seq");
+    let reply = reply_rx.try_recv().expect("the unchecked handler replied to the inbound sender via ctx.reply");
+    assert_eq!(reply.kind, UncheckedAck::ID, "the reply carries the unchecked handler's ack kind");
+    assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the unchecked reply");
+    let ack = UncheckedAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
+    assert_eq!(ack, UncheckedAck { seq: 9 }, "the unchecked reply carries the ping seq");
 }
 
 fn assert_row<T: aether_actor::Contract<K, Reply = R>, K: Kind, R: aether_actor::ReplyShape>() {}
 
 /// ADR-0231 §1: every native handler yields one `Contract<K>` row — the
-/// deferred `-> Pending<O>` reads `O`, a manual handler reads `Undeclared`, a
+/// deferred `-> Pending<O>` reads `O`, an unchecked handler reads `Undeclared`, a
 /// silent one reads `Silent`, and an adopted set's handler arrives through the
 /// set's bridge.
 #[test]
 fn every_native_handler_emits_its_contract_row() {
     assert_row::<DeferredReplyCap, KickP, EchoReply>();
-    assert_row::<ManualReplyCap, ManualPing, aether_actor::Undeclared>();
+    assert_row::<UncheckedReplyCap, UncheckedPing, aether_actor::Undeclared>();
     assert_row::<InstancedChildCap, Greet, aether_actor::Silent>();
     assert_row::<CfgGatedSetAdopter, SetCfgKept, aether_actor::Silent>();
 }
@@ -1382,7 +1397,7 @@ fn native_contracts_match_handler_entries() {
 
     check::<ReplyMacroCap>();
     check::<DeferredReplyCap>();
-    check::<ManualReplyCap>();
+    check::<UncheckedReplyCap>();
     check::<CfgGatedCap>();
     check::<CfgGatedSetAdopter>();
     assert_eq!(CfgGatedSetAdopter::CONTRACTS.len(), 2, "the adopter's rows are the set's two surviving handlers");

@@ -191,6 +191,7 @@ mod tests {
                     name: format!("test.kind.{id}"),
                     doc: None,
                     reply: aether_data::ReplyContract::None,
+                    reason: None,
                 })
                 .collect(),
             fallback: fallback.then_some(FallbackCapability { doc: None }),

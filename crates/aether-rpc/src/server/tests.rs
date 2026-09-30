@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
-use aether_actor::{ActorRef, Addressable, Manual, OutboundReply};
+use aether_actor::{ActorRef, Addressable, OutboundReply, Unchecked};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, ErasedActorPath, Source, Uuid};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -50,12 +50,12 @@ struct EngineRouteBarrierForTest;
 #[aether_data::kind(name = "aether.rpc.test.stop_engine_route", default)]
 struct StopEngineRouteForTest;
 
-struct ManualEngineRouteConfig {
+struct UncheckedEngineRouteConfig {
     registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
     forwards: mpsc::Sender<()>,
 }
 
-struct ManualEngineRoute {
+struct UncheckedEngineRoute {
     registrations: mpsc::Sender<(EngineId, crate::RegisterEngineRouteResult)>,
     registration_requests: VecDeque<EngineId>,
     forwards: mpsc::Sender<()>,
@@ -63,9 +63,9 @@ struct ManualEngineRoute {
 }
 
 #[aether_actor::actor(instanced, root, depends(RpcServerCapability))]
-impl NativeActor for ManualEngineRoute {
-    type Config = ManualEngineRouteConfig;
-    const NAMESPACE: &'static str = "aether.rpc.test.manual_engine_route";
+impl NativeActor for UncheckedEngineRoute {
+    type Config = UncheckedEngineRouteConfig;
+    const NAMESPACE: &'static str = "aether.rpc.test.unchecked_engine_route";
 
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
@@ -88,14 +88,14 @@ impl NativeActor for ManualEngineRoute {
         self.registrations.send((engine_id, mail)).expect("registration result receiver stays live");
     }
 
-    #[handler::manual]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _mail: crate::ForwardEnvelope) {
+    #[handler::unchecked(reason = "test: parks the forwarded call for a later completion")]
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: crate::ForwardEnvelope) {
         self.pending.push_back(ctx.reply_target());
         self.forwards.send(()).expect("forward observer stays live");
     }
 
-    #[handler::manual]
-    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CompleteEngineRouteForTest) {
+    #[handler::unchecked(reason = "test: completes a parked call from another handler")]
+    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: CompleteEngineRouteForTest) {
         let target = self.pending.pop_front().expect("a forwarded call is pending");
         ctx.reply_to(target, &EngineRouteReplyForTest { value: mail.value });
         ctx.reply_to(target, &crate::CallSettled::Ok);
@@ -150,24 +150,24 @@ impl NativeActor for WrongEngineRoute {
     }
 
     // A real handler for the right kind with the wrong contract: silent does
-    // not cover EngineRoute's explicit manual row.
+    // not cover EngineRoute's explicit unchecked row.
     #[handler::single]
     fn on_forward(&mut self, _ctx: &mut NativeCtx<'_>, _mail: crate::ForwardEnvelope) {
         self.forwards.send(()).expect("wrong-route observer stays live");
     }
 }
 
-fn request_manual_route_registration(
+fn request_unchecked_route_registration(
     chassis: &PassiveChassis<TestChassis>,
-    route: ActorRef<ManualEngineRoute>,
+    route: ActorRef<UncheckedEngineRoute>,
     engine_id: EngineId,
     results: &mpsc::Receiver<(EngineId, crate::RegisterEngineRouteResult)>,
 ) -> crate::RegisterEngineRouteResult {
     let (_, settled) = chassis.send_tracked(route, &RegisterEngineRouteForTest { engine_id }, None);
     let (answered_engine, result) =
-        results.recv_timeout(Duration::from_secs(2)).expect("manual route registration answers");
+        results.recv_timeout(Duration::from_secs(2)).expect("unchecked route registration answers");
     assert_eq!(answered_engine, engine_id, "registration result is correlated with its request");
-    settled.recv_timeout(Duration::from_secs(2)).expect("manual route registration chain settles");
+    settled.recv_timeout(Duration::from_secs(2)).expect("unchecked route registration chain settles");
     result
 }
 
@@ -605,7 +605,7 @@ fn engine_call_without_a_route_closes_with_unknown_engine() {
     assert_unknown_engine(&mut stream, EngineId(Uuid::from_u128(9)), 11);
 }
 
-/// Engine route registration proves the registrant's manual forwarding row
+/// Engine route registration proves the registrant's unchecked forwarding row
 /// once, after preserving the existing ownership precedence. A sender with a
 /// real but silent `ForwardEnvelope` handler is refused without claiming the
 /// engine, so a compatible sender can take that same engine afterward.
@@ -625,9 +625,9 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
     let (alpha_results_tx, alpha_results_rx) = mpsc::channel();
     let (alpha_forwards_tx, _alpha_forwards_rx) = mpsc::channel();
     let alpha = chassis
-        .spawn_actor_for_test::<ManualEngineRoute>(
+        .spawn_actor_for_test::<UncheckedEngineRoute>(
             Subname::Named("alpha"),
-            ManualEngineRouteConfig { registrations: alpha_results_tx, forwards: alpha_forwards_tx },
+            UncheckedEngineRouteConfig { registrations: alpha_results_tx, forwards: alpha_forwards_tx },
             (),
         )
         .finish()
@@ -635,9 +635,9 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
     let (beta_results_tx, beta_results_rx) = mpsc::channel();
     let (beta_forwards_tx, _beta_forwards_rx) = mpsc::channel();
     let beta = chassis
-        .spawn_actor_for_test::<ManualEngineRoute>(
+        .spawn_actor_for_test::<UncheckedEngineRoute>(
             Subname::Named("beta"),
-            ManualEngineRouteConfig { registrations: beta_results_tx, forwards: beta_forwards_tx },
+            UncheckedEngineRouteConfig { registrations: beta_results_tx, forwards: beta_forwards_tx },
             (),
         )
         .finish()
@@ -659,14 +659,14 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
 
     assert!(
         matches!(
-            request_manual_route_registration(&chassis, alpha, alpha_engine, &alpha_results_rx),
+            request_unchecked_route_registration(&chassis, alpha, alpha_engine, &alpha_results_rx),
             crate::RegisterEngineRouteResult::Ok
         ),
-        "a manual ForwardEnvelope row is admitted",
+        "an unchecked ForwardEnvelope row is admitted",
     );
     assert!(
         matches!(
-            request_manual_route_registration(&chassis, alpha, alpha_engine, &alpha_results_rx),
+            request_unchecked_route_registration(&chassis, alpha, alpha_engine, &alpha_results_rx),
             crate::RegisterEngineRouteResult::Ok
         ),
         "the same owner re-registering its engine stays idempotent",
@@ -680,7 +680,7 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
     assert!(error.contains("already has a registered route"), "engine conflict keeps precedence: {error}");
 
     let crate::RegisterEngineRouteResult::Err { error } =
-        request_manual_route_registration(&chassis, alpha, beta_engine, &alpha_results_rx)
+        request_unchecked_route_registration(&chassis, alpha, beta_engine, &alpha_results_rx)
     else {
         panic!("one registrant cannot own two engines");
     };
@@ -689,7 +689,7 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
     let crate::RegisterEngineRouteResult::Err { error } =
         request_wrong_route_registration(&chassis, wrong, beta_engine, &wrong_results_rx)
     else {
-        panic!("a silent ForwardEnvelope handler must not cover EngineRoute's manual row");
+        panic!("a silent ForwardEnvelope handler must not cover EngineRoute's unchecked row");
     };
     assert!(error.contains("EngineRoute"), "wrong-contract refusal names the required protocol: {error}");
 
@@ -705,7 +705,7 @@ fn engine_route_registration_is_typed_and_preserves_ownership_precedence() {
 
     assert!(
         matches!(
-            request_manual_route_registration(&chassis, beta, beta_engine, &beta_results_rx),
+            request_unchecked_route_registration(&chassis, beta, beta_engine, &beta_results_rx),
             crate::RegisterEngineRouteResult::Ok
         ),
         "a failed cast changes no route or owner state",
@@ -744,16 +744,16 @@ fn forwarded_call_waits_for_remote_terminal_and_route_departure_cleans_up() {
     let (results_tx, results_rx) = mpsc::channel();
     let (forwards_tx, forwards_rx) = mpsc::channel();
     let route = chassis
-        .spawn_actor_for_test::<ManualEngineRoute>(
+        .spawn_actor_for_test::<UncheckedEngineRoute>(
             Subname::Named("remote"),
-            ManualEngineRouteConfig { registrations: results_tx, forwards: forwards_tx },
+            UncheckedEngineRouteConfig { registrations: results_tx, forwards: forwards_tx },
             (),
         )
         .finish()
-        .expect("manual route spawns");
+        .expect("unchecked route spawns");
     let engine = EngineId(Uuid::from_u128(0x0069_4903));
     assert!(matches!(
-        request_manual_route_registration(&chassis, route, engine, &results_rx),
+        request_unchecked_route_registration(&chassis, route, engine, &results_rx),
         crate::RegisterEngineRouteResult::Ok
     ));
 

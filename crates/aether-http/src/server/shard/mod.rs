@@ -33,7 +33,7 @@ use aether_actor::{CoveredBy, actor};
 
 // The shard is the counterparty every stream handle casts to its sink
 // (ADR-0133, ADR-0231 §4). Checking coverage here turns a stream handler
-// turned manual, or dropped, into this crate's build error rather than every
+// turned unchecked, or dropped, into this crate's build error rather than every
 // streaming handler's cast refusing at run time.
 const _: () = {
     const fn covered<P: CoveredBy<R>, R>() {}

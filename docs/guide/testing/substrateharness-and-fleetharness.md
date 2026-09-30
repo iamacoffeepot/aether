@@ -186,7 +186,7 @@ actor is the reply's stamped sender. When a test needs that reference — to ask
 through the harness directly instead of through an operation:
 
 ```rust,ignore
-let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
+let panel = harness.load::<WidgetPanel>(LoadComponent {
     wasm,
     name: Some("panel".to_owned()),
     config: Vec::new(),
@@ -194,10 +194,12 @@ let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
 })?;
 ```
 
-`load::<R>` sets the export to `R::NAMESPACE` and returns `(ActorRef<R>,
-ErasedActorPath)`; `load_any` sends the load as given and returns the erased
-reference, for a fixture actor the test cannot name, which the test types with
-`SubstrateHarness::cast::<P>` before it sends. A drop takes the path,
+`load::<R>` sets the export to `R::NAMESPACE` and returns `ActorRef<R>`;
+`harness.actor_path(&panel)` reads its canonical path for an assertion or a
+`CaptureWithMails` recipient. `load_any` sends the load as given and returns
+the erased reference and its path, for a fixture actor the test cannot name,
+which the test types with `SubstrateHarness::cast::<P>` before it sends. A
+drop takes the path,
 `DropComponent { target: path }`; a replace names no instance,
 `ReplaceComponent { wasm, configs }`, and moves every live instance of the
 module's namespaces (ADR-0241 §7), so a test that swaps identical code builds a
@@ -293,11 +295,12 @@ new tests use the typed doors.
 A loaded wasm component's reference comes from the load itself:
 `SubstrateHarness::load::<R>` types the reply's stamped sender as the export
 `R`, and `load_any` returns it erased for a fixture that ships only as wasm.
-Both also return the canonical lineage path the host reported, for an
-assertion against it or a `CaptureWithMails` bundle recipient:
+`load_any` also returns the canonical lineage path the host reported; a typed
+reference's path comes from `SubstrateHarness::actor_path`, for an assertion
+against it or a `CaptureWithMails` bundle recipient:
 
 ```rust,ignore
-let (camera, _path) = harness.load::<CameraComponent>(load)?;
+let camera = harness.load::<CameraComponent>(load)?;
 HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() });
 ```
 

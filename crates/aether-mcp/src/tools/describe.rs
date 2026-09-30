@@ -189,11 +189,11 @@ pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> 
         // best-effort from the static substrate vocabulary so the
         // In -> Out reads without a second lookup. A component-defined
         // reply kind stays `None`. Only a `One` row names a kind: a
-        // manual handler replies at run time with no declared kind.
+        // unchecked handler replies at run time with no declared kind.
         let (reply_class, reply_id) = match entry.reply {
             ReplyContract::None => ("none", None),
             ReplyContract::One(id) => ("one", Some(id)),
-            ReplyContract::Manual => ("manual", None),
+            ReplyContract::Unchecked => ("unchecked", None),
         };
         folded.entry(entry.namespace).or_default().push(NativeHandlerJson {
             // Input kind id rendered as the ADR-0064 tagged string,
@@ -203,6 +203,7 @@ pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> 
             reply_class,
             reply_id: reply_id.map(|id| tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))),
             reply_name: reply_id.and_then(static_kind_name),
+            reason: entry.reason,
         });
     }
     let caps = folded.into_iter().map(|(namespace, handlers)| NativeCapHandlers { namespace, handlers }).collect();

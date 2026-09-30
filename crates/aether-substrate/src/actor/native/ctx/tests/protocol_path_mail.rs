@@ -8,10 +8,10 @@
 //! stand `Live` with the contracts their own `#[actor]` tables declare. Each
 //! [`Carries`] payload names one path and crosses the boundary to the
 //! `Keeper` as a proven call, as a wire `Call` does, so the keeper's own
-//! dispatch decodes it. The accepted manual path is resolved and receives a
+//! dispatch decodes it. The accepted unchecked path is resolved and receives a
 //! typed send through its protocol reference.
 
-use aether_actor::{Addressable, ErasedActorRef, Manual, ProtocolPath, Row, Undeclared};
+use aether_actor::{Addressable, ErasedActorRef, ProtocolPath, Row, Unchecked, Undeclared};
 use aether_data::{ErasedActorPath, Kind, wire};
 
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Subname};
@@ -23,7 +23,7 @@ struct Poke {
     seq: u32,
 }
 
-/// The protocol a [`Carries`] path claims: a manual [`Poke`], which only the
+/// The protocol a [`Carries`] path claims: an unchecked [`Poke`], which only the
 /// [`Keeper`] handles and which promises no reply shape.
 struct KeeperProtocol;
 
@@ -53,8 +53,8 @@ impl NativeActor for Keeper {
         Ok(Self::default())
     }
 
-    #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Manual>, mail: Poke) {
+    #[handler::unchecked(reason = "test: a cast-only receiver exercising the unchecked row")]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Poke) {
         self.pokes.push(mail.seq);
     }
 
@@ -67,7 +67,7 @@ impl NativeActor for Keeper {
 }
 
 /// Handles the right kind with the wrong reply shape, so it must not cover
-/// the manual protocol.
+/// the unchecked protocol.
 struct SilentPoke;
 
 #[aether_actor::actor(instanced)]
@@ -119,7 +119,7 @@ fn deliver(driver: &mut PumpedDriver<Keeper>, path: &ErasedActorPath) {
 /// and a dispatch that skipped the proof would hand the handler the
 /// bystander's and the unregistered path too. The keeper's pokes also catch
 /// a resolve that fails after decode or a typed send that does not route
-/// through the manual protocol reference.
+/// through the unchecked protocol reference.
 #[test]
 fn a_received_path_reaches_the_handler_only_when_its_live_route_covers_the_protocol() {
     let (registry, mailer) = bare_substrate();
@@ -139,7 +139,7 @@ fn a_received_path_reaches_the_handler_only_when_its_live_route_covers_the_proto
     assert_eq!(received(&driver), [Keeper::NAMESPACE], "the keeper's route covers the protocol");
 
     deliver(&mut driver, &silent);
-    assert_eq!(received(&driver).len(), 1, "the same kind with a silent reply does not cover the manual row");
+    assert_eq!(received(&driver).len(), 1, "the same kind with a silent reply does not cover the unchecked row");
 
     deliver(&mut driver, &bystander);
     assert_eq!(received(&driver).len(), 1, "the bystander's route lacks its row");
@@ -150,6 +150,6 @@ fn a_received_path_reaches_the_handler_only_when_its_live_route_covers_the_proto
     assert_eq!(
         driver.read_state(|keeper| keeper.pokes.clone()).expect("the keeper is live"),
         [7],
-        "the resolved manual protocol receives the typed send",
+        "the resolved unchecked protocol receives the typed send",
     );
 }

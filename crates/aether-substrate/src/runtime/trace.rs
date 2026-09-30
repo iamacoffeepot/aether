@@ -86,7 +86,7 @@ pub struct TraceHandle {
     chassis_host_ring: Arc<Mutex<ActorTraceRing>>,
 }
 
-// Manual `Debug` — `SettlementRegistry` carries non-`Debug` subscriber
+// Unchecked `Debug` — `SettlementRegistry` carries non-`Debug` subscriber
 // handles (a `Mailer`), so the registry is summarised as an
 // installed/absent flag rather than printed.
 impl fmt::Debug for TraceHandle {

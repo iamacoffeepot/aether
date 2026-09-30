@@ -325,7 +325,7 @@ pub struct TagSpawnReport {
 pub struct SendSourceQuery;
 
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
-/// `Manual`-class handler reads `ctx.sender()` and replies a
+/// `Unchecked`-class handler reads `ctx.sender()` and replies a
 /// [`SourceReport`].
 #[aether_data::kind(name = "aether.test_fixtures.source_query", default)]
 pub struct SourceQuery;

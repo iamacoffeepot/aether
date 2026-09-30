@@ -3,7 +3,7 @@
 //! that answers it later.
 //!
 //! [`WasmCtx::hold`] mints the pair. The receipt goes back to the `#[actor]`
-//! macro, which accepts it through `WasmCtx::<A, Manual>::__accept_pending`
+//! macro, which accepts it through `WasmCtx::<A, Unchecked>::__accept_pending`
 //! and reports `DISPATCH_HANDLED_HOLD`, so the host keeps the dispatch's
 //! reply handle and holds the requester's settlement. The ticket is that
 //! reply handle. It lives in the actor's state, or travels by value in a
@@ -52,7 +52,7 @@ impl<R> Pending<R> {
     }
 
     /// Accept the receipt as returned from its handler. Reachable only from
-    /// `WasmCtx::<A, Manual>::__accept_pending`, which the `#[actor]` macro
+    /// `WasmCtx::<A, Unchecked>::__accept_pending`, which the `#[actor]` macro
     /// calls on the value a `-> Pending<R>` handler returns; a single handler
     /// never holds that view, so it cannot disarm its own receipt and
     /// declare a false row.

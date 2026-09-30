@@ -91,7 +91,7 @@ impl NativeActor for Spawned {
 impl Dispatch<Self> for Spawned {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -199,7 +199,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
     impl Dispatch<Self> for Pumped {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

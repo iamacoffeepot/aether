@@ -180,8 +180,9 @@ pub fn template_entries() -> impl Iterator<Item = &'static TemplateEntry> {
 /// `NAMESPACE` (the mailbox the handler is reached at), the handler's
 /// input kind (id + name), and the handler's [`ReplyContract`] (ADR-0231
 /// §4): `None` for a `-> ()` silent handler, `One(R)` for a `-> R`
-/// synchronous or `-> Pending<R>` deferred reply, and `Manual` for a
-/// `#[handler::manual]` handler that answers through `ctx.reply`. The
+/// synchronous or `-> Pending<R>` deferred reply, and `Unchecked` for a
+/// `#[handler::unchecked(reason = "…")]` handler that answers through
+/// `ctx.reply`, whose stated reason rides in `reason`. The
 /// `aether.inventory` cap folds these into the
 /// `aether.inventory.handlers` reply so a driver reads a native cap's
 /// `In -> Out` the way `describe_component` reads a wasm component's.
@@ -197,9 +198,12 @@ pub struct HandlerEntry {
     /// The handler's input kind name (`<K as Kind>::NAME`).
     pub name: &'static str,
     /// The handler's reply contract — `One(R::ID)` for `-> R` /
-    /// `-> Pending<R>`, `Manual` for a manual handler (decided by its
+    /// `-> Pending<R>`, `Unchecked` for an unchecked handler (decided by its
     /// class, not its return type), `None` for a `-> ()` silent handler.
     pub reply: ReplyContract,
+    /// An unchecked handler's stated reason for giving up the reply check
+    /// (#7193): `Some` exactly when `reply` is `Unchecked`.
+    pub reason: Option<&'static str>,
 }
 
 inventory::collect!(HandlerEntry);
