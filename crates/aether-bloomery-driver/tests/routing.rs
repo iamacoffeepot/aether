@@ -1009,7 +1009,7 @@ fn a_call_on_a_reactor_only_digest_faults_before_any_load() {
 
 #[test]
 fn a_mixed_digest_loaded_by_its_reactor_answers_a_call_from_the_same_root() {
-    // Catches a second load of a digest the other role already loaded: the core keeps one load per digest, and a second spawn under the unit key would find the root live and adopt it again.
+    // Catches a second load of a digest the other role already loaded: the core keeps one load per digest; in the engine a second spawn under the unit key answers `Live` for a digest already ready, which the core meets with no load outstanding and aborts on.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
