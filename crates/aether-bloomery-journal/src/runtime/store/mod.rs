@@ -24,7 +24,7 @@ use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, artifact_blob, hash_bytes}
 use aether_data::{Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
-use crate::runtime::blobs::BlobDir;
+use crate::runtime::blobs::{BlobDir, PendingSyncs};
 use crate::runtime::clock::{Clock, SystemClock};
 use crate::runtime::journal::{
     AppendError, ArtifactRows, DATABASE_FILE, GetError, Journal, JournalError, RootLock, cited, configure_writer,
@@ -78,6 +78,7 @@ impl ArtifactStore {
             conn,
             blobs: self.blobs.clone(),
             pending: Vec::new(),
+            syncs: PendingSyncs::default(),
             seen: HashSet::new(),
             _lock: Arc::clone(&self.lock),
         })
@@ -86,20 +87,25 @@ impl ArtifactStore {
 
 /// One import's or run's artifacts, committed together or not at all.
 ///
-/// Every blob file is written, made durable, and renamed to its digest name
-/// before [`ArtifactBatch::commit`] inserts the row that stores it. A batch
+/// Every blob file is written, fsynced, and renamed to its digest name as it
+/// is staged. The directories the renames touched are fsynced at
+/// [`ArtifactBatch::commit`], once each and before it inserts the rows, so
+/// every file a committed row names is durable (ADR-0220). A batch
 /// dropped without committing inserts nothing; any file it renamed is a
 /// harmless orphan, since the same content has the same name (ADR-0220).
 pub struct ArtifactBatch {
     conn: Connection,
     blobs: BlobDir,
     pending: Vec<PendingRow>,
+    /// The directories this batch's placements touched, fsynced at commit.
+    syncs: PendingSyncs,
     seen: HashSet<Digest>,
     /// Dropped last, so the lock outlives the connection.
     _lock: Arc<RootLock>,
 }
 
-/// A row [`ArtifactBatch::commit`] inserts when absent: its blob file is already durable.
+/// A row [`ArtifactBatch::commit`] inserts when absent: its blob file is
+/// already fsynced and renamed, and its directory is fsynced before the insert.
 struct PendingRow {
     digest: Digest,
     size_bytes: u64,
@@ -162,7 +168,7 @@ impl ArtifactBatch {
         let payload = K::encode_storage(&StorageData::from_value(value.clone())).map_err(JournalError::Encode)?;
         let bytes = artifact_blob(K::ID, &payload);
         let digest = hash_bytes(&bytes);
-        self.blobs.store(&digest, &bytes)?;
+        self.blobs.store(&digest, &bytes, &mut self.syncs)?;
         let size_bytes = u64::try_from(bytes.len()).map_err(|_| JournalError::IntegerRange)?;
         self.record(digest, size_bytes, sink.into_vec());
         Ok(Ref::from_digest(digest))
@@ -205,8 +211,9 @@ impl ArtifactBatch {
         decode_artifact(load_artifact(&self.conn, &self.blobs, digest)?)
     }
 
-    /// Insert every recorded row that is absent, with its citation edges,
-    /// then check every citation against its expected prefix, in one
+    /// Fsync every directory the batch's placements touched, once each, then
+    /// insert every recorded row that is absent, with its citation edges,
+    /// and check every citation against its expected prefix, in one
     /// `IMMEDIATE` transaction. Any refusal inserts nothing. The rows are
     /// stamped from [`SystemClock`], which is for people only.
     ///
@@ -215,8 +222,10 @@ impl ArtifactBatch {
     /// [`AppendError::DanglingRef`] when a citation names a digest that is
     /// neither recorded here nor stored. [`AppendError::PrefixMismatch`] when
     /// the cited blob's prefix is not the expected kind.
-    /// [`AppendError::Journal`] on a backend or constraint failure.
+    /// [`AppendError::Journal`] on a directory sync failure, or on a backend
+    /// or constraint failure.
     pub fn commit(mut self) -> Result<(), AppendError> {
+        self.blobs.sync_pending(&mut self.syncs)?;
         let recorded_at_millis = SystemClock.now_millis();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
@@ -237,7 +246,7 @@ impl ArtifactBatch {
         Ok(())
     }
 
-    /// Record the row for a blob whose file is durable. The same digest twice
+    /// Record the row for a blob whose file is fsynced and renamed. The same digest twice
     /// in one batch is one row.
     fn record(&mut self, digest: Digest, size_bytes: u64, citations: Vec<Citation>) {
         if self.seen.insert(digest) {

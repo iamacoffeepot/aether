@@ -5,8 +5,9 @@
 //! A root is a directory holding `journal.sqlite` (the event log and one
 //! row per stored artifact) and `blobs/<first two hex>/<digest hex>`, one
 //! file per artifact holding exactly the bytes its digest hashes. Each blob
-//! file is written temp file, fsync, rename, directory fsync before the row
-//! that names it commits. [`Journal::open`] takes an exclusive lock on the
+//! file is written to a temp file, fsynced, and renamed, and each directory
+//! a batch's renames touched is fsynced once, all before the row that names
+//! the file commits. [`Journal::open`] takes an exclusive lock on the
 //! root, so a second open fails in any process, and sweeps `blobs/tmp/`.
 //! [`Journal::open`] also stores the empty [`aether_bloomery_kinds::Tree`],
 //! with no event, so a program can cite it without staging it.
