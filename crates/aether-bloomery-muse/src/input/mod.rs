@@ -15,7 +15,8 @@ pub use limits::{
     Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, ReasoningEffort,
 };
 pub use tools::{
-    CallId, CallIdError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall, ToolCalls, ToolCallsError, ToolInput,
+    CallId, CallIdError, FunctionName, FunctionNameError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall,
+    ToolCalls, ToolCallsError, ToolInput,
 };
 
 /// One stateless turn: where it goes, which model answers, the programs it
@@ -116,11 +117,11 @@ impl TurnInput {
 #[cfg(test)]
 pub mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref};
-    use aether_bloomery_program::ToolSchema;
+    use aether_bloomery_program::{ToolSchema, function_name};
 
     use super::{
-        CallId, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OfferedTools, OutputBudget,
-        OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
+        CallId, Endpoint, EndpointError, FunctionName, ModelName, ModelNameError, OfferedTool, OfferedTools,
+        OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
         TurnItemsError,
     };
     use crate::result::TurnResult;
@@ -137,13 +138,14 @@ pub mod tests {
         )
     }
 
-    /// Call `id` to `program` with arguments `{}` that did not decode.
+    /// Call `id` to `program`'s function name with arguments `{}` that did not decode.
     pub fn call(id: &str, program: &str) -> ToolCall {
-        ToolCall::new(
+        let name = function_name(&ProgramName::new(program).expect("program")).expect("function name");
+        ToolCall::refused(
             CallId::new(id).expect("call id"),
-            ProgramName::new(program).expect("program"),
+            FunctionName::new(name).expect("name"),
             Ref::of_text("{}"),
-            ToolInput::Refused(Ref::of_text("refused")),
+            Ref::of_text("refused"),
         )
     }
 

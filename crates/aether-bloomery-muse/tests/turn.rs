@@ -6,8 +6,9 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    CallId, Endpoint, ModelName, MuseTurn, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall,
-    ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome, TurnResult,
+    CallId, Echo, EchoInput, EchoResult, Endpoint, FunctionName, ModelName, MuseTurn, OfferedTool, OfferedTools,
+    OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome,
+    TurnResult,
 };
 use aether_bloomery_program::{
     AsyncSession, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
@@ -18,6 +19,7 @@ use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const CALLED: &str = include_str!("../fixtures/called.json");
+const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const URL: &str = "https://example.test/v1/responses";
 
 /// Stands in for `workspace.read`'s input and result, so the turn decodes and renders a type it does not link.
@@ -241,8 +243,8 @@ fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(),
     let TurnOutcome::Called { calls, text, .. } = recorded.outcome() else {
         panic!("expected Called, got {:?}", recorded.outcome());
     };
-    let programs: Vec<_> = calls.as_slice().iter().map(|call| call.program().as_str()).collect();
-    assert_eq!(programs, ["workspace.read", "muse.turn"]);
+    let names = calls.as_slice().iter().map(ToolCall::name).collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(names, ["workspace-read", "muse-turn"]);
     for cited in calls.as_slice().iter().map(ToolCall::arguments).chain([*text]) {
         staged_payload(cited.digest())?;
     }
@@ -250,17 +252,66 @@ fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(),
     let [read, turn] = calls.as_slice() else {
         panic!("expected two calls, got {calls:?}");
     };
-    let ToolInput::Decoded(decoded) = read.input() else {
+    let ToolInput::Decoded { program, input: decoded } = read.input() else {
         panic!("expected the read's arguments to decode, got {:?}", read.input());
     };
+    assert_eq!(program.as_str(), "workspace.read");
     let expected = ReadInput { path: "notes/bloomery.md".into() };
     assert_eq!(decoded.cast::<ReadInput>(), Some(Ref::of_encoded(&expected)?), "stored under the input's kind");
     assert_eq!(staged_payload(decoded.digest())?, ReadInput::encode_storage(&StorageData::from_value(expected))?);
-    let ToolInput::Refused(refusal) = turn.input() else {
+    let ToolInput::Refused { refusal, .. } = turn.input() else {
         panic!("expected the partial turn input to refuse, got {:?}", turn.input());
     };
     let refusal = String::from_utf8(staged_payload(refusal.digest())?)?;
     assert!(refusal.starts_with("The arguments do not decode as muse.turn.input: "), "{refusal}");
+    Ok(())
+}
+
+#[test]
+fn a_call_to_a_tool_the_turn_did_not_offer_is_recorded_refused() -> Result<(), Box<dyn Error>> {
+    // Catches a reply with an unoffered call recorded `Unreadable`, the unoffered call dropped or its name
+    // normalized, its refusal left unstaged, and the offered call beside it no longer decoded.
+    let tools = [Tool {
+        program: "muse.echo",
+        definition: tool_definition::<Echo>()?.to_string(),
+        input: ToolSchema::of::<EchoInput>(),
+        result: ToolSchema::of::<EchoResult>(),
+    }];
+    let (items, closure) = opening();
+    let (mut session, pending) = start_turn(&tools, items, closure)?;
+
+    let reply = FetchResult::Ok {
+        request_id: 1,
+        url: URL.into(),
+        status: 200,
+        headers: Vec::new(),
+        body: CALLED_UNOFFERED.as_bytes().to_vec(),
+    };
+    session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+    let PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) = session.poll() else {
+        panic!("expected the turn to complete after its one fetch");
+    };
+
+    let staged_payload = |digest| -> Result<Vec<u8>, Box<dyn Error>> {
+        let artifact = staged.iter().find(|artifact| artifact.digest() == digest).ok_or("the artifact is staged")?;
+        Ok(payload(artifact)?)
+    };
+    let recorded = TurnResult::decode_storage(&staged_payload(result)?)?.value;
+    let TurnOutcome::Called { calls, .. } = recorded.outcome() else {
+        panic!("expected Called, got {:?}", recorded.outcome());
+    };
+    let [echo, shout] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+    let ToolInput::Decoded { input, .. } = echo.input() else {
+        panic!("expected the offered call to decode, got {:?}", echo.input());
+    };
+    assert_eq!(input.cast::<EchoInput>(), Some(Ref::of_encoded(&EchoInput::new("alpha"))?));
+    let ToolInput::Refused { name, refusal } = shout.input() else {
+        panic!("expected the unoffered call to refuse, got {:?}", shout.input());
+    };
+    assert_eq!((shout.call_id().as_str(), name.as_str()), ("call_b", "muse-shout"));
+    assert_eq!(String::from_utf8(staged_payload(refusal.digest())?)?, "no such tool: muse-shout");
     Ok(())
 }
 
@@ -275,14 +326,19 @@ fn a_turn_replays_a_rendered_result_and_a_refusal_as_call_outputs() -> Result<()
     let result_schema = ToolSchema::of::<ReadInput>();
     let result_digest = Ref::of_encoded(&read_result)?.digest();
 
-    let call = |id: &str, program: &str, arguments: &str| -> Result<TurnItem, Box<dyn Error>> {
-        let input = ToolInput::Refused(Ref::of_text(refusal));
-        Ok(TurnItem::Call(ToolCall::new(CallId::new(id)?, ProgramName::new(program)?, Ref::of_text(arguments), input)))
+    let call = |id: &str, name: &str, arguments: &str| -> Result<TurnItem, Box<dyn Error>> {
+        let refused = Ref::of_text(refusal);
+        Ok(TurnItem::Call(ToolCall::refused(
+            CallId::new(id)?,
+            FunctionName::new(name)?,
+            Ref::of_text(arguments),
+            refused,
+        )))
     };
     let (mut items, mut closure) = opening();
     items.extend([
-        call("call_read", "workspace.read", read_arguments)?,
-        call("call_turn", "muse.turn", turn_arguments)?,
+        call("call_read", "workspace-read", read_arguments)?,
+        call("call_turn", "muse-turn", turn_arguments)?,
         TurnItem::CallOutput {
             call_id: CallId::new("call_read")?,
             output: ToolOutput::result(Ref::of_encoded(&result_schema)?, &result_schema, result_digest),
