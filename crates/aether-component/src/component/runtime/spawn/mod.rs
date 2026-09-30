@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use aether_actor::ReplyMode;
+use aether_data::name_inventory::native_type_entries;
 use aether_kinds::{Spawn, SpawnResult};
 use aether_substrate::actor::native::Held;
 
@@ -46,7 +47,7 @@ impl ComponentHostCapabilityState {
     /// its namespace, placed beneath its proven parent when it names one.
     fn prepare_spawn<M: ReplyMode>(ctx: &HostCtx<'_, M>, payload: Spawn) -> Result<Arc<PreparedLoad>, String> {
         let Spawn { namespace, key, parent, config } = payload;
-        if aether_data::name_inventory::native_type_entries().any(|entry| entry.namespace == namespace) {
+        if native_type_entries().any(|entry| entry.namespace == namespace) {
             return Err(format!(
                 "{namespace} is a native type: native types are composed by their chassis or parent; spawning one by mail is not supported yet"
             ));

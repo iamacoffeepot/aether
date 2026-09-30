@@ -13,7 +13,7 @@
 
 use std::fs;
 
-use aether_actor::{HandlesKind, HeldReply, actor};
+use aether_actor::{Addressable, HandlesKind, HeldReply, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{Blob, ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
