@@ -31,9 +31,9 @@ one line that doesn't exist on the native side:
 aether_actor::export!(public = [Hello]);
 ```
 
-Every entry is keyed — `public = [..]`, `default = A`, `boot = B`,
-`private = [..]`, `generators = [..]` — in any order, each key once; a bare or
-mixed call is a compile error that shows the keyed spelling. This line is
+Every entry is keyed — `public = [..]`, `boot = B`, `private = [..]`,
+`generators = [..]` — in any order, each key once; a bare or mixed call is a
+compile error that shows the keyed spelling. This line is
 **required** — without it the wasm has no FFI exports and the substrate
 can't drive the actor. It emits the `#[no_mangle]` entry points the host calls
 across the boundary (`init`, `wire`, `receive_p32`, `unwire`) and two **wasm
@@ -44,8 +44,8 @@ custom sections**:
   exactly what `describe_component` reads back to tell a live engine what the
   component accepts — your doc comments, filtered through a `# Agent` section if
   you write one, ride along.
-- **`aether.namespace`** — present only when the module declares an explicit
-  default actor; it carries that actor's default load namespace.
+- **`aether.namespace`** — present only when the module exports exactly one
+  actor; it carries that actor's load namespace.
 
 You never write `extern "C"` by hand. The `_p32` suffix on the pointer-taking
 exports (`receive_p32`, `on_rehydrate_p32`) is the dual-target FFI convention
@@ -59,17 +59,16 @@ through the in-process transport rather than the FFI path.
 A crate can export more than one actor type ([ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md)):
 
 ```rust
-aether_actor::export!(default = RootManager, public = [Panel, Toolbar]);
+aether_actor::export!(public = [RootManager, Panel, Toolbar]);
 ```
 
 The module then carries every listed type's code behind one FFI surface, and the
-load path picks which type an instance becomes (below). Only `default = RootManager`
-makes it the default for a bare load and emits `aether.namespace`; a `default` or
-`boot` type is not listed again under `public`. A plain
-`export!(public = [RootManager, Panel, Toolbar])` is deliberately defaultless: the
-loader requires an actor selection and declaration order has no meaning
-(ADR-0138). A module that exports exactly one actor, `export!(public = [Hello])`,
-still loads without a selector.
+load path picks which type an instance becomes (below); a `boot` type is not
+listed again under `public`. A load or boot entry that names no export needs a
+module with exactly one selectable (non-boot) export; this module exports
+three, so a load must name one (ADR-0241 §9, superseding the multi-actor
+selection rule ADR-0138 first stated). A module that exports exactly one
+actor, `export!(public = [Hello])`, still loads without a selector.
 The `aether.kinds.inputs`
 manifest grows to one handler group per exported type, each tagged with its
 namespace, so the loader and `describe_component` read each type's surface
@@ -106,28 +105,40 @@ literals, checked with `#[rule]` idents as `ReactorName` / `RuleName`.
 Envelopes stay on their original types in `actors`; their other extensions
 are not copied onto the root. `type Alias = T` is not followed. The pipeline
 ends in one keyed no-generator `export!`. The root takes no config and is not a `boot`
-actor; neither `boot` nor `default` may name a program or reactor. When
-`export!` names no `default`, the generated root becomes the default, so
-`export: Some("aether.bloomery.bundle")` resolves.
+actor, and `boot` may not name a program or reactor. The root is one of the
+module's public exports, so `export: Some("aether.bloomery.bundle")` selects it.
 
 ```rust
 aether_actor::export!(
-    default = Probe,
-    public = [ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
+    public = [Probe, ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
     generators = [aether_bloomery_bundle::bundle],
 );
 ```
 
-## Loading, dropping, and the trampoline address
+## Publishing, spawning, loading, and dropping
 
 A component enters and leaves a running engine by mail to the `aether.component`
 mailbox:
 
 | kind | does | reply |
 |---|---|---|
-| `aether.component.load` | compile, publish its module (admission), register its kinds, instantiate, publish a mailbox | `LoadResult` |
+| `aether.component.publish` | bind a module's namespaces (admission), register its kinds; a successor republishes every live instance of them as one group | `PublishResult` |
+| `aether.component.spawn` | stand up an instance of a published type at `NS`, `NS:key`, or `parent/NS:key`, or return a live one | `SpawnResult` |
+| `aether.component.load` | publish the module, then spawn the export it selects, in one call | `LoadResult` |
 | `aether.component.drop` | run the guest's `unwire` and close the instance; its name tombstones | `DropResult` |
-| `aether.component.replace` | republish a module over every live instance of its namespaces, as one group | `ReplaceResult` |
+| `aether.component.list` | enumerate the engine's live components | `ListComponentsResult` |
+| `aether.component.describe` | introspect one component's receive-side capabilities | `DescribeComponentResult` |
+
+A bare `Publish { code, configs }` binds every namespace the module exports;
+identical bytes already bound are a no-op, and a first publish spawns the
+module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config }`
+then stands up an instance of a published type: a live name answers
+`SpawnResult::Live` without re-init, an absent name answers `Spawned`, and a
+tombstoned name (§8, below) is refused. A `namespace` naming a native type —
+one linked into the binary rather than published from wasm — is refused:
+native types are composed by their chassis or parent, and spawning one by mail
+is not supported yet. `aether.component.load` combines the two in one call: it
+publishes `wasm`, then spawns the export it selects, keyed by `name`.
 
 `LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
 omitted `name` learns the key the load took) and the parsed
@@ -151,23 +162,24 @@ the reply event
 
 `aether.component.drop` names its component by `target`, its actor path; the
 host parses and proves it once at receipt, and an address with no live component
-answers `Err` naming it. `aether.component.replace` names no instance: the
-module's namespaces are the group it moves.
+answers `Err` naming it. `aether.component.publish` names no instance: the
+module's namespaces are the group it binds, or, for a successor, republishes.
 
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
-and replace of the same bytes shares that one entry, which lives
+and publish of the same bytes shares that one entry, which lives
 while its publication or any of them holds it. The wasm bytes are not kept once
 the module is built, and each `aether.asset.*` section is checked in as its own
 blob ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
-target type's `NAMESPACE` — and stands up that type. Omission defaults only when
-the module declared an explicit default; a defaultless multi-actor module returns a
-load error. The `LoadResult` reports the selected type's capabilities. A selector
-naming a type the module doesn't export is a clean load error. A single-actor
-module is unambiguous, so an omitted selector is the whole story there.
+target type's `NAMESPACE` — and stands up that type. Omitting it works only for
+a module with exactly one selectable (non-boot) export; a module exporting
+several is refused with an `Err` that names the exports. The `LoadResult`
+reports the selected type's capabilities. A selector naming a type the module
+doesn't export is a clean load error. A single-actor module is unambiguous, so
+an omitted selector is the whole story there.
 
 The selected type's cardinality decides the load's key
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
@@ -188,18 +200,19 @@ always placed there, so each must declare **`root`** — `#[actor(root)]`, or
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
 §5; see [Declaring placement](../foundations/actor-model.md#declaring-placement)).
 The host reads the permission from the module's `aether.actor.lineage` section: a
-load whose selected type or boot type has no `Root` record, and a replace whose
-replacement module's boot type has none, answer `Err` naming the type and the
+load whose selected type or boot type has no `Root` record, and a republish whose
+successor module's boot type has none, answer `Err` naming the type and the
 placements it does declare, before the module publishes or anything is staged. A
 type whose only placement is a parent — `child_of(P)` or `composable` — is reached
 through that parent, never loaded at the host.
 
-A drop closes the instance, and its name tombstones for the engine's lifetime
+A drop closes the instance's trampoline entirely — nothing resident is left at
+that lineage — and its name tombstones for the engine's lifetime
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
 §8). Its route reads `Dropped`, so mail to it drops, every watcher receives a
-`MonitorNotice`, and a later load of the same name is refused as retired. A
-second drop at the path is refused. Load under a new name to bring the component
-back.
+`MonitorNotice`, and a later load or spawn of the same name is refused as
+retired. A second drop at the path is refused. Load or spawn under a new key
+to bring the component back.
 
 In practice you drive this through the MCP harness — `publish(engine_id,
 selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,
@@ -218,7 +231,7 @@ The registry owner keeps a **publication table**: which code implements each
 namespace the engine publishes
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §3).
 Every native actor namespace linked into the binary is published when the
-registry is built. Every load and every replace publishes its module before
+registry is built. Every load and every publish binds its module before
 anything spawns or is swapped, through one owner batch that runs admission (§4)
 and then registers the module's kinds, all or nothing. Admission reads
 manifests only and refuses the whole module at the first failing namespace:
@@ -248,9 +261,9 @@ The bundle generator marks every bundle content-addressed, so a bundle root
 publishes as `aether.bloomery.bundle.<module hash>`, and each built bundle adds
 one publication.
 
-A refusal answers `LoadResult::Err` or `ReplaceResult::Err` with
+A refusal answers `LoadResult::Err` or `PublishResult::Err` with
 `module publish refused: <namespace> … (<rule>)`, and nothing is spawned or
-swapped. A replace publishes too, so a successor's new kinds register. A
+swapped. A publish of a successor publishes too, so its new kinds register. A
 load that publishes and is then refused at spawn (an unmet dependency, a failed
 module boot) leaves its module published: publish and spawn are separate steps.
 A published module stays resident for the engine's life.
@@ -324,7 +337,7 @@ child the host should never load by selector goes under `private = [..]`:
 #[actor(root, spawns(Panel))]
 impl WasmActor for RootManager { /* … spawns Panel inline … */ }
 
-aether_actor::export!(default = RootManager, public = [Sibling], private = [Panel]);
+aether_actor::export!(public = [RootManager, Sibling], private = [Panel]);
 ```
 
 Both halves are compile errors. A typed inline spawn of a child the spawner does
@@ -353,40 +366,11 @@ what lets a wasm crate be a *library* of actors: a UI root spawns its panels, a 
 manager spawns a per-entity actor for each thing in range — all inside the one
 resident instance, while each child keeps its own state.
 
-### Explicit logical parents in `SubstrateHarness`
-
-Component-composition tests can load a different binary beneath an already-live
-logical actor with `HarnessOp::load_component_under`, sent through the
-component host's reference:
-
-```rust,ignore
-let host = harness.actor_ref::<ComponentHostCapability>();
-let nested_load = HarnessOp::load_component_under(
-    &host,
-    parent_name,
-    LoadComponent {
-        wasm,
-        name: Some("worker".to_owned()),
-        config: Vec::new(),
-        export: Some("example.worker".to_owned()),
-    },
-);
-```
-
-The component host resolves `parent_name` through the live registry before it
-stages the ordinary component-loader path, and admits the load only when the
-selected type declares `child_of` the parent's type
-([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
-§5); any other placement answers `Err` before the module publishes. The
-existing `LoadResult` is the reply: `Ok.path` carries the canonical nested
-address `PARENT/example.worker:worker`, while a missing or non-live parent
-returns `LoadResult::Err`. A singleton is named at the root alone, so a
-`load_under` of one is refused. A declared dependency is always a root
-singleton, so a nested guest reaches its peers exactly as a root one does.
-
-This constructor is test-harness composition infrastructure. Ordinary
-`aether.component.load` places its guest at the root; the hub and MCP load
-surfaces do not expose an explicit parent mode.
+A `Spawn { parent }` places an instanced type beneath a live parent whose type
+it declares `child_of`, at `parent/NS:key`; a singleton names no parent, so a
+`parent` naming one is refused. In `SubstrateHarness`, the door for this is
+`spawn_child::<P, C>(&parent, key)`, which takes the parent's already-proven
+reference; the MCP `spawn` tool takes the same shape as `parent?`.
 
 ## Hot reload
 
@@ -416,17 +400,18 @@ impl WasmActor for MyComponent {
 aether_actor::export!(public = [MyComponent]);
 ```
 
-`aether.component.replace { wasm, configs }` republishes a module as one group
+A `Publish { code, configs }` of a module that succeeds one already bound
+republishes every live instance of the module's namespaces as one group
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
 §7). Its members are every live instance of every namespace the module
 publishes; each keeps its hosted type, since the namespace is the type.
 Identical bytes answer `Ok` with no swap. Otherwise the host first runs every
-pre-check and refuses the whole replace, naming each instance a check refuses,
-before any member is touched:
+pre-check and refuses the whole republish, naming each instance a check
+refuses, before any member is touched:
 
-- a module with no predecessor (none of its namespaces is published: load it),
-  a content-addressed module, or one whose republish is already in flight;
-- a module that declares a boot, or succeeds one that did (ADR-0147);
+- a content-addressed module, or one whose republish is already in flight;
+- a module that declares a boot, or succeeds one that did (ADR-0147; "a boot
+  module is not replaceable");
 - a module publish admission refuses (see
   [Publishing a module](#publishing-a-module)): a dropped namespace, or a row or
   `#[fallback]` a namespace or private child type narrows
@@ -438,13 +423,16 @@ before any member is touched:
   unlisted instance with an unchanged kind keeps its stored spawn config; a
   live inline child of a type whose config kind changes cannot be given one.
 
+A module with no predecessor — none of its namespaces is yet published — is
+not refused: it binds as a first publish.
+
 Then each member prepares: its inbox gate closes, so mail for it waits; the
 candidate instantiates behind the same binding with its outbox held, the old
 guest runs `unwire` and `on_dehydrate` and is kept, the correlation cursor,
 reply table and request contexts move to the candidate, and it runs
 `on_rehydrate`. Once every member is ready the module publishes, and each member
 commits: its held mail leaves on a chain of its own, and the mail its gate queued
-reaches the candidate in order. `ReplaceResult::Ok { types }`, each republished
+reaches the candidate in order. `PublishResult::Ok { types }`, each republished
 type with its capabilities, comes once every commit's chain has settled. A
 component that leaves both state hooks at their defaults swaps cleanly and comes
 back fresh from `init`. Resident inline children are rebuilt from the module's
@@ -464,8 +452,8 @@ undone
 ([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4),
 so an `on_rehydrate` override should assign from `prior` rather than accumulate
 onto what the instance already holds.
-While the replace is in flight, a load of one of its namespaces and a drop of a
-member wait for the answer and then run against the code that won; a replace
+While a republish is in flight, a load of one of its namespaces and a drop of a
+member wait for the answer and then run against the code that won; a republish
 that arrives while a load of its namespaces is in flight waits for those births.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): each swap replaces
@@ -591,7 +579,7 @@ A guest can load a component itself. It declares the component host,
 `depends(ComponentHostCapability)`, sends it `aether.component.load`, and keeps the
 sender of `LoadResult::Ok`, which is the loaded actor, as its reference to the
 component, as
-[Loading, dropping, and the trampoline address](#loading-dropping-and-the-trampoline-address)
+[Publishing, spawning, loading, and dropping](#publishing-spawning-loading-and-dropping)
 describes. The loaded component has no door back to its loader;
 [Talking back to the actor that loaded you](../recipes/addressing-a-peer-you-cannot-depend-on.md#talking-back-to-the-actor-that-loaded-you)
 shows the two shapes that reach it.

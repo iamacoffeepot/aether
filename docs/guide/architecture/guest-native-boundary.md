@@ -38,24 +38,25 @@ The deployable artifact is a wasm `cdylib`. An accompanying `rlib` can expose
 the kinds and helpers other Rust crates need to talk to it. Runtime code is
 normally feature-gated so a type-only consumer does not link the implementation.
 
-## Multi-actor modules have explicit default semantics
+## Multi-actor modules need an explicit export selector
 
-A wasm module may export several actor identities. Do not infer a default from
-declaration order:
+A wasm module may export several actor identities. Do not infer a selection
+from declaration order:
 
-- `export!(default = Main, public = [Helper, …])` declares `Main` as the
-  default and emits the namespace compatibility metadata.
-- `export!(public = [Main, Helper, …])` is defaultless. A loader must select an
-  exported actor; a bare load is an error.
+- `export!(public = [Main, Helper, …])` needs the load's `export` selector to
+  name one of them; a bare load is refused, naming the exports.
+- A module that exports exactly one actor, `export!(public = [Hello])`, still
+  loads without a selector, and only that case emits the namespace
+  compatibility metadata (`aether.namespace`).
 
 This rule prevents a harmless reordering from changing what a selector loads.
-It is governed by accepted ADR-0138 and enforced by the export manifest and
+It is governed by ADR-0241 §9 and enforced by the export manifest and
 component loader.
 
-A `boot = Boot` key may join either form (`export!(boot = Boot, default = Main,
-public = […])` or `export!(boot = Boot, public = [Helper, …])`). The boot type is instantiated
-once per loaded module whatever selector the caller names, and is not itself
-selectable; it is governed by accepted ADR-0147.
+A `boot = Boot` key may join either form, as in `export!(boot = Boot, public = […])`.
+The boot type is instantiated once per loaded module whatever selector the
+caller names, and is not itself selectable; it is governed by accepted
+ADR-0147.
 
 ## Native capability surface
 
@@ -125,7 +126,7 @@ Before changing a public boundary, ask:
 8. Is an ADR required because the boundary or compatibility policy changed?
 
 Integration fixtures under `crates/aether-test-fixtures-*/` cover several
-load/replace and multi-actor cases. Use them before inventing a new one-off
+load/publish and multi-actor cases. Use them before inventing a new one-off
 example.
 
 ## Implementation and decisions
@@ -138,5 +139,5 @@ example.
 - ADR-0096: multi-actor wasm modules
 - ADR-0099: actor identity and addressing
 - ADR-0121 and ADR-0122: kind ownership and marker/runtime split
-- ADR-0138: explicit/defaultless multi-actor default semantics
-- ADR-0147: the module boot actor and the default export slot
+- ADR-0138: multi-actor module export selection (superseded by ADR-0241 §9)
+- ADR-0147: the module boot actor, instantiated once per module load outside the export selector

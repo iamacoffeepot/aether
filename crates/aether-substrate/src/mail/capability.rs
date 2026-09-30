@@ -21,8 +21,8 @@
 // `register` call covers both. A native cap registers at boot. A wasm
 // guest's caps are written through `NativeCtx::sync_guest` from its host's
 // `GuestHost` declaration: on the host's `wire` (load, module boot, sibling
-// spawn), again on `aether.component.replace` (the mailbox id is stable per
-// ADR-0022), and removed on drop.
+// spawn), again on a republish (`aether.component.publish` of a successor;
+// the mailbox id is stable per ADR-0022), and removed on drop.
 
 // The registry's `RwLock` guard is intentionally held across the
 // read-then-membership-check pair in `accepts` — the same low-contention
@@ -65,7 +65,7 @@ impl MailboxCaps {
 /// `Arc<CapabilityRegistry>` off the boot path (mirroring how the
 /// routing [`Registry`](crate::mail::registry::Registry) is shared);
 /// the DAG validator reads `accepts` / `has_fallback` on the submit
-/// path, the load / replace / drop hooks mutate it.
+/// path, the load, spawn, republish, and drop hooks mutate it.
 ///
 /// Two views of the same loaded set are retained: the projected
 /// [`MailboxCaps`] (handler kind-id set + fallback flag) on the hot
@@ -132,8 +132,9 @@ impl CapabilityRegistry {
     /// Register (or replace) the caps for `mailbox`. A native cap's caps
     /// are registered at boot; a wasm guest's are written through
     /// `NativeCtx::sync_guest` from its host's `GuestHost` declaration, at
-    /// load and again on `aether.component.replace` (same mailbox id, fresh
-    /// handler set). Takes the full [`ComponentCapabilities`] and projects the hot-path
+    /// load and again on a republish (`aether.component.publish` of a
+    /// successor; same mailbox id, fresh handler set). Takes the full
+    /// [`ComponentCapabilities`] and projects the hot-path
     /// [`MailboxCaps`] internally, retaining the full surface for
     /// `describe_component` (iamacoffeepot/aether#2421).
     ///

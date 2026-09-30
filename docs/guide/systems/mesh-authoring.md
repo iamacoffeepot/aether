@@ -48,13 +48,13 @@ Keep the layers distinct:
    stroke ribbons for the active camera on every `Render`.
 
 The library has no renderer or mailbox dependency. The viewer is guest code in
-the multi-actor `aether-kit` wasm module. `aether-kit` declares
-no default export, so a load that names no `export` is refused with the
-module's export list (ADR-0138); the mesh actor must be selected as
+the multi-actor `aether-kit` wasm module. `aether-kit` exports several types,
+so a load that names no `export` is refused with the module's export list
+(ADR-0241 §9); the mesh actor must be selected as
 `aether_kit@aether.kit.mesh`. Export membership is in
 [`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
 The viewer declares `aether.kit.camera` as a dependency: load
-`aether_kit@aether.kit.camera` at its default name first. A viewer
+`aether_kit@aether.kit.camera` at its published name first. A viewer
 loaded alone is refused at load, naming `aether.kit.camera`.
 
 ## DSL vocabulary

@@ -25,7 +25,7 @@ For the hosted-code overview and replacement boundary, start with
 
 | System | Owns |
 |---|---|
-| [Components](systems/components.md) | wasm load/drop/replace, exports, config and state transfer |
+| [Components](systems/components.md) | wasm publish/spawn/load/drop, exports, config and state transfer |
 | [Inventory and transforms](systems/inventory-and-transforms.md) | live names, kind schemas, native handlers, value transforms |
 
 The hub's stored artifact and an engine's loaded instance are different things.

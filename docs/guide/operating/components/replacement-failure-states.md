@@ -12,8 +12,8 @@ until the group commits, and a failed successor's mail is discarded.
 Introspection can also describe a retained capability snapshot rather than the
 state an installed guest is actually in.
 
-Read [Component registry](../component-registry.md) first for normal load,
-replace, and drop behavior.
+Read [Component registry](../component-registry.md) first for normal publish,
+spawn, load, and drop behavior.
 
 ## Phase-dependent residue
 
@@ -30,7 +30,7 @@ The exact phase matters more than the generic `Err` shape. Do not say
 old guests still serve their mailboxes.
 
 An `unwire` or `on_dehydrate` guest trap is different: those traps are logged
-and contained rather than returned as `ReplaceResult::Err`, and the prepare
+and contained rather than returned as `PublishResult::Err`, and the prepare
 continues. Only a rejected `save_state` host call is surfaced at that phase. If
 the group later commits, do not mistake an earlier hook-trap log for a
 rolled-back swap.
@@ -40,8 +40,8 @@ rolled-back swap.
 There are two description layers:
 
 1. `aether-mcp` returns a process-local cache hit immediately. It refreshes that
-   cache on a successful load or replace, but retains the prior entries on a
-   replace error.
+   cache on a successful load or publish, but retains the prior entries on a
+   publish error.
 2. On a cache miss addressed by lineage name, the substrate returns its
    capability registry entry. Some post-splice failures happen before that
    entry is removed or replaced.
@@ -53,7 +53,7 @@ of them as snapshots, not liveness or binary-identity proof.
 
 ## Recovery protocol
 
-After any replace error:
+After any publish error:
 
 1. Stop further lifecycle mutation on the module's instances.
 2. Record the exact selector/hash, configs, the instances the error names, the
@@ -89,7 +89,7 @@ shared one instead.
 
 ## Success verification
 
-Even after `ReplaceResult::Ok`:
+Even after `PublishResult::Ok`:
 
 - retain the exact content hash used;
 - compare each returned type's capabilities with the expected one;
@@ -106,8 +106,8 @@ Even after `ReplaceResult::Ok`:
   `crates/aether-component/src/trampoline/runtime/republish.rs`
 - Substrate live component description:
   `crates/aether-component/src/component/runtime/mod.rs`
-- MCP replace result and cache update:
-  `crates/aether-mcp/src/tools/components.rs`
+- MCP publish result and cache update:
+  `crates/aether-mcp/src/tools/components/publish.rs`
 - MCP description cache and live fallback:
   `crates/aether-mcp/src/tools/describe.rs`
 - Live kind cache contract:
