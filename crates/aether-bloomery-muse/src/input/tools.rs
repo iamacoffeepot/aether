@@ -8,14 +8,16 @@
 //! ([`ToolSchema::of`]), so `muse.turn` links no tool's types.
 //!
 //! A call cites its arguments exactly as the model wrote them, to replay
-//! them unchanged, and cites what `muse.turn` made of them against the
-//! offered input schema: the decoded input, stored under the input's kind,
-//! or the text of the refused decode.
+//! them unchanged, and records what `muse.turn` made of the call: a call to
+//! an offered program whose arguments decoded carries the program and the
+//! decoded input, stored under the input's kind; any other call carries the
+//! name the model wrote and the text that refuses it.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Utf8Text};
-use aether_bloomery_program::ToolSchema;
+use aether_bloomery_program::{ToolDefinitionError, ToolSchema, function_name};
 
 /// One program offered to the model, with the definition sent for it and
 /// the schemas of its input and result.
@@ -190,38 +192,116 @@ impl CallId {
     }
 }
 
-/// What a call's arguments decoded to against the offered input schema.
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-pub enum ToolInput {
-    /// The program's input, stored under the input's kind: the input to run
-    /// the program with.
-    Decoded(ErasedRef),
-    /// Why the arguments did not decode: the text to replay as the call's
-    /// output.
-    Refused(Ref<Utf8Text>),
+/// Why [`FunctionName::new`] or decode refused a function name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionNameError {
+    /// The name was empty.
+    Empty,
+    /// Longer than [`FunctionName::MAX_BYTES`].
+    TooLong,
 }
 
-/// One call the model asked for: its id, the program, the arguments as the
-/// model wrote them, and the input they decoded to.
+impl FunctionNameError {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too-long",
+        }
+    }
+}
+
+/// The function name a model wrote on a call, kept exactly as written so the
+/// call replays under it: 1 to 256 bytes of any UTF-8.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct FunctionName(String);
+
+impl FunctionName {
+    /// Longest accepted name in bytes.
+    pub const MAX_BYTES: usize = 256;
+
+    /// Accept a function name.
+    ///
+    /// # Errors
+    ///
+    /// The [`FunctionNameError`] naming the rule the name broke.
+    pub fn new(name: impl Into<String>) -> Result<Self, FunctionNameError> {
+        let name = name.into();
+        Self::check(&name)?;
+        Ok(Self(name))
+    }
+
+    /// Borrow the name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(name: &str) -> Result<(), FunctionNameError> {
+        if name.is_empty() {
+            return Err(FunctionNameError::Empty);
+        }
+        if name.len() > Self::MAX_BYTES {
+            return Err(FunctionNameError::TooLong);
+        }
+        Ok(())
+    }
+}
+
+/// What `muse.turn` made of a call: the input to run an offered program
+/// with, or the text that refuses the call.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub enum ToolInput {
+    /// A call to an offered program whose arguments decoded; it replays under
+    /// the program's function name, which is the name the model wrote.
+    Decoded {
+        /// The program to run.
+        program: ProgramName,
+        /// The program's input, stored under the input's kind.
+        input: ErasedRef,
+    },
+    /// A call that does not run: its name offers no program, or its
+    /// arguments did not decode.
+    Refused {
+        /// The function name exactly as the model wrote it, which the call
+        /// replays under.
+        name: FunctionName,
+        /// Why the call does not run: the text to replay as its output.
+        refusal: Ref<Utf8Text>,
+    },
+}
+
+/// One call the model asked for: its id, the arguments as the model wrote
+/// them, and what `muse.turn` made of the call.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct ToolCall {
     /// The vendor's id for the call, which its output names.
     call_id: CallId,
-    /// The program the model asked to run.
-    program: ProgramName,
     /// The cited arguments, verbatim: JSON the program's input may or may
     /// not decode from.
     arguments: Ref<Utf8Text>,
-    /// The decoded input, or the refused decode's text.
+    /// The program and its decoded input, or the call's name and refusal.
     input: ToolInput,
 }
 
 impl ToolCall {
-    /// One call `call_id` to `program` with the cited `arguments`, which
+    /// One call `call_id` to the offered `program`, whose cited `arguments`
     /// decoded to `input`.
     #[must_use]
-    pub const fn new(call_id: CallId, program: ProgramName, arguments: Ref<Utf8Text>, input: ToolInput) -> Self {
-        Self { call_id, program, arguments, input }
+    pub const fn decoded(call_id: CallId, program: ProgramName, arguments: Ref<Utf8Text>, input: ErasedRef) -> Self {
+        Self { call_id, arguments, input: ToolInput::Decoded { program, input } }
+    }
+
+    /// One call `call_id` named `name` with the cited `arguments`, which does
+    /// not run and is answered with `refusal`.
+    #[must_use]
+    pub const fn refused(
+        call_id: CallId,
+        name: FunctionName,
+        arguments: Ref<Utf8Text>,
+        refusal: Ref<Utf8Text>,
+    ) -> Self {
+        Self { call_id, arguments, input: ToolInput::Refused { name, refusal } }
     }
 
     /// The vendor's id for the call.
@@ -230,10 +310,27 @@ impl ToolCall {
         &self.call_id
     }
 
-    /// The program the model asked to run.
+    /// The program the call runs, or `None` for a refused call.
     #[must_use]
-    pub const fn program(&self) -> &ProgramName {
-        &self.program
+    pub const fn program(&self) -> Option<&ProgramName> {
+        match &self.input {
+            ToolInput::Decoded { program, .. } => Some(program),
+            ToolInput::Refused { .. } => None,
+        }
+    }
+
+    /// The function name the call replays under: the program's function name
+    /// for a decoded call, the name as written for a refused one.
+    ///
+    /// # Errors
+    ///
+    /// The [`ToolDefinitionError`] of a program whose function name is too
+    /// long.
+    pub fn name(&self) -> Result<Cow<'_, str>, ToolDefinitionError> {
+        match &self.input {
+            ToolInput::Decoded { program, .. } => function_name(program).map(Cow::Owned),
+            ToolInput::Refused { name, .. } => Ok(Cow::Borrowed(name.as_str())),
+        }
     }
 
     /// The cited arguments, verbatim.
@@ -242,7 +339,7 @@ impl ToolCall {
         self.arguments
     }
 
-    /// The decoded input, or the refused decode's text.
+    /// The program and its decoded input, or the call's name and refusal.
     #[must_use]
     pub const fn input(&self) -> &ToolInput {
         &self.input
@@ -315,14 +412,17 @@ impl ToolCalls {
     }
 }
 
-invariant_errors!(OfferedToolsError, CallIdError, ToolCallsError);
+invariant_errors!(OfferedToolsError, CallIdError, FunctionNameError, ToolCallsError);
 
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref};
     use aether_data::{Storage, StorageData};
 
-    use super::{CallId, CallIdError, OfferedTools, OfferedToolsError, ToolCalls, ToolCallsError};
+    use super::{
+        CallId, CallIdError, FunctionName, FunctionNameError, OfferedTools, OfferedToolsError, ToolCalls,
+        ToolCallsError,
+    };
     use crate::input::tests::{call, offered_tool};
     use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems};
 
@@ -340,6 +440,17 @@ mod tests {
         for (reject, error, accept) in ids {
             assert_eq!(CallId::new(reject), Err(error), "reject {reject:?}");
             assert_eq!(CallId::new(accept).expect("accepted neighbour").as_str(), accept, "accept {accept:?}");
+        }
+
+        let longest_name = "\u{e9}".repeat(FunctionName::MAX_BYTES / 2);
+        let too_long_name = format!("{longest_name}a");
+        let names = [
+            ("", FunctionNameError::Empty, "a"),
+            (too_long_name.as_str(), FunctionNameError::TooLong, longest_name.as_str()),
+        ];
+        for (reject, error, accept) in names {
+            assert_eq!(FunctionName::new(reject), Err(error), "reject {reject:?}");
+            assert_eq!(FunctionName::new(accept).expect("accepted neighbour").as_str(), accept, "accept {accept:?}");
         }
 
         let program = |name: &str| ProgramName::new(name).expect("program name");

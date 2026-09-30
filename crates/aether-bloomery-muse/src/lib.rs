@@ -15,10 +15,13 @@
 //! `aether_bloomery_program::tool_definition` and cites the definition in an
 //! [`OfferedTool`], beside the program's input and result schemas
 //! (`ToolSchema::of`); nothing defaults to every declared program. A reply
-//! that asks for calls is [`TurnOutcome::Called`], each [`ToolCall`] naming
-//! an offered program, citing its arguments verbatim, and citing a
-//! [`ToolInput`]: the arguments decoded against the offered input schema and
-//! stored under the input's kind, or the text of the refused decode. The
+//! that asks for calls is [`TurnOutcome::Called`], each [`ToolCall`] citing
+//! its arguments verbatim and holding a [`ToolInput`]: a call whose name is an
+//! offered program's function name and whose arguments decode against the
+//! offered input schema carries the program and the input stored under the
+//! input's kind; any other call is refused under the name the model wrote,
+//! with the text of the refusal (`no such tool: <name>`, or the refused
+//! decode), so the model sees its mistake on the next turn. The
 //! program never runs a call. A later turn replays the call as
 //! [`TurnItem::Call`] and its [`ToolOutput`] as [`TurnItem::CallOutput`]:
 //! a stored result, which the program renders to JSON with the result schema
@@ -79,9 +82,9 @@ mod result;
 mod session;
 
 pub use input::{
-    CallId, CallIdError, Endpoint, EndpointError, ModelName, ModelNameError, OfferedTool, OfferedTools,
-    OfferedToolsError, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolCalls, ToolCallsError,
-    ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
+    CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, ModelName, ModelNameError,
+    OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall,
+    ToolCalls, ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};

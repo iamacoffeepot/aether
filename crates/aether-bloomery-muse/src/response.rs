@@ -4,22 +4,21 @@
 //! spent, and a fault carries no blobs. Only no reply at all refuses, and the
 //! driver records that refusal as a fault. [`classify`] holds every rule.
 
-use std::collections::BTreeSet;
-
-use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
-use aether_bloomery_program::{Async, Env, ToolSchema, program_name};
+use aether_bloomery_kinds::{Detail, Refusal};
+use aether_bloomery_program::{Async, Env, ToolSchema, function_name};
 use aether_http::{FetchResult, HttpHeader};
 use serde::Deserialize;
 
 use crate::arguments;
-use crate::input::{CallId, OfferedTool, ToolCall, ToolCalls, ToolInput};
+use crate::input::{CallId, FunctionName, OfferedTool, ToolCall, ToolCalls};
 use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
 
 /// Stage the reply body and whatever text and call arguments it carries, and build the result that cites them.
 ///
-/// `offered` is the turn's offered tools: a call to any other program leaves the reply `Unreadable`. `inputs[i]` is
-/// the read input schema of `offered[i]`; each call's arguments decode against its tool's, and the call cites the
-/// staged input or the staged refusal.
+/// `offered` is the turn's offered tools, and `inputs[i]` is the read input schema of `offered[i]`. A call named for an
+/// offered tool decodes its arguments against that tool's schema and cites the staged input, or the staged refusal of
+/// the decode. A call named for no offered tool is refused with the staged text `no such tool: <name>`, so the loop
+/// answers it and the model can correct itself on the next turn.
 pub fn record(
     env: &mut Env<Async>,
     offered: &[OfferedTool],
@@ -40,18 +39,20 @@ pub fn record(
         Classified::Called { calls, text, usage } => {
             let calls = calls
                 .into_iter()
-                .map(|(call_id, program, arguments)| {
-                    let (_, schema) = offered
-                        .iter()
-                        .zip(inputs)
-                        .find(|(tool, _)| *tool.program() == program)
-                        .expect("classify admits only calls to offered programs");
+                .map(|ReadCall { call_id, name, tool, arguments }| {
                     let verbatim = env.stage_text(&arguments);
-                    let input = match arguments::decode(&arguments, schema) {
-                        Ok(payload) => ToolInput::Decoded(env.stage_payload(schema.kind_id(), &payload)),
-                        Err(reason) => ToolInput::Refused(env.stage_text(&reason)),
+                    let Some(tool) = tool else {
+                        let refusal = env.stage_text(&format!("no such tool: {}", name.as_str()));
+                        return ToolCall::refused(call_id, name, verbatim, refusal);
                     };
-                    ToolCall::new(call_id, program, verbatim, input)
+                    let schema = &inputs[tool];
+                    match arguments::decode(&arguments, schema) {
+                        Ok(payload) => {
+                            let input = env.stage_payload(schema.kind_id(), &payload);
+                            ToolCall::decoded(call_id, offered[tool].program().clone(), verbatim, input)
+                        }
+                        Err(reason) => ToolCall::refused(call_id, name, verbatim, env.stage_text(&reason)),
+                    }
                 })
                 .collect();
             let calls = ToolCalls::new(calls).expect("classify checked the call list's rules");
@@ -100,7 +101,7 @@ fn header<'a>(headers: &'a [HttpHeader], name: &str) -> Option<&'a str> {
 #[derive(Debug, PartialEq, Eq)]
 enum Classified {
     Completed { text: String, usage: TurnUsage },
-    Called { calls: Vec<(CallId, ProgramName, String)>, text: String, usage: TurnUsage },
+    Called { calls: Vec<ReadCall>, text: String, usage: TurnUsage },
     Incomplete { text: String, reason: String, usage: TurnUsage },
     Declined { refusal: String, usage: TurnUsage },
     Rejected,
@@ -118,9 +119,11 @@ enum Classified {
 /// 6. A vendor status of `failed` or `cancelled` is `Rejected`.
 /// 7. A response without usage is `Unreadable`.
 /// 8. Any `refusal` content part is `Declined`.
-/// 9. A vendor status of `completed` with any `function_call` output item is `Called`, every call in order. It is
-///    `Unreadable` instead when a call's name maps to no program or to one `offered` does not hold, or when a call
-///    id is not a valid `CallId`, repeats, or the calls outnumber `ToolCalls::MAX_CALLS`.
+/// 9. A vendor status of `completed` with any `function_call` output item is `Called`, every call in order. A call
+///    whose name is exactly the function name of a tool `offered` holds is read with that tool; any other call is
+///    read with no tool, so [`record`] refuses it back to the model. It is `Unreadable` instead when a call id is not
+///    a valid `CallId` or repeats, a name is not a valid `FunctionName`, or the calls outnumber
+///    `ToolCalls::MAX_CALLS`.
 /// 10. A vendor status of `incomplete` is `Incomplete`; `completed` is `Completed`; any other is `Unreadable`.
 ///
 /// A `Transient` outcome carries `retry_after_secs` as read. The text is every
@@ -180,17 +183,37 @@ fn classify(
     }
 }
 
-/// Each call as `(call id, program, arguments)`, or `None` when any breaks a rule of [`classify`]'s step 9.
-fn read_calls(calls: Vec<FunctionCall>, offered: &[OfferedTool]) -> Option<Vec<(CallId, ProgramName, String)>> {
-    let offered: BTreeSet<&ProgramName> = offered.iter().map(OfferedTool::program).collect();
+/// One call of a reply, read before any artifact is staged.
+#[derive(Debug, PartialEq, Eq)]
+struct ReadCall {
+    call_id: CallId,
+    /// The function name exactly as the model wrote it.
+    name: FunctionName,
+    /// The index of the offered tool whose function name is `name`, or `None` when no offered tool has it.
+    tool: Option<usize>,
+    /// The arguments, verbatim.
+    arguments: String,
+}
+
+/// Each call read against the offered tools, or `None` when any breaks a rule of [`classify`]'s step 9.
+///
+/// A name matches a tool only when it is exactly that tool's function name, the name the request's definition sent,
+/// so a decoded call replays under the name the model wrote.
+fn read_calls(calls: Vec<FunctionCall>, offered: &[OfferedTool]) -> Option<Vec<ReadCall>> {
+    let names: Vec<Option<String>> = offered.iter().map(|tool| function_name(tool.program()).ok()).collect();
     let calls = calls
         .into_iter()
         .map(|call| {
-            let program = program_name(&call.name).filter(|program| offered.contains(program))?;
-            Some((CallId::new(call.call_id).ok()?, program, call.arguments))
+            let tool = names.iter().position(|name| name.as_deref() == Some(call.name.as_str()));
+            Some(ReadCall {
+                call_id: CallId::new(call.call_id).ok()?,
+                name: FunctionName::new(call.name).ok()?,
+                tool,
+                arguments: call.arguments,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
-    ToolCalls::check_ids(calls.iter().map(|(call_id, ..)| call_id)).ok()?;
+    ToolCalls::check_ids(calls.iter().map(|call| &call.call_id)).ok()?;
     Some(calls)
 }
 
@@ -325,9 +348,9 @@ mod tests {
 
     use aether_bloomery_kinds::ProgramName;
 
-    use super::{Classified, classify, retry_after_secs, vendor_verdict};
+    use super::{Classified, ReadCall, classify, retry_after_secs, vendor_verdict};
     use crate::input::tests::offered_tool;
-    use crate::input::{CallId, OfferedTool};
+    use crate::input::{CallId, FunctionName, OfferedTool, ToolCalls};
     use crate::result::TurnUsage;
 
     const COMPLETED: &str = include_str!("../fixtures/completed.json");
@@ -479,19 +502,28 @@ mod tests {
         assert_eq!(retry_after_secs(&two), Some(4), "the first header wins");
     }
 
+    fn read(id: &str, name: &str, tool: Option<usize>, arguments: &str) -> ReadCall {
+        ReadCall {
+            call_id: CallId::new(id).expect("call id"),
+            name: FunctionName::new(name).expect("function name"),
+            tool,
+            arguments: arguments.to_owned(),
+        }
+    }
+
+    const READ_ARGUMENTS: &str = r#"{"path": "notes/bloomery.md"}"#;
+    const TURN_ARGUMENTS: &str = r#"{"endpoint":"https://example.test/v1/responses"}"#;
+
     #[test]
     fn a_reply_that_asks_for_calls_records_every_call_in_order() {
-        // Catches a reply read as `Completed` with its calls dropped, only the first call kept, a call mapped to
-        // the wrong program, and arguments rewritten instead of kept verbatim.
-        let call = |id: &str, name: &str, arguments: &str| {
-            (CallId::new(id).expect("call id"), program(name), arguments.to_owned())
-        };
+        // Catches a reply read as `Completed` with its calls dropped, only the first call kept, a call matched to
+        // the wrong tool, and arguments rewritten instead of kept verbatim.
         assert_eq!(
             classify(200, None, None, CALLED.as_bytes(), &offer(&["muse.turn", "workspace.read"])),
             Classified::Called {
                 calls: vec![
-                    call("call_read", "workspace.read", r#"{"path": "notes/bloomery.md"}"#),
-                    call("call_turn", "muse.turn", r#"{"endpoint":"https://example.test/v1/responses"}"#),
+                    read("call_read", "workspace-read", Some(1), READ_ARGUMENTS),
+                    read("call_turn", "muse-turn", Some(0), TURN_ARGUMENTS),
                 ],
                 text: "Reading the notes first.".into(),
                 usage: TurnUsage::new(1500, 0, 90, 40),
@@ -500,22 +532,60 @@ mod tests {
     }
 
     #[test]
+    fn a_call_to_a_tool_the_turn_did_not_offer_is_read_with_no_tool() {
+        // Catches a call to an unoffered name dropped from the list, the whole reply made `Unreadable` over it, and
+        // a dotted or respelled name admitted through a lossy map to an offered program.
+        let both = offer(&["muse.turn", "workspace.read"]);
+        let spaced = CALLED.replace("muse-turn", "Muse Turn");
+        let dotted = CALLED.replace("muse-turn", "muse.turn");
+        let cases = [
+            ("a program not offered", CALLED, offer(&["workspace.read"]), "muse-turn", Some(0)),
+            ("no program offered", CALLED, Vec::new(), "muse-turn", None),
+            ("a name no program has", spaced.as_str(), both.clone(), "Muse Turn", Some(1)),
+            ("a dotted program name", dotted.as_str(), both, "muse.turn", Some(1)),
+        ];
+        for (label, body, offered, name, read_tool) in cases {
+            assert_eq!(
+                classify(200, None, None, body.as_bytes(), &offered),
+                Classified::Called {
+                    calls: vec![
+                        read("call_read", "workspace-read", read_tool, READ_ARGUMENTS),
+                        read("call_turn", name, None, TURN_ARGUMENTS),
+                    ],
+                    text: "Reading the notes first.".into(),
+                    usage: TurnUsage::new(1500, 0, 90, 40),
+                },
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn a_call_the_turn_cannot_record_leaves_the_reply_unreadable() {
-        // Catches a call to a program the turn never offered being recorded, and a `ToolCalls` built past its own
-        // rule on a repeated or invalid call id.
+        // Catches a `ToolCalls` built past its own rule on a repeated or invalid call id or too many calls, and a
+        // name past the cap stored as a call's name.
         let both = offer(&["muse.turn", "workspace.read"]);
         let repeated = CALLED.replace("call_turn", "call_read");
         let spaced = CALLED.replace("call_turn", "call turn");
-        let unmapped = CALLED.replace("muse-turn", "Muse Turn");
+        let too_long = CALLED.replace("muse-turn", &"a".repeat(FunctionName::MAX_BYTES + 1));
+        let mut reply: serde_json::Value = serde_json::from_str(CALLED).expect("fixture parses");
+        let call = reply["output"][2].clone();
+        reply["output"] = (0..=ToolCalls::MAX_CALLS)
+            .map(|index| {
+                let mut call = call.clone();
+                call["call_id"] = format!("call_{index}").into();
+                call
+            })
+            .collect();
+        let too_many = reply.to_string();
         let cases = [
-            ("a program not offered", CALLED, offer(&["workspace.read"])),
-            ("no program offered", CALLED, Vec::new()),
-            ("a repeated call id", repeated.as_str(), both.clone()),
-            ("an invalid call id", spaced.as_str(), both.clone()),
-            ("a name that maps to no program", unmapped.as_str(), both),
+            ("a repeated call id", repeated.as_str()),
+            ("an invalid call id", spaced.as_str()),
+            ("a name past the cap", too_long.as_str()),
+            ("more calls than the cap", too_many.as_str()),
         ];
-        for (label, body, offered) in cases {
-            assert_eq!(classify(200, None, None, body.as_bytes(), &offered), Classified::Unreadable, "{label}");
+        for (label, body) in cases {
+            assert_eq!(classify(200, None, None, body.as_bytes(), &both), Classified::Unreadable, "{label}");
         }
     }
 }

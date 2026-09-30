@@ -87,11 +87,11 @@ impl Conversation {
         let answered = waiting.outputs.len();
         for call in &waiting.calls.as_slice()[answered..] {
             match call.input() {
-                ToolInput::Refused(text) => {
-                    waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(*text)));
+                ToolInput::Refused { refusal, .. } => {
+                    waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(*refusal)));
                 }
-                ToolInput::Decoded(input) => {
-                    self.next = Some(Next::Call { program: call.program().clone(), input: input.digest() });
+                ToolInput::Decoded { program, input } => {
+                    self.next = Some(Next::Call { program: program.clone(), input: input.digest() });
                     return Some(());
                 }
             }
@@ -111,11 +111,12 @@ impl Conversation {
 
     /// Record `result`, the result of the tool run at `seq`, as the output of
     /// the call the loop ran, citing the result schema its turn offered.
-    /// `None` when the turn offered no such tool.
+    /// `None` when the call does not run or the turn offered no such tool.
     fn answer(&mut self, result: ErasedRef, seq: Seq) -> Option<()> {
         let waiting = self.waiting.as_mut()?;
         let call = waiting.calls.as_slice().get(waiting.outputs.len())?;
-        let schema = waiting.input.tools().iter().find(|tool| tool.program() == call.program())?.result();
+        let program = call.program()?;
+        let schema = waiting.input.tools().iter().find(|tool| tool.program() == program)?.result();
         waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Result { schema, result }));
         self.answered = Some(seq);
         Some(())

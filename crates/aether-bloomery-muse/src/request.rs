@@ -5,6 +5,8 @@
 //! closure describes is testable without the invocation machinery. The
 //! program sets exactly one header and no credential.
 
+use std::borrow::Cow;
+
 use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
 use aether_bloomery_program::function_name;
 use aether_http::{Fetch, HttpHeader, HttpMethod};
@@ -45,7 +47,7 @@ enum Item<'a> {
         #[serde(rename = "type")]
         kind: &'static str,
         call_id: &'a str,
-        name: String,
+        name: Cow<'a, str>,
         arguments: &'a str,
     },
     FunctionCallOutput {
@@ -78,7 +80,7 @@ impl<'a> Item<'a> {
             TurnItem::Call(call) => Self::FunctionCall {
                 kind: "function_call",
                 call_id: call.call_id().as_str(),
-                name: function(call.program())?,
+                name: call.name().map_err(|error| refused(format!("call {}: {error}", call.call_id().as_str())))?,
                 arguments: text,
             },
             TurnItem::CallOutput { call_id, .. } => {
@@ -156,14 +158,15 @@ pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Res
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref, Refusal};
+    use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Refusal};
+    use aether_data::KindId;
     use aether_http::{HttpHeader, HttpMethod};
     use serde_json::json;
 
     use super::{TURN_TIMEOUT_MILLIS, fetch};
     use crate::input::tests::offered_tool;
     use crate::input::{
-        CallId, Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput,
+        CallId, Endpoint, FunctionName, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall,
         ToolOutput, TurnInput, TurnItem, TurnItems,
     };
 
@@ -225,28 +228,39 @@ mod tests {
 
     #[test]
     fn request_offers_each_tool_and_replays_calls_beside_their_outputs() {
-        // Catches unsent or reordered tools, a replayed call under the program name instead of its function name,
-        // replay items in the wrong shape, and `store` left on.
+        // Catches unsent or reordered tools, a replayed call under the program name instead of its function name, a
+        // refused call's name normalized or re-derived instead of sent as the model wrote it, replay items in the
+        // wrong shape, and `store` left on.
         let definitions = [
             json!({ "type": "function", "name": "workspace-read", "parameters": { "type": "object" } }),
             json!({ "type": "function", "name": "muse-turn", "description": "One turn.", "strict": false }),
         ];
         let definition_texts = definitions.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let texts = ["Read the notes.", r#"{"path":"notes.md"}"#, "a bloom"].map(String::from);
-        let refused = ToolInput::Refused(Ref::of_text(&texts[2]));
-        let call = ToolCall::new(
-            CallId::new("call_1").expect("call id"),
+        let texts =
+            ["Read the notes.", r#"{"path":"notes.md"}"#, "a bloom", "{}", "no such tool: Muse Turn"].map(String::from);
+        let id = |id: &str| CallId::new(id).expect("call id");
+        let decoded = ToolCall::decoded(
+            id("call_1"),
             program("workspace.read"),
             Ref::of_text(&texts[1]),
-            refused,
+            ErasedRef::new(KindId(1), Ref::of_text("input").digest()),
         );
+        let unoffered = ToolCall::refused(
+            id("call_2"),
+            FunctionName::new("Muse Turn").expect("name"),
+            Ref::of_text(&texts[3]),
+            Ref::of_text(&texts[4]),
+        );
+        let output = |call: &str, text: &str| TurnItem::CallOutput {
+            call_id: id(call),
+            output: ToolOutput::Refused(Ref::of_text(text)),
+        };
         let items = vec![
             TurnItem::message(Role::User, Ref::of_text(&texts[0])),
-            TurnItem::Call(call),
-            TurnItem::CallOutput {
-                call_id: CallId::new("call_1").expect("call id"),
-                output: ToolOutput::Refused(Ref::of_text(&texts[2])),
-            },
+            TurnItem::Call(decoded),
+            output("call_1", &texts[2]),
+            TurnItem::Call(unoffered),
+            output("call_2", &texts[4]),
         ];
         let input = input(offered(&["workspace.read", "muse.turn"]), items);
 
@@ -270,6 +284,8 @@ mod tests {
                         "arguments": r#"{"path":"notes.md"}"#,
                     },
                     { "type": "function_call_output", "call_id": "call_1", "output": "a bloom" },
+                    { "type": "function_call", "call_id": "call_2", "name": "Muse Turn", "arguments": "{}" },
+                    { "type": "function_call_output", "call_id": "call_2", "output": "no such tool: Muse Turn" },
                 ],
             })
         );

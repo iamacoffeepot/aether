@@ -24,6 +24,7 @@ use aether_http::FetchResult;
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
+const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
 const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
 const URL: &str = "https://example.test/v1/responses";
@@ -306,7 +307,7 @@ fn called(result: &TurnResult) -> (Ref<Utf8Text>, Vec<ToolCall>) {
 
 /// The input `call`'s arguments decoded to.
 fn decoded(call: &ToolCall) -> Digest {
-    let ToolInput::Decoded(input) = call.input() else {
+    let ToolInput::Decoded { input, .. } = call.input() else {
         panic!("expected {:?} to decode", call.call_id());
     };
     input.digest()
@@ -424,8 +425,8 @@ fn a_call_whose_arguments_do_not_decode_goes_straight_to_the_next_turn() -> Test
     let refusals: Vec<_> = calls
         .iter()
         .map(|call| match call.input() {
-            ToolInput::Refused(refusal) => (call.call_id().clone(), *refusal),
-            ToolInput::Decoded(_) => panic!("expected {:?} to refuse", call.call_id()),
+            ToolInput::Refused { refusal, .. } => (call.call_id().clone(), *refusal),
+            ToolInput::Decoded { .. } => panic!("expected {:?} to refuse", call.call_id()),
         })
         .collect();
     let next_call = asked(&driver, first_turn);
@@ -446,6 +447,55 @@ fn a_call_whose_arguments_do_not_decode_goes_straight_to_the_next_turn() -> Test
 
     let rested = driver.settle(first_turn);
     assert!(driver.intents(rested).is_empty());
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_completes() -> TestResult {
+    // Catches a session dropped over a call to a tool the turn did not offer, that call run as a tool or answered
+    // with anything but its stored refusal, its output out of order with the offered call's result, and a replay
+    // under any name but the one the model wrote.
+    let mut driver = Driver::new(&[CALLED_UNOFFERED, COMPLETED]);
+    let opened = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (text, calls) = called(&driver.result(first_turn));
+    let [call_a, call_b] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+    let ToolInput::Refused { name, refusal } = call_b.input() else {
+        panic!("expected the unoffered call to refuse, got {:?}", call_b.input());
+    };
+    assert_eq!(name.as_str(), "muse-shout", "the call keeps the name the model wrote");
+    let echo = asked(&driver, first_turn);
+    assert_eq!(echo.name.as_str(), Echo::NAME);
+    assert_eq!(echo.input, CallInput::Stored(decoded(call_a)), "only the offered call runs");
+    let echoed = driver.follow(first_turn);
+    let result = ErasedRef::new(EchoResult::ID, driver.transition(echoed).result);
+
+    let next_call = asked(&driver, echoed);
+    assert_eq!(next_call.name.as_str(), MuseTurn::NAME, "the refused call runs no tool");
+    let CallInput::Value(next) = next_call.input else {
+        panic!("expected the next turn as a value");
+    };
+    let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
+    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let answered = [
+        TurnItem::message(Role::Assistant, text),
+        TurnItem::Call(call_a.clone()),
+        TurnItem::Call(call_b.clone()),
+        TurnItem::CallOutput {
+            call_id: call_a.call_id().clone(),
+            output: ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result },
+        },
+        TurnItem::CallOutput { call_id: call_b.call_id().clone(), output: ToolOutput::Refused(*refusal) },
+    ];
+    assert_eq!(next.items().split_at(first.items().len()), (first.items(), answered.as_slice()));
+
+    driver.settle(echoed);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(session.rested(), RestReason::Completed);
     assert_warm_and_live_agree(&driver);
     Ok(())
 }

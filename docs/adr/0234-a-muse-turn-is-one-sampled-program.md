@@ -95,12 +95,16 @@ program is tested without spending money.
        System-style instructions are a leading `Developer` message; there is
        no separate instructions field.
      - `Call(ToolCall)`: a call the model asked for in an earlier turn,
-       replayed as a `function_call` item. `ToolCall { call_id, program,
-       arguments, input }` holds a `CallId` (1 to 256 bytes of ASCII graphic
-       characters), a `ProgramName` sent under its function name, the
-       arguments as a `Ref<Utf8Text>`, sent verbatim, and a `ToolInput`:
-       `Decoded(ErasedRef)` citing the input the arguments decoded to, or
-       `Refused(Ref<Utf8Text>)` citing why they did not.
+       replayed as a `function_call` item. `ToolCall { call_id, arguments,
+       input }` holds a `CallId` (1 to 256 bytes of ASCII graphic
+       characters), the arguments as a `Ref<Utf8Text>`, sent verbatim, and
+       a `ToolInput`: `Decoded { program, input }`, a `ProgramName` sent
+       under its function name and an `ErasedRef` citing the input the
+       arguments decoded to; or `Refused { name, refusal }`, a
+       `FunctionName` (1 to 256 bytes of any UTF-8) sent exactly as the
+       model wrote it and a `Ref<Utf8Text>` citing why the call does not
+       run. Only a call that runs carries a program, so no stored call
+       pairs a program with a name that disagrees with it.
      - `CallOutput { call_id, output }`: that call's output, replayed as a
        `function_call_output` item matched by `call_id`. `output` is a
        `ToolOutput`: `Result { schema, result }`, a `Ref<ToolSchema>` and
@@ -216,12 +220,18 @@ program is tested without spending money.
      wrong, and nothing was bought.
    - A completed reply with `function_call` output items is
      `Called { calls, text, usage }`, every call in order as
-     `ToolCall { call_id, program, arguments }` with the arguments staged
-     verbatim. `calls` is a `ToolCalls`: 1 to 128 calls, no `call_id`
-     twice. A call whose name maps back through `program_name` to no
-     offered program, or whose id is invalid or repeats, makes the reply
-     `Unreadable`, and the body stays on the record; the program never
-     keeps a partial list.
+     a `ToolCall` with the arguments staged verbatim. `calls` is a
+     `ToolCalls`: 1 to 128 calls, no `call_id` twice. A call names an
+     offered program only when its name is exactly that program's function
+     name, the name the request's definition sent, so a decoded call
+     replays under the name the model wrote. A call whose name is no
+     offered program's function name is kept and refused with the staged
+     text `no such tool: <name>` under the name as written, so the loop
+     answers it and the model can correct itself on the next turn. Only a
+     call id that is invalid or repeats, a name that is empty or longer
+     than 256 bytes, or more than 128 calls make the reply `Unreadable`,
+     and the body stays on the record; the program never keeps a partial
+     list.
    - `muse.turn` decodes each call's arguments against its offered input
      schema with `aether-codec`'s storage codec (`encode_storage_schema`)
      and stages either the payload under the input's kind or a refusal
@@ -329,8 +339,9 @@ program is tested without spending money.
   through `Storage::decode_storage`, so the tool's run would refuse every
   decoded input.
 - **Dropping calls to unoffered programs and keeping the rest.** Rejected:
-  a partial record of what the model asked for; `Unreadable` keeps the body
-  whole for later correction.
+  a partial record of what the model asked for. The unoffered call is kept
+  and refused instead (decision 9), so the record holds every call and the
+  model sees its mistake.
 - **Retrying inside `run`.** Rejected: retry belongs to the graph
   (ADR-0226), and a hidden retry spends money twice. Backing off also
   needs a sleep, and a program has no clock or timer; the backoff would
