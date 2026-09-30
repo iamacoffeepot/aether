@@ -9,7 +9,7 @@ use std::sync::mpsc;
 
 use aether_bloomery_kinds::{CallOutcome, MoveHeadResult, Processed, PublishResult, WatchHeadResult};
 use aether_bloomery_workspace::{ImportResult, RunResult};
-use aether_kinds::LoadResult;
+use aether_kinds::{ListComponentsResult, LoadResult, SpawnResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -28,6 +28,13 @@ pub enum Reply {
     /// The component host's answer to a `LoadComponent`, boxed: it carries
     /// the component's whole receive surface.
     Load(Box<LoadResult>),
+    /// The component host's answer to a code `Publish`.
+    PublishCode(aether_kinds::PublishResult),
+    /// A spawned or live instance's answer to a `Spawn`, or the component
+    /// host's refusal, boxed: it carries the instance's receive surface.
+    Spawn(Box<SpawnResult>),
+    /// The component host's answer to a `ListComponents`.
+    List(ListComponentsResult),
     /// The journal owner's answer to a `WatchHead`.
     Watch(WatchHeadResult),
     /// The workspace's answer to an `Import`.
@@ -86,6 +93,21 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::single]
     fn on_load_result(&mut self, ctx: &mut NativeCtx<'_>, result: LoadResult) {
         self.forward(ctx, Reply::Load(Box::new(result)));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_publish_code_result(&mut self, ctx: &mut NativeCtx<'_>, result: aether_kinds::PublishResult) {
+        self.forward(ctx, Reply::PublishCode(result));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_spawn_result(&mut self, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
+        self.forward(ctx, Reply::Spawn(Box::new(result)));
+    }
+
+    #[aether_actor::handler::single]
+    fn on_list_components_result(&mut self, ctx: &mut NativeCtx<'_>, result: ListComponentsResult) {
+        self.forward(ctx, Reply::List(result));
     }
 
     #[aether_actor::handler::single]

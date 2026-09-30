@@ -32,8 +32,9 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # workspace's `RunResult` (ADR-0240 D6).
 aether-http = { path = "../aether-http", default-features = false }
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
-# Identity-side: `LoadResult`, the component host's load reply, is a handled
-# kind of the driver.
+# Identity-side: `PublishResult` and `SpawnResult`, the component host's
+# replies to the driver's bundle publish and root spawn, are handled kinds of
+# the driver.
 aether-kinds = { path = "../aether-kinds" }
 # Native-only runtime half: the actor runtime, the journal owner the driver
 # mails (with its own runtime), the program and view vocabularies the core

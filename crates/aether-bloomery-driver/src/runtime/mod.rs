@@ -28,12 +28,15 @@
 //! unit's key, the journal's reference, and the unit's workspace reference in
 //! [`DriverParams`]. `init` builds the [`ProgramCore`] and keeps its first
 //! commands; `wire` performs them once the mailbox is live. Commands go to the
-//! journal owner (reads, appends, and the watch), the component host (loads,
-//! each under the unit's bundle name), bundle roots, and the providers of
-//! program APIs. The core names a loaded bundle by its digest; the shell keeps
-//! each root's proven reference, taken from its load reply's stamped sender
-//! (ADR-0230 §3), keyed by that digest, and sends to it with the command's
-//! ticket as the request context. Inbound [`Call`],
+//! journal owner (reads, appends, and the watch), the component host (a load
+//! publishes the bundle's code, then spawns its root at the bound
+//! `aether.bloomery.bundle.<hash>` namespace under the unit key), bundle
+//! roots, and the providers of program APIs. The core names a loaded bundle
+//! by its digest; the shell keeps each root's proven reference, taken from
+//! its spawn reply's stamped sender (ADR-0230 §3), keyed by that digest, and
+//! sends to it with the command's ticket as the request context. A spawn that
+//! finds the root already live adopts it (ADR-0226 D9), and the core resumes
+//! a reactor root from the cursor it reports. Inbound [`Call`],
 //! [`AwaitProcessed`], a bundle root's fetch-on-miss [`ReadArtifact`], and a
 //! relayed [`ApiCall`] each hold a typed reply (ADR-0243), are fed to the
 //! core, and keep the held ticket keyed by the returned [`CallerId`]; each
@@ -68,13 +71,13 @@ use std::mem;
 use aether_actor::{ActorPath, ActorRef, ErasedActorRef, ProtocolPath, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, Call, CallOutcome, ClosureLimit,
-    Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEventsResult,
-    Status, UnitKey, Warmed, WatchHeadResult,
+    ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
+    ClosureLimit, Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult,
+    ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
-use aether_kinds::LoadResult;
+use aether_kinds::{PublishResult, SpawnResult};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
@@ -94,9 +97,10 @@ const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 /// cannot be built over a journal that does not exist. The driver sends
 /// through both references, never by resolving a name.
 pub struct DriverParams {
-    /// The key of the unit this driver folds for. Every bundle root it loads
-    /// is keyed by it, at `aether.bloomery.bundle.<hash>:<unit key>`: the
-    /// bundle's content-addressed published name and this key (ADR-0240 D4).
+    /// The key of the unit this driver folds for. Every bundle root it
+    /// spawns or adopts is keyed by it, at
+    /// `aether.bloomery.bundle.<hash>:<unit key>`: the bundle's
+    /// content-addressed published name and this key (ADR-0240 D4).
     pub unit: UnitKey,
     /// The journal owner's proven reference, handed over at spawn.
     pub journal: ActorRef<JournalActor>,
@@ -107,8 +111,8 @@ pub struct DriverParams {
 /// [`BundleDriver`] runtime state: the sans-io program core, the unit and
 /// journal it folds for, the workspace its programs run through and the
 /// source their runs read and stage through, the core's startup commands
-/// until `wire` performs them, the held replies it owes, and each loaded
-/// bundle's root.
+/// until `wire` performs them, the held replies it owes, and each loaded or
+/// adopted bundle's root.
 pub struct BundleDriverState {
     core: ProgramCore,
     unit: UnitKey,
@@ -119,9 +123,11 @@ pub struct BundleDriverState {
     source: ProtocolPath<ArtifactStorage>,
     startup: Vec<Command>,
     callers: HashMap<CallerId, Caller>,
-    /// The digest each in-flight load was issued for, keyed by its ticket.
+    /// The digest each in-flight load was issued for, keyed by its ticket,
+    /// from its publish until its spawn answers.
     loading: BTreeMap<LoadTicket, Digest>,
-    /// Each loaded bundle's root, the stamped sender of its load reply.
+    /// Each loaded or adopted bundle's root, the stamped sender of its spawn
+    /// reply.
     roots: HashMap<Digest, ErasedActorRef>,
 }
 
@@ -283,26 +289,58 @@ impl NativeActor for BundleDriver {
         state.perform(ctx, commands);
     }
 
+    /// The bundle's code is published: spawn its root at the bound bundle
+    /// namespace under the unit key, with the same ticket, or finish the
+    /// load failed when the publish was refused or bound no bundle root.
     #[handler::single]
-    fn on_load_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: LoadResult) {
+    fn on_publish_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: PublishResult) {
         let Some(ticket) = ctx.take_context::<LoadTicket>() else {
             return;
         };
-        // ADR-0230 §3: the loaded root sends its own load reply, so the
-        // stamped sender is the reference the driver keeps for the digest.
+        let namespace = match result {
+            PublishResult::Ok { types } => types
+                .into_iter()
+                .map(|published| published.namespace)
+                .find(|namespace| bundle_root(namespace))
+                .ok_or_else(|| format!("the published bundle binds no {BUNDLE_NAMESPACE} root")),
+            PublishResult::Err { error } => Err(error),
+        };
+        match namespace {
+            Ok(namespace) => state.spawn_root(ctx, namespace, ticket),
+            Err(error) => {
+                state.loading.remove(&ticket);
+                let commands = state.core.on_loaded(ticket, LoadOutcome::Failed { error });
+                state.perform(ctx, commands);
+            }
+        }
+    }
+
+    /// The bundle's root answered its spawn. ADR-0230 §3: the root sends its
+    /// own spawn reply, so the stamped sender is the reference the driver
+    /// keeps for the digest. A root the spawn stood up is `Loaded`; one the
+    /// engine already held live under the unit key is `Adopted` (ADR-0226 D9).
+    #[handler::single]
+    fn on_spawn_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
+        let Some(ticket) = ctx.take_context::<LoadTicket>() else {
+            return;
+        };
         let bundle = state.loading.remove(&ticket);
         let outcome = match (result, ctx.sender(), bundle) {
-            (LoadResult::Ok { .. }, Some(root), Some(bundle)) => {
+            (SpawnResult::Err { error }, ..) => LoadOutcome::Failed { error },
+            (SpawnResult::Spawned { path, .. } | SpawnResult::Live { path, .. }, None, _) => {
+                LoadOutcome::Failed { error: format!("spawn reply for {path} carried no sender") }
+            }
+            (SpawnResult::Spawned { path, .. } | SpawnResult::Live { path, .. }, Some(_), None) => {
+                LoadOutcome::Failed { error: format!("spawn reply for {path} matched no issued load") }
+            }
+            (SpawnResult::Spawned { .. }, Some(root), Some(bundle)) => {
                 state.roots.insert(bundle, root);
                 LoadOutcome::Loaded
             }
-            (LoadResult::Ok { path, .. }, None, _) => {
-                LoadOutcome::Failed { error: format!("load reply for {path} carried no sender") }
+            (SpawnResult::Live { .. }, Some(root), Some(bundle)) => {
+                state.roots.insert(bundle, root);
+                LoadOutcome::Adopted
             }
-            (LoadResult::Ok { path, .. }, Some(_), None) => {
-                LoadOutcome::Failed { error: format!("load reply for {path} matched no issued load") }
-            }
-            (LoadResult::Err { error }, ..) => LoadOutcome::Failed { error },
         };
         let commands = state.core.on_loaded(ticket, outcome);
         state.perform(ctx, commands);
@@ -352,4 +390,15 @@ impl NativeActor for BundleDriver {
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
     }
+}
+
+/// Whether `namespace` is a bundle's root type as published: the bundle
+/// namespace qualified by the module's lowercase-hex hash (ADR-0241 §3). A
+/// bundle's other exports, such as `aether.bloomery.bundle.invocation`, are
+/// qualified the same way under their own declared names and do not match.
+fn bundle_root(namespace: &str) -> bool {
+    namespace
+        .strip_prefix(BUNDLE_NAMESPACE)
+        .and_then(|qualified| qualified.strip_prefix('.'))
+        .is_some_and(|hash| !hash.is_empty() && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
 }

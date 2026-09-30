@@ -4,7 +4,8 @@
 //! watermarks. Routing takes its `Heads` at `W` from the journal view's head
 //! history without delivering or reading the journal, then loads and warms
 //! each digest a head selected at `W` is live under,
-//! serially and through `W`. A digest that fails to load or warm rejects
+//! serially and through `W`, from its cursor: 0 for a root the load stood
+//! up, or the cursor an adopted root reports. A digest that fails to load or warm rejects
 //! the heads it serves in one batch caused by `W`; live routing starts at
 //! `W + 1`.
 
@@ -15,6 +16,7 @@ use aether_bloomery_view::HeadActivation;
 
 use crate::runtime::core::{Command, PendingWrite, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::claim::Claim;
+use crate::runtime::reactors::instance::Health;
 use crate::runtime::reactors::{RestartPhase, RestartWork, RoutingRead};
 
 impl ProgramCore {
@@ -106,6 +108,13 @@ impl ProgramCore {
             Claim::Pending => {}
             Claim::Ready { cursor } if cursor < watermark => {
                 self.emit_routing_read(cursor, RoutingRead::RestartWarm, out);
+            }
+            // Only an adopted root reports a cursor past `W`: it evaluated
+            // seqs whose reactions were never recorded, and they cannot be
+            // evaluated again.
+            Claim::Ready { cursor } if cursor > watermark => {
+                let reason = Detail::new(format!("adopted root is at {cursor}, past the restart point {watermark}"));
+                self.fail_reactor(digest, Health::Untrusted, reason);
             }
             Claim::Ready { .. } => {
                 if let Some(RestartWork { phase: RestartPhase::Warming { warming, .. }, .. }) =

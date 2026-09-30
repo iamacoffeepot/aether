@@ -101,7 +101,8 @@ impl ProgramCore {
         self.check_processed(out);
     }
 
-    /// Whether no routing reply, read, write, or awaited load is outstanding.
+    /// Whether no routing reply, read, write, awaited load, or adopted
+    /// root's cursor query is outstanding.
     ///
     /// A shared read or load holds routing only while the activation or
     /// restart warm waits on that same digest; one issued for the program
@@ -118,6 +119,7 @@ impl ProgramCore {
             && routing.deliveries.is_empty()
             && routing.warms.is_empty()
             && routing.statuses.is_empty()
+            && routing.adoptions.is_empty()
             && routing.committed.is_none()
             && !self.journal.has_routing_write()
             && !reading

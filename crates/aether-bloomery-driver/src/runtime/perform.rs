@@ -1,22 +1,23 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::{DependsOn, ReplyMode};
-use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
+use aether_bloomery_kinds::{Digest, StatusQuery};
 use aether_bloomery_workspace::Run;
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Kind};
 use aether_http::HttpCapability;
-use aether_kinds::LoadComponent;
+use aether_kinds::{Publish, Spawn};
 use aether_substrate::actor::native::NativeCtx;
 
-use super::{BundleDriverState, Caller, CallerId, Command};
+use super::{BundleDriverState, Caller, CallerId, Command, LoadTicket};
 
 impl BundleDriverState {
     /// Perform each [`Command`] in order, then return.
     ///
-    /// Journal reads and appends go to the handed-over journal reference, loads go
-    /// to the component host under the unit's bundle name, root commands go
-    /// to the reference the digest's load reply was stamped with, a program's
+    /// Journal reads and appends go to the handed-over journal reference, a
+    /// load publishes the bundle's code to the component host (its reply
+    /// spawns the root under the unit key), root commands go to the
+    /// reference the digest's spawn reply was stamped with, a program's
     /// relayed `Http` call goes to the http capability and its `Workspace` call
     /// to the held workspace reference, and answers, fetch answers, and API
     /// answers release the held reply. Every send carries its ticket as the request
@@ -46,12 +47,7 @@ impl BundleDriverState {
                 Command::Load { ticket, bundle, wasm } => {
                     self.loading.insert(ticket, bundle);
                     let _ = ctx.send_with_context::<ComponentHostCapability>(
-                        &LoadComponent {
-                            wasm,
-                            name: Some(self.unit.as_str().to_owned()),
-                            config: Vec::new(),
-                            export: Some(BUNDLE_NAMESPACE.to_owned()),
-                        },
+                        &Publish { code: wasm.into(), configs: Vec::new() },
                         ticket,
                     );
                 }
@@ -94,6 +90,19 @@ impl BundleDriverState {
                 Command::Abort { reason } => ctx.fatal_abort(reason),
             }
         }
+    }
+
+    /// Spawn a published bundle's root at its bound `namespace` under the
+    /// unit key, with the load's `ticket` as the request context: the second
+    /// half of a [`Command::Load`], sent once its publish answers.
+    pub(crate) fn spawn_root<M: ReplyMode, A: DependsOn<ComponentHostCapability>>(
+        &self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        namespace: String,
+        ticket: LoadTicket,
+    ) {
+        let spawn = Spawn { namespace, key: Some(self.unit.as_str().to_owned()), parent: None, config: Vec::new() };
+        let _ = ctx.send_with_context::<ComponentHostCapability>(&spawn, ticket);
     }
 
     /// Send `request` to `bundle`'s loaded root with `ticket` as the request

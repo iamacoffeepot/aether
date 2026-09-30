@@ -55,7 +55,8 @@ pub enum Command {
         /// The fenced write.
         request: AppendRecords,
     },
-    /// Load a bundle's wasm under the unit's bundle name for its digest.
+    /// Stand a bundle's root up under the unit's bundle name for its digest:
+    /// publish its wasm, then spawn its root under the unit key.
     Load {
         /// Ticket the matching [`LoadOutcome`] arrives under.
         ticket: LoadTicket,
@@ -158,14 +159,19 @@ pub enum Command {
 
 /// Shell-mapped outcome of [`Command::Load`].
 ///
-/// The shell maps the substrate's `LoadResult` onto this type so the core
-/// does not depend on `aether-kinds`. The core names a loaded bundle by its
-/// digest alone; the shell keeps the loaded root's proven reference, taken
-/// from the load reply's stamped sender, keyed by that digest.
+/// The shell maps the component host's `PublishResult` and `SpawnResult`
+/// onto this type so the core does not depend on `aether-kinds`. The core
+/// names a loaded bundle by its digest alone; the shell keeps the root's
+/// proven reference, taken from the spawn reply's stamped sender, keyed by
+/// that digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadOutcome {
-    /// The bundle loaded; the shell holds its root.
+    /// The spawn stood the bundle's root up; the shell holds it.
     Loaded,
+    /// The engine already held the bundle's root live under the unit key, so
+    /// nothing was stood up and the shell holds that root (ADR-0226 D9): a
+    /// reactor root resumes from the cursor it reports, not from 0.
+    Adopted,
     /// The load failed; the digest becomes permanently unavailable.
     Failed {
         /// Human-readable failure.

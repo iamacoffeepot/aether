@@ -5,13 +5,14 @@ use std::fs;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Activated, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, Processed, ProgramName,
-    ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, RuleName,
-    Transition, Utf8Text,
+    Activated, BUNDLE_NAMESPACE, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, Processed,
+    ProgramName, ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested,
+    RuleName, Transition, Utf8Text,
 };
 use aether_bloomery_view::{Activations, HeadActivation};
-use aether_harness_bloomery::{BloomeryHarness, Record};
+use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
+use aether_kinds::{PublishResult, Spawn, SpawnResult};
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 /// The input head the reactor fixtures watch.
@@ -96,6 +97,12 @@ fn drive_reaction(batch: Batch, seed: &Seed) -> (BloomeryHarness, Seq) {
 /// expectations but remains absent until the routing append commits it.
 fn drive_fresh_reaction(batch: Batch, seed: &Seed) -> (BloomeryHarness, Seq) {
     let mut harness = BloomeryHarness::start([batch]);
+    let activated = drive_fresh_reaction_on(&mut harness, seed);
+    (harness, activated)
+}
+
+/// [`drive_fresh_reaction`] on a harness already booted over the seed.
+fn drive_fresh_reaction_on(harness: &mut BloomeryHarness, seed: &Seed) -> Seq {
     assert_eq!(harness.settle(Seq(2)), Seq(2));
     assert_eq!(
         harness.move_head(&MoveHead::new(&ReactorSet::ROOT, Ref::from_digest(seed.set), 2)),
@@ -108,7 +115,7 @@ fn drive_fresh_reaction(batch: Batch, seed: &Seed) -> (BloomeryHarness, Seq) {
         MoveHeadResult::Committed { seq: activated.0 + 1 }
     );
     harness.settle(Seq(activated.0 + 1));
-    (harness, activated)
+    activated
 }
 
 /// The records one reaction appends after the seed's two head moves: the set
@@ -246,7 +253,7 @@ fn reactor_set_move_activates_and_persists_a_fresh_input_before_invocation() -> 
 
 #[test]
 fn a_mixed_bundle_serves_its_reactor_and_its_program_from_one_load() -> Result<(), Box<dyn Error>> {
-    // Catches a second `LoadComponent` for a digest one role already loaded: the component host refuses the name the unit's root already holds (`aether.bloomery.bundle.<hash>:<unit key>`) with `SubnameInUse`, which the driver records as a `BundleUnavailable` `Fault`, so one load is the only way both roles succeed.
+    // Catches a second load for a digest one role already loaded: its spawn finds the unit's root live at `aether.bloomery.bundle.<hash>:<unit key>` and answers `Live`, which the core, holding the digest ready, meets with no load outstanding and aborts on, so one load is the only way both roles succeed.
     let Some(mixed_path) = require_wasm("aether_test_fixtures_mixed_bundle") else {
         return Ok(());
     };
@@ -259,5 +266,46 @@ fn a_mixed_bundle_serves_its_reactor_and_its_program_from_one_load() -> Result<(
     harness.assert_appended(Seq(2), &reaction_records(&seed, "test.bloomery.mixed.caller")?);
     let transition = harness.record::<Transition>(Seq(7));
     assert!(harness.stores(&transition.result), "the staged result is stored");
+    Ok(())
+}
+
+#[test]
+fn a_reactor_root_already_live_under_the_unit_key_is_adopted() -> Result<(), Box<dyn Error>> {
+    // Catches a driver that refuses a bundle whose root the engine already
+    // holds live under the unit key (the spawn answers `Live`, not
+    // `Spawned`), recording `ActivationRejected` instead of `Activated`, or
+    // that stands a second root up beside it under another key.
+    let Some(reactor_path) = require_wasm("aether_test_fixtures_reactor_call") else {
+        return Ok(());
+    };
+    let Some(program_path) = require_wasm("aether_test_fixtures_program") else {
+        return Ok(());
+    };
+    let reactor_wasm = fs::read(&reactor_path)?;
+    let program_wasm = fs::read(&program_path)?;
+    let (batch, seed) = seed_batch(Bundles::Split { program: &program_wasm, reactor: &reactor_wasm })?;
+    let mut harness = BloomeryHarness::start([batch]);
+
+    let PublishResult::Ok { types } = harness.publish_code(reactor_wasm) else {
+        panic!("the reactor bundle's code publishes");
+    };
+    let prefix = format!("{BUNDLE_NAMESPACE}.");
+    let namespace = types
+        .into_iter()
+        .map(|published| published.namespace)
+        .find(|namespace| namespace.strip_prefix(&prefix).is_some_and(|hash| !hash.contains('.')))
+        .expect("the reactor bundle publishes its root type");
+    let spawn = Spawn { namespace: namespace.clone(), key: Some(UNIT.to_owned()), parent: None, config: Vec::new() };
+    let spawned = harness.spawn(&spawn);
+    let SpawnResult::Spawned { path, .. } = spawned else {
+        panic!("the test stands the reactor root up before the driver loads it: {spawned:?}");
+    };
+
+    let activated = drive_fresh_reaction_on(&mut harness, &seed);
+    assert_eq!(activated, Seq(4));
+    harness.assert_appended(Seq(2), &fresh_reaction_records(&seed)?);
+    let roots: Vec<String> =
+        harness.list_components().into_iter().filter(|name| name.starts_with(&format!("{namespace}:"))).collect();
+    assert_eq!(roots, vec![path.as_str().to_owned()], "the driver adopted the live root and stood up no other");
     Ok(())
 }
