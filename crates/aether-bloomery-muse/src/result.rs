@@ -8,6 +8,8 @@ use core::borrow::Borrow;
 
 use aether_bloomery_kinds::{Detail, OpaqueBytes, Ref, Utf8Text};
 
+use crate::input::ToolCalls;
+
 /// Why [`HttpStatus::new`] or decode refused a status code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpStatusError {
@@ -109,6 +111,9 @@ impl TurnUsage {
 pub enum TurnOutcome {
     /// The model finished its answer.
     Completed { text: Ref<Utf8Text>, usage: TurnUsage },
+    /// The model finished by asking for one or more calls, each to a program the turn offered. Any message text
+    /// the reply also carried is kept.
+    Called { calls: ToolCalls, text: Ref<Utf8Text>, usage: TurnUsage },
     /// The model stopped early, for example on the output budget; the partial text is kept.
     Incomplete { text: Ref<Utf8Text>, reason: Detail, usage: TurnUsage },
     /// The model refused; the refusal text is kept instead of an answer.
@@ -119,7 +124,8 @@ pub enum TurnOutcome {
     ///
     /// `retry_after_secs` is the vendor's `Retry-After` delay in seconds, when it sent one as a number.
     Transient { retry_after_secs: Option<u32> },
-    /// A 2xx body that does not read as a finished response. The body is kept.
+    /// A 2xx body that does not read as a finished response, or asks for a call this turn cannot record. The
+    /// body is kept.
     Unreadable,
 }
 

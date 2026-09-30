@@ -4,15 +4,20 @@
 //! spent, and a fault carries no blobs. Only no reply at all refuses, and the
 //! driver records that refusal as a fault. [`classify`] holds every rule.
 
-use aether_bloomery_kinds::{Detail, Refusal};
-use aether_bloomery_program::{Async, Env};
+use std::collections::BTreeSet;
+
+use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
+use aether_bloomery_program::{Async, Env, program_name};
 use aether_http::{FetchResult, HttpHeader};
 use serde::Deserialize;
 
+use crate::input::{CallId, OfferedTool, ToolCall, ToolCalls};
 use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
 
-/// Stage the reply body and whatever text it carries, and build the result that cites them.
-pub fn record(env: &mut Env<Async>, reply: FetchResult) -> Result<TurnResult, Refusal> {
+/// Stage the reply body and whatever text and call arguments it carries, and build the result that cites them.
+///
+/// `offered` is the turn's offered tools: a call to any other program leaves the reply `Unreadable`.
+pub fn record(env: &mut Env<Async>, offered: &[OfferedTool], reply: FetchResult) -> Result<TurnResult, Refusal> {
     let (status, headers, body) = match reply {
         FetchResult::Ok { status, headers, body, .. } => (status, headers, body),
         FetchResult::Err { error, .. } => return Err(Refusal::Refused { reason: Detail::new(format!("{error:?}")) }),
@@ -22,8 +27,16 @@ pub fn record(env: &mut Env<Async>, reply: FetchResult) -> Result<TurnResult, Re
     })?;
 
     let staged_body = env.stage_bytes(&body);
-    let outcome = match classify(status, vendor_verdict(&headers), retry_after_secs(&headers), &body) {
+    let outcome = match classify(status, vendor_verdict(&headers), retry_after_secs(&headers), &body, offered) {
         Classified::Completed { text, usage } => TurnOutcome::Completed { text: env.stage_text(&text), usage },
+        Classified::Called { calls, text, usage } => {
+            let calls = calls
+                .into_iter()
+                .map(|(call_id, program, arguments)| ToolCall::new(call_id, program, env.stage_text(&arguments)))
+                .collect();
+            let calls = ToolCalls::new(calls).expect("classify checked the call list's rules");
+            TurnOutcome::Called { calls, text: env.stage_text(&text), usage }
+        }
         Classified::Incomplete { text, reason, usage } => {
             TurnOutcome::Incomplete { text: env.stage_text(&text), reason: Detail::new(reason), usage }
         }
@@ -67,6 +80,7 @@ fn header<'a>(headers: &'a [HttpHeader], name: &str) -> Option<&'a str> {
 #[derive(Debug, PartialEq, Eq)]
 enum Classified {
     Completed { text: String, usage: TurnUsage },
+    Called { calls: Vec<(CallId, ProgramName, String)>, text: String, usage: TurnUsage },
     Incomplete { text: String, reason: String, usage: TurnUsage },
     Declined { refusal: String, usage: TurnUsage },
     Rejected,
@@ -84,12 +98,22 @@ enum Classified {
 /// 6. A vendor status of `failed` or `cancelled` is `Rejected`.
 /// 7. A response without usage is `Unreadable`.
 /// 8. Any `refusal` content part is `Declined`.
-/// 9. A vendor status of `incomplete` is `Incomplete`; `completed` is `Completed`; any other is `Unreadable`.
+/// 9. A vendor status of `completed` with any `function_call` output item is `Called`, every call in order. It is
+///    `Unreadable` instead when a call's name maps to no program or to one `offered` does not hold, or when a call
+///    id is not a valid `CallId`, repeats, or the calls outnumber `ToolCalls::MAX_CALLS`.
+/// 10. A vendor status of `incomplete` is `Incomplete`; `completed` is `Completed`; any other is `Unreadable`.
 ///
 /// A `Transient` outcome carries `retry_after_secs` as read. The text is every
 /// `output_text` part of every `message` output item, concatenated in order.
-/// Reasoning items never contribute.
-fn classify(status: u16, verdict: Option<bool>, retry_after_secs: Option<u32>, body: &[u8]) -> Classified {
+/// Reasoning items never contribute. A call's arguments are kept verbatim and
+/// never decoded.
+fn classify(
+    status: u16,
+    verdict: Option<bool>,
+    retry_after_secs: Option<u32>,
+    body: &[u8],
+    offered: &[OfferedTool],
+) -> Classified {
     if !(200..300).contains(&status) {
         let transient = verdict.unwrap_or_else(|| match status {
             429 => error_code(body).as_deref() != Some("insufficient_quota"),
@@ -118,6 +142,14 @@ fn classify(status: u16, verdict: Option<bool>, retry_after_secs: Option<u32>, b
         return Classified::Declined { refusal: refusals.concat(), usage };
     }
     let text: String = parts().filter_map(ContentPart::output_text).collect();
+    let calls: Vec<_> = reply.output.into_iter().filter_map(OutputItem::into_call).collect();
+    if reply.status == "completed" && !calls.is_empty() {
+        return read_calls(calls, offered).map_or(Classified::Unreadable, |calls| Classified::Called {
+            calls,
+            text,
+            usage,
+        });
+    }
     match reply.status.as_str() {
         "completed" => Classified::Completed { text, usage },
         "incomplete" => {
@@ -126,6 +158,20 @@ fn classify(status: u16, verdict: Option<bool>, retry_after_secs: Option<u32>, b
         }
         _ => Classified::Unreadable,
     }
+}
+
+/// Each call as `(call id, program, arguments)`, or `None` when any breaks a rule of [`classify`]'s step 9.
+fn read_calls(calls: Vec<FunctionCall>, offered: &[OfferedTool]) -> Option<Vec<(CallId, ProgramName, String)>> {
+    let offered: BTreeSet<&ProgramName> = offered.iter().map(OfferedTool::program).collect();
+    let calls = calls
+        .into_iter()
+        .map(|call| {
+            let program = program_name(&call.name).filter(|program| offered.contains(program))?;
+            Some((CallId::new(call.call_id).ok()?, program, call.arguments))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    ToolCalls::check_ids(calls.iter().map(|(call_id, ..)| call_id)).ok()?;
+    Some(calls)
 }
 
 /// The `error.code` of a vendor error body, when it parses and carries one.
@@ -161,15 +207,31 @@ enum OutputItem {
         #[serde(default)]
         content: Vec<ContentPart>,
     },
+    FunctionCall(FunctionCall),
     #[serde(other)]
     Other,
+}
+
+/// A `function_call` output item: the model asks for one call.
+#[derive(Deserialize)]
+struct FunctionCall {
+    call_id: String,
+    name: String,
+    arguments: String,
 }
 
 impl OutputItem {
     fn parts(&self) -> &[ContentPart] {
         match self {
             Self::Message { content } => content,
-            Self::Other => &[],
+            Self::FunctionCall(_) | Self::Other => &[],
+        }
+    }
+
+    fn into_call(self) -> Option<FunctionCall> {
+        match self {
+            Self::FunctionCall(call) => Some(call),
+            Self::Message { .. } | Self::Other => None,
         }
     }
 }
@@ -241,7 +303,10 @@ impl Usage {
 mod tests {
     use aether_http::HttpHeader;
 
+    use aether_bloomery_kinds::{ProgramName, Ref};
+
     use super::{Classified, classify, retry_after_secs, vendor_verdict};
+    use crate::input::{CallId, OfferedTool};
     use crate::result::TurnUsage;
 
     const COMPLETED: &str = include_str!("../fixtures/completed.json");
@@ -250,6 +315,15 @@ mod tests {
     const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
     const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
     const INSUFFICIENT_QUOTA: &str = include_str!("../fixtures/insufficient_quota.json");
+    const CALLED: &str = include_str!("../fixtures/called.json");
+
+    fn program(name: &str) -> ProgramName {
+        ProgramName::new(name).expect("program name")
+    }
+
+    fn offer(names: &[&str]) -> Vec<OfferedTool> {
+        names.iter().map(|name| OfferedTool::new(program(name), Ref::of_text(name))).collect()
+    }
 
     fn one_header(name: &str, value: &str) -> Vec<HttpHeader> {
         vec![HttpHeader { name: name.into(), value: value.into() }]
@@ -260,7 +334,7 @@ mod tests {
         // Catches reasoning text leaking into the answer, only the first part kept, and cached or
         // reasoning tokens read from the wrong path.
         assert_eq!(
-            classify(200, None, None, COMPLETED.as_bytes()),
+            classify(200, None, None, COMPLETED.as_bytes(), &[]),
             Classified::Completed {
                 text: "A bloomery is a furnace that smelts iron into a bloom.".into(),
                 usage: TurnUsage::new(1200, 1024, 340, 300),
@@ -272,7 +346,7 @@ mod tests {
     fn incomplete_reply_keeps_partial_text_and_its_reason() {
         // Catches a truncated turn recorded as `Completed`, and a partial text that is dropped.
         assert_eq!(
-            classify(200, None, None, INCOMPLETE.as_bytes()),
+            classify(200, None, None, INCOMPLETE.as_bytes(), &[]),
             Classified::Incomplete {
                 text: "A bloomery is a furnace that".into(),
                 reason: "max_output_tokens".into(),
@@ -285,7 +359,7 @@ mod tests {
     fn refusal_part_declines() {
         // Catches a model refusal recorded as the answer; the reply also leaves out both usage details.
         assert_eq!(
-            classify(200, None, None, REFUSAL.as_bytes()),
+            classify(200, None, None, REFUSAL.as_bytes(), &[]),
             Classified::Declined {
                 refusal: "I can't help with that request.".into(),
                 usage: TurnUsage::new(900, 0, 12, 0),
@@ -307,7 +381,7 @@ mod tests {
             ("2xx garbage", 200, "<html>bad gateway</html>", Classified::Unreadable),
         ];
         for (label, status, body, expected) in cases {
-            assert_eq!(classify(status, None, None, body.as_bytes()), expected, "{label}");
+            assert_eq!(classify(status, None, None, body.as_bytes(), &[]), expected, "{label}");
         }
     }
 
@@ -334,7 +408,7 @@ mod tests {
             ("verdict over a 2xx is ignored", 200, Some(true), None, RATE_LIMITED, Classified::Unreadable),
         ];
         for (label, status, verdict, retry_after, body, expected) in cases {
-            assert_eq!(classify(status, verdict, retry_after, body.as_bytes()), expected, "{label}");
+            assert_eq!(classify(status, verdict, retry_after, body.as_bytes(), &[]), expected, "{label}");
         }
     }
 
@@ -382,5 +456,45 @@ mod tests {
             HttpHeader { name: "retry-after".into(), value: "9".into() },
         ];
         assert_eq!(retry_after_secs(&two), Some(4), "the first header wins");
+    }
+
+    #[test]
+    fn a_reply_that_asks_for_calls_records_every_call_in_order() {
+        // Catches a reply read as `Completed` with its calls dropped, only the first call kept, a call mapped to
+        // the wrong program, and arguments rewritten instead of kept verbatim.
+        let call = |id: &str, name: &str, arguments: &str| {
+            (CallId::new(id).expect("call id"), program(name), arguments.to_owned())
+        };
+        assert_eq!(
+            classify(200, None, None, CALLED.as_bytes(), &offer(&["muse.turn", "workspace.read"])),
+            Classified::Called {
+                calls: vec![
+                    call("call_read", "workspace.read", r#"{"path": "notes/bloomery.md"}"#),
+                    call("call_turn", "muse.turn", r#"{"endpoint":"https://example.test/v1/responses"}"#),
+                ],
+                text: "Reading the notes first.".into(),
+                usage: TurnUsage::new(1500, 0, 90, 40),
+            }
+        );
+    }
+
+    #[test]
+    fn a_call_the_turn_cannot_record_leaves_the_reply_unreadable() {
+        // Catches a call to a program the turn never offered being recorded, and a `ToolCalls` built past its own
+        // rule on a repeated or invalid call id.
+        let both = offer(&["muse.turn", "workspace.read"]);
+        let repeated = CALLED.replace("call_turn", "call_read");
+        let spaced = CALLED.replace("call_turn", "call turn");
+        let unmapped = CALLED.replace("muse-turn", "Muse Turn");
+        let cases = [
+            ("a program not offered", CALLED, offer(&["workspace.read"])),
+            ("no program offered", CALLED, Vec::new()),
+            ("a repeated call id", repeated.as_str(), both.clone()),
+            ("an invalid call id", spaced.as_str(), both.clone()),
+            ("a name that maps to no program", unmapped.as_str(), both),
+        ];
+        for (label, body, offered) in cases {
+            assert_eq!(classify(200, None, None, body.as_bytes(), &offered), Classified::Unreadable, "{label}");
+        }
     }
 }

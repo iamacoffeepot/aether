@@ -63,11 +63,12 @@ program is tested without spending money.
    retries: a retry is a new request the graph decides on (ADR-0226).
 
 2. **Stateless turns over a flat item list.** The input carries the whole
-   conversation as a flat, ordered list of role-tagged cited texts, and
-   nothing more. The request always sends `store: false`, never a
-   server-side conversation handle, and resends the full `input` array
-   every turn. The recorded closure (the input plus every cited text) is
-   therefore the whole request except the credential. A fork is a
+   conversation as a flat, ordered list of cited items, and the tool
+   definitions it offers, and nothing more. The request always sends
+   `store: false`, never a server-side conversation handle, and resends the
+   full `input` array every turn. The recorded closure (the input plus every
+   cited text and definition) is therefore the whole request except the
+   credential. A fork is a
    different closure that shares its leading text artifacts, which the
    journal content-addresses and stores once. Any tree, fork, or
    compaction policy lives above the program.
@@ -82,10 +83,27 @@ program is tested without spending money.
      The HTTP capability's allowlist stays the policy for where a request
      may go.
    - `model: ModelName`: 1 to 128 bytes matching `[a-z0-9][a-z0-9._-]*`.
-   - `items: TurnItems`: non-empty, at most 4096 items, and the last item
-     is spoken by `User`. Each `TurnItem` is a `Role` (`Developer`, `User`,
-     or `Assistant`) plus a `Ref<Utf8Text>`. System-style instructions are
-     a leading `Developer` item; there is no separate instructions field.
+   - `tools: OfferedTools`: at most 128 `OfferedTool { program, definition }`,
+     no program twice. `program` is a `ProgramName`; `definition` is a
+     `Ref<Utf8Text>` citing the function definition sent for it. An empty
+     list offers nothing and the request sends no `tools` field (decision 9).
+   - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
+     one of three arms:
+     - `Message { role, text }`: a `Role` (`Developer`, `User`, or
+       `Assistant`) plus a `Ref<Utf8Text>`, sent as a message item.
+       System-style instructions are a leading `Developer` message; there is
+       no separate instructions field.
+     - `Call(ToolCall)`: a call the model asked for in an earlier turn,
+       replayed as a `function_call` item. `ToolCall { call_id, program,
+       arguments }` holds a `CallId` (1 to 256 bytes of ASCII graphic
+       characters), a `ProgramName` sent under its function name, and the
+       arguments as a `Ref<Utf8Text>`.
+     - `CallOutput { call_id, output }`: that call's output, replayed as a
+       `function_call_output` item matched by `call_id`.
+
+     The last item is a `User` message or a `CallOutput`; every
+     `CallOutput` names the `call_id` of an earlier `Call`; and no two
+     `Call`s share a `call_id`.
    - `max_output_tokens: OutputBudget`: never zero.
    - `reasoning: ReasoningEffort`: `Low`, `Medium`, or `High`.
 
@@ -96,15 +114,24 @@ program is tested without spending money.
    - `body: Ref<OpaqueBytes>`, the raw response body, always staged, so a
      classification bug can be corrected later from the record.
    - `outcome: TurnOutcome`: `Completed { text, usage }`;
-     `Incomplete { text, reason, usage }` when the vendor status is
+     `Called { calls, text, usage }` when a completed reply asks for one or
+     more calls (decision 9); `Incomplete { text, reason, usage }` when the
+     vendor status is
      `incomplete`, keeping the partial text; `Declined { refusal, usage }`
      when the reply carries a refusal content part; `Rejected` for a
      non-transient non-2xx status or a vendor status of `failed` or
      `cancelled`; `Transient { retry_after_secs }` when the vendor refused
      for now (rate limit or overload), nothing was bought, and a new
      request may succeed; and `Unreadable` for a 2xx body that does not
-     read as a finished response (it does not parse, reports no usage, or
-     carries a vendor status other than those above).
+     read as a finished response (it does not parse, reports no usage,
+     carries a vendor status other than those above, or asks for a call
+     the turn cannot record).
+   - A 2xx body is classified in this order: a body that does not parse is
+     `Unreadable`; a vendor status of `failed` or `cancelled` is
+     `Rejected`; no usage is `Unreadable`; any refusal content part is
+     `Declined`; a status of `completed` with any `function_call` output
+     item is `Called`; then `incomplete` is `Incomplete`, `completed` is
+     `Completed`, and any other status is `Unreadable`.
    - A non-2xx status is classified in this order. A vendor verdict
      header `x-should-retry` (name in any case, value exactly `true` or
      `false`) decides outright: `true` is `Transient`, `false` is
@@ -123,7 +150,8 @@ program is tested without spending money.
      zero.
 
    The text is every `output_text` part of every `message` output item,
-   concatenated in order; reasoning items never contribute. Every staged
+   concatenated in order; reasoning items never contribute, and a `Called`
+   outcome keeps any message text the reply also carried. Every staged
    artifact is cited by the result, so the SDK's orphan check passes.
 
 5. **Failure recording: a fault only when there is no reply.** A turn that
@@ -160,8 +188,34 @@ program is tested without spending money.
    to the real API is a manual step the owner approves and runs outside CI,
    and it is never a checked-in test.
 
-9. **Text only.** A turn carries no tool definitions. Tools need an
-   amendment to this ADR.
+9. **A turn offers the programs its caller names, and records the calls
+   the model asks for.** A tool is a program to run. The caller chooses
+   the programs offered: nothing defaults to every program a bundle or unit
+   declares.
+   - `muse.turn` cannot read another bundle's declarations or a program
+     input's schema, so the caller renders each offered program with
+     `aether_bloomery_program::tool_definition` (a responses-API function
+     object whose `name` is `function_name(program)`, the program name with
+     its dots mapped to dashes), stages the JSON as a `Utf8Text`, and cites
+     it in `tools`. The closure walk injects each definition like any cited
+     text, so the journal holds exactly what was sent.
+   - The request sends each definition in order, as written, in `tools`.
+     A definition that is not a JSON object whose `name` is its program's
+     function name refuses the run before any fetch: the input was built
+     wrong, and nothing was bought.
+   - A completed reply with `function_call` output items is
+     `Called { calls, text, usage }`, every call in order as
+     `ToolCall { call_id, program, arguments }` with the arguments staged
+     verbatim. `calls` is a `ToolCalls`: 1 to 128 calls, no `call_id`
+     twice. A call whose name maps back through `program_name` to no
+     offered program, or whose id is invalid or repeats, makes the reply
+     `Unreadable`, and the body stays on the record; the program never
+     keeps a partial list.
+   - `muse.turn` never decodes arguments and never runs a call. A caller
+     decodes them into the program's typed input through `aether-codec`;
+     a refused decode is text the caller can replay as that call's
+     `CallOutput`. Running the calls, and any loop that feeds their
+     outputs into the next turn, live above the program.
 
 ## Consequences
 
@@ -189,9 +243,11 @@ program is tested without spending money.
   vendor's signal; whether, how often, and when to retry is the caller's
   policy. Waiting out `Retry-After` needs a clock no program, reactor, or
   the driver has, so that mechanism is #6630.
-- Adding `Transient` changes the `muse.turn.result` kind id, because
-  ADR-0030 hashes a kind id over its name and schema. Results recorded
-  before the change keep the old kind.
+- Adding `Transient`, and then tools, changed the shapes of
+  `muse.turn.input` and `muse.turn.result`. Their storage kind ids hash the
+  name only (`storage_kind_id_from_name`), so a value recorded in an older
+  shape keeps the same kind id and no longer decodes. This is accepted
+  before 1.0, and nothing outside tests records them yet.
 - A 5xx other than 503 or 529 stays `Rejected`: a gateway error (500, 502,
   504) can arrive after the vendor started generating, so the program
   cannot claim nothing was bought. The caller may still retry a
@@ -224,7 +280,22 @@ program is tested without spending money.
   closure, and tree, fork, or compaction policy belongs above the program.
 - **Prompt-cache hints or keys.** Deferred: caching is automatic and uneven
   on the vendor side, and the program cannot guarantee it.
-- **Tool definitions in a turn.** Deferred to an amendment (decision 9).
+- **Offer every program the bundle or unit declares by default.**
+  Rejected: a turn offers only the tools its caller names (decision 9).
+- **`tools` as program names only, with `muse.turn` rendering the
+  definitions.** Rejected: the program cannot see another bundle's
+  declarations or input schema, and the request would not be recoverable
+  from the record.
+- **A structured tool-definition kind instead of cited JSON text.**
+  Rejected: it would restate the responses-API function object as a second
+  schema beside its one renderer, `tool_definition`; the cited text is
+  exactly what was sent.
+- **Decoding call arguments inside `muse.turn`.** Rejected: the program
+  would need every offered program's input type, and a refused decode is
+  the caller's to hand back to the model.
+- **Dropping calls to unoffered programs and keeping the rest.** Rejected:
+  a partial record of what the model asked for; `Unreadable` keeps the body
+  whole for later correction.
 - **Retrying inside `run`.** Rejected: retry belongs to the graph
   (ADR-0226), and a hidden retry spends money twice. Backing off also
   needs a sleep, and a program has no clock or timer; the backoff would
