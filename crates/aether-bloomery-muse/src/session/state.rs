@@ -233,7 +233,7 @@ impl SessionKey {
 }
 
 /// A session at rest: its settings, its whole conversation, why it rests, and
-/// the tree its tools work on.
+/// the tree its tools left.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session")]
 pub struct Session {
@@ -243,18 +243,13 @@ pub struct Session {
     items: SessionItems,
     /// Why the session rests.
     rested: RestReason,
-    /// The tree the session's tools work on. `None` until tools edit files.
-    tree: Option<Ref<Tree>>,
+    /// The tree the session's tools left: the latest tree of the session.
+    tree: Ref<Tree>,
 }
 
 impl Session {
     /// A session at rest.
-    pub(crate) const fn new(
-        settings: TurnSettings,
-        items: SessionItems,
-        rested: RestReason,
-        tree: Option<Ref<Tree>>,
-    ) -> Self {
+    pub(crate) const fn new(settings: TurnSettings, items: SessionItems, rested: RestReason, tree: Ref<Tree>) -> Self {
         Self { settings, items, rested, tree }
     }
 
@@ -276,9 +271,9 @@ impl Session {
         self.rested
     }
 
-    /// The tree the session's tools work on.
+    /// The tree the session's tools left, which a continue works on.
     #[must_use]
-    pub const fn tree(&self) -> Option<Ref<Tree>> {
+    pub const fn tree(&self) -> Ref<Tree> {
         self.tree
     }
 
@@ -299,7 +294,7 @@ invariant_errors!(TurnLimitError);
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::Ref;
+    use aether_bloomery_kinds::{Ref, Tree};
     use aether_data::{Storage, StorageData};
 
     use super::{RestReason, Session, SessionItems, SessionItemsError, TurnLimit, TurnLimitError};
@@ -331,13 +326,14 @@ mod tests {
             settings: settings(OfferedTools::default()),
             items: SessionItems(unanswered),
             rested: RestReason::TurnLimit,
-            tree: None,
+            tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
         };
         let bytes = Session::encode_storage(&StorageData::from_value(stored)).expect("encode");
         assert!(Session::decode_storage(&bytes).is_err(), "an unanswered call refuses on decode");
 
         assert_eq!(TurnLimit::new(0), Err(TurnLimitError::Zero));
-        let zero = OpenInput::new(settings(OfferedTools::default()), Ref::of_text("hi"), TurnLimit(0));
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let zero = OpenInput::new(settings(OfferedTools::default()), Ref::of_text("hi"), TurnLimit(0), tree);
         let bytes = OpenInput::encode_storage(&StorageData::from_value(zero)).expect("encode");
         assert!(OpenInput::decode_storage(&bytes).is_err(), "a zero limit refuses on decode");
     }
@@ -356,7 +352,7 @@ mod tests {
             settings: settings(OfferedTools::default()),
             items: SessionItems::new(items.clone()).expect("items"),
             rested: RestReason::Completed,
-            tree: None,
+            tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
         };
 
         let next = session.continue_with(Ref::of_text("more")).expect("next turn");

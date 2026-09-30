@@ -7,23 +7,27 @@ use std::error::Error;
 
 use aether_bloomery_kinds::{
     CallInput, CallProgram, ClosureArtifact, Detail, Digest, EncodedArtifact, ErasedRef, Evaluated, Event, Fault,
-    FaultReason, HeadChange, Invoke, Invoked, JournalEntry, NativeOrigin, ProgramName, ProgramRef, ReactorIntent,
-    RecordedHead, Ref, RequestSource, Requested, SetHeads, Transition, Utf8Text, Warm, WarmEntries, Warmed,
-    decode_call_program, decode_set_heads,
+    FaultReason, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node, ProgramName, ProgramRef,
+    ReactorIntent, ReadArtifactResult, RecordedHead, Ref, RequestSource, Requested, SetHeads, Transition, Tree,
+    Utf8Text, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
     ContinueInput, Echo, EchoResult, Endpoint, ModelName, MuseSession, MuseTurn, OfferedTools, OpenInput, OutputBudget,
     ReasoningEffort, RecordInput, RestReason, Role, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord,
-    ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings,
-    offered,
+    ToolCall, ToolInput, ToolOutput, TreeEdit, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome,
+    TurnResult, TurnSettings, offered,
 };
 use aether_bloomery_program::reactor::Root;
-use aether_bloomery_program::{Nil, Pending, PollResult, Program, Started, invoke, start_async};
+use aether_bloomery_program::{
+    AsyncProgram, Edited, Nil, Pending, PollResult, Program, Started, invoke, start_async, tooled,
+};
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::FetchResult;
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
+const CALLED_EDIT_WRITE: &str = include_str!("../fixtures/called_edit_write.json");
+const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
 const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
@@ -179,6 +183,8 @@ impl Driver {
         let invoked = match program.name().as_str() {
             name if name == MuseTurn::NAME => self.turn(invocation),
             name if name == Echo::NAME => invoke::<Echo>(invocation),
+            name if name == TreeEdit::NAME => self.run_async::<TreeEdit>(invocation),
+            name if name == TreeWrite::NAME => self.run_async::<TreeWrite>(invocation),
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
@@ -195,6 +201,30 @@ impl Driver {
                 self.append(&fault, Some(requested), Vec::new())
             }
             other => panic!("expected a run to complete or refuse, got {other:?}"),
+        }
+    }
+
+    /// One run of a pure async program, answering every read it fetches from the store.
+    fn run_async<P: AsyncProgram>(&self, invocation: Invoke) -> Invoked {
+        let (mut session, mut waiting) = match start_async::<P>(invocation) {
+            Started::Finished(invoked) => return invoked,
+            Started::Live { session, waiting } => (session, waiting),
+        };
+        loop {
+            let Some(Pending::Artifact(pending)) = waiting else {
+                panic!("expected a pure program to wait only on reads, got {waiting:?}");
+            };
+            let reply = if self.store.contains_key(&pending.digest) {
+                ReadArtifactResult::Found { artifact: self.artifact(pending.digest) }
+            } else {
+                ReadArtifactResult::Missing { digest: pending.digest }
+            };
+            session.fulfill(pending, reply);
+            waiting = match session.poll() {
+                PollResult::Finished(invoked) => return invoked,
+                PollResult::NeedArtifact(pending) => Some(Pending::Artifact(pending)),
+                other => panic!("expected a pure program to finish or read, got {other:?}"),
+            };
         }
     }
 
@@ -277,12 +307,48 @@ fn settings(driver: &mut Driver) -> Result<TurnSettings, Box<dyn Error>> {
     Ok(TurnSettings::new(endpoint, model, tools, budget, ReasoningEffort::Low))
 }
 
-/// Open a session that makes at most `max_turns` turns; the open run's seq.
-fn open(driver: &mut Driver, max_turns: u32) -> Result<u64, Box<dyn Error>> {
+/// The text of `src/lib.rs` in the tree a session opens on.
+const LIB: &str = "pub fn smelt() {}\n";
+
+/// Stage the tree a session opens on, `README` and `src/lib.rs`, and cite it.
+fn small_tree(driver: &mut Driver) -> Ref<Tree> {
+    let name = |name: &str| Name::new(name).expect("name");
+    let src = Tree::new([(name("lib.rs"), Node::File(Ref::of_bytes(LIB.as_bytes())))].into());
+    let root = Tree::new(
+        [
+            (name("README"), Node::File(Ref::of_bytes(b"# Bloomery\n"))),
+            (name("src"), Node::Directory(Ref::of_encoded(&src).expect("src"))),
+        ]
+        .into(),
+    );
+    let blobs = [EncodedArtifact::opaque_bytes(LIB.as_bytes()), EncodedArtifact::opaque_bytes(b"# Bloomery\n")];
+    driver.stage(blobs.into_iter().chain([encoded(&src), encoded(&root)]));
+    Ref::of_encoded(&root).expect("root")
+}
+
+/// The bytes of the file at `path` in `tree`.
+fn file(driver: &Driver, tree: Ref<Tree>, path: &str) -> Vec<u8> {
+    let mut dir: Tree = driver.value(tree.digest());
+    let (parents, leaf) = path.rsplit_once('/').unwrap_or(("", path));
+    for segment in parents.split('/').filter(|segment| !segment.is_empty()) {
+        let Some(Node::Directory(next)) = dir.entries().get(&Name::new(segment).expect("name")) else {
+            panic!("expected {segment} to be a directory in {path}");
+        };
+        dir = driver.value(next.digest());
+    }
+    let Some(Node::File(blob)) = dir.entries().get(&Name::new(leaf).expect("name")) else {
+        panic!("expected a file at {path}");
+    };
+    payload(&driver.store[&blob.digest()])
+}
+
+/// Open a session on the small tree that makes at most `max_turns` turns; the open run's seq and the tree.
+fn open(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     let settings = settings(driver)?;
+    let tree = small_tree(driver);
     driver.stage([EncodedArtifact::text(QUESTION)]);
-    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?);
-    Ok(driver.call_native::<SessionOpen>(&input))
+    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree);
+    Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
 /// Continue `session` from the record `from` with the user message `text`; the continue run's seq.
@@ -305,12 +371,17 @@ fn called(result: &TurnResult) -> (Ref<Utf8Text>, Vec<ToolCall>) {
     (*text, calls.as_slice().to_vec())
 }
 
-/// The input `call`'s arguments decoded to.
-fn decoded(call: &ToolCall) -> Digest {
+/// The arguments `call` decoded to.
+fn decoded(call: &ToolCall) -> ErasedRef {
     let ToolInput::Decoded { input, .. } = call.input() else {
         panic!("expected {:?} to decode", call.call_id());
     };
-    input.digest()
+    *input
+}
+
+/// The input the loop runs `call` over: `tree` and the arguments the call decoded to.
+fn bound(tree: Ref<Tree>, call: &ToolCall) -> CallInput {
+    CallInput::Value(encoded(&tooled(tree, decoded(call))))
 }
 
 /// The program and input of the one call the entry at `seq` asked for.
@@ -351,7 +422,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     // the wrong turn, a first head move comparing against anything but an unbound head, and folds that diverge
     // between warm-up and live delivery.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, tree) = open(&mut driver, 2)?;
     let first_input = driver.transition(opened).result;
     let opening = asked(&driver, opened);
     assert_eq!(opening.name.as_str(), MuseTurn::NAME);
@@ -368,7 +439,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     for call in [call_a, call_b] {
         let asked = asked(&driver, trigger);
         assert_eq!(asked.name.as_str(), Echo::NAME);
-        assert_eq!(asked.input, CallInput::Stored(decoded(call)), "{:?} runs over its input", call.call_id());
+        assert_eq!(asked.input, bound(tree, call), "{:?} runs over the tree and its arguments", call.call_id());
         trigger = driver.follow(trigger);
         assert_eq!(driver.intent(trigger).rule().as_str(), "resume", "a tool's run resumes the loop");
         let result = ErasedRef::new(EchoResult::ID, driver.transition(trigger).result);
@@ -394,7 +465,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     let second_turn = driver.follow(trigger);
     let second_result = driver.transition(second_turn).result;
 
-    let record = RecordInput::new(Ref::of_encoded(&next)?, Ref::from_digest(second_result), Vec::new(), None);
+    let record = RecordInput::new(Ref::of_encoded(&next)?, Ref::from_digest(second_result), Vec::new(), tree);
     let record_call = asked(&driver, second_turn);
     assert_eq!(record_call.name.as_str(), SessionRecord::NAME);
     assert_eq!(record_call.input, CallInput::Value(encoded(&record)), "the completed turn is recorded");
@@ -418,7 +489,7 @@ fn a_call_whose_arguments_do_not_decode_goes_straight_to_the_next_turn() -> Test
     // Catches a refused decode run as a tool, or answered with anything but the refusal `muse.turn` stored.
     let refusing = CALLED_ECHO.replace(r#"{\"text\": \"alpha\"}"#, "not json").replace(r#"{\"text\": \"beta\"}"#, "[]");
     let mut driver = Driver::new(&[&refusing, COMPLETED]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, _) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
     let (_, calls) = called(&driver.result(first_turn));
@@ -457,7 +528,7 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_co
     // with anything but its stored refusal, its output out of order with the offered call's result, and a replay
     // under any name but the one the model wrote.
     let mut driver = Driver::new(&[CALLED_UNOFFERED, COMPLETED]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
     let (text, calls) = called(&driver.result(first_turn));
@@ -470,7 +541,7 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_co
     assert_eq!(name.as_str(), "muse-shout", "the call keeps the name the model wrote");
     let echo = asked(&driver, first_turn);
     assert_eq!(echo.name.as_str(), Echo::NAME);
-    assert_eq!(echo.input, CallInput::Stored(decoded(call_a)), "only the offered call runs");
+    assert_eq!(echo.input, bound(tree, call_a), "only the offered call runs");
     let echoed = driver.follow(first_turn);
     let result = ErasedRef::new(EchoResult::ID, driver.transition(echoed).result);
 
@@ -510,7 +581,7 @@ fn payload(artifact: &EncodedArtifact) -> Vec<u8> {
 fn a_faulted_call_ends_the_session() -> TestResult {
     // Catches a fault replayed to the model or left waiting, so the loop would go on after a tool it could not run.
     let mut driver = Driver::new(&[CALLED_ECHO]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, _) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
     let asked = driver.request(first_turn);
@@ -549,7 +620,7 @@ fn a_continue_resumes_only_from_the_latest_record_of_a_resting_session() -> Test
     // Catches a continue run over a stale record or into an activation already in progress, and a later rest
     // that does not compare against the session's previous record.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED, COMPLETED]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
     let first = driver.head(key);
@@ -580,7 +651,7 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     // rest that sends another turn or records other items than the next turn would have sent, and a rested
     // session that cannot be continued.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED, CALLED_ECHO_MORE, COMPLETED]);
-    let opened = open(&mut driver, 2)?;
+    let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
     let first = driver.head(key);
@@ -606,6 +677,61 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
     assert_eq!(completed.items().last(), Some(&answer));
     assert_eq!(completed.items()[..session.items().len()], *session.items(), "the resumed session extends its rest");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> TestResult {
+    // Catches a call run over a tree other than the latest, an `Edited` result whose tree the loop drops, a rest
+    // that records the opened tree instead of the edited one, a continue that forgets the tree its record rested
+    // with, and folds that diverge between warm-up and live delivery.
+    let mut driver = Driver::new(&[CALLED_EDIT_WRITE, COMPLETED, CALLED_WRITE, COMPLETED]);
+    let (opened, opened_tree) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [edit, write] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+    let editing = asked(&driver, first_turn);
+    assert_eq!(editing.name.as_str(), TreeEdit::NAME);
+    assert_eq!(editing.input, bound(opened_tree, edit), "the edit runs over the opened tree");
+    let edited_run = driver.follow(first_turn);
+    let edited: Edited = driver.result(edited_run);
+    assert_eq!(edited.summary(), "Edited src/lib.rs.");
+
+    let writing = asked(&driver, edited_run);
+    assert_eq!(writing.name.as_str(), TreeWrite::NAME);
+    assert_eq!(writing.input, bound(edited.tree(), write), "the write runs over the edited tree");
+    let written_run = driver.follow(edited_run);
+    let written: Edited = driver.result(written_run);
+    assert_eq!(written.summary(), "Wrote docs/notes.md.");
+
+    driver.settle(written_run);
+    let key = SessionKey::new(opened);
+    let rested = driver.head(key);
+    let session: Session = driver.value(rested);
+    assert_eq!((session.rested(), session.tree()), (RestReason::Completed, written.tree()));
+    assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt_iron() {}\n");
+    assert_eq!(file(&driver, session.tree(), "docs/notes.md"), b"Iron blooms.\n");
+    assert_eq!(file(&driver, session.tree(), "README"), b"# Bloomery\n");
+
+    let resumed = continue_from(&mut driver, key, rested, "Note the slag too.", 2);
+    let resumed_turn = driver.follow(resumed);
+    let (_, calls) = called(&driver.result(resumed_turn));
+    let [rewrite] = calls.as_slice() else {
+        panic!("expected one call, got {calls:?}");
+    };
+    assert_eq!(
+        asked(&driver, resumed_turn).input,
+        bound(session.tree(), rewrite),
+        "a continue works on the rested tree"
+    );
+    driver.settle(resumed_turn);
+    let continued: Session = driver.value(driver.head(key));
+    assert_eq!(file(&driver, continued.tree(), "docs/notes.md"), b"Iron blooms.\nSlag floats.\n");
 
     assert_warm_and_live_agree(&driver);
     Ok(())

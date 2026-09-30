@@ -1,6 +1,6 @@
 //! The live sessions, folded from the journal: which entry belongs to which
-//! session, what each waiting turn still owes, and each session's latest
-//! record.
+//! session, what each waiting turn still owes, each session's current tree,
+//! and each session's latest record with the tree it rested with.
 //!
 //! Every hop of a session is one cause lookup. An entry the loop acts on is
 //! linked to its session's key; the `Requested` entry the loop's intent
@@ -11,10 +11,10 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, Digest, EncodedArtifact, ErasedRef, Fault, HeadChange, HeadMoved, ProgramName,
-    ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Utf8Text,
+    CallInput, CallProgram, EncodedArtifact, ErasedRef, Fault, HeadChange, HeadMoved, ProgramName, ReactionFailed, Ref,
+    RequestSource, Requested, Seq, SetHeads, Transition, Tree, Utf8Text,
 };
-use aether_bloomery_program::{At, Cited, CitedError, Ran, Reactor, ViewCursor, view};
+use aether_bloomery_program::{At, Cited, CitedError, Edited, Ran, Reactor, ViewCursor, tooled, view};
 
 use crate::input::{ToolCalls, ToolInput, ToolOutput, TurnInput};
 use crate::program::MuseTurn;
@@ -37,6 +37,9 @@ pub struct Conversations {
     sessions: BTreeMap<SessionKey, Conversation>,
     /// Each session's latest record, from its head's own moves.
     current: BTreeMap<SessionKey, Ref<Session>>,
+    /// Each session's last record and the tree it rested with, which a
+    /// continue from that record works on.
+    rested: BTreeMap<SessionKey, (Ref<Session>, Ref<Tree>)>,
 }
 
 /// One session's activation in progress.
@@ -45,6 +48,9 @@ struct Conversation {
     limit: TurnLimit,
     /// The turns it has made.
     turns: u32,
+    /// The tree every call works on: the one the activation started from, or
+    /// the one the last `Edited` result left.
+    tree: Ref<Tree>,
     /// The turn whose calls are running, if one asked for calls.
     waiting: Option<Waiting>,
     /// The seq of the tool run answered last.
@@ -65,8 +71,9 @@ struct Waiting {
 
 /// What the loop runs after the entry linked to a session.
 enum Next {
-    /// A called program, over the input its call decoded to.
-    Call { program: ProgramName, input: Digest },
+    /// A called program, over the session's tree and the arguments its call
+    /// decoded to.
+    Call { program: ProgramName, input: EncodedArtifact },
     /// The next turn, once every call has its output.
     Turn(TurnInput),
     /// The record of a session resting at its turn limit.
@@ -76,8 +83,8 @@ enum Next {
 }
 
 impl Conversation {
-    const fn new(limit: TurnLimit) -> Self {
-        Self { limit, turns: 0, waiting: None, answered: None, next: None }
+    const fn new(limit: TurnLimit, tree: Ref<Tree>) -> Self {
+        Self { limit, turns: 0, tree, waiting: None, answered: None, next: None }
     }
 
     /// Answer every refused call up to the next decoded one, and set what runs
@@ -91,7 +98,8 @@ impl Conversation {
                     waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(*refusal)));
                 }
                 ToolInput::Decoded { program, input } => {
-                    self.next = Some(Next::Call { program: program.clone(), input: input.digest() });
+                    let input = EncodedArtifact::new(&tooled(self.tree, *input)).ok()?;
+                    self.next = Some(Next::Call { program: program.clone(), input });
                     return Some(());
                 }
             }
@@ -99,14 +107,17 @@ impl Conversation {
         self.next = Some(if self.turns < self.limit.get() {
             Next::Turn(waiting.input.append(replay(waiting.text, waiting.calls.as_slice(), &waiting.outputs)).ok()?)
         } else {
-            Next::Limit(RecordInput::new(waiting.turn, waiting.result, waiting.outputs.clone(), None))
+            Next::Limit(RecordInput::new(waiting.turn, waiting.result, waiting.outputs.clone(), self.tree))
         });
         Some(())
     }
 
     /// Whether `run` is the run of the call the loop runs next.
     fn awaits(&self, run: &Transition) -> bool {
-        matches!(&self.next, Some(Next::Call { program, input }) if program == run.program.name() && *input == run.input)
+        matches!(
+            &self.next,
+            Some(Next::Call { program, input }) if program == run.program.name() && input.digest() == run.input
+        )
     }
 
     /// Record `result`, the result of the tool run at `seq`, as the output of
@@ -129,7 +140,7 @@ impl Conversations {
     pub fn step(&self, at: At) -> Option<CallProgram> {
         match self.next(at)? {
             Next::Call { program, input } => {
-                Some(CallProgram { program: MUSE, name: program.clone(), input: CallInput::Stored(*input) })
+                Some(CallProgram { program: MUSE, name: program.clone(), input: CallInput::Value(input.clone()) })
             }
             Next::Turn(turn) => Some(call::<MuseTurn>(CallInput::Value(EncodedArtifact::new(turn).ok()?))),
             Next::Limit(record) => Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?))),
@@ -200,7 +211,7 @@ impl View for Conversations {
     #[fold]
     fn opened(&mut self, run: Ran<SessionOpen>, cited: &Cited, at: At) -> Result<(), CitedError> {
         let input = cited.get(run.input())?;
-        self.keep(SessionKey::new(at.seq.0), Conversation::new(input.max_turns()), at.seq);
+        self.keep(SessionKey::new(at.seq.0), Conversation::new(input.max_turns(), input.tree()), at.seq);
         Ok(())
     }
 
@@ -208,8 +219,12 @@ impl View for Conversations {
     fn continued(&mut self, run: Ran<SessionContinue>, cited: &Cited, at: At) -> Result<(), CitedError> {
         let input = cited.get(run.input())?;
         let key = input.session();
-        if self.current.get(&key) == Some(&input.from()) && !self.sessions.contains_key(&key) {
-            self.keep(key, Conversation::new(input.max_turns()), at.seq);
+        let rested = self.rested.get(&key).filter(|(from, _)| *from == input.from());
+        if let Some(&(_, tree)) = rested
+            && self.current.get(&key) == Some(&input.from())
+            && !self.sessions.contains_key(&key)
+        {
+            self.keep(key, Conversation::new(input.max_turns(), tree), at.seq);
         }
         Ok(())
     }
@@ -228,7 +243,8 @@ impl View for Conversations {
                 self.advance(key, conversation, at.seq);
             }
             TurnOutcome::Completed { .. } | TurnOutcome::Declined { .. } | TurnOutcome::Incomplete { .. } => {
-                conversation.next = Some(Next::Rest(RecordInput::new(run.input(), run.result(), Vec::new(), None)));
+                let record = RecordInput::new(run.input(), run.result(), Vec::new(), conversation.tree);
+                conversation.next = Some(Next::Rest(record));
                 self.keep(key, conversation, at.seq);
             }
             TurnOutcome::Rejected | TurnOutcome::Transient { .. } | TurnOutcome::Unreadable => {}
@@ -237,9 +253,10 @@ impl View for Conversations {
     }
 
     /// Any program's run: the output of a tool call when the run answers the
-    /// `Requested` the loop recorded for the call it runs next. Every other
-    /// run, `muse.turn` and the session programs included, is left to its own
-    /// fold.
+    /// `Requested` the loop recorded for the call it runs next. A result that
+    /// is an [`Edited`] moves the session to its tree before the next call.
+    /// Every other run, `muse.turn` and the session programs included, is
+    /// left to its own fold.
     #[fold]
     fn ran(&mut self, run: Transition, cited: &Cited, at: At) -> Result<(), CitedError> {
         let linked = at.cause.and_then(|cause| self.sessions.get(self.links.get(&cause)?));
@@ -247,17 +264,20 @@ impl View for Conversations {
             return Ok(());
         }
         let result = ErasedRef::new(cited.kind(run.result)?, run.result);
+        let edited = result.cast::<Edited>().map(|edited| cited.get(edited)).transpose()?;
         if let Some((key, mut conversation)) = self.take(at.cause)
             && conversation.answer(result, at.seq).is_some()
         {
+            conversation.tree = edited.map_or(conversation.tree, |edited| edited.tree());
             self.advance(key, conversation, at.seq);
         }
         Ok(())
     }
 
     #[fold]
-    fn recorded(&mut self, _run: Ran<SessionRecord>, at: At) {
-        if let Some((key, _)) = self.take(at.cause) {
+    fn recorded(&mut self, run: Ran<SessionRecord>, at: At) {
+        if let Some((key, conversation)) = self.take(at.cause) {
+            self.rested.insert(key, (run.result(), conversation.tree));
             self.links.insert(at.seq, key);
         }
     }

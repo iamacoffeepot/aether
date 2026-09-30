@@ -1,16 +1,21 @@
 //! A declared program rendered as a responses-API function tool.
 //!
-//! A tool is a program to run: its name is the program's name, its
-//! description is the program's `///` doc, and its parameters are the JSON
-//! Schema of the JSON `aether-codec` accepts for the program's input, with
-//! each field's and variant's `///` doc attached. Rendering needs the
-//! program's crate linked: the input's schema is read from its type, not
-//! from the declaration record.
+//! A tool is a program whose input is [`Tooled<A>`]: the tree the call works
+//! on, which the loop that runs the call binds, and the arguments `A`, which
+//! the model writes. Its name is the program's name, its description is the
+//! program's `///` doc, and its parameters are the JSON Schema of the JSON
+//! `aether-codec` accepts for `A`, with each field's and variant's `///` doc
+//! attached. Rendering needs the program's crate linked: the arguments'
+//! schema is read from their type, not from the declaration record. A tool
+//! that changes the tree returns [`Edited`].
 //!
 //! [`ToolSchema`] is the same type's schema as a stored value, so a program
 //! that links none of a tool's types can still decode its arguments and
 //! render its result: the caller, which links them, stores one for the
-//! tool's input and one for its result and cites both.
+//! tool's arguments and one for its result and cites both.
+
+mod edited;
+mod tooled;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -25,6 +30,12 @@ use serde_json::{Value, json};
 use crate::Program;
 use crate::kinds::ProgramName;
 
+pub use edited::Edited;
+pub use tooled::{ErasedTooled, ToolArguments, Tooled, tooled};
+
+/// The arguments of tool `P`: what the model writes for a call.
+type Arguments<P> = <<P as Program>::Input as ToolArguments>::Arguments;
+
 /// The longest function name the responses API accepts, in bytes.
 pub const MAX_FUNCTION_NAME_BYTES: usize = 64;
 
@@ -36,7 +47,7 @@ pub enum ToolDefinitionError {
     InvalidName,
     /// The mapped function name is longer than [`MAX_FUNCTION_NAME_BYTES`].
     NameTooLong,
-    /// The input's schema has no JSON Schema form.
+    /// The arguments' schema has no JSON Schema form.
     Schema(JsonSchemaError),
 }
 
@@ -47,7 +58,7 @@ impl fmt::Display for ToolDefinitionError {
             Self::NameTooLong => {
                 write!(f, "the program's function name is longer than {MAX_FUNCTION_NAME_BYTES} bytes")
             }
-            Self::Schema(error) => write!(f, "the program input has no JSON Schema form: {error}"),
+            Self::Schema(error) => write!(f, "the tool's arguments have no JSON Schema form: {error}"),
         }
     }
 }
@@ -67,27 +78,29 @@ impl From<JsonSchemaError> for ToolDefinitionError {
 /// leave `Option` fields out of `required`, which strict mode refuses; the
 /// codec's decode stays the authority on what the program accepts.
 ///
-/// An input with an undocumented field or variant does not compile here,
-/// the same check `#[program]` runs, so a hand-written `impl Program` is
-/// refused too.
+/// The parameters are the arguments `A` of `P`'s [`Tooled<A>`] input, never
+/// the envelope: the model does not write the tree. Arguments with an
+/// undocumented field or variant do not compile here, the same check
+/// `#[program]` runs on an input, so a hand-written `impl Program` is refused
+/// too.
 ///
 /// # Errors
 ///
 /// [`ToolDefinitionError`] when the name is invalid or too long, or the
-/// input's schema has no JSON Schema form.
+/// arguments' schema has no JSON Schema form.
 pub fn tool_definition<P: Program>() -> Result<Value, ToolDefinitionError>
 where
-    P::Input: Schema,
+    P::Input: ToolArguments,
 {
     const {
         require_documented(
-            StaticSchema::<P::Input>::SCHEMA,
-            StaticSchema::<P::Input>::DOC_NODE,
-            "a program input must be a struct whose fields and variants all carry a `///` doc",
+            StaticSchema::<Arguments<P>>::SCHEMA,
+            StaticSchema::<Arguments<P>>::DOC_NODE,
+            "a tool's arguments must be a struct whose fields and variants all carry a `///` doc",
         );
     }
     let program = ProgramName::new(P::NAME).map_err(|_| ToolDefinitionError::InvalidName)?;
-    let parameters = json_schema(&<P::Input as Schema>::SCHEMA, &<P::Input as Schema>::DOC_NODE)?;
+    let parameters = json_schema(&<Arguments<P> as Schema>::SCHEMA, &<Arguments<P> as Schema>::DOC_NODE)?;
     Ok(json!({
         "type": "function",
         "name": function_name(&program)?,
@@ -199,12 +212,45 @@ impl SchemaBytes {
 #[cfg(test)]
 mod tests {
     use alloc::format;
+    use alloc::string::String;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use aether_data::{Storage, StorageData};
 
-    use super::{SchemaBytes, ToolDefinitionError, ToolSchema, function_name, program_name};
-    use crate::kinds::{ProgramName, Tree};
+    use super::{Edited, SchemaBytes, ToolDefinitionError, ToolSchema, Tooled, function_name, program_name};
+    use crate::Program;
+    use crate::kinds::{Mode, ProgramName, Tree};
+    use crate::tool_definition;
+
+    /// The arguments of [`Look`].
+    #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+    #[kind(name = "test.program.look.args")]
+    struct LookArgs {
+        /// Where to look.
+        path: String,
+    }
+
+    /// A tool over [`LookArgs`], declared by hand: rendering reads only its constants and types.
+    struct Look;
+
+    impl Program for Look {
+        const NAME: &'static str = "test.look";
+        const MODE: Mode = Mode::Pure;
+        const INTENT: &'static str = "Look at one path.";
+        const DOC: &'static str = "Looks at one path.";
+        type Input = Tooled<LookArgs>;
+        type Result = Edited;
+    }
+
+    #[test]
+    fn a_tool_offers_its_arguments_and_never_the_tree() {
+        // Catches the envelope rendered as the parameters, which would ask the model to write the tree the loop
+        // binds.
+        let definition = tool_definition::<Look>().expect("renders");
+        let properties = definition["parameters"]["properties"].as_object().expect("an object schema");
+        assert_eq!(properties.keys().collect::<Vec<_>>(), ["path"]);
+    }
 
     #[test]
     fn function_names_map_back_to_their_program() {

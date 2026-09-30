@@ -40,11 +40,11 @@ pub use aether_bloomery_kinds::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
 #[doc(hidden)]
 pub use program::__macro_internals;
 pub use program::{
-    Admission, Async, AsyncSession, Declaration, DeclarationsError, Env, Http, InjectedApi, Invoke, Invoked,
-    MAX_FUNCTION_NAME_BYTES, Pending, PendingArtifact, PendingCall, PollResult, Process, Program, ProgramEntry,
-    ProgramKind, ProgramTable, Ran, Refusal, Root, Started, Sync, ToolDefinitionError, ToolSchema, Workspace,
-    declarations, dispatch, function_name, invoke, kinds, program, program_name, start_async, start_invocation,
-    tool_definition, unreachable_staged,
+    Admission, Async, AsyncSession, Declaration, DeclarationsError, Edited, Env, ErasedTooled, Http, InjectedApi,
+    Invoke, Invoked, MAX_FUNCTION_NAME_BYTES, Pending, PendingArtifact, PendingCall, PollResult, Process, Program,
+    ProgramEntry, ProgramKind, ProgramTable, Ran, Refusal, Root, Started, Sync, ToolArguments, ToolDefinitionError,
+    ToolSchema, Tooled, Workspace, declarations, dispatch, function_name, invoke, kinds, program, program_name,
+    start_async, start_invocation, tool_definition, tooled, unreachable_staged,
 };
 #[doc(hidden)]
 pub use program::{AsyncProgram, SyncProgram};
