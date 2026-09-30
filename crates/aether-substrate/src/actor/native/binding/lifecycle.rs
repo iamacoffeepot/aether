@@ -312,6 +312,17 @@ impl NativeBinding {
         self.mailer.registry().published_rows_at(position)
     }
 
+    /// The position of the `Live` route standing under exactly `path`'s
+    /// canonical name, as `Registry::live_route` answers it: the read behind
+    /// the wasm guest's `WasmCtx::resolve` over an `ActorPath<R>` (ADR-0230
+    /// §3), through the `live_route_p32` host fn. The same read the native
+    /// `NativeCtx::resolve` (over a `ProtocolPath<P>`) takes, through
+    /// `Registry::resolve_protocol`, so the two answers cannot drift apart.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
+        self.mailer.registry().live_route(path)
+    }
+
     /// The receive surface retained for the actor a reference proves. The
     /// path behind
     /// [`NativeCtx::receive_surface`](crate::actor::native::ctx::NativeCtx::receive_surface).

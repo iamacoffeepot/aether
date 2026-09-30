@@ -530,47 +530,58 @@ the dependency is checked at the type's next spawn.
 
 A declared dependency reaches only an actor whose type the guest can compile
 and name. A native actor in a native-only crate, such as a Bloomery engine's
-journal owner or bundle driver, has no type a guest can write, and an
-`Instanced` actor cannot be declared at all. A guest reaches such an actor by
-its path instead: the operator names it in the component's config as an
-`ErasedActorPath`, validated on decode, and the guest proves it once with
-`ctx.resolve_path(&path)` ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
-§3):
+journal owner or bundle driver, is named to a guest only by the marker type
+its identity half publishes (`JournalActor`, `BundleDriver`), and an
+`Instanced` actor cannot be declared at all. A guest reaches such an actor by its path instead: the operator names
+it in the component's config as an `ActorPath<R>`, whose leaf must name `R` to
+decode, and the guest proves it once with `ctx.resolve(&path)`
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
+§3, #7205):
 
 ```rust
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    match ctx.resolve_path(&self.config.journal) {
+    match ctx.resolve(&self.config.journal) {
         Ok(journal) => self.journal = Some(journal),
-        Err(error) => tracing::error!(path = self.config.journal.as_str(), %error, "the journal does not prove"),
+        Err(error) => tracing::error!(path = self.config.journal.as_erased().as_str(), %error, "the journal does not prove"),
     }
 }
 ```
 
-The verb is the guest twin of the native `NativeCtx::resolve_path`. The host
-expands and resolves the path, short or canonical, and proves the answer
-through the same path the native verb takes, so both answer the same way. It
-refuses in two ways, and neither names a position:
+The verb folds the path as written — a typed path is canonical by
+construction, so no short-path expansion runs — and finds the `Live` route
+standing under exactly that canonical name, the same read the native
+`NativeCtx::resolve` (over a `ProtocolPath<P>`) takes, so both answer the same
+way. It refuses one way, naming no position:
+
+| Refusal | When |
+|---|---|
+| `ResolveError::NotLive { path }` | no `Live` route stands under the path's canonical name: never registered, still `Starting`, `Dropped`, or a fold collision with a different canonical name |
+
+It costs one host call reading the published route view. Call it once, at
+`wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt, and keep the
+`ActorRef<R>` it returns; never re-resolve at a send. The verb is on the
+receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path does not
+fail the load: the guest decides what a refusal means.
+
+The answer is kind-checked: `ctx.send_to(journal, &kind)` compiles only for a
+kind `R` handles, caught where the send is written rather than at the
+recipient. A path the guest will send to arrives as this typed path, not an
+`ErasedActorPath` ([R-0040](../contributing/design-rules.md#r-0040)).
+
+A guest handed text with no compile-time actor claim — over the wire, or a
+short path that only expands against the live registry — proves it instead
+with `ctx.resolve_path(&path)`, the guest twin of the native
+`NativeCtx::resolve_path`, over an `ErasedActorPath`. Its answer is an
+`ErasedActorRef`, which names no actor type: it serves identity (naming what a
+path resolves to) and the guard cast (`ctx.cast`, over a reference it
+proves), never a send target. It refuses in two ways, and neither names a
+position:
 
 | Refusal | When |
 |---|---|
 | `ResolvePathError::Unresolved { detail }` | the path names no `Starting` or `Live` route, a dropped route included; `detail` is the registry's refusal as text |
 | `ResolvePathError::NotLive { canonical_path }` | the route is still `Starting`, or drops between the two reads |
 
-It costs one address resolution plus one published-route read, inside one host
-call. Call it once, at `wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt,
-and keep the `ErasedActorRef` it returns; never re-resolve at a send. The verb
-is on the receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path
-does not fail the load: the guest decides what a refusal means.
-
-The answer is an `ErasedActorRef`, which names no actor type, so on `main`
-`ctx.send_to(journal, &kind)` compiles for any kind, and a kind the actor does
-not handle is caught only at the recipient. Sending through that answer is the
-erased send #6895 removes. A guest's typed door is `WasmCtx::resolve` over an
-`ActorPath<R>`, which yields an `ActorRef<R>` whose sends are checked by kind;
-ADR-0230 §3 decides it, it lands with the Bloomery bootstrap (#6829), and it
-is not built on `main`. A path the guest will send to then arrives as that
-typed path, not an `ErasedActorPath`
-([R-0040](../contributing/design-rules.md#r-0040)).
 Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
@@ -585,9 +596,10 @@ describes. The loaded component has no door back to its loader;
 shows the two shapes that reach it.
 
 The worked example is the environment bootstrap script,
-`crates/aether-bloomery-bootstrap`: its `wire` proves the journal owner and the
-bundle driver from its config, logs one error and stops on a refusal, and
-otherwise drives an import, merge, and publish sequence through the two proofs
+`crates/aether-bloomery-bootstrap`: its `wire` resolves the typed
+`ActorPath<JournalActor>` and `ActorPath<BundleDriver>` config fields with
+`ctx.resolve`, logs one error and stops on a refusal, and otherwise drives an
+import, merge, and publish sequence through the two kind-checked references
 (see [Building an environment](workspace.md#building-an-environment)).
 
 ## Where to read more

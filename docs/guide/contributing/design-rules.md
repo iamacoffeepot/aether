@@ -526,8 +526,8 @@ stand-in (ADR-0231 §4).
 The typed doors are not all built on `main`. The native `resolve` takes only a
 `ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
 and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
-A guest has no typed-path door yet: its `ProtocolPath<P>` decode lands with
-ADR-0241, and its `resolve` over an `ActorPath<R>` lands with #6829.
+A guest's `ProtocolPath<P>` decode still lands with ADR-0241; its `resolve`
+over an `ActorPath<R>` is built, `WasmCtx::resolve` (#7205).
 
 - **Why:** an erased path proves to an erased reference, which has no send
   verb, so a path meant for sending carries the type its sends need.
@@ -566,8 +566,8 @@ stand-in (ADR-0231 §4).
 The typed doors are not all built on `main`. The native `resolve` takes only a
 `ProtocolPath<P>` (`crates/aether-substrate/src/actor/native/ctx/address.rs`),
 and its `ActorPath<R>` arm lands with its first native caller (ADR-0230 §3).
-A guest has no typed-path door yet: its `ProtocolPath<P>` decode lands with
-ADR-0241, and its `resolve` over an `ActorPath<R>` lands with #6829.
+A guest's `ProtocolPath<P>` decode still lands with ADR-0241; its `resolve`
+over an `ActorPath<R>` is built, `WasmCtx::resolve` (#7205).
 
 - **Why:** an erased path proves only to an erased reference, which has no
   send verb, so a path that code written against the engine will send to

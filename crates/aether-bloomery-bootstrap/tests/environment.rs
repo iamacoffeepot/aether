@@ -9,6 +9,7 @@ use std::thread;
 
 use aether_actor::ActorPath;
 use aether_bloomery_bootstrap::BootstrapConfig;
+use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::{Batch, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
     Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove,
@@ -18,7 +19,7 @@ use aether_bloomery_view::Heads;
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
 use aether_bloomery_workspace::{Environment, ImageRef};
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::{Kind, LoadName};
 use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{LoadComponent, LoadResult};
@@ -82,7 +83,7 @@ fn toolchain_export() -> Vec<u8> {
 
 #[test]
 fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> Result<(), Box<dyn Error>> {
-    // Catches a guest `resolve_path` that does not prove the mounted instanced roots, a step whose reply the
+    // Catches a guest `resolve` that does not prove the mounted instanced roots, a step whose reply the
     // script drops or sends in the wrong order, a merge call keyed by anything but the input digest, and a head
     // named by anything but the merged environment's platform.
     let (Some(bundle_path), Some(script_path)) =
@@ -101,7 +102,7 @@ fn the_bootstrap_script_imports_merges_and_publishes_the_environment_head() -> R
         base: Some(ImageRef::new(BASE)?),
         toolchain: Some(ImageRef::new(TOOLCHAIN)?),
         journal: Some(ActorPath::<JournalActor>::instance(UnitKey::new(UNIT)?.as_load_name())),
-        driver: Some(ErasedActorPath::new("aether.bloomery.driver:driver")?),
+        driver: Some(ActorPath::<BundleDriver>::instance(&LoadName::new("driver")?)),
     };
     let load =
         LoadComponent { wasm: fs::read(script_path)?, name: None, config: config.encode_into_bytes(), export: None };

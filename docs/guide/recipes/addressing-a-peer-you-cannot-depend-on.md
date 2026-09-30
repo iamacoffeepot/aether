@@ -154,9 +154,9 @@ a `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
 two ways: by casting the envelope sender at receipt
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
 §4), or by proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`)
-that the announcement carries. Neither route exists for a guest on `main`:
-the cast is not built, and a guest's typed-path door lands with ADR-0241 and
-#6829.
+that the announcement carries. A guest has the cast, `WasmCtx::cast`, and the
+`ActorPath<R>` door, `WasmCtx::resolve` (#7205); its `ProtocolPath<P>` decode
+lands with ADR-0241.
 
 A reply to the announcing mail itself needs no stored reference. The handler
 replies, as any handler does.
@@ -213,27 +213,28 @@ actor does that with the ctx verb `resolve_live`
 proof, not the position. An address that arrives as an `ErasedActorPath`, such as
 the component path in a drop or replace request, is proven the same way
 through `resolve_path`, whose refusal names the path, never a position. A
-guest has the same verb, `WasmCtx::resolve_path`: an `ErasedActorPath` from its
-config or a payload is proven once, at `wire` or at receipt, and kept as an
-`ErasedActorRef` (the environment bootstrap script in
-`crates/aether-bloomery-bootstrap` proves the journal owner and the bundle driver
-this way). An `ErasedActorRef` proven this way and then sent through is an
-erased send #6895 removes; a path the holder will send to arrives as a typed
-path instead ([R-0040](../contributing/design-rules.md#r-0040)), and the
-bootstrap's move to `resolve` over an `ActorPath<R>` is #6829. A guest has
+guest has the same verb, `WasmCtx::resolve_path`, for a path with no
+compile-time actor claim, kept as an `ErasedActorRef`. A path the holder will
+send to arrives as a typed path instead
+([R-0040](../contributing/design-rules.md#r-0040)): the environment bootstrap
+script in `crates/aether-bloomery-bootstrap` now resolves its typed
+`ActorPath<JournalActor>` and `ActorPath<BundleDriver>` config fields with
+`WasmCtx::resolve` and keeps the two kind-checked `ActorRef`s (#7205),
+replacing the erased `resolve_path` proof #6895 was removing. A guest has
 no door for a payload-borne position and will not get
 one, because no guest API takes a `MailboxId`; a guest is told where to send by
-an `ErasedActorPath` or by the envelope sender.
+an `ActorPath<R>`, a `ProtocolPath<P>`, or the envelope sender.
 
 A typed path that arrives in mail is proven with `resolve`. A native actor
 proves a `ProtocolPath<P>` with `ctx.resolve(&path)`
 (`crates/aether-substrate/src/actor/native/ctx/address.rs`), which checks that
 a `Live` route stands under the path's canonical name and returns a
-`ProtocolRef<P>` that sends only the kinds `P` lists (ADR-0231 §3). No door turns an `ActorPath<R>` (ADR-0230 §2) into a reference
-yet: the guest arm over one lands with the Bloomery bootstrap (#6829,
-ADR-0240 D8). The editor shell's `RegionSpec.target` was the first site that
-would have needed one; issue #6306 dropped the field instead, and the region
-announces itself.
+`ProtocolRef<P>` that sends only the kinds `P` lists (ADR-0231 §3). A guest
+proves an `ActorPath<R>` (ADR-0230 §2) the same way, with `WasmCtx::resolve`
+(#7205, ADR-0240 D8), the Bloomery bootstrap's own door onto its two peers.
+The native `ActorPath<R>` arm still waits for a caller: the editor shell's
+`RegionSpec.target` was the first site that would have needed one; issue
+#6306 dropped the field instead, and the region announces itself.
 
 ## What not to write
 

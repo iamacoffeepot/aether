@@ -94,6 +94,7 @@ name = "aether-bloomery-bootstrap"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-driver",
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-view",

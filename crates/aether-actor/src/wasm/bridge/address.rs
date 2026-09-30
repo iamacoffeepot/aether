@@ -18,6 +18,13 @@
 //! one [`__PublishedRows`], delivered the same way. This is the transport
 //! under `WasmCtx::cast`, which applies the protocol's `admits` rule to the
 //! rows and mints the typed reference itself.
+//!
+//! A third sibling is the guest half of the `live_route_p32` host fn
+//! (ADR-0230 §3, #7205): the guest hands the host a typed path's text, and
+//! the host answers the position of the `Live` route standing under exactly
+//! that canonical name, or none, as one [`__LiveRoute`], delivered the same
+//! way. This is the transport under `WasmCtx::resolve`, which mints the
+//! `ActorRef<R>` itself from a `Some` answer.
 
 use aether_data::{ErasedActorPath, KindId, ReplyContract, wire};
 use alloc::string::String;
@@ -107,5 +114,47 @@ pub fn published_rows(position: u64) -> __PublishedRows {
     let bytes = unsafe { take_delivered(ptr, len) };
     wire::from_bytes(&bytes).unwrap_or_else(|error| {
         panic!("aether-actor: published_rows: the host's answer does not decode as __PublishedRows: {error}")
+    })
+}
+
+/// The host's answer to one `live_route_p32` call, wire-encoded into the
+/// buffer it delivers. The ABI between the substrate's host fn and this SDK,
+/// defined once here beside [`__ResolvedPath`] so the two sides cannot
+/// disagree on its shape.
+///
+/// Not part of the public API: a guest reaches it only as the `Result` of
+/// `WasmCtx::resolve`, and the substrate names it only to encode the answer.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct __LiveRoute {
+    /// The position of the `Live` route standing under exactly the path's
+    /// canonical name, or `None` for `Starting`, `Dropped`, never
+    /// registered, or a fold collision with a different canonical name.
+    pub position: Option<u64>,
+}
+
+/// Ask the host for the position of the `Live` route standing under exactly
+/// `path`'s canonical name, and decode its answer.
+///
+/// This is the transport under `WasmCtx::resolve`, which mints the
+/// `ActorRef<R>` from a `Some` answer — the guest twin of the native
+/// `NativeCtx::resolve` over a `ProtocolPath<P>`, both reading
+/// `Registry::live_route`.
+///
+/// # Panics
+///
+/// Panics when the delivered bytes do not decode as a [`__LiveRoute`]: the
+/// host and this SDK disagree on the ABI, which no guest can recover from
+/// (ADR-0063).
+pub fn live_route(path: &ErasedActorPath) -> __LiveRoute {
+    let text = path.as_str();
+    // SAFETY: FFI import; the host copies the path out before returning and
+    // always hands back a live `(ptr, len)`, or traps.
+    let packed = unsafe { raw::live_route(abi32(text.as_ptr().addr()), abi32(text.len())) };
+    let (ptr, len) = unpack(packed);
+    // SAFETY: the return is always a live host-delivered buffer.
+    let bytes = unsafe { take_delivered(ptr, len) };
+    wire::from_bytes(&bytes).unwrap_or_else(|error| {
+        panic!("aether-actor: live_route: the host's answer does not decode as __LiveRoute: {error}")
     })
 }

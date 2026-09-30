@@ -310,8 +310,10 @@ impl Registry {
     /// `Dropped`, and a name mismatch all answer `None`.
     ///
     /// Consumers: `Registry::resolve_protocol`, the native receipt of a
-    /// protocol path. A `ProtocolPath` decode reads [`Self::route_rows`]
-    /// instead, which also answers a `Dropped` route.
+    /// protocol path, and `NativeBinding::live_route`, the read behind the
+    /// wasm guest's `WasmCtx::resolve` over an `ActorPath<R>` (ADR-0230 §3),
+    /// through the `live_route_p32` host fn. A `ProtocolPath` decode reads
+    /// [`Self::route_rows`] instead, which also answers a `Dropped` route.
     pub(crate) fn live_route(&self, path: &ErasedActorPath) -> Option<MailboxId> {
         let id = lineage_mailbox_id(path.as_str());
         let routes = self.routes.load();

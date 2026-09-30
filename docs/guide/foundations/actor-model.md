@@ -448,8 +448,8 @@ match ctx.resolve(&run.source) {
 }
 ```
 
-The guest arm, `resolve` over an `ActorPath<R>`, lands with the Bloomery
-bootstrap (#6829).
+The guest arm is `WasmCtx::resolve` over an `ActorPath<R>` (#7205); the
+Bloomery bootstrap proves its journal and driver peers with it.
 
 A kind or config field naming an actor its receiver will later send to, such
 as a subscriber, a handler, a callback, or a source, is a typed path, never an

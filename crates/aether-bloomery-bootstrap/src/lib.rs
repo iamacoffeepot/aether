@@ -23,12 +23,12 @@
 //! the same digest again, which appends one more head-move event.
 //!
 //! The journal owner and the bundle driver are instanced roots in native-only
-//! crates. The script names the journal owner's type through the journal's
-//! identity half, so its config path is typed and each import names that
-//! journal as its storage `source`; it proves both paths once at `wire` with
-//! `resolve_path` and keeps the two proofs. Bootstrap is ordinary mail from an
-//! ordinary component, which is why it lives in its own throwaway crate rather
-//! than in the workspace or the engine.
+//! crates. The script names both types through their identity halves, so both
+//! config paths are typed and each import names the journal as its storage
+//! `source`; it proves both paths once at `wire` with `resolve` and keeps the
+//! two kind-checked proofs. Bootstrap is ordinary mail from an ordinary
+//! component, which is why it lives in its own throwaway crate rather than in
+//! the workspace or the engine.
 
 #![forbid(unsafe_code)]
 
@@ -37,13 +37,12 @@ mod phase;
 
 use std::mem;
 
-use aether_actor::{ActorInitError, ActorPath, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{ActorInitError, ActorPath, ActorRef, Addressable, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{
     ArtifactStorage, CallOutcome, PublishResult, ReadArtifact, ReadArtifactResult, ReadHead, ReadHeadResult,
 };
 use aether_bloomery_workspace::{ImageRef, Import, ImportResult, WorkspaceCapability};
-use aether_data::ErasedActorPath;
 
 use config::Bootstrap;
 pub use config::BootstrapConfig;
@@ -69,7 +68,7 @@ impl WasmActor for EnvironmentBootstrap {
     /// Prove both peers, then import the base. A refused path is logged and
     /// nothing is sent.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-        let Some(journal) = prove(ctx, self.config.journal.as_erased()) else {
+        let Some(journal) = prove(ctx, &self.config.journal) else {
             self.run = Run::Stopped;
             return;
         };
@@ -247,11 +246,11 @@ fn import(image: &ImageRef, journal: &ActorPath<JournalActor>) -> Import {
 }
 
 /// Prove `path`, or log the refusal naming it.
-fn prove<A>(ctx: &WasmCtx<'_, A>, path: &ErasedActorPath) -> Option<ErasedActorRef> {
-    ctx.resolve_path(path)
-        .inspect_err(
-            |error| tracing::error!(path = path.as_str(), %error, "a peer path does not prove; bootstrap stopped"),
-        )
+fn prove<A, R: Addressable>(ctx: &WasmCtx<'_, A>, path: &ActorPath<R>) -> Option<ActorRef<R>> {
+    ctx.resolve(path)
+        .inspect_err(|error| {
+            tracing::error!(path = path.as_erased().as_str(), %error, "a peer path does not prove; bootstrap stopped");
+        })
         .ok()
 }
 

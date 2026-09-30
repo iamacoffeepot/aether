@@ -1,9 +1,10 @@
 //! The bootstrap's config: the two images to import and the two actors to mail.
 
 use aether_actor::{ActorInitError, ActorPath};
+use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::JournalActor;
 use aether_bloomery_workspace::ImageRef;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::Kind;
 
 /// What the operator hands `load_component` as `config`: the base and
 /// toolchain images `publish.sh` printed, and the paths of the journal owner
@@ -24,7 +25,9 @@ pub struct BootstrapConfig {
     /// typed: a path whose leaf is not a journal owner does not decode.
     pub journal: Option<ActorPath<JournalActor>>,
     /// The bundle driver, `aether.bloomery.driver:driver` on a Bloomery engine.
-    pub driver: Option<ErasedActorPath>,
+    /// The merge `Call` goes here, so it is typed: a path whose leaf is not
+    /// the bundle driver does not decode.
+    pub driver: Option<ActorPath<BundleDriver>>,
 }
 
 /// A whole config: both images and both peer paths.
@@ -37,7 +40,7 @@ pub struct Bootstrap {
     /// The journal owner's path.
     pub journal: ActorPath<JournalActor>,
     /// The bundle driver's path.
-    pub driver: ErasedActorPath,
+    pub driver: ActorPath<BundleDriver>,
 }
 
 impl BootstrapConfig {

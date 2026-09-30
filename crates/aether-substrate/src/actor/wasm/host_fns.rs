@@ -6,7 +6,7 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{__PublishedRows, __ResolvedPath, AssetCatalog, AssetWindow};
+use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog, AssetWindow};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
@@ -689,6 +689,43 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             };
             let bytes = wire::to_vec(&answer)
                 .map_err(|error| wasmtime::Error::msg(format!("resolve_path: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0230 §3 (#7205) — a guest resolves a typed
+    // `ActorPath<R>` that arrived in its config or mail inside `wire` or a
+    // handler, synchronously, and keeps the proof for its later sends. Mail
+    // cannot answer it, because the proof must exist before the first send
+    // that needs it. The host reads the position of the `Live` route
+    // standing under exactly the path's canonical name through
+    // `NativeBinding::live_route`, the same `Registry::live_route` read the
+    // native `NativeCtx::resolve` (over a `ProtocolPath`) already takes,
+    // so the guest and native answers cannot drift apart.
+    //
+    // The guest passes the path text (a slice in guest memory). The host
+    // encodes the answer as one `__LiveRoute` — `Some` position for a route
+    // live under exactly that canonical name, `None` for `Starting`,
+    // `Dropped`, never registered, or a fold collision — and delivers it as
+    // the packed `(ptr << 32) | len`, like `resolve_path_p32`. The SDK mints
+    // the `ActorRef<R>` itself from a `Some` answer, the way `WasmCtx::cast`
+    // mints a `ProtocolRef` from `published_rows_p32`'s answer, so this host
+    // fn mints nothing: no actor-type tag is checked or carried, since the
+    // path's leaf namespace is `R::NAMESPACE` by construction. An
+    // out-of-bounds pointer, text that is not UTF-8, or text outside the
+    // ADR-0166 grammar traps: the SDK passes only a validated `ActorPath<R>`'s
+    // text.
+    linker.func_wrap(
+        "aether",
+        "live_route_p32",
+        |mut caller: Caller<'_, ComponentCtx>, path_ptr: u32, path_len: u32| -> wasmtime::Result<u64> {
+            let text = read_guest_utf8(&mut caller, path_ptr, path_len)?;
+            let path = ErasedActorPath::new(&text).map_err(|error| {
+                wasmtime::Error::msg(format!("live_route: the text is not an ADR-0166 actor path: {error}"))
+            })?;
+            let answer = __LiveRoute { position: caller.data().binding.live_route(&path).map(|id| id.0) };
+            let bytes = wire::to_vec(&answer)
+                .map_err(|error| wasmtime::Error::msg(format!("live_route: encode failed: {error}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;
