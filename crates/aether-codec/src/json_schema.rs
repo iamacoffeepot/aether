@@ -307,7 +307,6 @@ mod tests {
 
     /// How to run.
     #[derive(aether_data::Schema)]
-    #[allow(dead_code)]
     enum Mode {
         /// As fast as possible.
         Fast,
@@ -328,7 +327,6 @@ mod tests {
 
     /// A map key.
     #[derive(aether_data::Schema, PartialEq, Eq, PartialOrd, Ord)]
-    #[allow(dead_code)]
     enum Key {
         /// The first key.
         A,
@@ -338,7 +336,6 @@ mod tests {
 
     /// Every schema arm a program input can reach.
     #[derive(aether_data::Schema)]
-    #[allow(dead_code)]
     struct Composite {
         /// An optional note.
         note: Option<String>,

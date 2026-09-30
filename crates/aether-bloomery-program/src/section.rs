@@ -76,53 +76,71 @@ pub struct Declaration {
     pub input_docs: DocNode,
 }
 
-/// Byte length of one declaration record for `name`, `intent`, `doc`, and
-/// `input_docs`.
+/// One program's declaration record, as the bundle generator assembles it
+/// at compile time.
+#[derive(Clone, Copy)]
+pub struct ProgramRecord<'a> {
+    /// The program's `NAME`.
+    pub name: &'a [u8],
+    /// The input kind id.
+    pub input: u64,
+    /// The result kind id.
+    pub result: u64,
+    /// [`MODE_PURE`] or [`MODE_SAMPLED`].
+    pub mode: u8,
+    /// The [`api_mask`] of the APIs `run` binds.
+    pub apis: u8,
+    /// The program's `INTENT`.
+    pub intent: &'a [u8],
+    /// The program's `DOC`.
+    pub doc: &'a [u8],
+    /// The input's doc tree.
+    pub input_docs: &'a DocNode,
+}
+
+/// Byte length of `record`.
 #[must_use]
-pub const fn program_record_len(name: &[u8], intent: &[u8], doc: &[u8], input_docs: &DocNode) -> usize {
-    1 + 2 + name.len() + 8 + 8 + 1 + 1 + 2 + intent.len() + 4 + doc.len() + canonical_len_docs(input_docs)
+pub const fn program_record_len(record: &ProgramRecord<'_>) -> usize {
+    1 + 2
+        + record.name.len()
+        + 8
+        + 8
+        + 1
+        + 1
+        + 2
+        + record.intent.len()
+        + 4
+        + record.doc.len()
+        + canonical_len_docs(record.input_docs)
 }
 
 /// Const-assemble one version-prefixed declaration record.
 ///
 /// # Panics
 ///
-/// Panics when `N` is not [`program_record_len`] for the same strings and
-/// doc tree, when `name` or `intent` is longer than `u16::MAX`, or when
-/// `input_docs` holds an undocumented field.
-#[allow(clippy::too_many_arguments)]
+/// Panics when `N` is not [`program_record_len`] for `record`, when its name
+/// or intent is longer than `u16::MAX`, or when its input doc tree holds an
+/// undocumented field.
 #[must_use]
-pub const fn write_program_record<const N: usize>(
-    name: &[u8],
-    input: u64,
-    result: u64,
-    mode: u8,
-    apis: u8,
-    intent: &[u8],
-    doc: &[u8],
-    input_docs: &DocNode,
-) -> [u8; N] {
-    assert!(
-        N == program_record_len(name, intent, doc, input_docs),
-        "aether-bloomery-program: program record length mismatch"
-    );
+pub const fn write_program_record<const N: usize>(record: &ProgramRecord<'_>) -> [u8; N] {
+    assert!(N == program_record_len(record), "aether-bloomery-program: program record length mismatch");
     let mut out = [0u8; N];
     let mut pos = 0;
     out[pos] = SECTION_VERSION;
     pos += 1;
-    write_u16_le(&mut out, &mut pos, u16_len(name));
-    write_slice(&mut out, &mut pos, name);
-    write_u64_le(&mut out, &mut pos, input);
-    write_u64_le(&mut out, &mut pos, result);
-    out[pos] = mode;
+    write_u16_le(&mut out, &mut pos, u16_len(record.name));
+    write_slice(&mut out, &mut pos, record.name);
+    write_u64_le(&mut out, &mut pos, record.input);
+    write_u64_le(&mut out, &mut pos, record.result);
+    out[pos] = record.mode;
     pos += 1;
-    out[pos] = apis;
+    out[pos] = record.apis;
     pos += 1;
-    write_u16_le(&mut out, &mut pos, u16_len(intent));
-    write_slice(&mut out, &mut pos, intent);
-    write_u32_le(&mut out, &mut pos, u32_len(doc));
-    write_slice(&mut out, &mut pos, doc);
-    let _ = canonical_write_docs(input_docs, &mut out, pos);
+    write_u16_le(&mut out, &mut pos, u16_len(record.intent));
+    write_slice(&mut out, &mut pos, record.intent);
+    write_u32_le(&mut out, &mut pos, u32_len(record.doc));
+    write_slice(&mut out, &mut pos, record.doc);
+    let _ = canonical_write_docs(record.input_docs, &mut out, pos);
     out
 }
 
@@ -141,9 +159,9 @@ const fn u16_len(bytes: &[u8]) -> u16 {
 
 const fn u32_len(bytes: &[u8]) -> u32 {
     assert!(bytes.len() <= u32::MAX as usize, "aether-bloomery-program: program doc exceeds u32::MAX");
-    #[allow(clippy::cast_possible_truncation)]
-    let len = bytes.len() as u32;
-    len
+    // The low four little-endian bytes of a length that fits.
+    let wide = bytes.len().to_le_bytes();
+    u32::from_le_bytes([wide[0], wide[1], wide[2], wide[3]])
 }
 
 const fn write_u32_le(out: &mut [u8], pos: &mut usize, value: u32) {
@@ -325,7 +343,9 @@ mod tests {
 
     use aether_data::{Doc, DocCell, DocNode, FieldDoc, KindId};
 
-    use super::{DeclarationsError, MODE_PURE, api_mask, declarations, program_record_len, write_program_record};
+    use super::{
+        DeclarationsError, MODE_PURE, ProgramRecord, api_mask, declarations, program_record_len, write_program_record,
+    };
     use crate::kinds::{Mode, ProgramApi, ProgramName};
 
     static LEAF: DocNode = DocNode::Leaf;
@@ -337,22 +357,36 @@ mod tests {
         }]),
     };
 
+    /// A pure record.
+    const fn record(
+        name: &'static [u8],
+        input: u64,
+        result: u64,
+        apis: u8,
+        intent: &'static [u8],
+        doc: &'static [u8],
+        input_docs: &'static DocNode,
+    ) -> ProgramRecord<'static> {
+        ProgramRecord { name, input, result, mode: MODE_PURE, apis, intent, doc, input_docs }
+    }
+
     #[test]
     fn concatenated_records_decode_name_ids_mode_intent_and_docs() {
         // Catches a v3 record whose doc bytes or doc tree shift the next record.
-        const FIRST_NAME: &[u8] = b"test.program.one";
-        const FIRST_INTENT: &[u8] = b"first";
-        const FIRST_DOC: &[u8] = b"Read the first thing.";
-        const SECOND_NAME: &[u8] = b"test.program.two";
-        const SECOND_INTENT: &[u8] = b"second";
-        const SECOND_DOC: &[u8] = b"Read the second thing.";
-        const FIRST_LEN: usize = program_record_len(FIRST_NAME, FIRST_INTENT, FIRST_DOC, &FIRST_DOCS);
-        const SECOND_LEN: usize = program_record_len(SECOND_NAME, SECOND_INTENT, SECOND_DOC, &LEAF);
-        let apis = api_mask(&[ProgramApi::Http, ProgramApi::Workspace]);
-        let first =
-            write_program_record::<FIRST_LEN>(FIRST_NAME, 1, 2, MODE_PURE, 0, FIRST_INTENT, FIRST_DOC, &FIRST_DOCS);
-        let second =
-            write_program_record::<SECOND_LEN>(SECOND_NAME, 3, 4, MODE_PURE, apis, SECOND_INTENT, SECOND_DOC, &LEAF);
+        const FIRST: ProgramRecord<'static> = record(b"test.program.one", 1, 2, 0, b"first", b"Do first.", &FIRST_DOCS);
+        const SECOND: ProgramRecord<'static> = record(
+            b"test.program.two",
+            3,
+            4,
+            api_mask(&[ProgramApi::Http, ProgramApi::Workspace]),
+            b"second",
+            b"Do second.",
+            &LEAF,
+        );
+        const FIRST_LEN: usize = program_record_len(&FIRST);
+        const SECOND_LEN: usize = program_record_len(&SECOND);
+        let first = write_program_record::<FIRST_LEN>(&FIRST);
+        let second = write_program_record::<SECOND_LEN>(&SECOND);
         let mut section = first.to_vec();
         section.extend_from_slice(&second);
 
@@ -363,14 +397,14 @@ mod tests {
         assert_eq!(decoded[0].program.result, KindId(2));
         assert_eq!(decoded[0].program.mode, Mode::Pure);
         assert_eq!(decoded[0].program.intent, "first");
-        assert_eq!(decoded[0].doc, "Read the first thing.");
+        assert_eq!(decoded[0].doc, "Do first.");
         assert_eq!(decoded[0].input_docs, FIRST_DOCS);
         assert!(decoded[0].apis.is_empty());
         assert_eq!(decoded[1].program.name.as_str(), "test.program.two");
         assert_eq!(decoded[1].program.input, KindId(3));
         assert_eq!(decoded[1].program.result, KindId(4));
         assert_eq!(decoded[1].program.intent, "second");
-        assert_eq!(decoded[1].doc, "Read the second thing.");
+        assert_eq!(decoded[1].doc, "Do second.");
         assert_eq!(decoded[1].input_docs, DocNode::Leaf);
         assert_eq!(decoded[1].apis, [ProgramApi::Http, ProgramApi::Workspace]);
     }
@@ -378,11 +412,11 @@ mod tests {
     #[test]
     fn repeated_program_name_is_refused() {
         // Catches a decoder that accepts duplicates, letting the driver's Programs::find silently pick the first.
-        const NAME: &[u8] = b"test.program.dup";
-        const INTENT: &[u8] = b"dup";
-        const LEN: usize = program_record_len(NAME, INTENT, INTENT, &LEAF);
-        let first = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, 0, INTENT, INTENT, &LEAF);
-        let second = write_program_record::<LEN>(NAME, 3, 4, MODE_PURE, 0, INTENT, INTENT, &LEAF);
+        const FIRST: ProgramRecord<'static> = record(b"test.program.dup", 1, 2, 0, b"dup", b"Dup.", &LEAF);
+        const SECOND: ProgramRecord<'static> = record(b"test.program.dup", 3, 4, 0, b"dup", b"Dup.", &LEAF);
+        const LEN: usize = program_record_len(&FIRST);
+        let first = write_program_record::<LEN>(&FIRST);
+        let second = write_program_record::<LEN>(&SECOND);
         let mut section = first.to_vec();
         section.extend_from_slice(&second);
 
@@ -396,11 +430,10 @@ mod tests {
     fn a_record_with_an_unknown_api_bit_is_refused() {
         // Catches a decoder that silently drops an unknown bit, which would let a program bind an API the driver never
         // checks.
-        const NAME: &[u8] = b"test.program.api";
-        const INTENT: &[u8] = b"api";
-        const LEN: usize = program_record_len(NAME, INTENT, INTENT, &LEAF);
-        let record = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, 0b1000, INTENT, INTENT, &LEAF);
+        const RECORD: ProgramRecord<'static> = record(b"test.program.api", 1, 2, 0b1000, b"api", b"Api.", &LEAF);
+        const LEN: usize = program_record_len(&RECORD);
+        let bytes = write_program_record::<LEN>(&RECORD);
 
-        assert_eq!(declarations(&record), Err(DeclarationsError::UnknownApi(0b1000)));
+        assert_eq!(declarations(&bytes), Err(DeclarationsError::UnknownApi(0b1000)));
     }
 }

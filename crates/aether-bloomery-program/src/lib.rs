@@ -58,7 +58,9 @@ pub mod __macro_internals {
     pub use crate::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
     pub use crate::invoke::{PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
-    pub use crate::section::{MODE_PURE, MODE_SAMPLED, api_mask, program_record_len, write_program_record};
+    pub use crate::section::{
+        MODE_PURE, MODE_SAMPLED, ProgramRecord, api_mask, program_record_len, write_program_record,
+    };
 
     /// The provider the driver maps each program API to, by the name
     /// `#[program]` accepts. Each row's `Replies` impls type the calls the

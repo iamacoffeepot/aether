@@ -23,6 +23,9 @@ use serde::ser::Error as SerError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Schema;
+use crate::canonical::primitives::{
+    cow_enum_variants, cow_field_docs, cow_named_fields, cow_schema_types, cow_variant_docs,
+};
 use crate::schema::{EnumVariant, NamedField, SchemaCell, SchemaType};
 
 /// How deep [`require_documented`] walks before it refuses the type as too
@@ -175,21 +178,21 @@ const fn check_node(schema: &SchemaType, docs: &DocNode, opaque: &'static str, d
             check_node(schema_cell(value), doc_cell(value_docs), opaque, depth + 1);
         }
         (SchemaType::Struct { fields, .. }, DocNode::Struct { fields: field_docs }) => {
-            check_named_fields(named_fields(fields), doc_fields(field_docs), opaque, depth);
+            check_named_fields(cow_named_fields(fields), cow_field_docs(field_docs), opaque, depth);
         }
         (SchemaType::Enum { variants }, DocNode::Enum { variants: variant_docs }) => {
-            let variants = enum_variants(variants);
-            let variant_docs = doc_variants(variant_docs);
+            let variants = cow_enum_variants(variants);
+            let variant_docs = cow_variant_docs(variant_docs);
             assert!(variants.len() == variant_docs.len(), "{}", opaque);
             let mut index = 0;
             while index < variants.len() {
                 let variant_doc = &variant_docs[index];
                 require_doc(&variant_doc.doc);
-                let field_docs = doc_fields(&variant_doc.fields);
+                let field_docs = cow_field_docs(&variant_doc.fields);
                 match &variants[index] {
                     EnumVariant::Unit { .. } => {}
                     EnumVariant::Tuple { fields, .. } => {
-                        let fields = schema_types(fields);
+                        let fields = cow_schema_types(fields);
                         assert!(fields.len() == field_docs.len(), "{}", opaque);
                         let mut field = 0;
                         while field < fields.len() {
@@ -199,7 +202,7 @@ const fn check_node(schema: &SchemaType, docs: &DocNode, opaque: &'static str, d
                         }
                     }
                     EnumVariant::Struct { fields, .. } => {
-                        check_named_fields(named_fields(fields), field_docs, opaque, depth);
+                        check_named_fields(cow_named_fields(fields), field_docs, opaque, depth);
                     }
                 }
                 index += 1;
@@ -261,46 +264,6 @@ const fn doc_cell(cell: &DocCell) -> &DocNode {
     match cell {
         DocCell::Static(r) => r,
         DocCell::Owned(_) => panic!("require_documented: an Owned DocCell is not supported in const"),
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-const fn named_fields<'a>(fields: &'a Cow<'static, [NamedField]>) -> &'a [NamedField] {
-    match fields {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(_) => panic!("require_documented: an Owned field list is not supported in const"),
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-const fn enum_variants<'a>(variants: &'a Cow<'static, [EnumVariant]>) -> &'a [EnumVariant] {
-    match variants {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(_) => panic!("require_documented: an Owned variant list is not supported in const"),
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-const fn schema_types<'a>(types: &'a Cow<'static, [SchemaType]>) -> &'a [SchemaType] {
-    match types {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(_) => panic!("require_documented: an Owned tuple field list is not supported in const"),
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-pub(crate) const fn doc_fields<'a>(fields: &'a Cow<'static, [FieldDoc]>) -> &'a [FieldDoc] {
-    match fields {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(_) => panic!("doc tree: an Owned field doc list is not supported in const"),
-    }
-}
-
-#[allow(clippy::ptr_arg)]
-pub(crate) const fn doc_variants<'a>(variants: &'a Cow<'static, [VariantDoc]>) -> &'a [VariantDoc] {
-    match variants {
-        Cow::Borrowed(s) => s,
-        Cow::Owned(_) => panic!("doc tree: an Owned variant doc list is not supported in const"),
     }
 }
 

@@ -19,11 +19,13 @@
 //! in `canonical::tests` are the guard.
 //!
 //! Everything here is `pub(super)` — reachable from sibling submodules via
-//! `super::primitives::*`. No runtime allocations; no `std`.
+//! `super::primitives::*` — except the `Cow` narrowing shims the const doc
+//! check in `schema_docs` shares, which the crate-private module makes `pub`. No runtime allocations; no `std`.
 
 use alloc::borrow::Cow;
 
 use crate::schema::{EnumVariant, LabelNode, NamedField, SchemaType, VariantLabel};
+use crate::schema_docs::{FieldDoc, VariantDoc};
 
 // `Cow::Borrowed::deref` isn't const, so `&cow[i]` / `&cow.as_str()`
 // can't be called from a const fn. Hand-roll a `match` per concrete
@@ -33,24 +35,38 @@ use crate::schema::{EnumVariant, LabelNode, NamedField, SchemaType, VariantLabel
 // module-level `#![allow(clippy::ptr_arg)]` in `canonical/mod.rs`
 // for why these take `&Cow` rather than `&[T]` / `&str`.
 
-pub(super) const fn cow_named_fields<'a>(c: &'a Cow<'static, [NamedField]>) -> &'a [NamedField] {
+pub const fn cow_named_fields<'a>(c: &'a Cow<'static, [NamedField]>) -> &'a [NamedField] {
     match c {
         Cow::Borrowed(s) => s,
         Cow::Owned(_) => panic!("canonical: Owned Cow<[NamedField]> not supported in const"),
     }
 }
 
-pub(super) const fn cow_enum_variants<'a>(c: &'a Cow<'static, [EnumVariant]>) -> &'a [EnumVariant] {
+pub const fn cow_enum_variants<'a>(c: &'a Cow<'static, [EnumVariant]>) -> &'a [EnumVariant] {
     match c {
         Cow::Borrowed(s) => s,
         Cow::Owned(_) => panic!("canonical: Owned Cow<[EnumVariant]> not supported in const"),
     }
 }
 
-pub(super) const fn cow_schema_types<'a>(c: &'a Cow<'static, [SchemaType]>) -> &'a [SchemaType] {
+pub const fn cow_schema_types<'a>(c: &'a Cow<'static, [SchemaType]>) -> &'a [SchemaType] {
     match c {
         Cow::Borrowed(s) => s,
         Cow::Owned(_) => panic!("canonical: Owned Cow<[SchemaType]> not supported in const"),
+    }
+}
+
+pub const fn cow_field_docs<'a>(c: &'a Cow<'static, [FieldDoc]>) -> &'a [FieldDoc] {
+    match c {
+        Cow::Borrowed(s) => s,
+        Cow::Owned(_) => panic!("canonical: Owned Cow<[FieldDoc]> not supported in const"),
+    }
+}
+
+pub const fn cow_variant_docs<'a>(c: &'a Cow<'static, [VariantDoc]>) -> &'a [VariantDoc] {
+    match c {
+        Cow::Borrowed(s) => s,
+        Cow::Owned(_) => panic!("canonical: Owned Cow<[VariantDoc]> not supported in const"),
     }
 }
 

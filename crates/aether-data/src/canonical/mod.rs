@@ -42,7 +42,7 @@
 mod docs;
 mod inputs;
 mod labels;
-mod primitives;
+pub(crate) mod primitives;
 mod schema;
 
 pub use docs::{canonical_len_docs, canonical_serialize_docs, canonical_write_docs};

@@ -5,9 +5,11 @@
 //! A [`Doc::Missing`] panics with the message it holds, so a tree with an
 //! undocumented field cannot be serialized.
 
-use crate::schema_docs::{Doc, DocCell, DocNode, FieldDoc, VariantDoc, doc_fields, doc_variants};
+use crate::schema_docs::{Doc, DocCell, DocNode, FieldDoc, VariantDoc};
 
-use super::primitives::{U32_WIDTH, cow_str_as_str, str_len, write_count, write_str, write_u32_le};
+use super::primitives::{
+    U32_WIDTH, cow_field_docs, cow_str_as_str, cow_variant_docs, str_len, write_count, write_str, write_u32_le,
+};
 
 const DOC_LEAF: u32 = 0;
 const DOC_OPTION: u32 = 1;
@@ -28,9 +30,9 @@ pub const fn canonical_len_docs(node: &DocNode) -> usize {
         DocNode::Leaf | DocNode::Opaque => U32_WIDTH,
         DocNode::Option(cell) | DocNode::Vec(cell) | DocNode::Array(cell) => U32_WIDTH + cell_len(cell),
         DocNode::Map { key, value } => U32_WIDTH + cell_len(key) + cell_len(value),
-        DocNode::Struct { fields } => U32_WIDTH + fields_len(doc_fields(fields)),
+        DocNode::Struct { fields } => U32_WIDTH + fields_len(cow_field_docs(fields)),
         DocNode::Enum { variants } => {
-            let variants = doc_variants(variants);
+            let variants = cow_variant_docs(variants);
             let mut total = U32_WIDTH + U32_WIDTH;
             let mut index = 0;
             while index < variants.len() {
@@ -83,17 +85,17 @@ pub const fn canonical_write_docs(node: &DocNode, out: &mut [u8], cursor: usize)
         }
         DocNode::Struct { fields } => {
             let pos = write_u32_le(DOC_STRUCT, out, cursor);
-            write_fields(doc_fields(fields), out, pos)
+            write_fields(cow_field_docs(fields), out, pos)
         }
         DocNode::Enum { variants } => {
-            let variants = doc_variants(variants);
+            let variants = cow_variant_docs(variants);
             let pos = write_u32_le(DOC_ENUM, out, cursor);
             let mut pos = write_count(variants.len(), out, pos);
             let mut index = 0;
             while index < variants.len() {
                 let variant = &variants[index];
                 pos = write_str(doc_text(&variant.doc), out, pos);
-                pos = write_fields(doc_fields(&variant.fields), out, pos);
+                pos = write_fields(cow_field_docs(&variant.fields), out, pos);
                 index += 1;
             }
             pos
@@ -145,5 +147,5 @@ const fn write_fields(fields: &[FieldDoc], out: &mut [u8], cursor: usize) -> usi
 }
 
 const fn variant_len(variant: &VariantDoc) -> usize {
-    str_len(doc_text(&variant.doc)) + fields_len(doc_fields(&variant.fields))
+    str_len(doc_text(&variant.doc)) + fields_len(cow_field_docs(&variant.fields))
 }

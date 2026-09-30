@@ -506,27 +506,24 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
         quote! { #program::__macro_internals::MODE_PURE }
     };
     let apis = &entry.meta.apis;
-    let doc = quote! { <#ty as #program::Program>::DOC.as_bytes() };
-    let input_docs = quote! {
-        #program::__macro_internals::StaticSchema::<<#ty as #program::Program>::Input>::DOC_NODE
-    };
+    let record_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_RECORD_{hash:016X}");
     quote! {
-        const #len_ident: usize = #program::__macro_internals::program_record_len(
-            #name.as_bytes(),
-            #intent.as_bytes(),
-            #doc,
-            #input_docs,
-        );
-        const #bytes_ident: [u8; #len_ident] = #program::__macro_internals::write_program_record::<#len_ident>(
-            #name.as_bytes(),
-            <<#ty as #program::Program>::Input as #program::__macro_internals::Kind>::ID.0,
-            <<#ty as #program::Program>::Result as #program::__macro_internals::Kind>::ID.0,
-            #mode,
-            #program::__macro_internals::api_mask(&[#(#program::kinds::ProgramApi::#apis),*]),
-            #intent.as_bytes(),
-            #doc,
-            #input_docs,
-        );
+        const #record_ident: #program::__macro_internals::ProgramRecord<'static> =
+            #program::__macro_internals::ProgramRecord {
+                name: #name.as_bytes(),
+                input: <<#ty as #program::Program>::Input as #program::__macro_internals::Kind>::ID.0,
+                result: <<#ty as #program::Program>::Result as #program::__macro_internals::Kind>::ID.0,
+                mode: #mode,
+                apis: #program::__macro_internals::api_mask(&[#(#program::kinds::ProgramApi::#apis),*]),
+                intent: #intent.as_bytes(),
+                doc: <#ty as #program::Program>::DOC.as_bytes(),
+                input_docs: #program::__macro_internals::StaticSchema::<
+                    <#ty as #program::Program>::Input,
+                >::DOC_NODE,
+            };
+        const #len_ident: usize = #program::__macro_internals::program_record_len(&#record_ident);
+        const #bytes_ident: [u8; #len_ident] =
+            #program::__macro_internals::write_program_record::<#len_ident>(&#record_ident);
         const _: &[u8] = &#bytes_ident;
         #[cfg(target_family = "wasm")]
         #[unsafe(link_section = #PROGRAMS_SECTION)]

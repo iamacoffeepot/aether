@@ -18,7 +18,7 @@
 //! every path out of the process carries (ADR-0238 decisions 3 and 5), and
 //! [`blob_hashes`] lists those hashes for the sender-side resolve.
 //!
-//! [`json_schema`] renders the JSON Schema of the JSON [`encode_schema`]
+//! [`json_schema()`] renders the JSON Schema of the JSON [`encode_schema`]
 //! accepts for a schema, with a type's field docs attached, for a caller that
 //! offers a typed input to a model.
 //!
