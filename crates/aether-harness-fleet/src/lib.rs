@@ -76,6 +76,7 @@ use aether_trace::TraceDispatchCapability;
 
 mod component;
 
+pub use aether_substrate::testing::successor_wasm;
 pub use component::Loaded;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked

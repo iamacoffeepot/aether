@@ -16,13 +16,12 @@
 mod tests {
     use aether_data::Kind;
     use aether_kinds::LoadComponent;
-    use aether_substrate::testing::successor_wasm;
     use aether_test_fixtures_kinds::{
         Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
         InlineProbe,
     };
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
+    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm, successor_wasm};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
