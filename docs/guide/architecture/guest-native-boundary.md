@@ -50,10 +50,10 @@ from declaration order:
   compatibility metadata (`aether.namespace`).
 
 This rule prevents a harmless reordering from changing what a selector loads.
-It is governed by accepted ADR-0241 §9 and enforced by the export manifest and
+It is governed by ADR-0241 §9 and enforced by the export manifest and
 component loader.
 
-A `boot = Boot` key may join either form (`export!(boot = Boot, public = […])`).
+A `boot = Boot` key may join either form, as in `export!(boot = Boot, public = […])`.
 The boot type is instantiated once per loaded module whatever selector the
 caller names, and is not itself selectable; it is governed by accepted
 ADR-0147.

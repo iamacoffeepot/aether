@@ -155,13 +155,12 @@ logical parent with `SubstrateHarness::spawn_child::<P, C>`, which takes the
 parent's already-proven reference and the child's key:
 
 ```rust,ignore
-let panel = harness.load::<RootManager>(load)?;
-let worker = harness.spawn_child::<RootManager, Worker>(&panel, &LoadName::new("worker")?)?;
+let root = harness.load::<RootManager>(load)?;
+let worker = harness.spawn_child::<RootManager, Worker>(&root, &LoadName::new("worker")?)?;
 ```
 
-`spawn_child` admits the spawn only when `Worker` declares `child_of`
-`RootManager` (ADR-0241 §5); a parent with no retained actor path, or a child
-type that doesn't declare the placement, is refused with
+`spawn_child` compiles only when `Worker` declares `child_of` `RootManager`
+(ADR-0241 §5), and a parent with no retained actor path is refused with
 `SubstrateHarnessError::Spawn`. The child's canonical path, for example
 `PARENT/example.worker:worker`, comes from `harness.actor_path(&worker)`.
 Ordinary `aether.component.load` places its guest at the root: a parent is a

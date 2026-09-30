@@ -139,7 +139,7 @@ name and `describe_kinds` for its exact live schema.
 `replicas` is refused, since each replica draws its own counter key) publishes
 the module once, then spawns `N` counter-keyed instances of the selected type
 (`NS:0`, `NS:1`, …). An entry that names no `replicas` spawns the one instance
-its `key` (or `name`, for `load_component`) keys. The result carries one
+its `key` names, or a counter key when it names none. The result carries one
 shared `capabilities` block, since every instance is the same type, and an
 `instances` list of each spawned address and whether it was already live.
 
@@ -152,9 +152,8 @@ prefix rather than guessing addresses or retrying into occupied ones.
 
 Boot-time replicas use the same counter-keyed expansion. The substrate binds
 only after every boot instance has answered its spawn, so a successful
-`spawn_substrate` means every instance is live. A derived key that collides
-with another boot instance fails that spawn, which fails the boot with a
-`spawn_failed` entry rather than reporting the engine ready.
+`spawn_substrate` means every instance is live. A boot spawn that fails fails
+the boot with a `spawn_failed` entry rather than reporting the engine ready.
 
 ## Live introspection
 
@@ -200,8 +199,7 @@ successor together, or none does, and each keeps its address and mailbox.
 
 Identical bytes answer `Ok` with no swap. Before any instance is touched the
 host refuses the whole republish, naming each instance a check refuses, when the
-module has no predecessor (nothing publishes its namespaces: load it instead),
-is content-addressed, already has a republish in flight, declares a boot or
+module is content-addressed, already has a republish in flight, declares a boot or
 succeeds one that did, drops a namespace or narrows a handler row or fallback of
 one, adds a dependency that is not live to a live instance's type, or leaves an
 instance without a config of its type's kind. An instance whose type's config

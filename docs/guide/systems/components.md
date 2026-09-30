@@ -105,14 +105,12 @@ literals, checked with `#[rule]` idents as `ReactorName` / `RuleName`.
 Envelopes stay on their original types in `actors`; their other extensions
 are not copied onto the root. `type Alias = T` is not followed. The pipeline
 ends in one keyed no-generator `export!`. The root takes no config and is not a `boot`
-actor; neither `boot` nor `default` may name a program or reactor. When
-`export!` names no `default`, the generated root becomes the default, so
-`export: Some("aether.bloomery.bundle")` resolves.
+actor, and `boot` may not name a program or reactor. The root is one of the
+module's public exports, so `export: Some("aether.bloomery.bundle")` selects it.
 
 ```rust
 aether_actor::export!(
-    default = Probe,
-    public = [ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
+    public = [Probe, ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
     generators = [aether_bloomery_bundle::bundle],
 );
 ```
