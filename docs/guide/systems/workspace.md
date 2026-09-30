@@ -55,18 +55,24 @@ Every read and stage of the request then goes through that source as mail. The
 tar codec runs on a worker thread, which sends no mail, so each read or stage it
 needs is a request its own actor sends for it and hands the answer back:
 
-- **Reads, closure first.** A tree is prefetched with one `ReadClosure` under
-  the rest of the run's read budget (`AETHER_WORKSPACE_PREFETCH_BYTES`), which
-  answers every member at once as shared blobs from the journal's read cache. A
-  closure over the budget reads that one directory with `ReadArtifact` and
-  prefetches each subdirectory the same way, over an explicit work stack, so
-  only the spine of oversized directories and the blobs directly inside them
-  are left out. Those blobs are read as the archive reaches them, in batched
+- **Reads, a window ahead.** A tree is read while it is written, in
+  `ReadClosure` windows of at most 64 MiB requested ahead of the archive under
+  the run's read budget (`AETHER_WORKSPACE_PREFETCH_BYTES`), which bounds what
+  the run holds plus what it has asked for. Each directory the archive lists
+  queues its subdirectories in the order the archive reaches them, and their
+  closures are sent without waiting while the budget left covers a window, so
+  the source reads the next windows while the worker encodes and uploads this
+  one; each answer is shared blobs from the journal's read cache. A closure
+  over its window reads that one directory with `ReadArtifact`, and its
+  subdirectories are read the same way when the archive reaches it, so only
+  the spine of oversized directories and the blobs directly inside them are
+  left out. Those blobs are read as the archive reaches them, in batched
   `ReadArtifacts` of up to 64 MiB and 4,096 blobs: one names a blob and the
-  later files of its directory not yet read, and the answer is held only until
-  the archive takes it, never charged to the budget. Every member is verified against its digest before
-  it is trusted; a blob hashes as it streams into a container and fails the
-  write at its end on a mismatch.
+  later files of its directory not yet read, and the answer is held, charged
+  to the budget, only until the archive takes it. Each blob leaves memory and
+  the budget once the archive has written it. Every member is verified
+  against its digest before it is trusted; a blob hashes as it streams into a
+  container and fails the write at its end on a mismatch.
 - **Writes, bounded batches.** Each blob and tree is staged as it is produced,
   in `Stage` batches of up to 64 MiB or 4,096 artifacts; a larger blob goes
   alone. One `Stage` is in flight while the next fills, and each is answered
@@ -122,8 +128,10 @@ those are the executor's (see [Provisioning](#provisioning)).
 Once the run is admitted, the whole sequence runs on the worker thread, held
 like an import:
 
-1. **Resolve.** Load the environment, prefetch the run tree and every mount
-   tree, and read every stdin blob, all from the source. Then check the tree's
+1. **Resolve.** Load the environment, the roots of the run tree and every
+   mount tree, and every stdin blob, all from the source. A stored tree's
+   members are stored whenever the tree is, so a root that loads means the
+   tree is whole, and its members are read later, as they are written. Then check the tree's
    `rust-toolchain.toml`, when it has one: its channel must be the
    environment's `provides.rust` channel, and its components and targets a
    subset. Then resolve each step's tool through the environment's `tools`
@@ -134,7 +142,7 @@ like an import:
 2. **Environment image.** The daemon must hold
    `aether-workspace-environment:<environment hex>` labelled
    `aether.workspace.environment=<hex>`. When it holds no such image, the root
-   tree is prefetched and streams as a canonical tar to
+   tree is read a window ahead and streams as a canonical tar to
    `POST /images/create?fromSrc=-`, which applies the label, and the image is
    inspected again. The image has no `Env`
    of its own; every variable is constructed per step. It stays after the run
@@ -193,7 +201,7 @@ directory and its destination on the same side.
 | Answer | When |
 |---|---|
 | `Ok(Outcome)` | The steps ran. `steps` holds one `StepOutcome` per step that ran, each with `exit_code: Some(code)`, the stored stdout and stderr, and the `ToolRecord` naming the executable blob that ran; `tree` is `/work` minus scratch. A non-zero exit is an outcome. Docker reports a signal death as 128 + n, which cannot be told apart from `exit(128 + n)`, so this backend always answers `Some`. |
-| `Err(Refused(InputMissing(digest)))` | The source lacks the environment, the tree, a mount tree, a stdin blob, or anything they cite. |
+| `Err(Refused(InputMissing(digest)))` | The source lacks the environment, its root, the tree, a mount tree, or a stdin blob. A member missing below a root that loaded is a damaged source and answers `Failed`. |
 | `Err(Refused(SourceUnavailable(refused)))` | The source did not prove: no journal has stood at the path, its route does not cover `ArtifactStorage`, or it is not live when the run is received. `refused` names the path and why. Answered before the run is queued. |
 | `Err(Refused(ToolchainMismatch))` | The tree's `rust-toolchain.toml` asks for a channel, component, or target the environment does not provide. |
 | `Err(Refused(UnknownTool(name)))` | A step's tool is not in the table, or its path does not hold an executable. |
@@ -381,10 +389,11 @@ environment variable of its own.
   naming its key.
 - The pids limit and the output bounds are the same for every run; memory and
   pids apply to each step's container.
-- `prefetch_bytes` bounds what one run holds prefetched from its source, each
-  artifact counted as its payload plus its eight-byte kind prefix. A tree whose
-  closure fits what is left is read in one request; a larger one is read a
-  directory at a time. Below 8 or above 4 GiB refuses boot naming
+- `prefetch_bytes` bounds what one run holds or has requested from its source
+  at once, each artifact counted as its payload plus its eight-byte kind prefix
+  and each closure read in flight as its limit. A tree is read in windows of at
+  most 64 MiB ahead of the archive, and each blob leaves the budget once
+  written. Below 8 or above 4 GiB refuses boot naming
   `AETHER_WORKSPACE_PREFETCH_BYTES`.
 
 ## Composition

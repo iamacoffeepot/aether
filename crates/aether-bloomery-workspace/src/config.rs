@@ -2,7 +2,7 @@
 //! decisions 8 and 9, ADR-0090). The Engine API endpoint and its TLS files,
 //! the import bounds, the host budget runs are provisioned from, the default
 //! allotment a run key never seen gets, the fixed per-container limits, and
-//! the read budget one run prefetches under are configuration resolved at
+//! the read budget one run reads ahead under are configuration resolved at
 //! chassis boot (argv > env > file > default) and handed to `init`; the actor
 //! reads no environment variable of its own, and never `DOCKER_HOST`.
 //!
@@ -106,11 +106,12 @@ pub struct WorkspaceConfig {
     /// An output over it answers `Failed`. `0` refuses boot.
     #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
     pub output_max_bytes: u64,
-    /// The most bytes one run holds prefetched from its source
+    /// The most bytes one run holds or has requested from its source at once
     /// (`AETHER_WORKSPACE_PREFETCH_BYTES`), each stored artifact counted as
-    /// its payload plus its eight-byte kind prefix. A tree whose closure fits
-    /// what is left is read in one request; a larger one is read a directory
-    /// at a time. Default 256 MiB. Below 8 or above 4 GiB refuses boot.
+    /// its payload plus its eight-byte kind prefix and each closure read in
+    /// flight as its limit. A tree is read in windows of at most 64 MiB ahead
+    /// of the archive that writes it, and each blob leaves the budget once
+    /// written. Default 256 MiB. Below 8 or above 4 GiB refuses boot.
     #[cfg_attr(feature = "runtime", config(default = 268_435_456u64))]
     pub prefetch_bytes: u64,
 }

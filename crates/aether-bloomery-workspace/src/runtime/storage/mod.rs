@@ -26,8 +26,9 @@
 //! senders drop and a waiting worker's receive fails with
 //! [`StorageError::Closed`], so its task ends `Failed` and never hangs.
 //!
-//! A session reads through [`SourceReader`] (closure first, then descend) and
-//! writes through [`StagingSink`] (bounded batches, one in flight).
+//! A session reads through [`SourceReader`] (closure windows read ahead of
+//! the archive) and writes through [`StagingSink`] (bounded batches, one in
+//! flight).
 
 mod sink;
 mod source;
@@ -97,13 +98,13 @@ pub struct StorageDesk {
     wake: SelfWake<StorageWake>,
     open: HashMap<u64, Open>,
     next_ticket: u64,
-    /// The read budget each session's prefetch starts with.
+    /// The read budget each session holds or has asked for at most.
     prefetch: ClosureLimit,
 }
 
 impl StorageDesk {
     /// A desk whose ports wake the actor through `wake`, and whose sessions
-    /// prefetch up to `prefetch` bytes each.
+    /// each hold or have asked for at most `prefetch` bytes at once.
     pub fn new(wake: SelfWake<StorageWake>, prefetch: ClosureLimit) -> Self {
         let (sender, requests) = mpsc::channel();
         Self { requests, sender, wake, open: HashMap::new(), next_ticket: 0, prefetch }
@@ -199,6 +200,15 @@ impl StoragePort {
             }
             self.early.insert(arrived, answer);
         }
+    }
+
+    /// The answer under `seq` if it has arrived, without blocking, keeping any
+    /// other that arrived with it.
+    fn poll(&mut self, seq: u64) -> Option<StorageAnswer> {
+        while let Ok((arrived, answer)) = self.answers.try_recv() {
+            self.early.insert(arrived, answer);
+        }
+        self.early.remove(&seq)
     }
 
     /// Send `call` and wait for its answer.

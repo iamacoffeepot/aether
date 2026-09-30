@@ -1,29 +1,50 @@
-//! Reading a task's inputs through its source: closure first, then descend.
+//! Reading a task's inputs through its source: windows read ahead of the
+//! archive, released as it writes them.
 //!
-//! [`SourceReader::prefetch`] asks for a tree's whole closure in one
-//! `ReadClosure` under the rest of the session's read budget. `Found` fills
-//! the session's map in one round trip, its members the source's own shared
-//! [`Blob`](aether_data::Blob)s, never copied. `TooLarge` reads that one tree
-//! node with a `ReadArtifact` and pushes its subtrees onto an explicit work
-//! stack, each prefetched in turn, so only the spine of oversized directories
-//! and the blobs directly inside them are left out of the map.
+//! A session's reads share one budget, `AETHER_WORKSPACE_PREFETCH_BYTES`,
+//! which bounds the bytes the session holds (members in its map and the
+//! blobs of the last batched read) plus the bytes it has asked for (the
+//! `limit_bytes` of each closure read in flight). A closure read reserves
+//! its limit when it is sent; its answer is charged to what the session
+//! holds and the reservation is refunded.
 //!
-//! Those blobs are read as the archive reaches them, a batch at a time. The
-//! reader remembers each directory listing it loads, its file digests in
-//! entry order (the order the archive opens them). A blob the map misses
-//! that a remembered listing holds is read with one `ReadArtifacts` naming it
-//! and every later file in its listing the map does not hold, under
-//! [`READ_MANY_BYTES`]; the answered prefix goes into a transient window that
-//! each open takes from, never charged to the read budget and replaced by the
-//! next batch, so it holds at most one batch. Any other lookup the map
-//! misses is one `ReadArtifact`.
+//! Each directory listing [`TreeSource::tree`] hands the archive queues the
+//! child directories the map lacks at the front of the read-ahead queue, in
+//! listing order, so the queue is in the order the archive reaches them.
+//! The queue is pumped: a `ReadClosure` for its front, asking for at most
+//! [`READ_AHEAD_BYTES`], is sent without waiting while the budget left
+//! covers a whole window (half the budget, when that is less), so the source
+//! reads the next windows while the worker encodes and uploads this one. `tree` waits only for the answer it
+//! needs. A closure over its window (`TooLarge`) reads that one tree node
+//! with a `ReadArtifact`, and its subtrees are queued when the archive lists
+//! it, so only the spine of oversized directories and the blobs directly
+//! inside them are left out of the map. A directory the archive reaches
+//! before it was sent waits for the reads in flight to free their
+//! reservations; with none in flight it is read with whatever budget is
+//! left, or node alone, so a tiny budget never waits on bytes that will not
+//! free.
+//!
+//! [`TreeSource::blob`] takes the blob it hands the archive out of the map
+//! and refunds its bytes, so the window slides. Trees stay: they are small,
+//! and a second walk reuses them. [`SourceReader::open`], for a caller that
+//! is not writing an archive, keeps what it reads.
+//!
+//! The blobs directly inside an oversized directory are read as the archive
+//! reaches them, a batch at a time. The reader remembers each directory
+//! listing it loads, its file digests in entry order (the order the archive
+//! opens them). A blob the map misses that a remembered listing holds is
+//! read with one `ReadArtifacts` naming it and every later file in its
+//! listing the map does not hold, under [`READ_MANY_BYTES`]; the answered
+//! prefix goes into a window each open takes from, charged to the budget
+//! and replaced by the next batch, so it holds at most one batch. Any other
+//! lookup the map misses is one `ReadArtifact`.
 //!
 //! Every member is verified against the digest it is read under before it is
 //! trusted: a tree through [`ClosureArtifact::load`], a blob through a
 //! [`StoredBlob`] that hashes as it streams and fails at its end on a
 //! mismatch, so a corrupt blob never crosses into a container whole.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map};
 use std::io::{self, Read};
 use std::iter;
 
@@ -43,28 +64,68 @@ const PREFIX_BYTES: u64 = 8;
 /// stage batch's byte bound.
 pub const READ_MANY_BYTES: u64 = 64 << 20;
 
-/// What a session has read, keyed by digest, and how much of its read budget
-/// is left; the directory listings it has loaded; and the blobs the last
-/// batched read answered that no open has taken yet.
+/// Largest closure one read-ahead request asks for: the stage batch's byte
+/// bound, so even a tree that fits the whole budget is read as a sequence of
+/// windows the archive can overlap with.
+pub const READ_AHEAD_BYTES: u64 = 64 << 20;
+
+/// What a session has read, keyed by digest, and what its budget holds and
+/// has reserved; the directory listings it has loaded; the blobs the last
+/// batched read answered that no open has taken yet; and the directories it
+/// reads ahead of the archive.
 pub struct Fetched {
     members: HashMap<Digest, ClosureArtifact>,
-    remaining_bytes: u64,
+    /// The most bytes the session holds or has asked for at once.
+    budget: u64,
+    /// The stored length of every member and window blob held.
+    held_bytes: u64,
+    /// The limit of every closure read in flight.
+    reserved_bytes: u64,
     /// Each file digest's latest listing and its position there.
     listed: HashMap<Digest, (usize, usize)>,
     /// Each loaded listing's file digests, in entry order.
     listings: Vec<Vec<Digest>>,
-    /// The last batch's members not yet opened; not charged to the budget.
+    /// The last batch's members not yet opened.
     window: HashMap<Digest, ClosureArtifact>,
+    /// Directories the archive will reach, in the order it reaches them, not
+    /// yet asked for.
+    ahead: VecDeque<Digest>,
+    /// Reads sent ahead of the archive and not yet applied, oldest first.
+    pending: Vec<Pending>,
+}
+
+/// One read sent ahead of the archive: the directory it is for, the sequence
+/// its answer comes back under, and what was asked.
+struct Pending {
+    directory: Digest,
+    seq: u64,
+    read: Ahead,
+}
+
+enum Ahead {
+    /// The directory's closure, under the limit it reserved.
+    Closure(ClosureLimit),
+    /// The directory's node alone, after its closure was over its limit.
+    Node,
+}
+
+/// A member's stored length: its payload plus its kind prefix.
+fn stored_bytes(member: &ClosureArtifact) -> u64 {
+    member.len().saturating_add(PREFIX_BYTES)
 }
 
 impl Fetched {
     pub fn new(budget: ClosureLimit) -> Self {
         Self {
             members: HashMap::new(),
-            remaining_bytes: budget.get(),
+            budget: budget.get(),
+            held_bytes: 0,
+            reserved_bytes: 0,
             listed: HashMap::new(),
             listings: Vec::new(),
             window: HashMap::new(),
+            ahead: VecDeque::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -86,17 +147,97 @@ impl Fetched {
         self.listings.push(files);
     }
 
-    /// Keep `member` under `digest`, charging its stored length to the
-    /// budget.
+    /// Keep `member` under `digest`, charging its stored length to what the
+    /// session holds. A member already held is not charged twice.
     fn keep(&mut self, digest: Digest, member: ClosureArtifact) {
-        self.remaining_bytes = self.remaining_bytes.saturating_sub(member.len().saturating_add(PREFIX_BYTES));
-        self.members.insert(digest, member);
+        if let hash_map::Entry::Vacant(slot) = self.members.entry(digest) {
+            self.held_bytes = self.held_bytes.saturating_add(stored_bytes(&member));
+            slot.insert(member);
+        }
     }
 
-    /// The closure limit the rest of the budget allows, or `None` when it
-    /// cannot cover even one kind prefix.
-    fn limit(&self) -> Option<ClosureLimit> {
-        ClosureLimit::new(self.remaining_bytes.min(ClosureLimit::MAX_BYTES)).ok()
+    /// Take the blob under `digest` out of the window, refunding its stored
+    /// length.
+    fn take_window(&mut self, digest: Digest) -> Option<ClosureArtifact> {
+        let member = self.window.remove(&digest)?;
+        self.held_bytes = self.held_bytes.saturating_sub(stored_bytes(&member));
+        Some(member)
+    }
+
+    /// Take the member under `digest` out of the window or the map,
+    /// refunding its stored length.
+    fn release(&mut self, digest: Digest) -> Option<ClosureArtifact> {
+        if let Some(member) = self.take_window(digest) {
+            return Some(member);
+        }
+        let member = self.members.remove(&digest)?;
+        self.held_bytes = self.held_bytes.saturating_sub(stored_bytes(&member));
+        Some(member)
+    }
+
+    /// Replace the window with `members`, refunding the old one and charging
+    /// the new.
+    fn replace_window(&mut self, members: impl Iterator<Item = ClosureArtifact>) {
+        let refund = self.window.drain().map(|(_, member)| stored_bytes(&member)).sum::<u64>();
+        self.held_bytes = self.held_bytes.saturating_sub(refund);
+        for member in members {
+            self.held_bytes = self.held_bytes.saturating_add(stored_bytes(&member));
+            self.window.insert(member.claimed().unverified(), member);
+        }
+    }
+
+    /// The limit one closure read asks for at most: [`READ_AHEAD_BYTES`], or
+    /// the whole budget when that is smaller.
+    fn whole_window(&self) -> u64 {
+        READ_AHEAD_BYTES.min(ClosureLimit::MAX_BYTES).min(self.budget)
+    }
+
+    /// The least budget left a read ahead of the archive is sent under: a
+    /// whole window, or half the budget when that is smaller, so a budget of
+    /// a few windows never splits one and a small budget still reads ahead.
+    fn ahead_floor(&self) -> u64 {
+        self.whole_window().min(self.budget / 2).max(ClosureLimit::MIN_BYTES)
+    }
+
+    /// Reserve a closure limit of the whole window or the free budget,
+    /// whichever is less, or `None` when that is below `at_least`.
+    fn reserve(&mut self, at_least: u64) -> Option<ClosureLimit> {
+        let free = self.budget.saturating_sub(self.held_bytes.saturating_add(self.reserved_bytes));
+        let bytes = self.whole_window().min(free);
+        if bytes < at_least {
+            return None;
+        }
+        let limit = ClosureLimit::new(bytes).ok()?;
+        self.reserved_bytes += bytes;
+        Some(limit)
+    }
+
+    /// Refund the reservation of a closure read that has answered.
+    fn settle(&mut self, limit: ClosureLimit) {
+        self.reserved_bytes = self.reserved_bytes.saturating_sub(limit.get());
+    }
+
+    /// Queue `tree`'s child directories the map lacks at the front of the
+    /// read-ahead queue, in listing order.
+    fn queue_children(&mut self, tree: &Tree) {
+        let children = tree
+            .entries()
+            .values()
+            .rev()
+            .filter_map(|node| match node {
+                Node::Directory(child) => Some(child.digest()),
+                _ => None,
+            })
+            .filter(|child| !self.members.contains_key(child))
+            .collect::<Vec<_>>();
+        for child in children {
+            self.ahead.push_front(child);
+        }
+    }
+
+    /// Whether a read for `directory` is in flight.
+    fn is_pending(&self, directory: Digest) -> bool {
+        self.pending.iter().any(|pending| pending.directory == directory)
     }
 }
 
@@ -111,53 +252,113 @@ impl<'a> SourceReader<'a> {
         Self { port, fetched }
     }
 
-    /// Read `root` and everything under it into the map: its closure in one
-    /// request when it fits the budget left, otherwise its node alone and
-    /// then each subtree the same way, over an explicit work stack.
-    ///
-    /// # Errors
-    ///
-    /// [`StorageError::Missing`] naming the first member the source lacks,
-    /// or the failure of the read that broke.
-    pub fn prefetch(&mut self, root: &Ref<Tree>) -> Result<(), StorageError> {
-        let mut pending = vec![root.digest()];
-        while let Some(digest) = pending.pop() {
-            if self.fetched.members.contains_key(&digest) {
+    /// Make sure the tree node `directory` names is in the map: from the
+    /// read in flight for it, or read now.
+    fn arrive(&mut self, directory: Digest) -> Result<(), StorageError> {
+        loop {
+            if self.fetched.members.contains_key(&directory) {
+                return Ok(());
+            }
+            if let Some(index) = self.fetched.pending.iter().position(|pending| pending.directory == directory) {
+                self.wait_on(index)?;
                 continue;
             }
-            let fits = match self.fetched.limit() {
-                Some(limit_bytes) => self.closure(digest, limit_bytes)?,
-                None => false,
+            self.fetched.ahead.retain(|queued| *queued != directory);
+            self.apply_ready()?;
+            if let Some(limit) = self.fetched.reserve(self.fetched.ahead_floor()) {
+                self.send_closure(directory, limit)?;
+            } else if !self.fetched.pending.is_empty() {
+                // The reads in flight hold the budget; each answer frees its
+                // reservation's unused part.
+                self.wait_on(0)?;
+            } else if let Some(limit) = self.fetched.reserve(ClosureLimit::MIN_BYTES) {
+                self.send_closure(directory, limit)?;
+            } else {
+                return self.member(directory, true).map(drop);
+            }
+        }
+    }
+
+    /// Send a `ReadClosure` for every queued directory, front first, while
+    /// the budget left covers a whole window, after applying every answer
+    /// that has arrived.
+    fn pump(&mut self) -> Result<(), StorageError> {
+        self.apply_ready()?;
+        while let Some(&directory) = self.fetched.ahead.front() {
+            if self.fetched.members.contains_key(&directory) || self.fetched.is_pending(directory) {
+                self.fetched.ahead.pop_front();
+                continue;
+            }
+            let Some(limit) = self.fetched.reserve(self.fetched.ahead_floor()) else {
+                break;
             };
-            if !fits {
-                let tree: Tree = self.load(&Ref::from_digest(digest))?;
-                pending.extend(tree.entries().values().filter_map(|node| match node {
-                    Node::Directory(child) => Some(child.digest()),
-                    _ => None,
-                }));
+            self.fetched.ahead.pop_front();
+            self.send_closure(directory, limit)?;
+        }
+        Ok(())
+    }
+
+    fn send_closure(&mut self, directory: Digest, limit: ClosureLimit) -> Result<(), StorageError> {
+        let seq = self.port.send(StorageCall::ReadClosure(ReadClosure { root: directory, limit_bytes: limit }))?;
+        self.fetched.pending.push(Pending { directory, seq, read: Ahead::Closure(limit) });
+        Ok(())
+    }
+
+    /// Apply every read in flight whose answer has arrived.
+    fn apply_ready(&mut self) -> Result<(), StorageError> {
+        let mut index = 0;
+        while let Some(pending) = self.fetched.pending.get(index) {
+            match self.port.poll(pending.seq) {
+                Some(answer) => {
+                    let pending = self.fetched.pending.remove(index);
+                    self.apply(pending, answer)?;
+                }
+                None => index += 1,
             }
         }
         Ok(())
     }
 
-    /// Read `root`'s closure under `limit_bytes` into the map, answering
-    /// whether it fit.
-    fn closure(&mut self, root: Digest, limit_bytes: ClosureLimit) -> Result<bool, StorageError> {
-        let StorageAnswer::ReadClosure(result) =
-            self.port.call(StorageCall::ReadClosure(ReadClosure { root, limit_bytes }))?
-        else {
-            return Err(StorageError::Answer);
-        };
-        match result {
-            ReadClosureResult::Found { artifacts, .. } => {
-                for member in artifacts {
-                    self.fetched.keep(member.claimed().unverified(), member);
+    /// Wait for the read in flight at `index` and apply its answer.
+    fn wait_on(&mut self, index: usize) -> Result<(), StorageError> {
+        let pending = self.fetched.pending.remove(index);
+        let answer = self.port.wait(pending.seq)?;
+        self.apply(pending, answer)
+    }
+
+    /// Apply one read-ahead answer: a closure's members are kept and its
+    /// reservation refunded, and one over its limit sends a read of its node
+    /// alone.
+    fn apply(&mut self, pending: Pending, answer: StorageAnswer) -> Result<(), StorageError> {
+        match (pending.read, answer) {
+            (Ahead::Closure(limit), StorageAnswer::ReadClosure(result)) => {
+                self.fetched.settle(limit);
+                match result {
+                    ReadClosureResult::Found { artifacts, .. } => {
+                        for member in artifacts {
+                            self.fetched.keep(member.claimed().unverified(), member);
+                        }
+                        Ok(())
+                    }
+                    ReadClosureResult::TooLarge { .. } => {
+                        let directory = pending.directory;
+                        let seq = self.port.send(StorageCall::Read(ReadArtifact { digest: directory }))?;
+                        self.fetched.pending.push(Pending { directory, seq, read: Ahead::Node });
+                        Ok(())
+                    }
+                    ReadClosureResult::Missing { digest, .. } => Err(StorageError::Missing(digest)),
+                    ReadClosureResult::Err { message, .. } => Err(StorageError::Refused(message)),
                 }
-                Ok(true)
             }
-            ReadClosureResult::TooLarge { .. } => Ok(false),
-            ReadClosureResult::Missing { digest, .. } => Err(StorageError::Missing(digest)),
-            ReadClosureResult::Err { message, .. } => Err(StorageError::Refused(message)),
+            (Ahead::Node, StorageAnswer::Read(result)) => match result {
+                ReadArtifactResult::Found { artifact } => {
+                    self.fetched.keep(pending.directory, artifact);
+                    Ok(())
+                }
+                ReadArtifactResult::Missing { digest } => Err(StorageError::Missing(digest)),
+                ReadArtifactResult::Err { message, .. } => Err(StorageError::Refused(message)),
+            },
+            _ => Err(StorageError::Answer),
         }
     }
 
@@ -189,9 +390,10 @@ impl<'a> SourceReader<'a> {
         self.member(blob.digest(), true).map(drop)
     }
 
-    /// Open the blob `blob` names as a reader verified at its end. A blob the
-    /// map misses is taken from the window, read in a batch with the later
-    /// blobs of its listing, or read alone, and never kept.
+    /// Open the blob `blob` names as a reader verified at its end, leaving a
+    /// member the map holds there. A blob the map misses is taken from the
+    /// window, read in a batch with the later blobs of its listing, or read
+    /// alone, and never kept.
     ///
     /// # Errors
     ///
@@ -199,19 +401,34 @@ impl<'a> SourceReader<'a> {
     /// read; [`StorageError::OtherKind`] when it is not stored as bytes.
     pub fn open(&mut self, blob: &Ref<OpaqueBytes>) -> Result<StoredBlob, StorageError> {
         let digest = blob.digest();
-        let member = if let Some(member) = self.fetched.window.remove(&digest) {
-            member
-        } else if self.fetched.members.contains_key(&digest) {
-            self.member(digest, false)?
-        } else if let Some(&at) = self.fetched.listed.get(&digest) {
-            self.read_batch(digest, at)?
-        } else {
-            self.member(digest, false)?
+        let member = match self.fetched.take_window(digest) {
+            Some(member) => member,
+            None if self.fetched.members.contains_key(&digest) => self.member(digest, false)?,
+            None => self.miss(digest)?,
         };
-        if member.kind() != OpaqueBytes::ID {
-            return Err(StorageError::OtherKind(digest));
+        verified(digest, &member)
+    }
+
+    /// Open the blob `blob` names for the archive: taken out of the window or
+    /// the map, its bytes refunded to the budget, then the read-ahead pumped
+    /// into what that freed.
+    fn take(&mut self, blob: &Ref<OpaqueBytes>) -> Result<StoredBlob, StorageError> {
+        let digest = blob.digest();
+        let member = match self.fetched.release(digest) {
+            Some(member) => member,
+            None => self.miss(digest)?,
+        };
+        self.pump()?;
+        verified(digest, &member)
+    }
+
+    /// Read a blob neither the map nor the window holds: in a batch when a
+    /// remembered listing holds it, otherwise alone.
+    fn miss(&mut self, digest: Digest) -> Result<ClosureArtifact, StorageError> {
+        match self.fetched.listed.get(&digest) {
+            Some(&at) => self.read_batch(digest, at),
+            None => self.member(digest, false),
         }
-        Ok(StoredBlob(member.verified_reader(digest)))
     }
 
     /// Read the blob `digest` names with one `ReadArtifacts` naming it and
@@ -224,7 +441,7 @@ impl<'a> SourceReader<'a> {
         (listing, position): (usize, usize),
     ) -> Result<ClosureArtifact, StorageError> {
         let fetched = &mut *self.fetched;
-        fetched.window.clear();
+        fetched.replace_window(iter::empty());
         let mut named = HashSet::from([digest]);
         let later = fetched.listings[listing][position + 1..]
             .iter()
@@ -246,7 +463,7 @@ impl<'a> SourceReader<'a> {
         };
         let first =
             artifacts.next().filter(|first| first.claimed().unverified() == digest).ok_or(StorageError::Answer)?;
-        self.fetched.window.extend(artifacts.map(|member| (member.claimed().unverified(), member)));
+        self.fetched.replace_window(artifacts);
         Ok(first)
     }
 
@@ -279,14 +496,25 @@ impl TreeSource for SourceReader<'_> {
         Self: 'b;
 
     fn tree(&mut self, tree: &Ref<Tree>) -> Result<Tree, StorageError> {
+        self.arrive(tree.digest())?;
         let tree = self.load(tree)?;
         self.fetched.list(&tree);
+        self.fetched.queue_children(&tree);
+        self.pump()?;
         Ok(tree)
     }
 
     fn blob(&mut self, blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<StoredBlob>, StorageError> {
-        self.open(blob).map(|reader| SourceBlob { len: reader.len(), reader })
+        self.take(blob).map(|reader| SourceBlob { len: reader.len(), reader })
     }
+}
+
+/// `member` as a blob reader verified against `digest` at its end.
+fn verified(digest: Digest, member: &ClosureArtifact) -> Result<StoredBlob, StorageError> {
+    if member.kind() != OpaqueBytes::ID {
+        return Err(StorageError::OtherKind(digest));
+    }
+    Ok(StoredBlob(member.verified_reader(digest)))
 }
 
 /// A stored blob read a window at a time, whose last read fails with

@@ -7,10 +7,13 @@
 //! to an executable in the root (`UnknownTool`). Then [`platform`] compares
 //! the environment's platform with the daemon's (`PlatformMismatch`).
 //!
-//! The run tree and each mount are prefetched before the checks, so
-//! `rust-toolchain.toml`, the mounts, and the later writes into containers
-//! read from the session's map. The environment root is walked on demand, a
-//! few reads per tool.
+//! Only the roots are read here: the run tree's and each mount's node, and
+//! each stdin blob. A stored tree's members are stored whenever the tree is
+//! (the journal refuses a stage citing an artifact it holds neither staged
+//! nor stored), so a root that loads means the whole tree is there, and the
+//! members are read later, a window at a time ahead of the archive that
+//! writes them. `rust-toolchain.toml` is read on its own, and the
+//! environment root is walked on demand, a few reads per tool.
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -41,10 +44,9 @@ pub struct Resolved {
 pub fn resolve(session: &mut StorageSession, run: &RunRequest) -> Result<Resolved, Stop> {
     let mut reader = session.reader();
     let environment: Environment = load(&mut reader, &run.environment, "the environment")?;
-    prefetch(&mut reader, &run.tree, "the run tree")?;
     let tree: Tree = load(&mut reader, &run.tree, "the run tree")?;
     for mount in run.mounts.as_slice() {
-        prefetch(&mut reader, &mount.tree, "a mount tree")?;
+        load::<Tree>(&mut reader, &mount.tree, "a mount tree")?;
     }
     for stdin in run.steps.as_slice().iter().filter_map(|step| step.stdin.as_ref()) {
         reader
@@ -95,12 +97,6 @@ pub fn platform(engine: &Engine, wanted: &Platform) -> Result<(), Stop> {
 /// `InputMissing` when the source lacks it.
 fn load<K: Storage>(reader: &mut SourceReader<'_>, artifact: &Ref<K>, what: &str) -> Result<K, Stop> {
     reader.load(artifact).map_err(|error| storage_stop(format!("loading {what} {}", artifact.digest()), error))
-}
-
-/// Read `tree`'s closure into the session, or refuse the run as
-/// `InputMissing` naming the first member the source lacks.
-fn prefetch(reader: &mut SourceReader<'_>, tree: &Ref<Tree>, what: &str) -> Result<(), Stop> {
-    reader.prefetch(tree).map_err(|error| storage_stop(format!("reading {what} {}", tree.digest()), error))
 }
 
 /// Check the tree's `rust-toolchain.toml`, when it has one: its channel must
