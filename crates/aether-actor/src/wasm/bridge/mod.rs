@@ -21,6 +21,9 @@
 //! - `blob` — ADR-0238 guest blob reads (`blob_hold`, `blob_read`,
 //!   `blob_drop`), the transport under the guest's `GuestHold` backing.
 //!   wasm32-only: every caller is.
+//! - `init` — ADR-0096 guest init-failure staging (`init_failed`), the
+//!   transport the `export!` init shims call before returning non-zero.
+//!   wasm32-only: every caller is.
 //! - `address` — ADR-0230 §3 path proof (`resolve_path`), the transport under
 //!   `WasmCtx::resolve_path`, and the `__ResolvedPath` answer it decodes; and
 //!   ADR-0231 §4 published rows (`published_rows`), the transport under
@@ -35,6 +38,8 @@ pub(crate) mod address;
 pub(crate) mod asset;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod blob;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod init;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;

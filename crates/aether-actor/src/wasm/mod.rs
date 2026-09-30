@@ -427,12 +427,7 @@ pub trait ErasedWasmActor {
 #[cfg(target_family = "wasm")]
 #[doc(hidden)]
 pub fn stage_init_failure(message: &str) {
-    let bytes = message.as_bytes();
-    // SAFETY: `init_failed` copies `len` bytes from `ptr` into the
-    // substrate synchronously; the borrowed slice outlives the call.
-    unsafe {
-        raw::init_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32);
-    }
+    bridge::init::init_failed(message);
 }
 
 /// Guest-runtime log install (wasm32). Wires the FFI sink
@@ -447,8 +442,10 @@ pub fn stage_init_failure(message: &str) {
 #[cfg(target_family = "wasm")]
 #[doc(hidden)]
 pub fn install_guest_logging() {
-    crate::log::install_log_sink(bridge::log::emit_log_event);
-    crate::log::install_forwarding_subscriber();
+    use crate::log::{install_forwarding_subscriber, install_log_sink};
+
+    install_log_sink(bridge::log::emit_log_event);
+    install_forwarding_subscriber();
 }
 
 /// Validate an export-selected inline actor before its alias is allocated.

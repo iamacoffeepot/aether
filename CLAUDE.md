@@ -48,7 +48,7 @@ Edits under `.claude/` — skill text in `.claude/skills/` especially — and fo
 - Build: `cargo build` (release: `cargo build --release`). The root manifest's `default-members` leaves out the build pipeline (`xtask`), the `aether-demo` release-demo component, and the `aether-test-fixtures-*` wasm crates; add `--workspace` to select every member.
 - Run: `cargo run -p <crate>` — the workspace root has no default binary. Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`.
 - Test: `cargo test` (single test: `cargo test <name>`; single-threaded with output: `cargo test -- --nocapture --test-threads=1`)
-- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings` plus `cargo xtask clippy-wasm`, the wasm32 clippy pass over the component packages the host arm never compiles
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 

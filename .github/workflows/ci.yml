@@ -313,6 +313,12 @@ jobs:
       # xtask dist` prepare runs too, so the lane predicts this gate.
       - name: Component wasm warning gate
         run: cargo xtask build-wasm
+      # The host clippy arm above never compiles `cfg(target_family = "wasm")`
+      # code (issue #7185), so this is that code's only lint gate: one `cargo
+      # clippy` per component package on the wasm triple, over the same
+      # discovery `build-wasm` runs.
+      - name: Component wasm clippy gate
+        run: cargo xtask clippy-wasm
 
   # Not the guide: docs.yml builds the mdBook. This job denies the
   # tracked rustdoc lints over the API docs.

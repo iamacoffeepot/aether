@@ -120,7 +120,7 @@ pub fn run_build_denying_warnings(mut cmd: Command, what: &str) -> Result<()> {
     }
     if !warned.is_empty() {
         bail!(
-            "{what} warned in {} — the component cross-build is warning-free and stays that way",
+            "{what} warned in {} — this component gate is warning-free and stays that way",
             warned.into_iter().collect::<Vec<_>>().join(", "),
         );
     }
@@ -200,6 +200,24 @@ pub fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
         plan.package.clone()
     };
     run_build_denying_warnings(cmd, &format!("build component {label}"))
+}
+
+/// Clippy-lint one component package on the wasm triple — `build_component`'s
+/// clippy twin, for the `cfg(target_family = "wasm")` code no host clippy run
+/// ever compiles (issue #7185). One invocation per package, never batched:
+/// the guest's real feature resolve, same as `build_component`.
+pub fn clippy_component(plan: &BuildPlan) -> Result<()> {
+    let mut cmd = command();
+    cmd.args(["clippy", "--target", WASM_TARGET, "-p", &plan.package]);
+    if plan.examples {
+        cmd.arg("--examples");
+    }
+    let label = if plan.examples {
+        format!("{} (examples)", plan.package)
+    } else {
+        plan.package.clone()
+    };
+    run_build_denying_warnings(cmd, &format!("clippy component {label}"))
 }
 
 pub fn build_chassis(profile: Profile) -> Result<()> {
