@@ -1,0 +1,27 @@
+{
+  "id": "resp_0011",
+  "object": "response",
+  "created_at": 1790000300,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "fc_0012",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_c",
+      "name": "muse-echo",
+      "arguments": "{\"text\": \"gamma\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1100,
+    "input_tokens_details": { "cached_tokens": 896 },
+    "output_tokens": 20,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 1120
+  }
+}

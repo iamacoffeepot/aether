@@ -50,14 +50,7 @@ impl Cited {
     /// as `K`.
     pub fn get<K: Storage>(&self, cited: Ref<K>) -> Result<K, CitedError> {
         let digest = cited.digest();
-        if !self.digests.contains(&digest) {
-            return Err(CitedError::NotCited { digest });
-        }
-        let artifact = self
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.claimed().unverified() == digest)
-            .ok_or(CitedError::Missing { digest })?;
+        let artifact = self.delivered(digest)?;
         let payload = artifact.load(digest).map_err(CitedError::Mismatch)?;
         if artifact.kind() != K::ID {
             return Err(CitedError::KindMismatch { digest, expected: K::ID, actual: artifact.kind() });
@@ -66,7 +59,36 @@ impl Cited {
     }
 }
 
-/// Why [`Cited::get`] refused a read.
+impl Cited {
+    /// The kind the artifact at `digest` is stored under, read from the
+    /// artifact delivered with the entry. Its bytes are verified against the
+    /// digest, which covers the kind.
+    ///
+    /// # Errors
+    ///
+    /// [`CitedError::NotCited`] when the entry does not cite `digest`,
+    /// [`CitedError::Missing`] when it does but its artifact was not
+    /// delivered, and [`CitedError::Mismatch`] when the delivered bytes do not
+    /// hash to the digest.
+    pub fn kind(&self, digest: Digest) -> Result<KindId, CitedError> {
+        let artifact = self.delivered(digest)?;
+        artifact.load(digest).map_err(CitedError::Mismatch)?;
+        Ok(artifact.kind())
+    }
+
+    /// The artifact delivered for `digest`, which the entry cites.
+    fn delivered(&self, digest: Digest) -> Result<&ClosureArtifact, CitedError> {
+        if !self.digests.contains(&digest) {
+            return Err(CitedError::NotCited { digest });
+        }
+        self.artifacts
+            .iter()
+            .find(|artifact| artifact.claimed().unverified() == digest)
+            .ok_or(CitedError::Missing { digest })
+    }
+}
+
+/// Why [`Cited::get`] or [`Cited::kind`] refused a read.
 #[derive(Debug)]
 pub enum CitedError {
     /// The entry does not cite this digest, such as a ref found inside a

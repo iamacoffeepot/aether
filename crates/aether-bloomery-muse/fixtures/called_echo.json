@@ -1,0 +1,51 @@
+{
+  "id": "resp_0010",
+  "object": "response",
+  "created_at": 1790000200,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "rs_0010",
+      "type": "reasoning",
+      "summary": [
+        { "type": "summary_text", "text": "Echo both words, then answer." }
+      ]
+    },
+    {
+      "id": "msg_0010",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "text": "Echoing both words first.", "annotations": [] }
+      ]
+    },
+    {
+      "id": "fc_0010",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_a",
+      "name": "muse-echo",
+      "arguments": "{\"text\": \"alpha\"}"
+    },
+    {
+      "id": "fc_0011",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_b",
+      "name": "muse-echo",
+      "arguments": "{\"text\": \"beta\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 900,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 60,
+    "output_tokens_details": { "reasoning_tokens": 20 },
+    "total_tokens": 960
+  }
+}

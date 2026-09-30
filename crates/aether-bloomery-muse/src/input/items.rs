@@ -123,6 +123,11 @@ impl TurnItems {
         Ok(Self(items))
     }
 
+    /// A conversation of one user message citing `text`, which keeps every rule.
+    pub(crate) fn user(text: Ref<Utf8Text>) -> Self {
+        Self(vec![TurnItem::message(Role::User, text)])
+    }
+
     /// Every item in conversation order.
     #[must_use]
     pub fn as_slice(&self) -> &[TurnItem] {
@@ -130,33 +135,44 @@ impl TurnItems {
     }
 
     fn check(items: &[TurnItem]) -> Result<(), TurnItemsError> {
-        let Some(last) = items.last() else {
-            return Err(TurnItemsError::Empty);
-        };
-        if items.len() > Self::MAX_ITEMS {
-            return Err(TurnItemsError::TooMany);
-        }
-        if !matches!(last, TurnItem::Message { role: Role::User, .. } | TurnItem::CallOutput { .. }) {
+        check_order(items)?;
+        if !matches!(items.last(), Some(TurnItem::Message { role: Role::User, .. } | TurnItem::CallOutput { .. })) {
             return Err(TurnItemsError::LastNotUser);
-        }
-        let mut calls = BTreeSet::new();
-        for item in items {
-            match item {
-                TurnItem::Message { .. } => {}
-                TurnItem::Call(call) => {
-                    if !calls.insert(call.call_id()) {
-                        return Err(TurnItemsError::DuplicateCall);
-                    }
-                }
-                TurnItem::CallOutput { call_id, .. } => {
-                    if !calls.contains(call_id) {
-                        return Err(TurnItemsError::OrphanOutput);
-                    }
-                }
-            }
         }
         Ok(())
     }
+}
+
+/// The rules every conversation keeps wherever it ends: never empty, at most
+/// [`TurnItems::MAX_ITEMS`] items, no call id twice, and every call output
+/// after the call it answers. Answers the ids of the calls no output answers.
+pub fn check_order(items: &[TurnItem]) -> Result<BTreeSet<&CallId>, TurnItemsError> {
+    if items.is_empty() {
+        return Err(TurnItemsError::Empty);
+    }
+    if items.len() > TurnItems::MAX_ITEMS {
+        return Err(TurnItemsError::TooMany);
+    }
+    let mut calls = BTreeSet::new();
+    let mut unanswered = BTreeSet::new();
+    for item in items {
+        match item {
+            TurnItem::Message { .. } => {}
+            TurnItem::Call(call) => {
+                if !calls.insert(call.call_id()) {
+                    return Err(TurnItemsError::DuplicateCall);
+                }
+                unanswered.insert(call.call_id());
+            }
+            TurnItem::CallOutput { call_id, .. } => {
+                if !calls.contains(call_id) {
+                    return Err(TurnItemsError::OrphanOutput);
+                }
+                unanswered.remove(call_id);
+            }
+        }
+    }
+    Ok(unanswered)
 }
 
 invariant_errors!(TurnItemsError);

@@ -4,7 +4,7 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    Digest, Head, HeadMoved, Program, RecordedHead, RecordedHeadMove, Ref, Tree, artifact_digest,
+    Digest, Head, HeadMoved, HeadNameError, Program, RecordedHead, RecordedHeadMove, Ref, Tree, artifact_digest,
 };
 use aether_data::storage::{decode_derived, encode_derived};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
@@ -138,6 +138,19 @@ fn standalone_heads_encode_kind_and_name() -> Result<(), Box<dyn Error>> {
         Err(StorageError::Invariant { kind: "Head", reason: "kind-mismatch" }) => Ok(()),
         other => panic!("expected standalone kind-mismatch, got {other:?}"),
     }
+}
+
+#[test]
+fn a_runtime_named_head_is_checked_and_equals_its_const_twin() -> Result<(), Box<dyn Error>> {
+    // Catches `Head::named` skipping the name check, or storing a name that does not round-trip through the
+    // recorded identity the journal decodes.
+    assert_eq!(Head::<Tree>::named("a b"), Err(HeadNameError::Whitespace));
+
+    let named = Head::<Tree>::named(String::from("main"))?;
+    assert_eq!(named, MAIN);
+    let bytes = encode_derived(&StorageData::from_value(RecordedHead::from(&named)))?;
+    assert_eq!(decode_derived::<Head<Tree>>(&bytes, false)?.value, named);
+    Ok(())
 }
 
 #[test]

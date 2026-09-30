@@ -142,6 +142,17 @@ impl<K: Kind> Head<K> {
         Self { name: Cow::Borrowed(name), _kind: PhantomData }
     }
 
+    /// Accept a runtime name, checked with the same rules as [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`HeadNameError`] names which rule failed, in [`Self::new`]'s order.
+    pub fn named(name: impl Into<String>) -> Result<Self, HeadNameError> {
+        let name = name.into();
+        check(&name)?;
+        Ok(Self { name: Cow::Owned(name), _kind: PhantomData })
+    }
+
     /// Kind this head names, `K::ID`.
     #[must_use]
     pub const fn kind(&self) -> KindId {
