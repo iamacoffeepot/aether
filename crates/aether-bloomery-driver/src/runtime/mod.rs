@@ -32,9 +32,12 @@
 //! publishes the bundle's code, then spawns its root at the bound
 //! `aether.bloomery.bundle.<hash>` namespace under the unit key), bundle
 //! roots, and the providers of program APIs. The core names a loaded bundle
-//! by its digest; the shell keeps each root's proven reference, taken from
-//! its spawn reply's stamped sender (ADR-0230 §3), keyed by that digest, and
-//! sends to it with the command's ticket as the request context. A spawn that
+//! by its digest; the shell casts its spawn reply's stamped sender (ADR-0230
+//! §3) once per declared role, to [`ProgramRoot`](aether_bloomery_kinds::ProgramRoot)
+//! and [`ReactorRoot`](aether_bloomery_kinds::ReactorRoot), keeps the typed
+//! references keyed by that digest, and sends through them with the command's
+//! ticket as the request context. A root that does not publish a role its
+//! bundle declares fails the load (ADR-0240 D4). A spawn that
 //! finds the root already live adopts it (ADR-0226 D9), and the core resumes
 //! a reactor root from the cursor it reports. Inbound [`Call`],
 //! [`AwaitProcessed`], a bundle root's fetch-on-miss [`ReadArtifact`], and a
@@ -59,16 +62,17 @@ mod perform;
 mod programs;
 mod reactors;
 mod recovery;
+mod root;
 
 pub use self::core::{
     ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
-    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
+    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket, WarmTicket, WatchTicket,
 };
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
-use aether_actor::{ActorPath, ActorRef, ErasedActorRef, ProtocolPath, runtime};
+use aether_actor::{ActorPath, ActorRef, ProtocolPath, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
@@ -81,6 +85,7 @@ use aether_kinds::{PublishResult, SpawnResult};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
+use self::root::BundleRoot;
 use crate::BundleDriver;
 
 // Tripwire: the core reads the journal `EVENTS_PAGE` entries per page, and the
@@ -123,12 +128,13 @@ pub struct BundleDriverState {
     source: ProtocolPath<ArtifactStorage>,
     startup: Vec<Command>,
     callers: HashMap<CallerId, Caller>,
-    /// The digest each in-flight load was issued for, keyed by its ticket,
-    /// from its publish until its spawn answers.
-    loading: BTreeMap<LoadTicket, Digest>,
-    /// Each loaded or adopted bundle's root, the stamped sender of its spawn
-    /// reply.
-    roots: HashMap<Digest, ErasedActorRef>,
+    /// The digest each in-flight load was issued for and the roles its root
+    /// is cast to, keyed by its ticket, from its publish until its spawn
+    /// answers.
+    loading: BTreeMap<LoadTicket, (Digest, RootRoles)>,
+    /// Each loaded or adopted bundle's root, cast from the stamped sender of
+    /// its spawn reply once per declared role.
+    roots: HashMap<Digest, BundleRoot>,
 }
 
 /// One held reply the driver owes, typed by the inbound kind that armed it.
@@ -316,16 +322,19 @@ impl NativeActor for BundleDriver {
     }
 
     /// The bundle's root answered its spawn. ADR-0230 §3: the root sends its
-    /// own spawn reply, so the stamped sender is the reference the driver
-    /// keeps for the digest. A root the spawn stood up is `Loaded`; one the
-    /// engine already held live under the unit key is `Adopted` (ADR-0226 D9).
+    /// own spawn reply, so the stamped sender is the root, and the driver
+    /// casts it once per declared role and keeps the typed references for
+    /// the digest (ADR-0231 §4). A root the spawn stood up is `Loaded`; one
+    /// the engine already held live under the unit key is `Adopted`
+    /// (ADR-0226 D9). A root that does not publish a declared role fails the
+    /// load, so the core never addresses it in that role.
     #[handler::single]
     fn on_spawn_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: SpawnResult) {
         let Some(ticket) = ctx.take_context::<LoadTicket>() else {
             return;
         };
-        let bundle = state.loading.remove(&ticket);
-        let outcome = match (result, ctx.sender(), bundle) {
+        let load = state.loading.remove(&ticket);
+        let outcome = match (result, ctx.sender(), load) {
             (SpawnResult::Err { error }, ..) => LoadOutcome::Failed { error },
             (SpawnResult::Spawned { path, .. } | SpawnResult::Live { path, .. }, None, _) => {
                 LoadOutcome::Failed { error: format!("spawn reply for {path} carried no sender") }
@@ -333,13 +342,11 @@ impl NativeActor for BundleDriver {
             (SpawnResult::Spawned { path, .. } | SpawnResult::Live { path, .. }, Some(_), None) => {
                 LoadOutcome::Failed { error: format!("spawn reply for {path} matched no issued load") }
             }
-            (SpawnResult::Spawned { .. }, Some(root), Some(bundle)) => {
-                state.roots.insert(bundle, root);
-                LoadOutcome::Loaded
+            (SpawnResult::Spawned { path, .. }, Some(sender), Some((bundle, roles))) => {
+                state.keep_root(BundleRoot::cast(ctx, sender, roles, &path), bundle, LoadOutcome::Loaded)
             }
-            (SpawnResult::Live { .. }, Some(root), Some(bundle)) => {
-                state.roots.insert(bundle, root);
-                LoadOutcome::Adopted
+            (SpawnResult::Live { path, .. }, Some(sender), Some((bundle, roles))) => {
+                state.keep_root(BundleRoot::cast(ctx, sender, roles, &path), bundle, LoadOutcome::Adopted)
             }
         };
         let commands = state.core.on_loaded(ticket, outcome);
@@ -389,6 +396,20 @@ impl NativeActor for BundleDriver {
         };
         let commands = state.core.on_status(ticket, &status);
         state.perform(ctx, commands);
+    }
+}
+
+impl BundleDriverState {
+    /// Keep `bundle`'s cast root and report `kept`, or fail the load with the
+    /// role the root refused.
+    fn keep_root(&mut self, root: Result<BundleRoot, String>, bundle: Digest, kept: LoadOutcome) -> LoadOutcome {
+        match root {
+            Ok(root) => {
+                self.roots.insert(bundle, root);
+                kept
+            }
+            Err(error) => LoadOutcome::Failed { error },
+        }
     }
 }
 

@@ -61,8 +61,8 @@ name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/
   every substrate and guest — so two processes that hold the same names and the
   same lineage produce the same ids, and addressing works across a fleet
   without a resolution round-trip.
-- **Stable across hot-swap.** Replacing a component in place changes neither
-  its name nor its position under its host, so its lineage — and the
+- **Stable across hot-swap.** A republish changes neither a component's name
+  nor its position under its host, so its lineage — and the
   `MailboxId` folded from it — is unchanged: senders and route caches survive
   the swap ([ADR-0029](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0029-name-derived-mailbox-ids.md); the `replace_component_preserves_mailbox_identity`
   scenario guards it).

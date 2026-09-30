@@ -200,11 +200,11 @@ A wasm actor declares placement with the same arguments — `root`,
 §5) — but the permission is checked at run time, from the module's
 `aether.actor.lineage` section. `root` writes a `Root` record for every
 cardinality, and it is the permission the component host checks when it loads
-the type at itself, boots it as its module's boot type, or replaces an actor
-with a module whose boot type it is: each is refused with the operation's
-`Err`, naming the type and the placements it does declare, before the module
-publishes or anything is staged. A `child_of(P)` or `composable` record never
-satisfies it. A `load_under` is checked the same way against a `child_of(P)`
+the type at itself, boots it as its module's boot type, or publishes a module
+whose boot type it is: each is refused with the operation's `Err`, naming the
+type and the placements it does declare, before the module publishes or
+anything is staged. A `child_of(P)` or `composable` record never satisfies it.
+A spawn naming a `parent` is checked the same way against a `child_of(P)`
 record naming the proven parent's type. A loaded guest is named as a native
 actor is — `NS`, `NS:key`, or `parent/NS:key` — so a wasm `root` emits the same
 `Root` marker impl a native root does.
@@ -275,7 +275,7 @@ A loaded component needs no short path to reach it: it is named by its own
 namespace, so its canonical address is already short (`aether.kit.camera`, or
 `aether.widget:panel` for an instanced one). Its children are reached by a hole
 beneath it: `game.world/:north/:gate` for an inline child and its own inline
-child, or `game.world/:k` for a guest a `load_under` placed at
+child, or `game.world/:k` for a guest a `Spawn` with `parent` placed at
 `game.world/NS:k`. A `composable` type is a candidate beneath every parent in
 its module, so a parent that declares another instanced child as well has
 several candidates for a hole, and the hole fills with whichever of them holds
@@ -728,10 +728,9 @@ peer sits. A declared dependency is always a root singleton, so moving the
 caller changes nothing about the route.
 
 A load name is the one thing the type cannot declare, because it is a runtime
-fact. Replica 0 of a `replicas` fan-out claims the bare base name, so the
-bare-type spelling reaches it when the base is the type's own namespace; a
-component loaded under any other name is reached through the reference its load
-proved, never by folding the name at the send site.
+fact. A `replicas` fan-out spawns several counter-keyed instances (`NS:0`,
+`NS:1`, …), each reached through the reference its own spawn proved, never by
+folding a name at the send site.
 
 `LoadResult.path` is an `ErasedActorPath`: the host's `resolve_address` parser, at
 the MCP, RPC, and harness boundary, is the one place an `ErasedActorPath` becomes a

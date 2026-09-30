@@ -11,7 +11,7 @@ by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
 layout for each new knob.
 
-The set is a defaultless grab-bag module (ADR-0138): load a widget by its
+The module exports several types, so a load must name one (ADR-0241 §9): load a widget by its
 `module@export` selector against the `aether_widget` stem — `WidgetPanel` is
 `aether_widget@aether.widget.panel`, the `EditorShell` arbiter is
 `aether_widget@aether.widget.editor`, and so on. **Every stock widget is

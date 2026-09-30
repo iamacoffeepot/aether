@@ -3,8 +3,8 @@
 //! Exported via `export!(boot = Boot, public = [WidgetA, WidgetB])`: `Boot` is the module's
 //! boot actor — instantiated once per loaded module content hash, whatever
 //! export selector a load names, and not itself selectable — while `WidgetA` /
-//! `WidgetB` are ordinary selectable actors (no `default =`, so the module is
-//! selector-load-only). The module carries an `aether.boot` custom section
+//! `WidgetB` are ordinary selectable actors, so the module is
+//! selector-load-only for them. The module carries an `aether.boot` custom section
 //! naming `Boot`'s `NAMESPACE`, which the host reads to spawn the boot
 //! singleton once, by the module's first load. A module that declares a boot
 //! is not replaceable.
@@ -95,6 +95,6 @@ impl WasmActor for WidgetB {
 }
 
 // ADR-0147: `Boot` is the unconditional boot slot; `WidgetA` / `WidgetB` are
-// the ordinary selectable exports. No `default =` — this module is
-// selector-load-only.
+// the ordinary selectable exports — this module is selector-load-only for
+// them.
 aether_actor::export!(boot = Boot, public = [WidgetA, WidgetB]);

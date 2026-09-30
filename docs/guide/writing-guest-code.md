@@ -65,8 +65,8 @@ fails fast:
   state, or its mail had no reply target;
 - a reply whose stored context holds a `Held` must take that context, or the
   guest panics after the handler returns, naming the context kind;
-- `on_dehydrate` refuses the replace while a `Held` is still live and unsaved,
-  and the host keeps the old instance running.
+- `on_dehydrate` refuses the republish while a `Held` is still live and
+  unsaved, and the host keeps the old instance running.
 
 `R` must implement `aether_actor::HeldReply`, whose `unanswered()` names the
 failure reply the caller receives if the guest never answers. `hold` encodes it,
@@ -74,7 +74,7 @@ and the `receive` shim registers it with the host when the dispatch returns,
 because the host cannot call into a guest that is gone. If the guest is dropped,
 or its actor closes while the engine keeps running, the host sends the registered
 reply for each debt still owed, on the request's chain, before it releases the
-settlement. A replace carries the registration with the debt. An engine teardown
+settlement. A republish carries the registration with the debt. An engine teardown
 sends nothing, since every requester is closing too. Write the impl by hand next
 to the kind, with a failure arm the caller can tell from a real answer:
 

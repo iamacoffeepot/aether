@@ -99,7 +99,8 @@ child is already gone, so there is nothing to terminate.
 Check common boot causes in this order:
 
 1. component was uploaded before selector use;
-2. selected module has the requested/default actor export;
+2. selected module has the requested export, or a sole selectable export when
+   none was named;
 3. config JSON matches the selected actor's Config schema;
 4. derived replica/name lineages do not conflict;
 5. the `spawn_failed` detail's substrate stderr names the failing boot
@@ -138,12 +139,13 @@ load, not the artifact name, actor namespace, selector, or tagged id rendered as
 a name. `describe_component` by lineage enables a live lookup on a cache miss;
 pair a cache hit with a safe live probe when liveness is the question.
 
-For partial replica loads, already-loaded instances stay live. The error reports
-the failed index and how many succeeded, so their names follow the documented
-`base-0` through prefix. It does not return the successful prefix's mailbox ids,
-and registry `list_components` lists stored artifacts rather than those live
-instances. The current MCP surface therefore cannot safely target that prefix
-for drop unless the ids were obtained elsewhere.
+For partial replica spawns, already-spawned instances stay live. The error
+reports the failed index and how many succeeded, so their addresses follow the
+counter-keyed sequence (`NS:0`, `NS:1`, …) up to that point. It does not
+return the successful prefix's addresses, and registry `list_components`
+lists stored artifacts rather than those live instances. The current MCP
+surface therefore cannot safely target that prefix for drop unless the
+addresses were obtained elsewhere.
 
 If the engine belongs to the task, preserve evidence and terminate it. If the
 engine is shared, stop and report the occupied name prefix to its owner. Do not
@@ -241,6 +243,6 @@ invalidating the successful engine capture, so inspect both results. See
 - Live kind/component lookup: `crates/aether-mcp/src/tools/state.rs` and
   `describe.rs`
 - Component lifecycle: `crates/aether-component/src/component/` and
-  `crates/aether-component/src/trampoline/runtime/replace.rs`
+  `crates/aether-component/src/trampoline/runtime/republish.rs`
 
 Return to the [Operating overview](index.md) for the normal loop.

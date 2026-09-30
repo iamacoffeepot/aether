@@ -22,7 +22,7 @@ pub(super) mod store;
 /// pre-resolution. `export` is the `module@actor` selector's actor half;
 /// `exports` names every type the module's manifest declares, which a
 /// namespace-less load reads to find a sole export. `config_kind` is the
-/// selected type's config descriptor (the module's default type when the
+/// selected type's config descriptor (the module's sole export when the
 /// selector names none).
 pub(super) struct ResolvedComponent {
     pub(super) wasm: Vec<u8>,

@@ -14,7 +14,9 @@ mod reactor;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
-use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, WatchTicket};
+use aether_bloomery_driver::{
+    CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
+};
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
     Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
@@ -228,7 +230,7 @@ impl World {
                 next.extend(self.wake_watches(head));
                 Step::More(next)
             }
-            Command::Load { ticket, bundle, wasm } => self.load(ticket, bundle, wasm),
+            Command::Load { ticket, bundle, roles, wasm } => self.load(ticket, bundle, roles, wasm),
             Command::Invoke { ticket, bundle, request } => {
                 self.invokes_seen.push((bundle, request.clone()));
                 match self.invokes.remove(&request.seq()) {
@@ -297,7 +299,7 @@ impl World {
 
     /// Answer one load: `Adopted` for a root the engine already holds live,
     /// else the scripted outcome, else hand it to the test.
-    fn load(&mut self, ticket: LoadTicket, bundle: Digest, wasm: Vec<u8>) -> Step {
+    fn load(&mut self, ticket: LoadTicket, bundle: Digest, roles: RootRoles, wasm: Vec<u8>) -> Step {
         self.loads_seen.push(bundle);
         if let Some(status) = self.adopted.get(&bundle).copied() {
             self.reactors.insert(bundle, Reactor::adopted(status));
@@ -307,7 +309,7 @@ impl World {
         match self.loads.get(&bundle).cloned() {
             Some(Ok(())) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded)),
             Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
-            None => Step::Manual(Command::Load { ticket, bundle, wasm }),
+            None => Step::Manual(Command::Load { ticket, bundle, roles, wasm }),
         }
     }
 

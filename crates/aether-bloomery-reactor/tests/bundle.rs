@@ -3,10 +3,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::{ProtocolRef, Undeclared};
+use aether_actor::ProtocolRef;
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION,
-    Ref, SetHeads, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
+    ReactorRoot, Ref, SetHeads, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest,
+    reactor_declarations,
 };
 use aether_data::{ErasedActorPath, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -32,14 +33,6 @@ fn journal_moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) ->
 
 fn fold_fail(seq: u64) -> JournalEntry {
     JournalEntry { seq, kind: REACTOR_FOLD_FAIL_KIND, cause: None, recorded_at_millis: 0, bytes: Vec::new() }
-}
-
-/// The reactor root's rows, as the test names a root type it cannot type.
-#[aether_actor::protocol]
-trait ReactorRoot {
-    fn warm(mail: Warm) -> Undeclared;
-    fn event(mail: Event) -> Undeclared;
-    fn status(mail: StatusQuery) -> Status;
 }
 
 fn load_root(harness: &mut SubstrateHarness, wasm_path: &Path) -> (String, ProtocolRef<ReactorRoot>, ErasedActorPath) {

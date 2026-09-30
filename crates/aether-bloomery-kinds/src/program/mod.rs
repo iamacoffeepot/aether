@@ -12,6 +12,7 @@ mod fault;
 mod invoke;
 mod mode;
 mod name;
+mod protocols;
 mod reference;
 mod refusal;
 mod request;
@@ -30,6 +31,7 @@ pub use name::{
     NativeOrigin, NativeOriginError, ProgramName, ProgramNameError, ReactorName, ReactorNameError, RuleName,
     RuleNameError,
 };
+pub use protocols::{ProgramInvoker, ProgramRelay, ProgramRoot};
 pub use reference::ProgramRef;
 pub use refusal::Refusal;
 pub use request::{RequestSource, Requested};

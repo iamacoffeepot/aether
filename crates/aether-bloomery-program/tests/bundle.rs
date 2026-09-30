@@ -5,7 +5,7 @@ use std::fs;
 
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi, ProgramName,
-    Ref, Refusal, Utf8Text, artifact_digest,
+    ProgramRoot, Ref, Refusal, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::declarations;
 use aether_component::ComponentHostCapability;
@@ -33,12 +33,6 @@ struct SummarizeResult {
 #[kind(name = "test.program.refuse.input")]
 struct RefuseInput {
     marker: u32,
-}
-
-/// The bundle root's program row, as the test names a root type it cannot type.
-#[aether_actor::protocol]
-trait ProgramRoot {
-    fn invoke(mail: Invoke) -> Invoked;
 }
 
 fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box<dyn Error>> {

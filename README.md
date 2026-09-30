@@ -233,14 +233,14 @@ impl WasmActor for Echo {
 aether_actor::export!(public = [Echo]);
 ```
 
-For multi-actor modules, declare the default explicitly:
+For multi-actor modules, every export lives in one `public` list:
 
 ```rust
-aether_actor::export!(default = Console, public = [Inspector, Worker]);
+aether_actor::export!(public = [Console, Inspector, Worker]);
 ```
 
-Without `default =`, a multi-actor module is defaultless and every load must select
-an export. Build for `wasm32-unknown-unknown`, call `upload_component` with the
+A load names the type by namespace unless the module exports exactly one.
+Build for `wasm32-unknown-unknown`, call `upload_component` with the
 artifact path, then call `publish`/`load_component` with the returned
 registry selector—not a host wasm path.
 
