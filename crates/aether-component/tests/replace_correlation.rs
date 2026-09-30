@@ -31,7 +31,7 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{LoadComponent, Publish, PublishResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{CarriedReplyMatched, CarriedRequestResult, ReleaseCarried, RunCarriedRequest};
 use aether_test_fixtures_republish::ReplyHolder;
@@ -89,7 +89,7 @@ const RESHAPING: Family = Family {
 fn release_across_swap(
     family: &Family,
     release_before_swap: bool,
-) -> Option<(SubstrateHarness, ProtocolRef<CarryHolder>, ReplaceResult)> {
+) -> Option<(SubstrateHarness, ProtocolRef<CarryHolder>, PublishResult)> {
     let wasm = fs::read(require_wasm(family.module)?).expect("read fixture wasm");
     let replacement = match family.replacement {
         Some(module) => fs::read(require_wasm(module)?).expect("read replacement wasm"),
@@ -122,20 +122,20 @@ fn release_across_swap(
             "swap",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: replacement, configs: Vec::new() },
+                &Publish { code: replacement.into(), configs: Vec::new() },
             ),
         ),
         ("request_2", HarnessOp::send_and_settle(&requester, &RunCarriedRequest { tag: 2 })),
         ("release", HarnessOp::send_and_settle(&holder, &ReleaseCarried)),
     ]);
 
-    let swap = harness.execute(steps).expect("carried-request sequence").reply::<ReplaceResult>("swap");
+    let swap = harness.execute(steps).expect("carried-request sequence").reply::<PublishResult>("swap");
 
-    Some((harness, holder, swap.expect("decode ReplaceResult")))
+    Some((harness, holder, swap.expect("decode PublishResult")))
 }
 
-fn assert_replaced(swap: &ReplaceResult) {
-    assert!(matches!(swap, ReplaceResult::Ok { .. }), "replace_component: {swap:?}");
+fn assert_replaced(swap: &PublishResult) {
+    assert!(matches!(swap, PublishResult::Ok { .. }), "publish: {swap:?}");
 }
 
 #[test]
@@ -202,14 +202,14 @@ fn a_replace_that_reshapes_a_carried_context_kind_is_refused() {
     };
 
     match swap {
-        ReplaceResult::Err { error } => assert!(
+        PublishResult::Err { error } => assert!(
             error.contains(
                 "replacement does not declare its carried request context \
                  aether.test_fixtures.republish_carried_context"
             ),
             "the refusal must name the carried context kind: {error}",
         ),
-        ReplaceResult::Ok { .. } => panic!("a replacement that cannot take a carried context was accepted"),
+        PublishResult::Ok { .. } => panic!("a replacement that cannot take a carried context was accepted"),
     }
     assert_eq!(
         harness.count_observed(CarriedReplyMatched::NAME),

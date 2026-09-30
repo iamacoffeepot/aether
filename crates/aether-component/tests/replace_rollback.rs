@@ -15,8 +15,8 @@ use std::fs;
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceConfig, ReplaceResult};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
+use aether_kinds::{InstanceConfig, LoadComponent, Publish, PublishResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::ProbeWithConfig;
 use aether_test_fixtures_kinds::{
@@ -36,8 +36,8 @@ trait GroupPeer {
 }
 
 /// A republish of `wasm` giving the instance at `path` the config `config`.
-fn replace_configured(wasm: &[u8], path: &ErasedActorPath, config: Vec<u8>) -> ReplaceComponent {
-    ReplaceComponent { wasm: wasm.to_vec(), configs: vec![ReplaceConfig { path: path.clone(), config }] }
+fn publish_configured(wasm: &[u8], path: &ErasedActorPath, config: Vec<u8>) -> Publish {
+    Publish { code: wasm.to_vec().into(), configs: vec![InstanceConfig { path: path.clone(), config }] }
 }
 
 /// The group pair's two versions, or `None` when either is not built.
@@ -60,10 +60,10 @@ fn load_trapping_peer(harness: &mut SubstrateHarness, v1: &[u8]) -> (aether_acto
         .expect("load test.republish.peer v1")
 }
 
-fn expect_refused(result: &ReplaceResult, reason: &str) {
+fn expect_refused(result: &PublishResult, reason: &str) {
     match result {
-        ReplaceResult::Err { error } => assert!(error.contains(reason), "the refusal must say {reason:?}: {error}"),
-        ReplaceResult::Ok { .. } => panic!("a replacement that failed to start was accepted"),
+        PublishResult::Err { error } => assert!(error.contains(reason), "the refusal must say {reason:?}: {error}"),
+        PublishResult::Ok { .. } => panic!("a replacement that failed to start was accepted"),
     }
 }
 
@@ -94,15 +94,15 @@ fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
     undecodable.pop();
 
     let host = harness.actor_ref::<ComponentHostCapability>();
-    let replace = replace_configured(&successor_wasm(&wasm, 1), &path, undecodable);
+    let publish = publish_configured(&successor_wasm(&wasm, 1), &path, undecodable);
     let result = harness
         .execute(vec![
-            ("replace", HarnessOp::send_and_await_reply(&host, &replace)),
+            ("publish", HarnessOp::send_and_await_reply(&host, &publish)),
             ("echo", HarnessOp::send_and_await_reply(&probe, &ConfigQuery)),
         ])
         .expect("replace + query sequence");
 
-    expect_refused(&result.reply::<ReplaceResult>("replace").expect("decode ReplaceResult"), "does not decode");
+    expect_refused(&result.reply::<PublishResult>("publish").expect("decode PublishResult"), "does not decode");
     let echo = result.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
     assert_eq!(echo.seed, config.seed, "the running guest keeps the seed its own init saw");
     assert_eq!(echo.label, config.label, "the running guest keeps the label its own init saw");
@@ -128,24 +128,21 @@ fn a_replace_whose_candidate_fails_rehydrate_keeps_the_running_guest() {
             ("bump_1", HarnessOp::send_and_settle(&peer, &Bump)),
             ("bump_2", HarnessOp::send_and_settle(&peer, &Bump)),
             ("bump_3", HarnessOp::send_and_settle(&peer, &Bump)),
-            (
-                "trap",
-                HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm: v2.clone(), configs: Vec::new() }),
-            ),
+            ("trap", HarnessOp::send_and_await_reply(&host, &Publish { code: v2.clone().into(), configs: Vec::new() })),
             ("after_trap", HarnessOp::send_and_await_reply(&peer, &CountQuery)),
-            ("calm", HarnessOp::send_and_await_reply(&host, &replace_configured(&v2, &path, calm))),
+            ("calm", HarnessOp::send_and_await_reply(&host, &publish_configured(&v2, &path, calm))),
             ("after_calm", HarnessOp::send_and_await_reply(&peer, &CountQuery)),
         ])
         .expect("bump + replace + query sequence");
 
-    expect_refused(&result.reply::<ReplaceResult>("trap").expect("decode ReplaceResult"), "on_rehydrate failed");
+    expect_refused(&result.reply::<PublishResult>("trap").expect("decode PublishResult"), "on_rehydrate failed");
     assert_eq!(
         result.reply::<CountReport>("after_trap").expect("decode CountReport").count,
         3,
         "the reinstated peer keeps its count",
     );
-    let calm = result.reply::<ReplaceResult>("calm").expect("decode ReplaceResult");
-    assert!(matches!(calm, ReplaceResult::Ok { .. }), "a replace with a non-trapping config swaps the peer: {calm:?}");
+    let calm = result.reply::<PublishResult>("calm").expect("decode PublishResult");
+    assert!(matches!(calm, PublishResult::Ok { .. }), "a replace with a non-trapping config swaps the peer: {calm:?}");
     assert_eq!(
         result.reply::<CountReport>("after_calm").expect("decode CountReport").count,
         3,
@@ -167,14 +164,10 @@ fn replace_with_rehydrate_trap() -> Option<(SubstrateHarness, usize)> {
     let _ = load_trapping_peer(&mut harness, &v1);
     let wired = harness.count_observed(WireObserved::NAME);
 
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let result = harness
-        .execute(vec![(
-            "trap",
-            HarnessOp::send_and_await_reply(&host, &ReplaceComponent { wasm: v2, configs: Vec::new() }),
-        )])
-        .expect("replace sequence");
-    expect_refused(&result.reply::<ReplaceResult>("trap").expect("decode ReplaceResult"), "on_rehydrate failed");
+    let Err(SubstrateHarnessError::Publish(error)) = harness.publish(v2) else {
+        panic!("a replacement that failed to start was accepted");
+    };
+    assert!(error.contains("on_rehydrate failed"), "the refusal must say \"on_rehydrate failed\": {error}");
 
     Some((harness, wired))
 }

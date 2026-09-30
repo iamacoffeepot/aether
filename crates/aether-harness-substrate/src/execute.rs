@@ -27,10 +27,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, At, Direct, ErasedActorRef, HandlesKind, Protocol, ProtocolRef, RowAt};
-use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, KindId};
 use aether_kinds::trace::TraceTail;
-use aether_kinds::{CostTail, LoadComponent, LoadComponentUnder, LogTail, NamedMail};
+use aether_kinds::{CostTail, LogTail, NamedMail};
 use aether_substrate::{PassiveChassis, ReplyTarget, mail::MailId};
 use aether_window::{InjectWindowEvent, WindowCapability};
 use crossbeam_channel::Receiver;
@@ -411,31 +410,6 @@ impl HarnessOp {
         Self::send_and_settle(synthetic, &injection)
     }
 
-    /// Load `component` beneath the live logical actor addressed by `parent`,
-    /// through the component host `host` proves — the reference
-    /// [`SubstrateHarness::actor_ref`] returns for it. `parent` stays address
-    /// text because it is the `LoadComponentUnder.parent` kind field.
-    ///
-    /// This is the public harness composition seam for explicit-parent
-    /// scenarios. The component host canonicalizes `parent` through the live
-    /// registry and admits the load only when the selected type declares
-    /// `child_of` the parent's type (ADR-0241 §5), before staging the same
-    /// loader path used by [`LoadComponent`]. Decode the stored reply as a
-    /// `LoadResult` with [`ExecutionResult::reply`]; its `Ok.path` is the
-    /// child's canonical lineage address, `parent/NS:key`.
-    ///
-    /// Ordinary [`HarnessOp::send_and_await_reply`] with `LoadComponent`
-    /// places the guest at the root. This constructor does not add a
-    /// production hub or MCP load mode.
-    #[must_use]
-    pub fn load_component_under(
-        host: &ActorRef<ComponentHostCapability>,
-        parent: impl Into<String>,
-        component: LoadComponent,
-    ) -> Self {
-        Self::send_and_await_reply(host, &LoadComponentUnder { parent: parent.into(), load: component })
-    }
-
     /// Send a typed mail and wait for its whole causal chain to settle:
     /// the recipient's handler has run, and so has every mail descended
     /// from it (`Settled { root }`, ADR-0080 §6). No reply is stored —
@@ -601,7 +575,7 @@ impl ExecutionResult {
 
     /// Decode the reply from a [`HarnessOp::SendAndAwaitReply`] step — or the
     /// satisfying observation from a [`HarnessOp::PollUntil`] step — as
-    /// `R`. `R` is any reply kind (`LoadResult`, `ReplaceResult`,
+    /// `R`. `R` is any reply kind (`LoadResult`, `PublishResult`,
     /// `WriteResult`, …); the bytes decode through the kind's declared
     /// codec (cast or structured) via `Kind::decode_from_bytes`
     /// (ADR-0100). Errors with [`ExecutionError::NoSuchReply`] if

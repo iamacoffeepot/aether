@@ -31,7 +31,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
             "load",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.probe".to_owned()) },
             ),
         )])
         .expect("load sequence");

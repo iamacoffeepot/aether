@@ -1,8 +1,8 @@
 //! Public `SubstrateHarness` placement coverage for issue #4535.
 //!
-//! The refusal scenarios pin the parent boundary: an address that does not
-//! resolve, and one that resolves to a parent still `Starting`, both answer
-//! `Err` before any load. Root placement is pinned the same way (ADR-0241
+//! The refusal scenarios pin the parent boundary: a spawn beneath an address
+//! that does not resolve, and beneath one that resolves to a parent still
+//! `Starting`, both answer `Err` before any guest is staged. Root placement is pinned the same way (ADR-0241
 //! §5): a root load of a type whose only declared placement is `child_of(P)`
 //! answers `Err` naming it, before the module publishes or its route is
 //! staged. `harness_guest_addresses` covers a placement beneath a live
@@ -17,13 +17,37 @@ use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{LoadComponent, LoadResult, Spawn, SpawnResult};
 use aether_substrate::BootError;
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 
 const CHILD_ONLY_EXPORT: &str = "test.matrix.child";
 const PANEL_EXPORT: &str = "test.ui.panel";
+
+/// Publish the bundle fixture into `harness`, or `None` when its wasm is not
+/// built.
+fn published_bundle(harness: &mut SubstrateHarness) -> Option<()> {
+    let wasm = fs::read(require_wasm("aether_test_fixtures_bundle")?).expect("read fixture wasm");
+    harness.publish(wasm).expect("publish the bundle");
+    Some(())
+}
+
+/// Send a raw `Spawn` of the published child-only type beneath `parent`,
+/// which the typed spawn cannot name: it is unresolved, or not yet `Live`.
+fn spawn_under(harness: &mut SubstrateHarness, label: &str, parent: &str) -> SpawnResult {
+    let spawn = Spawn {
+        namespace: CHILD_ONLY_EXPORT.to_owned(),
+        key: Some("k".to_owned()),
+        parent: Some(ErasedActorPath::new(parent).expect("a valid parent path")),
+        config: Vec::new(),
+    };
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let result =
+        harness.execute(vec![(label, HarnessOp::send_and_await_reply(&host, &spawn))]).expect("component spawn");
+
+    result.reply::<SpawnResult>(label).expect("decode SpawnResult")
+}
 
 fn load_result(
     harness: &mut SubstrateHarness,
@@ -70,24 +94,16 @@ fn a_root_load_of_a_child_only_type_is_refused_before_staging() {
 }
 
 #[test]
-fn unresolved_explicit_parent_is_a_clean_load_error() {
+fn unresolved_explicit_parent_is_a_clean_spawn_error() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let result = harness
-        .execute(vec![(
-            "missing-parent",
-            HarnessOp::load_component_under(
-                &host,
-                "test.missing",
-                LoadComponent { wasm: Vec::new(), name: None, config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("the component host replies to an unresolved parent");
+    if published_bundle(&mut harness).is_none() {
+        return;
+    }
 
-    let LoadResult::Err { error } = result.reply::<LoadResult>("missing-parent").expect("decode LoadResult") else {
-        panic!("an unresolved logical parent must not load a component");
+    let SpawnResult::Err { error } = spawn_under(&mut harness, "missing-parent", "test.missing") else {
+        panic!("an unresolved logical parent must not spawn a component");
     };
-    assert!(error.contains("component parent"), "error identifies the parent boundary: {error}");
+    assert!(error.contains("spawn parent"), "error identifies the parent boundary: {error}");
     assert!(error.contains("missing"), "error retains the unresolved address: {error}");
 }
 
@@ -177,9 +193,9 @@ impl NativeActor for HeldParent {
 /// Catches staging a child beneath a parent that has not reached `Live`: the
 /// parent's address resolves while it is `Starting`, and only proving the
 /// route (ADR-0230 §1) refuses it, so a host that stopped at resolution would
-/// go on to load beneath an unborn parent.
+/// go on to spawn beneath an unborn parent.
 #[test]
-fn a_starting_parent_is_a_clean_load_error() {
+fn a_starting_parent_is_a_clean_spawn_error() {
     let mut harness = SubstrateHarness::builder()
         .size(64, 48)
         .with_workers(Some(4))
@@ -187,6 +203,9 @@ fn a_starting_parent_is_a_clean_load_error() {
         .with_actor::<Launcher>(())
         .build()
         .expect("boot");
+    if published_bundle(&mut harness).is_none() {
+        return;
+    }
     let _open = OpenOnDrop;
     let _hatch = harness.send_deferred(harness.actor_ref::<Launcher>(), &HatchHeld);
     let (gate, changed) = &GATE;
@@ -197,21 +216,10 @@ fn a_starting_parent_is_a_clean_load_error() {
     drop(entered);
 
     let parent = format!("{}/{}:held", Launcher::NAMESPACE, HeldParent::NAMESPACE);
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let result = harness
-        .execute(vec![(
-            "starting-parent",
-            HarnessOp::load_component_under(
-                &host,
-                parent.as_str(),
-                LoadComponent { wasm: Vec::new(), name: None, config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("the component host replies to a starting parent");
-
-    let LoadResult::Err { error } = result.reply::<LoadResult>("starting-parent").expect("decode LoadResult") else {
-        panic!("a starting parent must not load a component");
+    let SpawnResult::Err { error } = spawn_under(&mut harness, "starting-parent", &parent) else {
+        panic!("a starting parent must not spawn a component");
     };
-    assert!(error.contains("component parent"), "error identifies the parent boundary: {error}");
+    assert!(error.contains("spawn parent"), "error identifies the parent boundary: {error}");
+    assert!(error.contains(&parent), "error retains the parent's address: {error}");
     assert!(error.contains("is not live"), "error names the parent's lifecycle: {error}");
 }

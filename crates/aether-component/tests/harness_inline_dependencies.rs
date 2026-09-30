@@ -18,11 +18,10 @@
 use std::fs;
 
 use aether_clipboard::{ClipboardCapability, ClipboardParams};
-use aether_component::ComponentHostCapability;
 use aether_data::LoadName;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::LoadComponent;
 use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_inline_dependency::{Holder, Needy};
 use aether_test_fixtures_kinds::{CountQuery, CountReport, SpawnOutcome, SpawnOutcomeQuery};
@@ -115,17 +114,6 @@ fn a_private_inline_child_with_an_unmet_dependency_is_refused_at_spawn() {
     );
 }
 
-/// Send `wasm` to the component host as a replace and await its answer.
-fn republish(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ReplaceResult {
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let replace = ReplaceComponent { wasm, configs: Vec::new() };
-    harness
-        .execute(vec![("replace", HarnessOp::send_and_await_reply(&host, &replace))])
-        .expect("replace sequence")
-        .reply::<ReplaceResult>("replace")
-        .expect("decode ReplaceResult")
-}
-
 #[test]
 fn a_republish_adding_an_unmet_dependency_to_a_live_inline_instance_is_refused() {
     let Some(helper) = read_wasm("republish_subject_helper") else {
@@ -143,14 +131,12 @@ fn a_republish_adding_an_unmet_dependency_to_a_live_inline_instance_is_refused()
     // barrier makes it live before the republish reads the inventory.
     harness.await_registry_applied();
 
-    let ReplaceResult::Err { error } = republish(&mut harness, successor) else {
+    let Err(SubstrateHarnessError::Publish(error)) = harness.publish(successor) else {
         panic!("a republish adding an unmet dependency to a live helper must be refused");
     };
     assert_eq!(
         error,
-        format!(
-            "replace refused: {path}/test.republish.subject_helper:helper depends on aether.clipboard, which is not live"
-        ),
+        format!("{path}/test.republish.subject_helper:helper depends on aether.clipboard, which is not live"),
         "the refusal names the live helper and the missing namespace",
     );
 
@@ -176,8 +162,7 @@ fn a_republish_adding_a_dependency_to_a_type_with_no_live_instance_proceeds() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     harness.load_any(&component(&base)).unwrap_or_else(|error| panic!("the subject must load: {error}"));
 
-    match republish(&mut harness, successor) {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("a type with no live instance is checked at its next spawn: {error}"),
+    if let Err(error) = harness.publish(successor) {
+        panic!("a type with no live instance is checked at its next spawn: {error}");
     }
 }

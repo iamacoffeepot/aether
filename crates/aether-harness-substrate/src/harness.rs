@@ -39,7 +39,7 @@ use aether_data::{ErasedActorPath, Kind, KindId, LoadName, ReplyContract, Sessio
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, CostTail, CostTailResult};
-use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
+use aether_kinds::{LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
 // The driver sends encode each kind through the descriptor-aware
@@ -134,6 +134,13 @@ pub enum SubstrateHarnessError {
     /// A component load the harness drove itself ([`SubstrateHarness::load`])
     /// was refused, or its reply could not be adopted as the loaded actor.
     Load(String),
+    /// A publish the harness drove itself ([`SubstrateHarness::publish`]) was
+    /// refused.
+    Publish(String),
+    /// A spawn the harness drove itself ([`SubstrateHarness::spawn_any`] and
+    /// the typed spawns) was refused, or its reply could not be adopted as the
+    /// spawned actor.
+    Spawn(String),
     /// [`SubstrateHarness::cast`] found the reference's route not `Live`, or
     /// its published rows do not answer `protocol`. `path` is the canonical
     /// path the registry retains for the reference, when it retains one.
@@ -165,6 +172,8 @@ impl fmt::Display for SubstrateHarnessError {
             Self::Capture(e) => write!(f, "capture failed: {e}"),
             Self::ChildRefused(refused) => write!(f, "child lookup refused: {refused}"),
             Self::Load(e) => write!(f, "component load failed: {e}"),
+            Self::Publish(e) => write!(f, "component publish failed: {e}"),
+            Self::Spawn(e) => write!(f, "component spawn failed: {e}"),
             Self::CastRefused { protocol, path: Some(path) } => {
                 write!(f, "the actor at {path} does not answer the protocol {protocol}")
             }
@@ -277,7 +286,7 @@ pub struct SubstrateHarness {
     /// the harness's lifetime so the passives' dispatcher threads
     /// stay alive; drops in reverse declaration order before
     /// `_boot`, so render+log shut down before the scheduler joins.
-    passive: PassiveChassis<SubstrateHarnessChassis>,
+    pub(crate) passive: PassiveChassis<SubstrateHarnessChassis>,
 }
 
 /// The pumped component host's slot, shut down when the harness drops so the
@@ -892,72 +901,6 @@ impl SubstrateHarness {
         self.passive.actor_cost(actor, &CostTail { kind: None })
     }
 
-    /// Load the component export `R` and return its proven reference and
-    /// canonical lineage path (ADR-0230 §3).
-    ///
-    /// Sets `component.export` to `R::NAMESPACE`, sends the load to the
-    /// component host with this harness's session as the reply target, and
-    /// types the successful reply's stamped sender — the loaded trampoline,
-    /// which answers the load itself — as `R`. Needs
-    /// [`SubstrateHarnessBuilder::with_component_host`].
-    ///
-    /// # Errors
-    ///
-    /// [`SubstrateHarnessError::Load`] when the host refuses the load or the
-    /// reply's sender is not the loaded component; the pump's timeout and
-    /// decode errors otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the harness composed no component host.
-    pub fn load<R: Addressable>(
-        &mut self,
-        mut component: LoadComponent,
-    ) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
-        component.export = Some(R::NAMESPACE.to_owned());
-        let (sender, path) = self.load_any(&component)?;
-        let actor =
-            self.passive.adopt_load::<R>(sender).map_err(|error| SubstrateHarnessError::Load(error.to_string()))?;
-
-        Ok((actor, path))
-    }
-
-    /// [`Self::load`] for a component whose actor type the test cannot name,
-    /// such as a fixture that ships only as wasm: the loaded actor's erased
-    /// reference, read off the reply's stamped sender, and its canonical
-    /// lineage path. `component` is sent as given. Type the reference with
-    /// [`Self::cast`] against a test-local `#[protocol]` naming the rows the
-    /// test sends.
-    ///
-    /// # Errors
-    ///
-    /// [`SubstrateHarnessError::Load`] when the host refuses the load or the
-    /// reply carries no sender; the pump's timeout and decode errors
-    /// otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the harness composed no component host.
-    pub fn load_any(
-        &mut self,
-        component: &LoadComponent,
-    ) -> Result<(ErasedActorRef, ErasedActorPath), SubstrateHarnessError> {
-        let host = self.passive.actor_ref::<ComponentHostCapability>();
-        let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(host, component, self.session_reply(cid));
-
-        let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, LoadResult::NAME)? else {
-            return Err(SubstrateHarnessError::Decode("expected a session-targeted LoadResult".to_owned()));
-        };
-        match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { path, .. }) => sender
-                .map(|sender| (sender, path))
-                .ok_or_else(|| SubstrateHarnessError::Load("the load reply carried no sender stamp".to_owned())),
-            Some(LoadResult::Err { error }) => Err(SubstrateHarnessError::Load(error)),
-            None => Err(SubstrateHarnessError::Decode("LoadResult decode failed".to_owned())),
-        }
-    }
-
     /// Type the erased reference `actor` as the protocol `P` (ADR-0231 §4's
     /// guard cast): the registry reads the route's `Live` published rows and
     /// mints a reference only when they answer every row of `P` with the exact
@@ -974,31 +917,6 @@ impl SubstrateHarness {
             protocol: type_name::<P>(),
             path: self.passive.actor_path(actor),
         })
-    }
-
-    /// The component host's `ListComponents` answer: every loaded guest's
-    /// canonical path, read from the publication table (ADR-0241 §3). A test
-    /// that asserts no route stands reads it here, since a refused or retired
-    /// guest leaves no reference to probe.
-    ///
-    /// # Errors
-    ///
-    /// The pump's timeout and decode errors.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the harness composed no component host.
-    pub fn list_components(&mut self) -> Result<Vec<String>, SubstrateHarnessError> {
-        let host = self.passive.actor_ref::<ComponentHostCapability>();
-        let cid = self.fresh_correlation_id();
-        self.passive.send_for_reply(host, &ListComponents {}, self.session_reply(cid));
-
-        let EgressEvent::ToSession { payload, .. } = self.pump_until_event(cid, ListComponentsResult::NAME)? else {
-            return Err(SubstrateHarnessError::Decode("expected a session-targeted ListComponentsResult".to_owned()));
-        };
-        ListComponentsResult::decode_from_bytes(&payload)
-            .map(|result| result.names)
-            .ok_or_else(|| SubstrateHarnessError::Decode("ListComponentsResult decode failed".to_owned()))
     }
 
     /// Bytes-level settlement-gated send: push `(kind, bytes)` to the actor
@@ -1469,7 +1387,7 @@ impl SubstrateHarness {
     /// chassis-peripheral kinds; each one now routes to its own cap
     /// (`aether.render.capture_frame`, `aether.substrate_harness.advance`,
     /// `aether.window.set_mode`, etc.) and replies to the session here.
-    const fn session_reply(&self, cid: u64) -> ReplyTarget {
+    pub(crate) const fn session_reply(&self, cid: u64) -> ReplyTarget {
         ReplyTarget::Session { session: self.session, correlation: cid }
     }
 
@@ -1477,7 +1395,7 @@ impl SubstrateHarness {
     /// correlation a recipient echoes back, which `pump_until_event` matches
     /// the loopback reply by. It names no root — `send_tracked` mints those
     /// from the engine's one chassis-root counter.
-    fn fresh_correlation_id(&self) -> u64 {
+    pub(crate) fn fresh_correlation_id(&self) -> u64 {
         // 0 is the "no correlation" sentinel so skip it.
         let id = self.next_correlation_id.fetch_add(1, Ordering::SeqCst);
         if id == 0 {
@@ -1522,7 +1440,11 @@ impl SubstrateHarness {
     /// reads the channel, but only between pump waits, and each pump wait
     /// drains every source before it first blocks, so a wake that settle
     /// consumed is covered.
-    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, SubstrateHarnessError> {
+    pub(crate) fn pump_until_event(
+        &mut self,
+        cid: u64,
+        expected: &'static str,
+    ) -> Result<EgressEvent, SubstrateHarnessError> {
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
         // healthy reply meets, so it reads the runtime-configurable

@@ -17,10 +17,7 @@ use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{
-    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
-    ReplaceResult,
-};
+use aether_kinds::{DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::Counter;
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
@@ -67,7 +64,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorPa
             "load",
             HarnessOp::send_and_await_reply(
                 &harness.actor_ref::<ComponentHostCapability>(),
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PROBE_NAME.to_owned()) },
             ),
         )])
         .expect("load sequence");
@@ -93,7 +90,7 @@ fn list_components_reports_loaded_probe_lineage() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let name = harness
-        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PROBE_NAME.to_owned()) })
         .unwrap_or_else(|error| panic!("load_component: {error}"))
         .1
         .to_string();
@@ -134,16 +131,14 @@ fn tick_subscription_yields_one_tick_observed_per_advance() {
     );
 }
 
-/// ADR-0096: a multi-actor module loads through the unmodified host,
-/// instantiating its entry export — the first type in the `export!`
-/// list, `Probe` — via the boxed `ErasedWasmActor` path. Omitting `name`
-/// exercises the `aether.namespace` section, which carries the entry
-/// type's `NAMESPACE` (`test.probe`), and the `LoadResult`
-/// capabilities come from the entry type's `aether.kinds.inputs`
-/// manifest. Proves init-through-the-box and the multi-actor section
-/// emission end-to-end; selecting a non-entry export is the follow-on.
+/// ADR-0096: a multi-actor module loads the export a load names through the
+/// unmodified host, via the boxed `ErasedWasmActor` path. Naming
+/// `test.probe` with no `name` registers the singleton at its own
+/// `NAMESPACE`, and the `LoadResult` capabilities come from `Probe`'s
+/// `aether.kinds.inputs` manifest group. Proves init-through-the-box and the
+/// multi-actor section emission end-to-end.
 #[test]
-fn multi_actor_module_loads_entry_export() {
+fn a_named_probe_load_registers_at_its_namespace() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
@@ -156,11 +151,10 @@ fn multi_actor_module_loads_entry_export() {
                 &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
-                    // No name: resolve from the entry type's aether.namespace section.
+                    // No name: a singleton registers at its own namespace.
                     name: None,
                     config: Vec::new(),
-                    // No selector: load the entry export (Probe).
-                    export: None,
+                    export: Some(PROBE_NAME.to_owned()),
                 },
             ),
         )])
@@ -168,14 +162,10 @@ fn multi_actor_module_loads_entry_export() {
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { path: name, capabilities, .. } => {
             assert!(
-                name.to_string() == "test.probe",
-                "entry export should resolve to the first type's NAMESPACE \
-                 (test.probe); got {name}",
+                name.to_string() == PROBE_NAME,
+                "a named probe load should register at its NAMESPACE (test.probe); got {name}",
             );
-            assert!(
-                !capabilities.handlers.is_empty(),
-                "entry export Probe declares handlers; capabilities.handlers was empty",
-            );
+            assert!(!capabilities.handlers.is_empty(), "Probe declares handlers; capabilities.handlers was empty");
         }
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     }
@@ -399,22 +389,10 @@ fn replace_component_preserves_mailbox_identity() {
     );
 
     // Republish a successor build of the same code: identical bytes would
-    // answer `Ok` with no swap (ADR-0241 §7). `SendAndAwaitReply` blocks on `ReplaceResult` so the splice
-    // completes before the post-replace baseline is sampled.
+    // answer `Ok` with no swap (ADR-0241 §7). The publish blocks on its `PublishResult`, which answers once
+    // the splice commits, so it completes before the post-replace baseline is sampled.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     let post_replace_baseline = harness.count_observed(TICK_OBSERVED);
     harness.execute(vec![("post", HarnessOp::advance(4))]).expect("post-replace advance");
@@ -471,19 +449,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
     // restores it on the new one.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
@@ -538,19 +504,7 @@ fn replace_preserves_state_via_typed_state_kind() {
 
     // Republish a successor build; the generated hooks carry the count.
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     // Mailbox ids are stable across a replace (ADR-0022), so the pre-replace
     // reference still names the successor instance.
@@ -610,19 +564,7 @@ fn typed_state_decode_miss_boots_fresh() {
     // Replace with the reshaped wasm: the saved bundle's leading id no
     // longer matches the new `CounterState::ID`, so rehydrate misses.
     let reshaped_wasm = fs::read(&reshaped_path).expect("read reshaped fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: reshaped_wasm, configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(reshaped_wasm).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     let post = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
@@ -670,19 +612,7 @@ fn childless_component_hot_reloads_unchanged() {
     );
 
     let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
-    let swapped = harness
-        .execute(vec![(
-            "swap",
-            HarnessOp::send_and_await_reply(
-                &harness.actor_ref::<ComponentHostCapability>(),
-                &ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() },
-            ),
-        )])
-        .expect("replace sequence");
-    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
-        ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
-    }
+    harness.publish(successor_wasm(&wasm, 1)).unwrap_or_else(|error| panic!("publish the successor: {error}"));
 
     let post = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])

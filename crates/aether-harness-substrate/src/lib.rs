@@ -63,8 +63,11 @@
 //!
 //! Every send addresses a proven reference ([`SendTarget`], ADR-0230): a
 //! composed capability's from [`SubstrateHarness::actor_ref`], a loaded
-//! component's from [`SubstrateHarness::load`], a wasm-only fixture's from
-//! [`SubstrateHarness::load_any`] typed with [`SubstrateHarness::cast`], and
+//! component's from [`SubstrateHarness::load`], a published component's
+//! from [`SubstrateHarness::spawn`], [`SubstrateHarness::spawn_keyed`], or
+//! [`SubstrateHarness::spawn_child`] after [`SubstrateHarness::publish`], a
+//! wasm-only fixture's from [`SubstrateHarness::load_any`] or
+//! [`SubstrateHarness::spawn_any`] typed with [`SubstrateHarness::cast`], and
 //! a spawned child's or opened window's from [`SubstrateHarness::child`]
 //! beneath a reference already held. An `&ActorRef<R>` takes the kinds `R`
 //! handles, a `&ProtocolRef<P>` the kinds `P` lists, and either takes the
@@ -80,6 +83,7 @@
 //! and a wgpu adapter, which is why they are not in the example above.
 
 pub mod chassis;
+mod components;
 mod diagnostics;
 mod execute;
 mod harness;
@@ -93,6 +97,7 @@ pub use chassis::{
     SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
     WORKERS,
 };
+pub use components::SpawnedActor;
 pub use execute::{
     DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, FrameworkTail, HarnessOp,
     HarnessOutput, PollObserver, PreparedSend, SendTarget, Tail,

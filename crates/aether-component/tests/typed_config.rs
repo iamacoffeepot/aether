@@ -15,7 +15,7 @@ use aether_data::ErasedActorPath;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::ProbeWithConfig;
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
@@ -124,14 +124,9 @@ fn a_replace_without_config_reuses_the_spawn_config() {
     // A successor build of the same code: identical bytes would answer with
     // no swap, and no candidate would be built.
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
-    let host = harness.actor_ref::<ComponentHostCapability>();
-    let replaced = harness
-        .execute(vec![("replace", HarnessOp::send_and_await_reply(&host, &replace))])
-        .expect("replace sequence")
-        .reply::<ReplaceResult>("replace")
-        .expect("decode ReplaceResult");
-    assert!(matches!(replaced, ReplaceResult::Ok { .. }), "the replace commits: {replaced:?}");
+    if let Err(error) = harness.publish(successor_wasm(&wasm, 1)) {
+        panic!("the republish commits: {error}");
+    }
 
     assert_eq!(
         echo_config(&mut harness, probe),

@@ -12,14 +12,15 @@ use std::fs;
 
 use aether_actor::{HeldReply, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::ErasedActorPath;
+use aether_data::{ErasedActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice, ReplaceComponent, ReplaceResult};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice, Publish, PublishResult};
 use aether_substrate::BootError;
 use aether_substrate::MonitorHandle;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::Panel;
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 /// An instanced export, so a load names its key.
@@ -107,8 +108,8 @@ fn keyed_load(wasm: &[u8]) -> LoadComponent {
 }
 
 /// Catches a drop that leaves a refillable `Live` slot: its name would stay
-/// listed and published, a reload would answer `SubnameInUse` rather than
-/// retired, a republish of its module would refill it, and a second drop at
+/// listed and published, a reload would answer with the live instance rather
+/// than be refused as retired, a republish of its module would refill it, and a second drop at
 /// its path would succeed.
 #[test]
 fn a_dropped_instance_closes_and_its_name_is_spent() {
@@ -125,8 +126,10 @@ fn a_dropped_instance_closes_and_its_name_is_spent() {
     let host = harness.actor_ref::<ComponentHostCapability>();
     let watcher = harness.actor_ref::<DepartureWatcher>();
 
+    harness.publish(wasm.clone()).unwrap_or_else(|error| panic!("the bundle publishes: {error}"));
+    let victim_key = LoadName::new("victim").expect("a valid instance key");
     let (victim, path) =
-        harness.load_any(&keyed_load(&wasm)).unwrap_or_else(|error| panic!("the panel loads: {error}"));
+        harness.spawn_keyed::<Panel>(&victim_key).unwrap_or_else(|error| panic!("the panel spawns: {error}"));
     assert_eq!(path.as_str(), format!("{PANEL_EXPORT}:victim"));
 
     let drop = DropComponent { target: path.clone() };
@@ -150,18 +153,18 @@ fn a_dropped_instance_closes_and_its_name_is_spent() {
     // close tail's route retirement, so the owner has applied it.
     let listed = harness.list_components().expect("list components");
     assert!(!listed.contains(&path.to_string()), "the dropped instance is not listed: {listed:?}");
-    assert_eq!(harness.published_contract(victim), None, "the dropped instance's route no longer reads `Live`");
+    assert_eq!(harness.published_contract(victim.erase()), None, "the dropped instance's route no longer reads `Live`");
 
     // A republish of the module moves every live instance and refills
     // nothing: the dropped name stays spent.
-    let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
+    let publish = Publish { code: successor_wasm(&wasm, 1).into(), configs: Vec::new() };
     let refused = harness
         .execute(vec![
-            ("replace", HarnessOp::send_and_await_reply(&host, &replace)),
+            ("publish", HarnessOp::send_and_await_reply(&host, &publish)),
             ("drop-again", HarnessOp::send_and_await_reply(&host, &drop)),
         ])
         .expect("republish, then drop the dropped path");
-    if let ReplaceResult::Err { error } = refused.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
+    if let PublishResult::Err { error } = refused.reply::<PublishResult>("publish").expect("decode PublishResult") {
         panic!("a republish with no live instance of the dropped path still publishes: {error}");
     }
     let listed = harness.list_components().expect("list components");
