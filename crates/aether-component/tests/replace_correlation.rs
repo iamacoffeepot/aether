@@ -25,7 +25,7 @@
 
 use std::fs;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::{Addressable, ProtocolRef, Undeclared};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -35,6 +35,21 @@ use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_kinds::{CarriedReplyMatched, CarriedRequestResult, ReleaseCarried, RunCarriedRequest};
 use aether_test_fixtures_republish::ReplyHolder;
+
+/// The holder row both families' `ReplyHolder` publish: a manual
+/// `ReleaseCarried`. Both the bundle's and the republish fixture's holder
+/// answer it the same way, so one protocol serves either family.
+#[aether_actor::protocol]
+trait CarryHolder {
+    fn release(mail: ReleaseCarried) -> Undeclared;
+}
+
+/// The requester row both families' requester publish: a silent
+/// `RunCarriedRequest`.
+#[aether_actor::protocol]
+trait CarryRequester {
+    fn run(mail: RunCarriedRequest);
+}
 
 /// A module holding a carried-request holder and requester, and the
 /// replacement a test republishes it with.
@@ -74,7 +89,7 @@ const RESHAPING: Family = Family {
 fn release_across_swap(
     family: &Family,
     release_before_swap: bool,
-) -> Option<(SubstrateHarness, ErasedActorRef, ReplaceResult)> {
+) -> Option<(SubstrateHarness, ProtocolRef<CarryHolder>, ReplaceResult)> {
     let wasm = fs::read(require_wasm(family.module)?).expect("read fixture wasm");
     let replacement = match family.replacement {
         Some(module) => fs::read(require_wasm(module)?).expect("read replacement wasm"),
@@ -95,10 +110,12 @@ fn release_across_swap(
     };
     let (holder, _) = load(family.holder);
     let (requester, _) = load(family.requester);
+    let holder = harness.cast::<CarryHolder>(holder).expect("the holder publishes ReleaseCarried");
+    let requester = harness.cast::<CarryRequester>(requester).expect("the requester publishes RunCarriedRequest");
 
-    let mut steps = vec![("request_1", HarnessOp::send_and_settle(requester, &RunCarriedRequest { tag: 1 }))];
+    let mut steps = vec![("request_1", HarnessOp::send_and_settle(&requester, &RunCarriedRequest { tag: 1 }))];
     if release_before_swap {
-        steps.push(("release_before_swap", HarnessOp::send_and_settle(holder, &ReleaseCarried)));
+        steps.push(("release_before_swap", HarnessOp::send_and_settle(&holder, &ReleaseCarried)));
     }
     steps.extend([
         (
@@ -108,8 +125,8 @@ fn release_across_swap(
                 &ReplaceComponent { wasm: replacement, configs: Vec::new() },
             ),
         ),
-        ("request_2", HarnessOp::send_and_settle(requester, &RunCarriedRequest { tag: 2 })),
-        ("release", HarnessOp::send_and_settle(holder, &ReleaseCarried)),
+        ("request_2", HarnessOp::send_and_settle(&requester, &RunCarriedRequest { tag: 2 })),
+        ("release", HarnessOp::send_and_settle(&holder, &ReleaseCarried)),
     ]);
 
     let swap = harness.execute(steps).expect("carried-request sequence").reply::<ReplaceResult>("swap");
@@ -156,7 +173,7 @@ fn a_replaced_guest_never_reuses_a_reply_mail_id() {
     let result = harness
         .execute(vec![(
             "tail",
-            HarnessOp::send_and_await_reply(holder, &TraceTail { max: 0, since: None, root: None }),
+            HarnessOp::send_and_await_reply(&holder, &TraceTail { max: 0, since: None, root: None }),
         )])
         .expect("holder trace tail");
     let entries = match result.reply::<TraceTailResult>("tail").expect("decode TraceTailResult") {

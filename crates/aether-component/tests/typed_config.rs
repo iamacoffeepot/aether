@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::ActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::ErasedActorPath;
 use aether_data::Kind;
@@ -17,6 +17,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DescribeComponent, DescribeComponentResult, LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::ProbeWithConfig;
 use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 use std::fs;
 
@@ -27,11 +28,16 @@ use aether_test_fixtures_kinds as _;
 
 /// Load `probe_with_config` with `config` bytes, assert it advertises its
 /// config kind, and hand back the loaded guest's reference and path.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>) -> (ErasedActorRef, ErasedActorPath) {
+fn load_probe(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    config: Vec<u8>,
+) -> (ActorRef<ProbeWithConfig>, ErasedActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let load = LoadComponent { wasm, name: None, config, export: Some("test.probe_with_config".to_owned()) };
-    let (probe, path) =
-        harness.load_any(&load).unwrap_or_else(|error| panic!("the typed-config guest failed to load: {error}"));
+    let load = LoadComponent { wasm, name: None, config, export: None };
+    let (probe, path) = harness
+        .load::<ProbeWithConfig>(load)
+        .unwrap_or_else(|error| panic!("the typed-config guest failed to load: {error}"));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let described = harness
@@ -53,9 +59,9 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, config: Vec<u8>)
 }
 
 /// Ask the loaded `probe_with_config` guest which config its `init` saw.
-fn echo_config(harness: &mut SubstrateHarness, probe: ErasedActorRef) -> ConfigEcho {
+fn echo_config(harness: &mut SubstrateHarness, probe: ActorRef<ProbeWithConfig>) -> ConfigEcho {
     harness
-        .execute(vec![("echo", HarnessOp::send_and_await_reply(probe, &ConfigQuery))])
+        .execute(vec![("echo", HarnessOp::send_and_await_reply(&probe, &ConfigQuery))])
         .expect("echo sequence")
         .reply::<ConfigEcho>("echo")
         .expect("decode ConfigEcho")

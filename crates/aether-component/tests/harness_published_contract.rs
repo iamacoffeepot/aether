@@ -28,6 +28,14 @@ const BUNDLE: &str = "aether_test_fixtures_bundle";
 const SUBJECT_BASE: &str = "republish_subject_base";
 const SUBJECT_EXTENDED: &str = "republish_subject_extended";
 
+/// The republish subject's row this file sends: a silent `Bump`. Both the
+/// base and its row-adding successor ship only as cdylib examples, so the
+/// test casts its `load_any` reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait SubjectBump {
+    fn bump(mail: Bump);
+}
+
 /// `rows` sorted by kind, the order a published contract holds them in.
 fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
     rows.sort_by_key(|(kind, _)| *kind);
@@ -77,6 +85,7 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace() {
     let (subject, _) = harness
         .load_any(&load_request(fs::read(base_path).expect("read subject base wasm")))
         .unwrap_or_else(|error| panic!("the base must load: {error}"));
+    let subject_bump = harness.cast::<SubjectBump>(subject).expect("the subject publishes Bump");
     let base = sorted(vec![(Bump::ID, ReplyContract::None), (CountQuery::ID, ReplyContract::One(CountReport::ID))]);
     assert_eq!(harness.published_contract(subject), Some((base.clone(), false)));
 
@@ -86,7 +95,7 @@ fn a_loaded_component_publishes_its_guest_contract_through_replace() {
     if let ReplaceResult::Err { error } = replaced.reply::<ReplaceResult>("replace").expect("decode ReplaceResult") {
         panic!("a replace that only adds a row must succeed: {error}");
     }
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(subject, &Bump))]).expect("bump the replaced actor");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&subject_bump, &Bump))]).expect("bump the replaced actor");
     harness.await_registry_applied();
     let extended = (sorted([base, vec![(InlineProbe::ID, ReplyContract::None)]].concat()), false);
     assert_eq!(harness.published_contract(subject), Some(extended));

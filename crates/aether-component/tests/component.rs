@@ -22,7 +22,18 @@ use aether_kinds::{
     ReplaceResult,
 };
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::Counter;
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
+
+/// The `test.stateful.typed` row the cdylib-only typed / reshaped
+/// satellites publish: a silent `Bump` and a `CountQuery -> CountReport`.
+/// Neither satellite ships as an rlib, so a test casts its `load_any`
+/// reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait StatefulCounter {
+    fn bump(mail: Bump);
+    fn count(mail: CountQuery) -> CountReport;
+}
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
@@ -438,24 +449,19 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load the `Counter` actor (a non-entry actor in the bundle) and capture
-    // its mailbox id.
+    // its proven reference.
     let (counter, _path) = harness
-        .load_any(&LoadComponent {
-            wasm,
-            name: None,
-            config: Vec::new(),
-            export: Some("test.stateful.counter".to_owned()),
-        })
+        .load::<Counter>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 
     // Bump the counter to 3, then read it back. `send_and_settle` waits out
     // each bump's whole chain, so all three land before the query.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
-            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
@@ -482,7 +488,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -513,14 +519,15 @@ fn replace_preserves_state_via_typed_state_kind() {
     let (counter, _path) = harness
         .load_any(&LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
+    let counter = harness.cast::<StatefulCounter>(counter).expect("the typed satellite publishes Bump and CountQuery");
 
     // Bump the counter to 3, then read it back.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
-            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -545,8 +552,10 @@ fn replace_preserves_state_via_typed_state_kind() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
+    // Mailbox ids are stable across a replace (ADR-0022), so the pre-replace
+    // reference still names the successor instance.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -582,13 +591,14 @@ fn typed_state_decode_miss_boots_fresh() {
     let (counter, _path) = harness
         .load_any(&LoadComponent { wasm: typed_wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
+    let counter = harness.cast::<StatefulCounter>(counter).expect("the typed satellite publishes Bump and CountQuery");
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_c", HarnessOp::send_and_settle(counter, &Bump)),
-            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -615,7 +625,7 @@ fn typed_state_decode_miss_boots_fresh() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -643,20 +653,14 @@ fn childless_component_hot_reloads_unchanged() {
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     let (counter, _path) = harness
-        .load_any(&LoadComponent {
-            wasm,
-            name: None,
-            config: Vec::new(),
-            // `Counter` is a non-entry actor in the bundle.
-            export: Some("test.stateful.counter".to_owned()),
-        })
+        .load::<Counter>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle(counter, &Bump)),
-            ("bump_b", HarnessOp::send_and_settle(counter, &Bump)),
-            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -681,7 +685,7 @@ fn childless_component_hot_reloads_unchanged() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
         .expect("post-replace query sequence");
     assert_eq!(
         post.reply::<CountReport>("query").expect("decode post-replace CountReport"),

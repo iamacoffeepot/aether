@@ -15,13 +15,14 @@
 
 use std::fs;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{ExecutionError, HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{ExecutionError, HarnessOp, SendTarget, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_substrate::testing::successor_wasm;
+use aether_test_fixtures_bundle::{HeldForgetter, HeldKeeper, HeldRequester, ReplyHolder as CarryReplyHolder};
 use aether_test_fixtures_kinds::{
     CountQuery, CountReport, HELD_TARGET_FORGETTER, HELD_TARGET_KEEPER, HELD_TARGET_RELAY, HeldReplyMatched,
     ReleaseCarried, ReleaseHeld, RunHeldRequest,
@@ -34,6 +35,16 @@ const RELAY: &str = "test.held.relay";
 const KEEPER: &str = "test.held.keeper";
 const FORGETTER: &str = "test.held.forgetter";
 const REQUESTER: &str = "test.held.requester";
+
+/// The `test.republish.carry.held_requester` rows this file sends: a silent
+/// `RunHeldRequest` and `CountQuery -> CountReport`. It ships only as a
+/// cdylib example, so the test casts its `load_any` reference to this
+/// instead of naming a type.
+#[aether_actor::protocol]
+trait CarriedHeldRequester {
+    fn run(mail: RunHeldRequest);
+    fn count(mail: CountQuery) -> CountReport;
+}
 
 /// The held actor a scenario sends its request to, and how its held reply
 /// is released.
@@ -75,31 +86,28 @@ fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, ReplaceResult
     let wasm = fs::read(require_wasm(FIXTURE_CRATE)?).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
 
-    let mut load = |export: &str| {
-        harness
-            .load_any(&LoadComponent {
-                wasm: wasm.clone(),
-                name: None,
-                config: Vec::new(),
-                export: Some(export.to_owned()),
-            })
-            .unwrap_or_else(|error| panic!("load {export}: {error}"))
-    };
-    let (reply_holder, _) = load(HOLDER);
-    let _ = load(RELAY);
-    let (keeper, _) = load(KEEPER);
-    let (forgetter, _) = load(FORGETTER);
-    let (requester, _) = load(REQUESTER);
+    let component = |wasm: &[u8]| LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None };
+    let (reply_holder, _) =
+        harness.load::<CarryReplyHolder>(component(&wasm)).unwrap_or_else(|error| panic!("load {HOLDER}: {error}"));
+    let _ = harness
+        .load_any(&LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: Some(RELAY.to_owned()) })
+        .unwrap_or_else(|error| panic!("load {RELAY}: {error}"));
+    let (keeper, _) =
+        harness.load::<HeldKeeper>(component(&wasm)).unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
+    let (forgetter, _) =
+        harness.load::<HeldForgetter>(component(&wasm)).unwrap_or_else(|error| panic!("load {FORGETTER}: {error}"));
+    let (requester, _) =
+        harness.load::<HeldRequester>(component(&wasm)).unwrap_or_else(|error| panic!("load {REQUESTER}: {error}"));
 
     let release = match holder {
-        Holder::Relay => HarnessOp::send_and_settle(reply_holder, &ReleaseCarried),
-        Holder::Keeper => HarnessOp::send_and_settle(keeper, &ReleaseHeld),
-        Holder::Forgetter => HarnessOp::send_and_settle(forgetter, &ReleaseHeld),
+        Holder::Relay => HarnessOp::send_and_settle(&reply_holder, &ReleaseCarried),
+        Holder::Keeper => HarnessOp::send_and_settle(&keeper, &ReleaseHeld),
+        Holder::Forgetter => HarnessOp::send_and_settle(&forgetter, &ReleaseHeld),
     };
     let replace = ReplaceComponent { wasm: successor_wasm(&wasm, 1), configs: Vec::new() };
     let run = RunHeldRequest { tag: 1, target: holder.target() };
 
-    let swap = run_across_swap(&mut harness, requester, run, &replace, release)
+    let swap = run_across_swap(&mut harness, &requester, run, &replace, release)
         .unwrap_or_else(|error| panic!("held-reply sequence for {}: {error}", holder.export()));
     Some((harness, swap))
 }
@@ -107,14 +115,20 @@ fn replace_while_held(holder: Holder) -> Option<(SubstrateHarness, ReplaceResult
 /// Send `run` to `requester`, republish with `replace`, run `release`, and
 /// wait for the requester to match the held reply: the held reply lands on
 /// the detached request's chain, which no harness step joins, so the
-/// requester's match count is the barrier.
-fn run_across_swap(
+/// requester's match count is the barrier. Generic over the requester's
+/// reference shape: the bundle's `HeldRequester` sends through an
+/// `&ActorRef<R>`, and the cdylib-only carry requester through a
+/// `&ProtocolRef<P>` cast.
+fn run_across_swap<'r, T, I1, I2>(
     harness: &mut SubstrateHarness,
-    requester: ErasedActorRef,
+    requester: &'r T,
     run: RunHeldRequest,
     replace: &ReplaceComponent,
     release: HarnessOp,
-) -> Result<ReplaceResult, ExecutionError> {
+) -> Result<ReplaceResult, ExecutionError>
+where
+    &'r T: SendTarget<RunHeldRequest, I1> + SendTarget<CountQuery, I2>,
+{
     let steps = vec![
         ("request", HarnessOp::send_and_settle(requester, &run)),
         ("swap", HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), replace)),
@@ -190,6 +204,10 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
     };
     let v1 = fs::read(v1_path).expect("read republish_carry_v1");
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
+    let (reply_holder, _) = harness
+        .load::<ReplyHolder>(LoadComponent { wasm: v1.clone(), name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {}: {error}", ReplyHolder::NAMESPACE));
+
     let mut load = |export: &str| {
         harness
             .load_any(&LoadComponent {
@@ -200,15 +218,17 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
             })
             .unwrap_or_else(|error| panic!("load {export}: {error}"))
     };
-    let (reply_holder, _) = load(ReplyHolder::NAMESPACE);
     let _ = load("test.republish.carry.held_relay");
     let (requester, _) = load("test.republish.carry.held_requester");
+    let requester = harness
+        .cast::<CarriedHeldRequester>(requester)
+        .expect("the held requester publishes RunHeldRequest and CountQuery");
 
     let replace = ReplaceComponent { wasm: fs::read(v2_path).expect("read republish_carry_v2"), configs: Vec::new() };
-    let release = HarnessOp::send_and_settle(reply_holder, &ReleaseCarried);
+    let release = HarnessOp::send_and_settle(&reply_holder, &ReleaseCarried);
     let swap = run_across_swap(
         &mut harness,
-        requester,
+        &requester,
         RunHeldRequest { tag: 1, target: HELD_TARGET_RELAY },
         &replace,
         release,

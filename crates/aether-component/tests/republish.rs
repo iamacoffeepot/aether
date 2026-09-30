@@ -25,12 +25,12 @@
 
 use std::fs;
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_component::ComponentHostCapability;
 use aether_component::component::Prepared;
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness};
 use aether_kinds::{
     DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceConfig, ReplaceResult,
 };
@@ -40,6 +40,7 @@ use aether_test_fixtures_kinds::{
     GateQuery, GateQueryResult, GuestLoad, HeldRequest, HeldRequestResult, PeerConfig, ReleaseCarried, TickObserved,
     WireCountQuery, WireObserved,
 };
+use aether_test_fixtures_republish::{Keeper, ProbeGate};
 
 const GATE: &str = "test.republish.gate";
 const PEER: &str = "test.republish.peer";
@@ -47,6 +48,47 @@ const COURIER: &str = "test.republish.courier";
 const PARCEL: &str = "test.republish.parcel";
 const KEEPER: &str = "test.republish.keep.keeper";
 const REFUSER: &str = "test.republish.keep.refuser";
+
+/// The courier's row this file sends: `CourierQuery -> CourierQueryResult`.
+/// Both courier versions ship only as cdylib examples, so the test casts its
+/// `load_any` reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait CourierRow {
+    fn query(mail: CourierQuery) -> CourierQueryResult;
+}
+
+/// The group gate's row `an_abort_after_ready_reinstates_and_rewires_the_ready_member`
+/// sends: `WireCountQuery -> CountReport`. This scenario's gate never leaves
+/// v1 (its republish aborts), and v1 ships only as a cdylib example.
+#[aether_actor::protocol]
+trait GateWired {
+    fn wired(mail: WireCountQuery) -> CountReport;
+}
+
+/// The group gate's row `a_changed_config_kind_needs_a_config_for_each_instance`
+/// sends: `GateQuery -> GateQueryResult`. Both v1 and v3 ship only as cdylib
+/// examples.
+#[aether_actor::protocol]
+trait GateRow {
+    fn query(mail: GateQuery) -> GateQueryResult;
+}
+
+/// The group peer's rows `every_live_instance_of_every_namespace_commits_together`
+/// sends: a silent `Bump` and `CountQuery -> CountReport`. Every peer version
+/// ships only as a cdylib example.
+#[aether_actor::protocol]
+trait GroupPeer {
+    fn bump(mail: Bump);
+    fn count(mail: CountQuery) -> CountReport;
+}
+
+/// The loader's row this file sends: `GuestLoad -> LoadResult`. The loader
+/// ships only as a cdylib example, so the test casts its `load_any`
+/// reference to this instead of naming a type.
+#[aether_actor::protocol]
+trait LoaderRow {
+    fn load(mail: GuestLoad) -> LoadResult;
+}
 
 /// The courier pair's two versions, or `None` when they are not built.
 struct Couriers {
@@ -90,7 +132,8 @@ fn republish_courier(
     };
 
     expect_ok(&republish(harness, &replace));
-    call::<_, CourierQueryResult>(harness, courier, &CourierQuery).outcomes
+    let courier = harness.cast::<CourierRow>(courier).expect("the courier publishes CourierQuery");
+    call::<_, _, CourierQueryResult>(harness, &courier, &CourierQuery).outcomes
 }
 
 /// The keep pair's two versions, or `None` when they are not built.
@@ -105,9 +148,9 @@ fn keeps() -> Option<Keeps> {
 }
 
 /// Send the keeper a `ReleaseCarried` and wait for its chain to settle.
-fn release_keeper(harness: &mut SubstrateHarness, keeper: ErasedActorRef) {
+fn release_keeper(harness: &mut SubstrateHarness, keeper: ActorRef<Keeper>) {
     harness
-        .execute(vec![("release", HarnessOp::send_and_settle(keeper, &ReleaseCarried))])
+        .execute(vec![("release", HarnessOp::send_and_settle(&keeper, &ReleaseCarried))])
         .expect("release the keeper");
 }
 
@@ -166,7 +209,11 @@ fn republish(harness: &mut SubstrateHarness, replace: &ReplaceComponent) -> Repl
         .expect("decode ReplaceResult")
 }
 
-fn call<K: Kind + Clone + 'static, R: Kind>(harness: &mut SubstrateHarness, to: ErasedActorRef, mail: &K) -> R {
+fn call<K: Kind + Clone + 'static, I, R: Kind>(
+    harness: &mut SubstrateHarness,
+    to: impl SendTarget<K, I>,
+    mail: &K,
+) -> R {
     harness
         .execute(vec![("call", HarnessOp::send_and_await_reply(to, mail))])
         .expect("guest call")
@@ -198,7 +245,18 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
         return;
     };
     let mut harness = pumped();
-    let (gate, _) = load_gate(&mut harness, &fixtures.v1, "a");
+    // Typed by the successor (`ProbeGate`, the shared lib type) rather than
+    // v1's own cdylib-only `Gate`: the probes below name `GateProbe`, a row
+    // only the winning successor publishes, and the harness's adopt checks
+    // only that the route is `Live` and a component trampoline.
+    let (gate, _) = harness
+        .load::<ProbeGate>(LoadComponent {
+            wasm: fixtures.v1.clone(),
+            name: Some("a".to_owned()),
+            config: Vec::new(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("load gate a: {error}"));
 
     let host = harness.actor_ref::<ComponentHostCapability>();
     let pending = harness.send_deferred(host, &replace(&fixtures.v2));
@@ -207,12 +265,12 @@ fn mail_gated_during_prepare_reaches_the_winning_guest_in_order() {
     // The gate answered `Ready` and the host has not run since, so no commit
     // has been sent: every probe waits at the gate.
     for seq in 1..=5 {
-        let _ = harness.send_tracked(gate, &GateProbe { seq }).expect("send probe");
+        let _ = harness.send_tracked(&gate, &GateProbe { seq }).expect("send probe");
     }
     let replaced = harness.await_deferred::<ReplaceResult>(pending).expect("replace reply");
 
     expect_ok(&replaced);
-    let report: GateQueryResult = call(&mut harness, gate, &GateQuery);
+    let report: GateQueryResult = call(&mut harness, &gate, &GateQuery);
     assert_eq!(report.seqs, vec![1, 2, 3, 4, 5], "the winning guest receives every gated probe, in order");
 }
 
@@ -226,6 +284,7 @@ fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
     };
     let mut harness = pooled();
     let (gate, _) = load_gate(&mut harness, &fixtures.v1, "a");
+    let gate_wired_ref = harness.cast::<GateWired>(gate).expect("the gate publishes WireCountQuery");
     let _peer = load_peer(&mut harness, &fixtures.v1, true);
     let peer_wired = harness.count_observed(WireObserved::NAME);
 
@@ -233,7 +292,7 @@ fn an_abort_after_ready_reinstates_and_rewires_the_ready_member() {
 
     assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the peer's refusal is reported: {replaced:?}");
     assert!(!harness.accepts(gate, GateProbe::ID), "the ready gate is back on its old guest");
-    let gate_wired: CountReport = call(&mut harness, gate, &WireCountQuery);
+    let gate_wired: CountReport = call(&mut harness, &gate_wired_ref, &WireCountQuery);
     assert_eq!(gate_wired.count, 2, "the ready gate's old guest is wired again after its abort");
     assert_eq!(harness.count_observed(WireObserved::NAME), peer_wired + 1, "the refusing peer is wired again too");
     assert_eq!(harness.count_observed(TickObserved::NAME), 0, "the failed candidate's mail never leaves");
@@ -248,16 +307,18 @@ fn an_abort_gives_each_ready_member_its_dehydrated_state_back() {
         return;
     };
     let mut harness = pooled();
-    let (keeper, _) = load_export(&mut harness, &fixtures.v1, KEEPER, None);
+    let (keeper, _) = harness
+        .load::<Keeper>(LoadComponent { wasm: fixtures.v1.clone(), name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
     let _refuser = load_export(&mut harness, &fixtures.v1, REFUSER, None);
     // The keeper's mailbox is FIFO, so the request reaches it ahead of the
     // host's prepare.
-    let pending = harness.send_deferred_to(keeper, &HeldRequest { tag: 7 }).expect("send the held request");
+    let pending = harness.send_deferred_to(&keeper, &HeldRequest { tag: 7 }).expect("send the held request");
 
     let replaced = republish(&mut harness, &replace(&fixtures.v2));
 
     assert!(expect_err(&replaced).contains("on_rehydrate failed"), "the refuser's refusal is reported: {replaced:?}");
-    let kept: CountReport = call(&mut harness, keeper, &CountQuery);
+    let kept: CountReport = call(&mut harness, &keeper, &CountQuery);
     assert_eq!(kept.count, 1, "the reinstated keeper has the count its dehydrate moved out");
 
     release_keeper(&mut harness, keeper);
@@ -273,11 +334,13 @@ fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
         return;
     };
     let mut harness = pooled();
-    let (keeper, _) = load_export(&mut harness, &fixtures.v1, KEEPER, None);
-    let first = harness.send_deferred_to(keeper, &HeldRequest { tag: 7 }).expect("send the first held request");
+    let (keeper, _) = harness
+        .load::<Keeper>(LoadComponent { wasm: fixtures.v1.clone(), name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {KEEPER}: {error}"));
+    let first = harness.send_deferred_to(&keeper, &HeldRequest { tag: 7 }).expect("send the first held request");
     // The second request's reply stays live as a stray, so the dehydrate
     // refuses.
-    let second = harness.send_deferred_to(keeper, &HeldRequest { tag: 8 }).expect("send the second held request");
+    let second = harness.send_deferred_to(&keeper, &HeldRequest { tag: 8 }).expect("send the second held request");
 
     let replaced = republish(&mut harness, &replace(&fixtures.v2));
 
@@ -285,7 +348,7 @@ fn a_held_unsaved_refusal_gives_the_member_its_dehydrated_state_back() {
         expect_err(&replaced).contains("held reply is live and was not saved"),
         "the keeper's held-unsaved refusal is reported: {replaced:?}"
     );
-    let kept: CountReport = call(&mut harness, keeper, &CountQuery);
+    let kept: CountReport = call(&mut harness, &keeper, &CountQuery);
     assert_eq!(kept.count, 2, "the reinstated keeper has the count its dehydrate moved out");
 
     release_keeper(&mut harness, keeper);
@@ -306,7 +369,8 @@ fn every_live_instance_of_every_namespace_commits_together() {
     let (gate_a, _) = load_gate(&mut harness, &fixtures.v1, "a");
     let (gate_b, _) = load_gate(&mut harness, &fixtures.v1, "b");
     let peer = load_peer(&mut harness, &fixtures.v1, false);
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(peer, &Bump))]).expect("bump the peer");
+    let peer = harness.cast::<GroupPeer>(peer).expect("the peer publishes Bump and CountQuery");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&peer, &Bump))]).expect("bump the peer");
 
     let replaced = republish(&mut harness, &replace(&fixtures.v2));
 
@@ -315,7 +379,7 @@ fn every_live_instance_of_every_namespace_commits_together() {
     assert_eq!(namespaces, [GATE, PEER], "the reply names every type the module republished");
     assert!(harness.accepts(gate_a, GateProbe::ID), "gate a runs the successor");
     assert!(harness.accepts(gate_b, GateProbe::ID), "gate b runs the successor");
-    let count: CountReport = call(&mut harness, peer, &CountQuery);
+    let count: CountReport = call(&mut harness, &peer, &CountQuery);
     assert_eq!(count.count, 1, "the peer carries its state into the successor");
 }
 
@@ -330,6 +394,8 @@ fn a_changed_config_kind_needs_a_config_for_each_instance() {
     let mut harness = pooled();
     let (gate_a, path_a) = load_gate(&mut harness, &fixtures.v1, "a");
     let (gate_b, path_b) = load_gate(&mut harness, &fixtures.v1, "b");
+    let gate_a = harness.cast::<GateRow>(gate_a).expect("gate a publishes GateQuery");
+    let gate_b = harness.cast::<GateRow>(gate_b).expect("gate b publishes GateQuery");
     let config = |path: &ErasedActorPath, label| ReplaceConfig {
         path: path.clone(),
         config: GateLabelledConfig { label }.encode_into_bytes(),
@@ -347,8 +413,8 @@ fn a_changed_config_kind_needs_a_config_for_each_instance() {
     let replaced = republish(&mut harness, &complete);
 
     expect_ok(&replaced);
-    let a: GateQueryResult = call(&mut harness, gate_a, &GateQuery);
-    let b: GateQueryResult = call(&mut harness, gate_b, &GateQuery);
+    let a: GateQueryResult = call(&mut harness, &gate_a, &GateQuery);
+    let b: GateQueryResult = call(&mut harness, &gate_b, &GateQuery);
     assert_eq!((a.seqs, b.seqs), (vec![7], vec![9]), "each instance is built with its own supplied config");
 }
 
@@ -432,6 +498,7 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
     let (loader, _) = harness
         .load_any(&LoadComponent { wasm: loader_wasm, name: None, config: Vec::new(), export: None })
         .expect("load the loader");
+    let loader = harness.cast::<LoaderRow>(loader).expect("the loader publishes GuestLoad");
 
     // Race-free by ordering on the pumped host. Once the host has dispatched
     // the gate's `Prepared`, the republish holds the namespace and has only
@@ -448,7 +515,7 @@ fn a_guest_load_of_a_republishing_namespace_waits() {
     harness.step_component_host_through::<Prepared>(1).expect("the gate answers its prepare");
 
     let guest_load = GuestLoad { wasm: fixtures.v1.clone(), name: Some("c".to_owned()), export: Some(GATE.to_owned()) };
-    let loading = harness.send_deferred_to(loader, &guest_load).expect("send the guest load");
+    let loading = harness.send_deferred_to(&loader, &guest_load).expect("send the guest load");
     harness.await_component_host_queued::<LoadComponent>().expect("the loader's load reaches the host");
     harness.step_component_host_through::<LoadComponent>(1).expect("the host takes the load mid-republish");
 

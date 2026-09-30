@@ -1,62 +1,23 @@
 //! Issue 7109: the second version of the republish pair, republishing
 //! `republish_group_v1`.
 //!
-//! - `Gate` adds a `GateProbe` row: it records each probe's `seq` in arrival
-//!   order, and `GateQuery` reads the order back. A test that holds a member
-//!   prepared sends the probes itself, and the order the winning guest reports
-//!   is the order the gate released them in.
+//! - `ProbeGate` (the crate's shared type, issue 7143) adds a `GateProbe`
+//!   row: it records each probe's `seq` in arrival order, and `GateQuery`
+//!   reads the order back. A test that holds a member prepared sends the
+//!   probes itself, and the order the winning guest reports is the order the
+//!   gate released them in.
 //! - `Peer` keeps v1's rows and state. With `PeerConfig::trap_on_rehydrate`
 //!   set, its `on_rehydrate` reports `TickObserved`, which a failed candidate
 //!   must never deliver, and traps, so a republish that carries the peer's
 //!   state fails at rehydrate.
-//!
-//! The gate sends nothing from its lifecycle hooks, so every probe it records
-//! is one a test sent.
 
 use std::process;
 
 use aether_actor::{ActorInitError, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult, PeerConfig, PeerState,
-    SubstrateHarnessObserver, TickObserved, WireCountQuery, WireObserved,
+    Bump, CountQuery, CountReport, PeerConfig, PeerState, SubstrateHarnessObserver, TickObserved, WireObserved,
 };
-
-pub struct Gate {
-    seqs: Vec<u32>,
-    /// How many times `wire` has run on this instance.
-    wired: u32,
-}
-
-#[actor(instanced, root)]
-impl WasmActor for Gate {
-    type Config = GateConfig;
-    const NAMESPACE: &'static str = "test.republish.gate";
-
-    fn init(_config: GateConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Gate { seqs: Vec::new(), wired: 0 })
-    }
-
-    #[handler::single]
-    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, probe: GateProbe) {
-        self.seqs.push(probe.seq);
-    }
-
-    /// Count each run of the hook, without sending anything.
-    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
-        self.wired += 1;
-    }
-
-    #[handler::single]
-    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
-        GateQueryResult { seqs: self.seqs.clone() }
-    }
-
-    /// The number of times this instance has been wired.
-    #[handler::single]
-    fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
-        CountReport { count: self.wired }
-    }
-}
+use aether_test_fixtures_republish::ProbeGate;
 
 pub struct Peer {
     count: u32,
@@ -107,4 +68,4 @@ impl WasmActor for Peer {
     }
 }
 
-aether_actor::export!(public = [Gate, Peer]);
+aether_actor::export!(public = [ProbeGate, Peer]);

@@ -16,6 +16,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_inventory::InventoryCapability;
 use aether_inventory::kinds::{ResolveAddress, ResolveAddressResult};
 use aether_kinds::{LoadComponent, LoadResult};
+use aether_test_fixtures_bundle::ParentPeerCaller;
 use aether_test_fixtures_kinds::{Bump, TickObserved};
 use aether_test_fixtures_short_path::{Branch, Host, Leaf, Placed, Trunk};
 
@@ -91,11 +92,13 @@ fn a_guest_reaches_its_declared_root_dependency_by_type() {
     };
 
     let (_, target) = load(&mut harness, &wasm, TARGET_EXPORT);
-    let (caller, _) = load(&mut harness, &wasm, CALLER_EXPORT);
+    let (caller, _) = harness
+        .load::<ParentPeerCaller>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {CALLER_EXPORT}: {error}"));
     assert_eq!(target.to_string(), TARGET_EXPORT, "a root singleton guest is named by its namespace");
 
     let baseline = harness.count_observed(TickObserved::NAME);
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(caller, &Bump))]).expect("bump the caller");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&caller, &Bump))]).expect("bump the caller");
 
     assert_eq!(
         harness.count_observed(TickObserved::NAME) - baseline,
@@ -144,8 +147,10 @@ fn holes_beneath_guest_parents_expand_through_private_inline_children() {
         return;
     };
 
-    let (trunk, _) = load(&mut harness, &wasm, TRUNK_EXPORT);
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(trunk, &Bump))]).expect("bump the trunk");
+    let (trunk, _) = harness
+        .load::<Trunk>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load {TRUNK_EXPORT}: {error}"));
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(&trunk, &Bump))]).expect("bump the trunk");
 
     let branch = format!("{TRUNK_EXPORT}/{}:branch", Branch::NAMESPACE);
     assert_eq!(resolve(&mut harness, &format!("{TRUNK_EXPORT}/:branch")), canonical(&branch));

@@ -4,15 +4,21 @@
 //! actors in its own `export!`, so a republish of one version by the other
 //! keeps every namespace its predecessor exported (ADR-0241 §4). This lib has
 //! no `export!` of its own.
+//!
+//! [`ProbeGate`] is the one exception: only `republish_group_v2` exports it.
+//! `v1`'s gate has no `GateProbe` row, and several scenarios assert that
+//! absence, so `v1` keeps its own gate in its example. `ProbeGate` lives here
+//! only so a test can name the successor's type (issue 7143).
 
 use std::mem;
 
 use aether_actor::{
     ActorInitError, Erased, Held, Manual, OutboundReply, Pending, PriorState, ReplyHandle, WasmActor, WasmCtx,
-    WasmDropCtx, WasmInitCtx, actor,
+    WasmDropCtx, WasmInitCtx, WireCtx, actor,
 };
 use aether_test_fixtures_kinds::{
-    CarriedRequest, CarriedRequestResult, CountQuery, CountReport, HeldRequest, HeldRequestResult, ReleaseCarried,
+    CarriedRequest, CarriedRequestResult, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult,
+    HeldRequest, HeldRequestResult, ReleaseCarried, WireCountQuery,
 };
 
 /// The reply handles `ReplyHolder` has parked, with their tags, carried
@@ -141,5 +147,49 @@ impl WasmActor for Keeper {
             self.tag = tag;
             self.kept = kept;
         }
+    }
+}
+
+/// The `test.republish.gate` row `v2` adds over `v1` (issue 7109): a
+/// `GateProbe` handler that records each probe's `seq` in arrival order,
+/// answered by `GateQuery`. It counts each run of `wire` and answers
+/// `WireCountQuery` with the count (issue 7086). It sends nothing from its
+/// lifecycle hooks, so every probe it records is one a test sent — a test
+/// that casts or loads it by this type is typed by the successor whose rows
+/// its probes are written for.
+pub struct ProbeGate {
+    seqs: Vec<u32>,
+    /// How many times `wire` has run on this instance.
+    wired: u32,
+}
+
+#[actor(instanced, root)]
+impl WasmActor for ProbeGate {
+    type Config = GateConfig;
+    const NAMESPACE: &'static str = "test.republish.gate";
+
+    fn init(_config: GateConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(ProbeGate { seqs: Vec::new(), wired: 0 })
+    }
+
+    #[handler::single]
+    fn on_probe(&mut self, _ctx: &mut WasmCtx<'_>, probe: GateProbe) {
+        self.seqs.push(probe.seq);
+    }
+
+    /// Count each run of the hook, without sending anything.
+    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
+        self.wired += 1;
+    }
+
+    #[handler::single]
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: GateQuery) -> GateQueryResult {
+        GateQueryResult { seqs: self.seqs.clone() }
+    }
+
+    /// The number of times this instance has been wired.
+    #[handler::single]
+    fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
+        CountReport { count: self.wired }
     }
 }
