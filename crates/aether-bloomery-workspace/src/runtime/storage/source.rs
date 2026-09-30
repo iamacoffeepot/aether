@@ -25,9 +25,12 @@
 //! free.
 //!
 //! [`TreeSource::blob`] takes the blob it hands the archive out of the map
-//! and refunds its bytes, so the window slides. Trees stay: they are small,
-//! and a second walk reuses them. [`SourceReader::open`], for a caller that
-//! is not writing an archive, keeps what it reads.
+//! and refunds its bytes, so the window slides; [`TreeSource::tree`] does
+//! the same with the node it decodes. A closure answers its members as views
+//! of one shared allocation, so a node kept after its listing was decoded
+//! would hold its whole window resident. [`SourceReader::open`] and
+//! [`SourceReader::load`], for a caller that is not writing an archive, keep
+//! what they read.
 //!
 //! The blobs directly inside an oversized directory are read as the archive
 //! reaches them, a batch at a time. The reader remembers each directory
@@ -495,9 +498,10 @@ impl TreeSource for SourceReader<'_> {
     where
         Self: 'b;
 
-    fn tree(&mut self, tree: &Ref<Tree>) -> Result<Tree, StorageError> {
-        self.arrive(tree.digest())?;
-        let tree = self.load(tree)?;
+    fn tree(&mut self, directory: &Ref<Tree>) -> Result<Tree, StorageError> {
+        self.arrive(directory.digest())?;
+        let tree = self.load(directory)?;
+        self.fetched.release(directory.digest());
         self.fetched.list(&tree);
         self.fetched.queue_children(&tree);
         self.pump()?;
