@@ -53,6 +53,20 @@ CREATE INDEX IF NOT EXISTS entries_kind ON entries (kind);
 CREATE INDEX IF NOT EXISTS entries_cause ON entries (cause);
 ";
 
+/// Each entry's citations in citation order: the typed `Ref`s its event
+/// cites, then a head move's destination, then its untyped digests (a
+/// `Transition`'s input and result). Written inside the append transaction
+/// with the entry itself. An entry appended before this table existed has no
+/// rows and reads as citing nothing.
+const ENTRY_CITATIONS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS entry_citations (
+    seq INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    to_digest BLOB NOT NULL CHECK (typeof(to_digest) = 'blob' AND length(to_digest) = 32),
+    PRIMARY KEY (seq, ordinal)
+);
+";
+
 /// Process-local identity of one [`Journal`] allocation.
 ///
 /// Equality is the backing allocation, not a unit value. Moving a journal
@@ -195,7 +209,8 @@ impl Journal {
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
     /// verified against the recorded head kind, every digest the batch
     /// requires (a `Transition`'s input and result) is checked for existence
-    /// (no prefix), then events are inserted. Any refusal rolls the whole
+    /// (no prefix), then events are inserted, each with the digests it cites
+    /// directly (see [`Self::read_cited`]). Any refusal rolls the whole
     /// transaction back. An empty batch is `Ok` of an empty range and
     /// writes nothing. The returned range is `head+1 .. head+n+1` (end
     /// exclusive).
@@ -297,6 +312,18 @@ impl Journal {
         read_entries(&self.conn, since, limit)
     }
 
+    /// As [`Self::read`], each entry beside the digests it cites directly, in
+    /// citation order (see [`Draft`]). An entry appended before the journal
+    /// recorded entry citations cites nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] on a backend failure, and
+    /// [`JournalError::CorruptCitation`] when a stored citation is not 32 bytes.
+    pub fn read_cited(&self, since: Seq, limit: usize) -> Result<Vec<(Entry, Vec<Digest>)>, JournalError> {
+        read_cited_entries(&self.conn, since, limit)
+    }
+
     /// Decode `entry` as `K`. Refuses when `entry.kind` is not `K::ID`.
     ///
     /// Forwards to [`Entry::decode`].
@@ -378,6 +405,35 @@ pub fn read_entries(conn: &Connection, since: Seq, limit: usize) -> Result<Vec<E
         });
     }
     Ok(entries)
+}
+
+/// Entries with `seq > since`, ascending, at most `limit`, each beside the
+/// digests it cites in ordinal order: one query for the page, one for its
+/// citations.
+fn read_cited_entries(conn: &Connection, since: Seq, limit: usize) -> Result<Vec<(Entry, Vec<Digest>)>, JournalError> {
+    let entries = read_entries(conn, since, limit)?;
+    let (Some(first), Some(last)) = (entries.first(), entries.last()) else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(
+        "SELECT seq, to_digest FROM entry_citations WHERE seq >= ?1 AND seq <= ?2 ORDER BY seq ASC, ordinal ASC",
+    )?;
+    let rows = stmt.query_map(params![sqlite_i64(first.seq.0)?, sqlite_i64(last.seq.0)?], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    let mut by_seq: HashMap<u64, Vec<Digest>> = HashMap::new();
+    for row in rows {
+        let (seq, to) = row?;
+        let digest = Digest::from_bytes(to.try_into().map_err(|_| JournalError::CorruptCitation)?);
+        by_seq.entry(from_sqlite_i64(seq)?).or_default().push(digest);
+    }
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let cites = by_seq.remove(&entry.seq.0).unwrap_or_default();
+            (entry, cites)
+        })
+        .collect())
 }
 
 /// One artifact as `(kind, payload)`, or `None` when absent. Shared by
@@ -547,7 +603,7 @@ fn insert_events(
     head: Seq,
     events: &[Draft],
     recorded_at_millis: u64,
-) -> Result<Range<Seq>, JournalError> {
+) -> Result<Range<Seq>, AppendError> {
     let first = head.0.saturating_add(1);
     if events.is_empty() {
         return Ok(Seq(first)..Seq(first));
@@ -556,15 +612,35 @@ fn insert_events(
     {
         let mut stmt = tx
             .prepare("INSERT INTO entries (seq, kind, cause, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let mut cites = tx.prepare("INSERT INTO entry_citations (seq, ordinal, to_digest) VALUES (?1, ?2, ?3)")?;
         for (offset, draft) in events.iter().enumerate() {
             let seq = first.saturating_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?);
             let seq_i64 = sqlite_i64(seq)?;
             let cause = draft.cause.map(|c| sqlite_i64(c.0)).transpose()?;
             stmt.execute(params![seq_i64, draft.kind.0.to_le_bytes().as_slice(), cause, recorded_at, draft.bytes])?;
+            for (ordinal, to) in entry_citations(draft)?.iter().enumerate() {
+                let ordinal = i64::try_from(ordinal).map_err(|_| JournalError::IntegerRange)?;
+                cites.execute(params![seq_i64, ordinal, to.as_slice()])?;
+            }
         }
     }
     let last_exclusive = first.saturating_add(u64::try_from(events.len()).map_err(|_| JournalError::IntegerRange)?);
     Ok(Seq(first)..Seq(last_exclusive))
+}
+
+/// Every digest `draft` cites directly, in citation order: its typed
+/// citations, then a head move's destination, then its untyped digests.
+/// `append` has already verified each one before this runs.
+fn entry_citations(draft: &Draft) -> Result<Vec<[u8; 32]>, AppendError> {
+    let mut digests = Vec::with_capacity(draft.cites.len() + draft.untyped.len() + 1);
+    for citation in &draft.cites {
+        digests.push(cited(citation)?.0);
+    }
+    if draft.kind == RecordedHeadMove::ID {
+        digests.push(head_move_target(draft)?.0);
+    }
+    digests.extend(draft.untyped.iter().map(|digest| *digest.as_bytes()));
+    Ok(digests)
 }
 
 /// A digest the check must find stored with an expected kind prefix: a
@@ -653,6 +729,7 @@ pub fn configure_writer(conn: &Connection) -> Result<(), JournalError> {
 
 fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
     conn.execute_batch(ENTRIES_DDL)?;
+    conn.execute_batch(ENTRY_CITATIONS_DDL)?;
     conn.execute_batch(ARTIFACTS_DDL)?;
     conn.execute_batch(CITATIONS_DDL)?;
     Ok(())

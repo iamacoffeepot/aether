@@ -1,22 +1,24 @@
 //! Reactor protocol mail: `WarmEntries` validation and pinned kind ids.
 
 use aether_bloomery_kinds::{
-    Evaluated, Event, JournalEntry, Status, StatusQuery, Warm, WarmEntries, WarmEntriesError, Warmed,
+    ClosureArtifact, Evaluated, Event, JournalEntry, Status, StatusQuery, Utf8Text, Warm, WarmEntries,
+    WarmEntriesError, Warmed,
 };
 use aether_data::{Kind, KindId};
 
 fn entry(seq: u64) -> JournalEntry {
-    JournalEntry { seq, kind: KindId(1), cause: None, recorded_at_millis: 0, bytes: Vec::new() }
+    JournalEntry { seq, kind: KindId(1), cause: None, recorded_at_millis: 0, bytes: Vec::new(), cites: Vec::new() }
 }
 
-#[aether_data::kind(name = "test.bloomery.reactor.unchecked_warm", eq)]
+#[aether_data::kind(name = "test.bloomery.reactor.unchecked_warm", no_serde)]
 struct UncheckedWarm {
     entries: Vec<JournalEntry>,
+    artifacts: Vec<ClosureArtifact>,
 }
 
 fn refuse_batch(entries: Vec<JournalEntry>) {
     assert!(WarmEntries::new(entries.clone()).is_err(), "construct {entries:?}");
-    let bytes = UncheckedWarm { entries }.encode_into_bytes();
+    let bytes = UncheckedWarm { entries, artifacts: Vec::new() }.encode_into_bytes();
     assert!(Warm::decode_from_bytes(&bytes).is_none(), "decode {bytes:?}");
 }
 
@@ -31,7 +33,7 @@ fn warm_entries_refuse_empty_and_non_dense_batches_on_construct_and_decode() {
     let accepted = WarmEntries::new(dense.clone()).expect("dense construct");
     assert_eq!(accepted.first(), 1);
     assert_eq!(accepted.last(), 3);
-    let bytes = UncheckedWarm { entries: dense }.encode_into_bytes();
+    let bytes = UncheckedWarm { entries: dense, artifacts: Vec::new() }.encode_into_bytes();
     let warm = Warm::decode_from_bytes(&bytes).expect("dense decode");
     assert_eq!(warm.entries().as_slice().len(), 3);
     assert_eq!(WarmEntries::new(Vec::new()), Err(WarmEntriesError::Empty));
@@ -39,6 +41,22 @@ fn warm_entries_refuse_empty_and_non_dense_batches_on_construct_and_decode() {
     assert_eq!(WarmEntries::new(vec![entry(1), entry(3)]), Err(WarmEntriesError::NotDense));
     // A batch ending at the last representable seq is still dense.
     assert!(WarmEntries::new(vec![entry(u64::MAX - 1), entry(u64::MAX)]).is_ok());
+}
+
+#[test]
+fn a_warm_refuses_an_artifact_no_entry_cites() {
+    // Catches a warm that hands a root bytes outside every entry's scope,
+    // which a fold could then read as if its entry had cited them.
+    let artifact = ClosureArtifact::new(Utf8Text::ID, b"cited".to_vec());
+    let digest = artifact.claimed().unverified();
+    let mut citing = entry(2);
+    citing.cites = vec![digest];
+    let batch = WarmEntries::new(vec![entry(1), citing]).expect("dense");
+    assert!(Warm::new(batch, vec![artifact.clone()]).is_ok());
+
+    let uncited = WarmEntries::new(vec![entry(1), entry(2)]).expect("dense");
+    let refused = Warm::new(uncited, vec![artifact]).expect_err("no entry cites the artifact");
+    assert_eq!(refused.digest(), digest);
 }
 
 #[test]
@@ -53,9 +71,9 @@ fn reactor_protocol_kind_ids_are_pinned() {
     assert_eq!(Status::ID, TRIPWIRE_STATUS);
 }
 
-const TRIPWIRE_WARM: KindId = KindId(0x2ff5_d120_60f2_d51e);
+const TRIPWIRE_WARM: KindId = KindId(0x2ab0_47ad_e6ab_bdc4);
 const TRIPWIRE_WARMED: KindId = KindId(0x2e92_8abc_d04c_43a0);
-const TRIPWIRE_EVENT: KindId = KindId(0x241b_bd4d_0535_3f94);
+const TRIPWIRE_EVENT: KindId = KindId(0x2b77_3cce_7f03_78ee);
 const TRIPWIRE_EVALUATED: KindId = KindId(0x2381_9f0f_18d4_93d3);
 const TRIPWIRE_STATUS_QUERY: KindId = KindId(0x2e1c_78f0_8320_e7c6);
 const TRIPWIRE_STATUS: KindId = KindId(0x2007_56da_bbf2_ec0f);

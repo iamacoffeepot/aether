@@ -52,18 +52,44 @@ pub struct JournalEntry {
     /// Verbatim storage-codec payload.
     #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
+    /// The digests this entry cites directly, in citation order, as the
+    /// journal recorded them at append: its typed `Ref`s, a head move's
+    /// destination, then a `Transition`'s input and result. An entry
+    /// appended before the journal recorded entry citations cites nothing.
+    #[serde(with = "digest_list")]
+    pub cites: Vec<Digest>,
+}
+
+/// Serde for a digest list as its 32-byte arrays, since [`Digest`] carries
+/// no serde impl of its own.
+mod digest_list {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::Digest;
+
+    pub(super) fn serialize<S: Serializer>(digests: &[Digest], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(digests.iter().map(Digest::as_bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Digest>, D::Error> {
+        Ok(Vec::<[u8; 32]>::deserialize(deserializer)?.into_iter().map(Digest::from_bytes).collect())
+    }
 }
 
 impl JournalEntry {
-    /// Copy one retained [`Entry`] into the mail envelope.
+    /// Copy one retained [`Entry`] into the mail envelope, beside the digests
+    /// it cites.
     #[must_use]
-    pub fn from_entry(entry: &Entry) -> Self {
+    pub fn from_entry(entry: &Entry, cites: Vec<Digest>) -> Self {
         Self {
             seq: entry.seq.0,
             kind: entry.kind,
             cause: entry.cause.map(|seq| seq.0),
             recorded_at_millis: entry.recorded_at_millis,
             bytes: entry.bytes.clone(),
+            cites,
         }
     }
 

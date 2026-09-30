@@ -42,6 +42,8 @@ struct Fold {
     method: ImplItemFn,
     event_ty: Type,
     fallible: bool,
+    /// The fold takes a third `cited: &Cited` parameter.
+    cites: bool,
 }
 
 /// Generate an ordinary View implementation from typed #[fold] methods on a
@@ -161,7 +163,7 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
     }
 
     let sig = &method.sig;
-    if matches!(sig.ident.to_string().as_str(), "empty" | "cursor" | "advance") {
+    if matches!(sig.ident.to_string().as_str(), "empty" | "cursor" | "advance" | "advance_cited") {
         return Err(syn::Error::new_spanned(&sig.ident, "#[fold] method name conflicts with a generated View method"));
     }
     if let Some(asyncness) = &sig.asyncness {
@@ -182,10 +184,10 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(&sig.generics, "#[fold] methods cannot be generic"));
     }
-    if sig.inputs.len() != 2 {
+    if !(2..=3).contains(&sig.inputs.len()) {
         return Err(syn::Error::new_spanned(
             &sig.inputs,
-            "#[fold] methods take exactly `&mut self` and one owned typed event",
+            "#[fold] methods take exactly `&mut self`, one owned typed event, and optionally `cited: &Cited`",
         ));
     }
 
@@ -205,9 +207,17 @@ fn parse_fold(mut method: ImplItemFn) -> syn::Result<Fold> {
         return Err(syn::Error::new_spanned(&event.ty, "#[fold] event parameters are owned values"));
     }
 
+    let cites = match sig.inputs.iter().nth(2) {
+        None => false,
+        Some(FnArg::Typed(cited)) if is_shared_reference(&cited.ty) => true,
+        Some(other) => {
+            return Err(syn::Error::new_spanned(other, "a #[fold] method's third parameter is `cited: &Cited`"));
+        }
+    };
+
     let event_ty = (*event.ty).clone();
     let fallible = classify_output(&sig.output)?;
-    Ok(Fold { method, event_ty, fallible })
+    Ok(Fold { method, event_ty, fallible, cites })
 }
 
 fn classify_output(output: &ReturnType) -> syn::Result<bool> {
@@ -240,6 +250,10 @@ fn classify_output(output: &ReturnType) -> syn::Result<bool> {
     }
 }
 
+fn is_shared_reference(ty: &Type) -> bool {
+    matches!(ty, Type::Reference(reference) if reference.mutability.is_none())
+}
+
 fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
 }
@@ -252,6 +266,11 @@ fn expand(def: ViewDef) -> TokenStream2 {
     let ViewDef { attrs, self_ty, cursor, folds } = def;
     let methods = folds.iter().map(|fold| &fold.method);
     let dispatches = folds.iter().map(expand_dispatch);
+    let advance = if folds.iter().any(|fold| fold.cites) {
+        expand_cited_advance(&cursor, dispatches)
+    } else {
+        expand_advance(&cursor, dispatches)
+    };
 
     quote! {
         #(#attrs)*
@@ -271,17 +290,53 @@ fn expand(def: ViewDef) -> TokenStream2 {
                 self.#cursor.get()
             }
 
-            fn advance(
-                &mut self,
-                entries: &[::aether_bloomery_view::__macro_internals::Entry],
-            ) -> ::core::result::Result<(), Self::Error> {
-                for entry in entries {
-                    ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
-                    #(#dispatches)*
-                    self.#cursor.set(entry.seq);
-                }
-                Ok(())
+            #advance
+        }
+    }
+}
+
+/// `advance` for a view none of whose folds read citations: the trait's
+/// default `advance_cited` calls it.
+fn expand_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+    quote! {
+        fn advance(
+            &mut self,
+            entries: &[::aether_bloomery_view::__macro_internals::Entry],
+        ) -> ::core::result::Result<(), Self::Error> {
+            for entry in entries {
+                ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                #(#dispatches)*
+                self.#cursor.set(entry.seq);
             }
+            Ok(())
+        }
+    }
+}
+
+/// `advance_cited` for a view with a fold that reads citations, handing each
+/// entry its own; `advance` is the same walk over entries that cite nothing.
+fn expand_cited_advance(cursor: &Ident, dispatches: impl Iterator<Item = TokenStream2>) -> TokenStream2 {
+    quote! {
+        fn advance(
+            &mut self,
+            entries: &[::aether_bloomery_view::__macro_internals::Entry],
+        ) -> ::core::result::Result<(), Self::Error> {
+            <Self as ::aether_bloomery_view::View>::advance_cited(self, entries, &[])
+        }
+
+        fn advance_cited(
+            &mut self,
+            entries: &[::aether_bloomery_view::__macro_internals::Entry],
+            cited: &[::aether_bloomery_view::__macro_internals::Cited],
+        ) -> ::core::result::Result<(), Self::Error> {
+            let uncited = <::aether_bloomery_view::__macro_internals::Cited as ::core::default::Default>::default();
+            for (index, entry) in entries.iter().enumerate() {
+                let entry_cited = cited.get(index).unwrap_or(&uncited);
+                ::aether_bloomery_view::__macro_internals::check_next(self.#cursor, entry.seq)?;
+                #(#dispatches)*
+                self.#cursor.set(entry.seq);
+            }
+            Ok(())
         }
     }
 }
@@ -289,9 +344,14 @@ fn expand(def: ViewDef) -> TokenStream2 {
 fn expand_dispatch(fold: &Fold) -> TokenStream2 {
     let ident = &fold.method.sig.ident;
     let event_ty = &fold.event_ty;
+    let args = if fold.cites {
+        quote! { event, entry_cited }
+    } else {
+        quote! { event }
+    };
     let call = if fold.fallible {
         quote_spanned! { ident.span() =>
-            if let ::core::result::Result::Err(source) = self.#ident(event) {
+            if let ::core::result::Result::Err(source) = self.#ident(#args) {
                 return ::core::result::Result::Err(
                     ::aether_bloomery_view::__macro_internals::ViewFoldError::handler(
                         stringify!(#ident),
@@ -301,7 +361,7 @@ fn expand_dispatch(fold: &Fold) -> TokenStream2 {
             }
         }
     } else {
-        quote_spanned! { ident.span() => self.#ident(event); }
+        quote_spanned! { ident.span() => self.#ident(#args); }
     };
 
     quote_spanned! { event_ty.span() =>

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_bloomery_view::{SequenceError, View, ViewCursor, ViewFoldError, view};
+use aether_bloomery_kinds::{ClosureArtifact, Digest, Entry, Head, HeadMoved, OpaqueBytes, Program, Ref, Seq, Tree};
+use aether_bloomery_view::{Cited, CitedError, SequenceError, View, ViewCursor, ViewFoldError, view};
 use aether_data::{Kind, Storage, StorageData};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
@@ -66,6 +66,34 @@ impl View for Fallible {
         self.accepted.push(event.key);
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.view.cites_note")]
+struct CitesNote {
+    note: Ref<Note>,
+}
+
+#[derive(Default)]
+struct CitedNotes {
+    cursor: ViewCursor,
+    keys: Vec<u64>,
+}
+
+#[view(cursor = cursor)]
+impl View for CitedNotes {
+    #[fold]
+    fn read(&mut self, event: CitesNote, cited: &Cited) -> Result<(), CitedError> {
+        self.keys.push(cited.get(event.note)?.key);
+        Ok(())
+    }
+}
+
+/// One stored `Note` as the driver delivers it: its ref and its artifact.
+fn note_artifact(key: u64) -> (Ref<Note>, ClosureArtifact) {
+    let note = Note { key, fail: false };
+    let payload = Note::encode_storage(&StorageData::from_value(note.clone())).expect("storage encode");
+    (Ref::of_encoded(&note).expect("digest the note"), ClosureArtifact::new(Note::ID, payload))
 }
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
@@ -175,4 +203,47 @@ fn handler_error_preserves_source_and_previous_entries() {
     assert_eq!(error.handler_name(), Some("note"));
     let source = error.source().expect("handler source").downcast_ref::<Boom>().expect("boom");
     assert_eq!(source.0, 20);
+}
+
+#[test]
+fn a_fold_reads_only_what_its_own_entry_cites() {
+    // Catches a fold handed the page's pooled artifacts rather than its own
+    // entry's, which would let it read a digest only a neighbour cites.
+    let (first, first_artifact) = note_artifact(10);
+    let (second, second_artifact) = note_artifact(20);
+    let pool = [first_artifact, second_artifact];
+    let entries = [entry_for(1, &CitesNote { note: first }), entry_for(2, &CitesNote { note: second })];
+    let cited = [Cited::new(vec![first.digest()], &pool), Cited::new(vec![second.digest()], &pool)];
+
+    let mut view = CitedNotes::empty();
+    view.advance_cited(&entries, &cited).expect("each entry reads its own citation");
+    assert_eq!(view.keys, [10, 20]);
+
+    let mut crossed = CitedNotes::empty();
+    let reads_neighbour = [entry_for(1, &CitesNote { note: second })];
+    let error = crossed
+        .advance_cited(&reads_neighbour, &[Cited::new(vec![first.digest()], &pool)])
+        .expect_err("the entry does not cite the digest it names");
+    assert_eq!(crossed.cursor(), Seq(0));
+    let source = error.source().expect("handler source").downcast_ref::<CitedError>().expect("cited error");
+    assert!(matches!(source, CitedError::NotCited { digest } if *digest == second.digest()), "{source:?}");
+}
+
+#[test]
+fn a_cited_artifact_of_another_kind_fails_the_fold() {
+    // Catches a read that decodes whatever bytes sit under the digest
+    // without checking they are the kind the ref names.
+    let bytes = ClosureArtifact::new(OpaqueBytes::ID, b"not a note".to_vec());
+    let digest = bytes.claimed().unverified();
+    let entry = entry_for(1, &CitesNote { note: Ref::from_digest(digest) });
+
+    let mut view = CitedNotes::empty();
+    let error = view.advance_cited(&[entry], &[Cited::new(vec![digest], &[bytes])]).expect_err("kind mismatch");
+    assert_eq!(view.cursor(), Seq(0));
+    assert_eq!(error.handler_name(), Some("read"));
+    let source = error.source().expect("handler source").downcast_ref::<CitedError>().expect("cited error");
+    assert!(
+        matches!(source, CitedError::KindMismatch { expected, actual, .. } if *expected == Note::ID && *actual == OpaqueBytes::ID),
+        "{source:?}"
+    );
 }

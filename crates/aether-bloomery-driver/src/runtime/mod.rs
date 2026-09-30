@@ -65,8 +65,9 @@ mod recovery;
 mod root;
 
 pub use self::core::{
-    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
-    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket, WarmTicket, WatchTicket,
+    ApiReply, ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE,
+    EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket,
+    WarmTicket, WatchTicket,
 };
 
 use std::collections::{BTreeMap, HashMap};
@@ -76,8 +77,8 @@ use aether_actor::{ActorPath, ActorRef, ProtocolPath, runtime};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
-    ClosureLimit, Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadClosureResult,
-    ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
+    ClosureLimit, Digest, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult, ReadArtifactsResult,
+    ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
 use aether_http::FetchResult;
@@ -228,6 +229,17 @@ impl NativeActor for BundleDriver {
         ticket: ArtifactTicket,
     ) {
         let commands = state.core.on_artifact(ticket, result);
+        state.perform(ctx, commands);
+    }
+
+    #[handler::response]
+    fn on_read_artifacts(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        result: ReadArtifactsResult,
+        ticket: ArtifactsTicket,
+    ) {
+        let commands = state.core.on_artifacts(ticket, result);
         state.perform(ctx, commands);
     }
 

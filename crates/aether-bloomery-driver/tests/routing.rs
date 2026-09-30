@@ -1411,3 +1411,83 @@ fn live_out_of_sequence_resyncs_by_status() {
     assert!(rejected_records(&world).is_empty());
     assert_eq!(watch_count(&world), 1);
 }
+
+/// The fan-out scenario with cited entries: the set root at 1, `a` at 2, and
+/// `b` at 3, where entry 3 cites `cites`. `a` warms 1..=2 and evaluates 3
+/// live; `b` warms 1..=3.
+fn cited_fan_out(world: &mut World, cites: Vec<Digest>) -> (Digest, Digest) {
+    let set = reactor_set(&["a", "b"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    let bundle_b = world.store_reactor(b"reactor-b");
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    world.seed_move("b", bundle_b);
+    world.cites.insert(3, cites);
+    script_quiet(world, 5);
+    (bundle_a, bundle_b)
+}
+
+/// The claimed digests the `Event` for `seq` carried to `bundle`.
+fn event_artifacts(world: &World, bundle: Digest, seq: u64) -> Vec<Vec<Digest>> {
+    world.reactors[&bundle]
+        .event_artifacts
+        .iter()
+        .filter(|(event, _)| *event == seq)
+        .map(|(_, cited)| cited.clone())
+        .collect()
+}
+
+#[test]
+fn a_warm_and_a_live_event_carry_the_same_cited_artifacts() {
+    // Catches a page routed before what it cites is read, a prefix answer
+    // taken for the whole read, a warm that drops the artifacts a live event
+    // carries for the same entry, and a cached artifact read again.
+    let (mut world, commands) = World::open();
+    let first = world.store(OpaqueBytes::ID, b"first-cited");
+    let second = world.store(OpaqueBytes::ID, b"second-cited");
+    let (bundle_a, bundle_b) = cited_fan_out(&mut world, vec![first, second]);
+    world.artifacts_per_read = 1;
+
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none(), "{:?}", world.abort);
+
+    assert_eq!(world.artifact_batches, vec![vec![first, second], vec![second]], "one read, then the unanswered rest");
+    assert_eq!(event_artifacts(&world, bundle_a, 3), vec![vec![first, second]]);
+    assert_eq!(world.warm_ranges_for(bundle_b), vec![(1, 3)]);
+    assert_eq!(world.reactors[&bundle_b].warm_artifacts, vec![vec![first, second]], "the warm carries entry 3's");
+    assert_eq!(world.reactors[&bundle_a].warm_artifacts, vec![Vec::<Digest>::new()], "entries 1 and 2 cite nothing");
+}
+
+#[test]
+fn a_failed_cited_read_is_retried_then_aborts() {
+    // Catches a failed read that poisons a view or routes the page without
+    // its artifacts, a retry that never ends, and a missing artifact routed
+    // as if the journal had kept its append guarantee.
+    let (mut recovering, commands) = World::open();
+    let cited = recovering.store(OpaqueBytes::ID, b"cited");
+    let (bundle_a, _) = cited_fan_out(&mut recovering, vec![cited]);
+    recovering.artifact_errors = 1;
+    let manual = recovering.drive(commands);
+    assert!(manual.is_empty());
+    assert!(recovering.abort.is_none(), "{:?}", recovering.abort);
+    assert_eq!(recovering.artifact_batches, vec![vec![cited], vec![cited]]);
+    assert_eq!(event_artifacts(&recovering, bundle_a, 3), vec![vec![cited]]);
+
+    let (mut failing, commands) = World::open();
+    let cited = failing.store(OpaqueBytes::ID, b"cited");
+    let (bundle_a, _) = cited_fan_out(&mut failing, vec![cited]);
+    failing.artifact_errors = 4;
+    let manual = failing.drive(commands);
+    assert!(manual.is_empty());
+    assert_eq!(failing.artifact_batches.len(), 4, "the read and three retries");
+    assert!(failing.abort.as_ref().is_some_and(|reason| reason.contains("cited artifact read failed")));
+    assert!(failing.events_for(bundle_a).is_empty(), "nothing routed");
+
+    let (mut missing, commands) = World::open();
+    cited_fan_out(&mut missing, vec![digest(0xee)]);
+    let manual = missing.drive(commands);
+    assert!(manual.is_empty());
+    assert!(missing.abort.as_ref().is_some_and(|reason| reason.contains("missing artifact")), "{:?}", missing.abort);
+}

@@ -18,6 +18,10 @@
 //! [`Workspace`] run that exhausts its allotment or fails in the executor
 //! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
 //!
+//! [`Ran<P>`](Ran) is the typed view of one recorded run of `P`: a
+//! `bloomery.transition` whose program is `P`, citing its input and result,
+//! for a reactor rule to trigger on.
+//!
 //! [`tool_definition`] renders a declared program as a responses-API function
 //! tool: its `///` doc, and its input's JSON Schema with every field's doc.
 //!
@@ -31,6 +35,7 @@ extern crate self as aether_bloomery_program;
 mod declare;
 mod env;
 mod invoke;
+mod ran;
 mod root;
 mod section;
 mod tool;
@@ -43,6 +48,7 @@ pub use declare::Program;
 pub use declare::{AsyncProgram, SyncProgram};
 pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync, Workspace};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
+pub use ran::Ran;
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{Declaration, DeclarationsError, declarations};
 pub use tool::{MAX_FUNCTION_NAME_BYTES, ToolDefinitionError, function_name, program_name, tool_definition};

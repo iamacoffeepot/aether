@@ -8,7 +8,7 @@
 //! maps; the double only advances its cursor over replies it actually
 //! returns, plus replies tests feed by hand through its [`note_evaluated`](Reactor::note_evaluated).
 
-use aether_bloomery_kinds::{Detail, Evaluated, Status, Warmed};
+use aether_bloomery_kinds::{Detail, Digest, Evaluated, Status, Warmed};
 
 /// One scripted reactor root behind a mailbox.
 #[derive(Debug, Default)]
@@ -21,6 +21,10 @@ pub struct Reactor {
     pub warms: Vec<(u64, u64)>,
     /// Every `Event` seq seen, in arrival order.
     pub events: Vec<u64>,
+    /// The claimed digests each `Warm` carried, in arrival order.
+    pub warm_artifacts: Vec<Vec<Digest>>,
+    /// Each `Event` seq beside the claimed digests it carried, in arrival order.
+    pub event_artifacts: Vec<(u64, Vec<Digest>)>,
 }
 
 impl Reactor {

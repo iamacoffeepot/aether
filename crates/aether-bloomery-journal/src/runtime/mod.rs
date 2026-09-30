@@ -79,6 +79,13 @@
 //! list cannot change them. [`Journal::read_closure`] walks those edges
 //! breadth-first under a byte budget and never truncates (ADR-0226
 //! decision 10). Artifacts stored before the table existed have no edges.
+//!
+//! Each entry's own citations are kept the same way, in `entry_citations`,
+//! written in the append transaction: the typed `Ref`s its event cites, a
+//! head move's destination, and a `Transition`'s input and result.
+//! [`Journal::read_cited`] returns them beside each entry, and a
+//! `ReadEvents` page carries them on each `JournalEntry`. Entries appended
+//! before the table existed cite nothing.
 
 mod artifact;
 mod batch;
@@ -200,13 +207,13 @@ impl NativeActor for JournalActor {
 
         match state
             .journal
-            .read(Seq(after), limit as usize)
+            .read_cited(Seq(after), limit as usize)
             .and_then(|entries| state.journal.head().map(|head| (entries, head)))
         {
             Ok((entries, head)) => ReadEventsResult::Ok {
                 after,
                 head: head.0,
-                entries: entries.iter().map(JournalEntry::from_entry).collect(),
+                entries: entries.into_iter().map(|(entry, cites)| JournalEntry::from_entry(&entry, cites)).collect(),
             },
             Err(error) => ReadEventsResult::Err { after, message: error.to_string() },
         }
@@ -408,11 +415,7 @@ impl NativeActor for JournalActor {
         for record in records {
             let result = match record {
                 DriverRecord::Requested { cause, record } => batch.push_event(&record, cause.map(Seq)),
-                DriverRecord::Transition { cause, record } => {
-                    batch.require_artifact(record.input);
-                    batch.require_artifact(record.result);
-                    batch.push_event(&record, Some(Seq(cause)))
-                }
+                DriverRecord::Transition { cause, record } => batch.push_transition(&record, Seq(cause)),
                 DriverRecord::Fault { cause, record } => batch.push_event(&record, Some(Seq(cause))),
                 DriverRecord::Activated { cause, record } => batch.push_event(&record, Some(Seq(cause))),
                 DriverRecord::ActivationRejected { cause, record } => batch.push_event(&record, Some(Seq(cause))),

@@ -11,13 +11,13 @@
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, Seq};
+use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, OpaqueBytes, Seq};
 use aether_bloomery_view::HeadActivation;
 
 use crate::runtime::core::{Command, PendingWrite, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::claim::Claim;
 use crate::runtime::reactors::instance::Health;
-use crate::runtime::reactors::{RestartPhase, RestartWork, RoutingRead};
+use crate::runtime::reactors::{CitedEntry, RestartPhase, RestartWork, RoutingRead};
 
 impl ProgramCore {
     /// Begin restart replay once the view has synced and program recovery is complete.
@@ -127,7 +127,7 @@ impl ProgramCore {
     }
 
     /// Warm the restarting digest with one page, trimmed to `W`.
-    pub(crate) fn continue_restart_warm_page(&mut self, entries: Vec<JournalEntry>, out: &mut Vec<Command>) {
+    pub(crate) fn continue_restart_warm_page(&mut self, entries: Vec<CitedEntry>, out: &mut Vec<Command>) {
         let Some(RestartWork { watermark, phase: RestartPhase::Warming { warming: Some((digest, _)), .. }, .. }) =
             self.routing.restart.as_ref()
         else {
@@ -135,7 +135,7 @@ impl ProgramCore {
             return;
         };
         let (watermark, digest) = (*watermark, *digest);
-        self.send_warm(digest, entries.into_iter().filter(|entry| entry.seq <= watermark).collect(), out);
+        self.send_warm(digest, entries.into_iter().filter(|cited| cited.entry.seq <= watermark).collect(), out);
     }
 
     /// Record the warming digest's failure against every head it serves and move on.

@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
 
 use aether_bloomery_kinds::{Entry, Seq};
+use aether_bloomery_view::Cited;
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
@@ -20,9 +21,14 @@ use crate::views::{ErasedView, ViewCtor, ViewSet};
 /// This type does not own a journal. The crate's [`crate::Root`] releases
 /// entries at or below every constructed view's cursor and keeps the last one
 /// as the trigger.
+///
+/// Each retained entry keeps its [`Cited`] beside it, pushed, sliced, and
+/// released together: a view folds each entry with its own citations, and a
+/// rule's trigger carries the last entry's.
 pub struct Owner {
     base: Seq,
     prefix: Vec<Entry>,
+    cited: Vec<Cited>,
     slots: BTreeMap<TypeId, CachedView>,
 }
 
@@ -37,7 +43,7 @@ impl Owner {
     /// Empty prefix at [`Seq`] `(0)`, no views constructed.
     #[must_use]
     pub const fn new() -> Self {
-        Self { base: Seq(0), prefix: Vec::new(), slots: BTreeMap::new() }
+        Self { base: Seq(0), prefix: Vec::new(), cited: Vec::new(), slots: BTreeMap::new() }
     }
 
     /// Last retained sequence, or [`Seq`] `(0)` when nothing has been pushed.
@@ -52,8 +58,8 @@ impl Owner {
         self.slots.values().any(|slot| slot.poisoned)
     }
 
-    /// Append the next contiguous entries. Does not fold; views catch up on
-    /// prepare.
+    /// Append the next contiguous entries, each citing nothing. Does not
+    /// fold; views catch up on prepare.
     ///
     /// # Errors
     ///
@@ -61,13 +67,16 @@ impl Owner {
     pub fn push(&mut self, entries: &[Entry]) -> Result<(), PrepareError> {
         self.check_next(entries)?;
         self.prefix.extend_from_slice(entries);
+        self.cited.resize_with(self.prefix.len(), Cited::default);
         Ok(())
     }
 
-    /// [`Self::push`] that moves `entries` in rather than cloning them.
-    pub(crate) fn push_owned(&mut self, entries: Vec<Entry>) -> Result<(), PrepareError> {
+    /// Move the next contiguous entries in, each beside its citations.
+    pub(crate) fn push_cited(&mut self, entries: Vec<(Entry, Cited)>) -> Result<(), PrepareError> {
+        let (entries, cited): (Vec<Entry>, Vec<Cited>) = entries.into_iter().unzip();
         self.check_next(&entries)?;
         self.prefix.extend(entries);
+        self.cited.extend(cited);
         Ok(())
     }
 
@@ -85,6 +94,7 @@ impl Owner {
         let released = usize::try_from(folded.0.saturating_sub(self.base.0))
             .unwrap_or(usize::MAX)
             .min(self.prefix.len().saturating_sub(1));
+        self.cited.drain(..released);
         if let Some(last) = self.prefix.drain(..released).next_back() {
             self.base = last.seq;
         }
@@ -123,8 +133,9 @@ impl Owner {
     }
 
     /// Decode the last retained entry as `T` and resolve an inferred parameter
-    /// list at the current prefix. Already-constructed views advance only the
-    /// new suffix. [`None`] means a named guard declined.
+    /// list at the current prefix, handing it that entry's citations.
+    /// Already-constructed views advance only the new suffix. [`None`] means a
+    /// named guard declined.
     ///
     /// # Errors
     ///
@@ -134,7 +145,8 @@ impl Owner {
         self.catch_up::<L::Views>()?;
         let refs = L::Views::refs(|id| self.slot_ref(id))
             .ok_or(PrepareError::Poisoned { view: type_name::<L::Views>(), last_trusted_cursor: self.cursor() })?;
-        Ok(L::resolve(&trigger, refs).map(|value| (trigger, value)))
+        let cited = self.cited.last().ok_or(PrepareError::Empty)?;
+        Ok(L::resolve(&trigger, cited, refs).map(|value| (trigger, value)))
     }
 
     fn catch_up<S: ViewSet>(&mut self) -> Result<(), PrepareError> {
@@ -184,12 +196,13 @@ impl Owner {
             return Ok(());
         }
         let entries = suffix(&self.prefix, self.base, last_trusted_cursor, target)?;
+        let cited = suffix(&self.cited, self.base, last_trusted_cursor, target)?;
         slot.poisoned = true;
         let advanced = slot
             .inner
             .as_mut()
             .ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor })?
-            .advance(entries);
+            .advance(entries, cited);
         match advanced {
             Ok(()) => {
                 let actual = slot
@@ -233,10 +246,10 @@ impl Default for Owner {
     }
 }
 
-/// Retained entries after `after` through `through`, where `prefix[0]` is the
-/// entry after `base`. An `after` below `base` was released and fails like an
-/// out-of-range suffix.
-fn suffix(prefix: &[Entry], base: Seq, after: Seq, through: Seq) -> Result<&[Entry], PrepareError> {
+/// Retained entries (or their citations) after `after` through `through`,
+/// where `prefix[0]` is the entry after `base`. An `after` below `base` was
+/// released and fails like an out-of-range suffix.
+fn suffix<T>(prefix: &[T], base: Seq, after: Seq, through: Seq) -> Result<&[T], PrepareError> {
     let mismatch = || seq_mismatch(Seq(after.0.saturating_add(1)), through);
     let start =
         usize::try_from(after.0.checked_sub(base.0).ok_or_else(mismatch)?).map_err(|_| PrepareError::Overflow)?;

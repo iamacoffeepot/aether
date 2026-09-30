@@ -52,6 +52,24 @@ immutable reactor bundle
         -> owned prepared data -> reactor actor
 ```
 
+A fold and a rule may read the artifacts their entry cites directly, one
+level deep. An entry names its content by digest, so a fold sees only the
+entry unless it is handed what the entry points at. The driver reads the
+artifacts before delivery (ADR-0226) and each `Warm` / `Event` carries them;
+the bundle scopes them per entry as a `Cited` value holding that entry's
+cited digests and their artifacts. A `#[view]` fold takes it as an optional
+third parameter, `cited: &Cited`; a rule takes `cited: Cited`, inferred as
+the trigger's citations the way views and guards are inferred. Folds and
+rules that do not ask for it are unchanged. `Cited::get(Ref<K>)` answers only
+a digest the entry itself cites, so a ref found inside a cited artifact, or
+one a neighbouring entry in the same warm batch cites, is never readable. It
+verifies the bytes against the digest and the kind prefix against `K` on
+every read, then decodes; a failed read is the fold's own error and poisons
+the views like any failed fold, while a rule decides what to return. Reads
+stay synchronous: there is no second hop, no resolver, and no suspended
+fold. A rule that reacts to a program's run triggers on `Ran<P>`, the typed
+`Transition` of program `P`, whose input and result are among its citations.
+
 ## Consequences
 
 - Rebuilding a source library creates new bundle content; it does not change

@@ -15,13 +15,14 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
 use aether_bloomery_driver::{
-    CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
+    ArtifactsTicket, CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
 };
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
     Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
-    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult,
-    RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult, artifact_digest,
+    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, ReadClosure,
+    ReadClosureResult, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult,
+    artifact_digest,
 };
 use aether_data::{Kind, KindId, Storage, StorageData};
 use reactor::Reactor;
@@ -107,6 +108,14 @@ pub struct World {
     pub evaluates: BTreeMap<u64, Evaluated>,
     /// Scripted status reply for every resync.
     pub status: Option<Status>,
+    /// Scripted entry citations by seq; an unscripted entry cites nothing.
+    pub cites: HashMap<u64, Vec<Digest>>,
+    /// Batched artifact reads still to answer `Err` before any answers `Found`.
+    pub artifact_errors: usize,
+    /// Most artifacts one batched read answers, so a longer read answers a prefix.
+    pub artifacts_per_read: usize,
+    /// Every batched artifact read's digests, in order.
+    pub artifact_batches: Vec<Vec<Digest>>,
 }
 
 impl World {
@@ -153,6 +162,10 @@ impl World {
             warm_default: None,
             evaluates: BTreeMap::new(),
             status: None,
+            cites: HashMap::new(),
+            artifact_errors: 0,
+            artifacts_per_read: usize::MAX,
+            artifact_batches: Vec::new(),
         };
         (world, commands)
     }
@@ -214,6 +227,7 @@ impl World {
                 let result = self.artifact(&request);
                 Step::More(self.core.on_artifact(ticket, result))
             }
+            Command::ReadArtifacts { ticket, request } => self.read_artifacts(ticket, &request),
             Command::ReadClosure { ticket, request } => {
                 self.closures_seen.push(request.root);
                 let result = self.closure(&request);
@@ -254,13 +268,16 @@ impl World {
                 let last = request.entries().last();
                 let scripted = self.warm_pages.get(&first).cloned();
                 let default = self.warm_default.clone();
-                let warmed = self.reactors.entry(bundle).or_default().warm(first, last, scripted, default.as_ref());
+                let reactor = self.reactors.entry(bundle).or_default();
+                reactor.warm_artifacts.push(claims(request.artifacts()));
+                let warmed = reactor.warm(first, last, scripted, default.as_ref());
                 Step::More(self.core.on_warmed(ticket, warmed))
             }
             Command::Evaluate { ticket, bundle, request } => {
                 let seq = request.entry().seq;
                 let scripted = self.evaluates.get(&seq).cloned();
                 let reactor = self.reactors.entry(bundle).or_default();
+                reactor.event_artifacts.push((seq, claims(request.artifacts())));
                 if let Some(auto) = reactor.check_event(seq) {
                     Step::More(self.core.on_evaluated(ticket, auto))
                 } else if let Some(scripted) = scripted {
@@ -297,6 +314,14 @@ impl World {
         }
     }
 
+    /// Answer one batched cited-artifact read and record the digests it asked for.
+    fn read_artifacts(&mut self, ticket: ArtifactsTicket, request: &ReadArtifacts) -> Step {
+        let digests = request.digests.as_slice().to_vec();
+        let result = self.artifacts_read(&digests);
+        self.artifact_batches.push(digests);
+        Step::More(self.core.on_artifacts(ticket, result))
+    }
+
     /// Answer one load: `Adopted` for a root the engine already holds live,
     /// else the scripted outcome, else hand it to the test.
     fn load(&mut self, ticket: LoadTicket, bundle: Digest, roles: RootRoles, wasm: Vec<u8>) -> Step {
@@ -325,12 +350,16 @@ impl World {
             .skip(after)
             .take(request.limit as usize)
             .enumerate()
-            .map(|(index, (kind, cause, bytes))| JournalEntry {
-                seq: seq_no(after + index + 1),
-                kind: *kind,
-                cause: *cause,
-                recorded_at_millis: 0,
-                bytes: bytes.clone(),
+            .map(|(index, (kind, cause, bytes))| {
+                let seq = seq_no(after + index + 1);
+                JournalEntry {
+                    seq,
+                    kind: *kind,
+                    cause: *cause,
+                    recorded_at_millis: 0,
+                    bytes: bytes.clone(),
+                    cites: self.cites.get(&seq).cloned().unwrap_or_default(),
+                }
             })
             .collect();
         ReadEventsResult::Ok { after: request.after, head: self.head(), entries }
@@ -342,6 +371,24 @@ impl World {
             Some((kind, bytes)) => ReadArtifactResult::Found { artifact: ClosureArtifact::new(*kind, bytes.clone()) },
             None => ReadArtifactResult::Missing { digest: request.digest },
         }
+    }
+
+    /// Answer one batched artifact read from the stored artifacts: a scripted
+    /// failure first, then at most [`World::artifacts_per_read`] artifacts in
+    /// request order, or the first one absent.
+    fn artifacts_read(&mut self, digests: &[Digest]) -> ReadArtifactsResult {
+        if self.artifact_errors > 0 {
+            self.artifact_errors -= 1;
+            return ReadArtifactsResult::Err { message: "scripted artifact read failure".to_owned() };
+        }
+        let mut artifacts = Vec::new();
+        for digest in digests.iter().take(self.artifacts_per_read) {
+            let Some((kind, bytes)) = self.artifacts.get(digest) else {
+                return ReadArtifactsResult::Missing { digest: *digest };
+            };
+            artifacts.push(ClosureArtifact::claiming(*digest, *kind, bytes.clone()));
+        }
+        ReadArtifactsResult::Found { artifacts }
     }
 
     /// Answer one closure read from the scripted closures.
@@ -444,6 +491,11 @@ fn encode_record(record: &DriverRecord) -> (Option<u64>, KindId, Vec<u8>) {
             (Some(*cause), kind, bytes)
         }
     }
+}
+
+/// The claimed digest of each artifact, in order.
+fn claims(artifacts: &[ClosureArtifact]) -> Vec<Digest> {
+    artifacts.iter().map(|artifact| artifact.claimed().unverified()).collect()
 }
 
 /// Digest of 32 equal bytes: readable, deterministic test identity.

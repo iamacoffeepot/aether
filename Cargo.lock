@@ -235,6 +235,7 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-bloomery-kinds",
+ "aether-bloomery-program",
  "aether-bloomery-reactor-derive",
  "aether-bloomery-view",
  "aether-data",

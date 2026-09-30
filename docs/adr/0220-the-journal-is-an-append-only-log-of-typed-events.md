@@ -59,7 +59,8 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   new bound BLOB values. Malformed BLOBs, invalid UTF-8 names, and other
   storage classes are corruption. `recorded_at_millis` is for people and
   consoles; a fold never reads it.
-- `open*` creates the `entries` table and `kind` / `cause` indexes if absent,
+- `open*` creates the `entries` and `entry_citations` tables and the
+  `kind` / `cause` indexes if absent,
   sets `journal_mode = WAL` on file-backed databases only, and sets
   `synchronous = FULL`. It then stores the empty `bloomery.tree` artifact when
   its row is absent, with no entry and no event, so every program can cite the
@@ -69,8 +70,8 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   written), otherwise inserts staged blobs, verifies every citation, decodes
   each `bloomery.head_moved` event as `RecordedHeadMove` and validates `to`
   against the recorded head kind,
-  inserts every event with dense `seq` values, and commits. Durable before
-  return. All-or-nothing. An empty batch writes nothing. The recognized-event
+  inserts every event with dense `seq` values and the digests it cites
+  directly, and commits. Durable before return. All-or-nothing. An empty batch writes nothing. The recognized-event
   check runs after staged artifacts are inserted and before events commit.
   It applies to both `Batch::push_event` and `Batch::push_draft`; a missing
   `Cites` walk cannot stand in for it. Validation is existence plus the
@@ -81,6 +82,18 @@ unwalked field. The recognized head-move check is not that walk: it decodes
 - `read(since, limit)` returns entries with `seq > since`, ascending, at most
   `limit`. A backend failure is `Err`, never a short result. `since` past the
   head is `Ok([])`.
+- The journal stores each entry's direct citations. `append` already walks
+  every event's citations to verify them; it also writes them, in citation
+  order, to `entry_citations (seq, ordinal, to_digest)` inside the same
+  transaction: the typed `Ref`s the event's `Cites` walk pushed, then a
+  `bloomery.head_moved` destination, then the untyped digests the batch
+  attaches to the draft (a `Transition`'s `input` and `result`). Only
+  artifact-to-artifact edges were stored before, and a `Ref<K>` encodes like
+  `[u8; 32]`, so an entry's citations cannot be recovered from its stored
+  bytes. `read_cited(since, limit)` returns each entry beside its digests,
+  and the `ReadEvents` reply's `JournalEntry` carries them as `cites`. An
+  entry appended before the table existed has no rows and reads as citing
+  nothing, the rule artifacts stored before citation edges already follow.
 - `JournalIdentity` is minted by each constructor, compared by allocation,
   and stable when the journal moves. It is not persisted and is not a SQL
   column.
@@ -252,7 +265,13 @@ typed-citation rule, judged by the driver because the expected prefixes
 live on the cited `Program`, not on the event. A head-move destination is
 the other bend: its expected prefix is the recorded head kind on the
 event itself, so the journal judges it. Derived `Cites` sees neither bare
-digest.
+digest. Both are still recorded as the entry's citations: `append` requires a
+`Transition`'s `input` and `result` to be stored or staged and records both,
+input first, and records a head move's destination, so a fold or rule can be
+handed what either entry points at. A reader that knows the program types
+the two digests with `Ran<P>` (`aether-bloomery-program`), which decodes a
+`Transition` whose program is `P` and cites them as `Ref<P::Input>` and
+`Ref<P::Result>`.
 
 Fault rules:
 
@@ -367,6 +386,9 @@ pub trait View: 'static {
     fn empty() -> Self;
     fn cursor(&self) -> Seq;
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error>;
+    fn advance_cited(&mut self, entries: &[Entry], cited: &[Cited]) -> Result<(), Self::Error> {
+        self.advance(entries)
+    }
 }
 ```
 
@@ -374,7 +396,9 @@ pub trait View: 'static {
 entry in the batch, including kinds the view ignores. Views read only those
 entries and their own state. There is no `Clone` / `Send` / `Sync` bound.
 `Heads` keeps `apply` / `get` / `new` / `cursor` and implements `View` by
-folding each entry through `apply`.
+folding each entry through `apply`. `advance_cited` hands each entry the
+artifacts it cites directly (`Cited`, see ADR-0222); a view that reads none
+keeps the default.
 
 The former native `ViewRegistry` owned a `Journal` and cached one instance
 per `TypeId`. Authors selected views with `views().at().with()`, and the

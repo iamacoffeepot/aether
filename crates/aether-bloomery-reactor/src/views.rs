@@ -6,7 +6,7 @@ use core::error::Error;
 use core::marker::PhantomData;
 
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_bloomery_view::View;
+use aether_bloomery_view::{Cited, View};
 
 mod sealed {
     pub trait Sealed {}
@@ -49,7 +49,7 @@ impl ViewCtor {
 pub trait ErasedView: Send {
     fn cursor(&self) -> Seq;
     fn as_any(&self) -> &dyn Any;
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>>;
+    fn advance(&mut self, entries: &[Entry], cited: &[Cited]) -> Result<(), Box<dyn Error + 'static>>;
 }
 
 struct Slot<V: View> {
@@ -65,8 +65,8 @@ impl<V: View + Send> ErasedView for Slot<V> {
         &self.view
     }
 
-    fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>> {
-        self.view.advance(entries).map_err(|error| Box::new(error) as _)
+    fn advance(&mut self, entries: &[Entry], cited: &[Cited]) -> Result<(), Box<dyn Error + 'static>> {
+        self.view.advance_cited(entries, cited).map_err(|error| Box::new(error) as _)
     }
 }
 

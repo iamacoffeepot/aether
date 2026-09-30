@@ -5,7 +5,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery_kinds::{
-    ArtifactCitation, Digest, EncodedArtifact, OpaqueBytes, Ref, Utf8Text, artifact_blob, artifact_prefix, hash_bytes,
+    ArtifactCitation, Digest, EncodedArtifact, OpaqueBytes, Ref, Transition, Utf8Text, artifact_blob, artifact_prefix,
+    hash_bytes,
 };
 use aether_data::{
     Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData, StorageError,
@@ -83,6 +84,19 @@ impl Batch {
     /// Push an already-encoded draft.
     pub fn push_draft(&mut self, draft: Draft) {
         self.events.push(draft);
+    }
+
+    /// Push a driver's `Transition` under `cause`, requiring its input and
+    /// result and recording both as the entry's citations, input first.
+    ///
+    /// # Errors
+    ///
+    /// [`BatchError::Storage`] when encoding fails.
+    pub(crate) fn push_transition(&mut self, record: &Transition, cause: Seq) -> Result<(), BatchError> {
+        self.require_artifact(record.input);
+        self.require_artifact(record.result);
+        self.push_draft(Draft::of(record, Some(cause))?.citing_untyped([record.input, record.result]));
+        Ok(())
     }
 
     /// Require that `digest` be stored or staged when `append` commits.

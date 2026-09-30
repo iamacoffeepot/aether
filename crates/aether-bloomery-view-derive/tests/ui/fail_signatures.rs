@@ -59,7 +59,7 @@ aggregate!(Extra);
 #[view(cursor = cursor)]
 impl View for Extra {
     #[fold]
-    fn event(&mut self, _event: Event, _other: Event) {}
+    fn event(&mut self, _event: Event, _cited: aether_bloomery_view::Cited) {}
 }
 
 aggregate!(Output);
@@ -76,6 +76,13 @@ aggregate!(Abi);
 impl View for Abi {
     #[fold]
     extern "C" fn event(&mut self, _event: Event) {}
+}
+
+aggregate!(Fourth);
+#[view(cursor = cursor)]
+impl View for Fourth {
+    #[fold]
+    fn event(&mut self, _event: Event, _cited: &aether_bloomery_view::Cited, _other: Event) {}
 }
 
 fn main() {}
