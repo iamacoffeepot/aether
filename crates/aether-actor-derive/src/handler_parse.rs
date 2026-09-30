@@ -38,6 +38,9 @@ pub struct HandlerFn {
     /// `class` is [`HandlerClass::Unchecked`]. It rides the manifest record and
     /// the native capability / inventory rows beside the reply.
     pub unchecked_reason: Option<syn::LitStr>,
+    /// The stored request context a `#[handler::response]` takes as its fourth
+    /// parameter (ADR-0243 §10), which the dispatch arm fills before the call.
+    pub response_context: Option<ResponseContext>,
 }
 
 pub struct FallbackFn {
@@ -82,9 +85,12 @@ pub enum HandlerVariant {
 /// The parenthesized arguments of a `#[handler(...)]` /
 /// `#[handler::<class>(...)]` attribute: the [`HandlerVariant`] trigger and,
 /// for `#[handler::unchecked(..)]`, the stated `reason` (ADR-0134, #7193).
+/// `explicit_variant` records that the parens named `mail` or `task`, which
+/// the four intent words refuse (#7201).
 pub struct HandlerArgs {
     pub variant: HandlerVariant,
     pub reason: Option<syn::LitStr>,
+    pub explicit_variant: bool,
 }
 
 /// Parse the parenthesized arguments of a `#[handler(...)]` attribute into
@@ -96,12 +102,15 @@ pub struct HandlerArgs {
 pub fn parse_handler_args(attr: &Attribute) -> syn::Result<HandlerArgs> {
     let list = match &attr.meta {
         // Bare `#[handler]` — the default inbound-mail handler.
-        Meta::Path(_) => return Ok(HandlerArgs { variant: HandlerVariant::Mail, reason: None }),
+        Meta::Path(_) => {
+            return Ok(HandlerArgs { variant: HandlerVariant::Mail, reason: None, explicit_variant: false });
+        }
         Meta::List(list) => list,
         Meta::NameValue(nv) => {
             return Err(syn::Error::new_spanned(
                 nv,
-                "#[handler] takes no `= value` — write `#[handler::single]`, \
+                "#[handler] takes no `= value` — write `#[handler::request]`, `#[handler::tell]`, \
+                 `#[handler::event]`, `#[handler::response]`, \
                  `#[handler::unchecked(reason = \"…\")]`, or `#[handler(task)]`",
             ));
         }
@@ -110,10 +119,10 @@ pub fn parse_handler_args(attr: &Attribute) -> syn::Result<HandlerArgs> {
         syn::Error::new_spanned(
             attr,
             "#[handler(...)] accepts a `mail` or `task` word and, on \
-                 `#[handler::unchecked(..)]`, `reason = \"…\"` — `mail` (bare \
-                 `#[handler::<class>]` or `#[handler::<class>(mail)]`) selects the \
-                 inbound-mail variant, `task` (`#[handler(task)]`) is a dispatch \
-                 completion (ADR-0093 §3)",
+                 `#[handler::unchecked(..)]`, `reason = \"…\"` — `mail` (the default, \
+                 `#[handler::unchecked(mail, ..)]`) selects the inbound-mail variant, `task` (`#[handler(task)]`) is a dispatch \
+                 completion (ADR-0093 §3); `#[handler::request]`, `#[handler::tell]`, \
+                 `#[handler::event]`, and `#[handler::response]` take no arguments",
         )
     })?;
     let mut variant = None;
@@ -149,14 +158,16 @@ pub fn parse_handler_args(attr: &Attribute) -> syn::Result<HandlerArgs> {
                 return Err(syn::Error::new_spanned(
                     other,
                     "unknown #[handler] argument — accepts a `mail` or `task` word \
-                     (`#[handler::<class>]` / `#[handler::<class>(mail)]` = inbound mail, \
+                     (`#[handler::unchecked(mail, ..)]` = inbound mail, \
                      `#[handler(task)]` = a dispatch completion, ADR-0093 §3) and, on \
-                     `#[handler::unchecked(..)]`, `reason = \"…\"`",
+                     `#[handler::unchecked(..)]`, `reason = \"…\"`; `#[handler::request]`, \
+                     `#[handler::tell]`, `#[handler::event]`, and `#[handler::response]` take \
+                     no arguments",
                 ));
             }
         }
     }
-    Ok(HandlerArgs { variant: variant.unwrap_or(HandlerVariant::Mail), reason })
+    Ok(HandlerArgs { explicit_variant: variant.is_some(), variant: variant.unwrap_or(HandlerVariant::Mail), reason })
 }
 
 /// The reply class of a handler (ADR-0112, ADR-0134), read off the
@@ -171,38 +182,84 @@ pub enum HandlerClass {
     Unchecked,
 }
 
-/// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112,
-/// ADR-0134), given the already-parsed [`HandlerArgs`]. The last path
-/// segment is the class (`single` / `unchecked`); a bare `handler`
-/// segment is classless task exemption for [`HandlerVariant::Task`] (its
-/// reply rides `TaskDone`, not the handler class) and a pointed compile
-/// error for [`HandlerVariant::Mail`] — the class is no longer defaulted.
-/// `attr_is_handler` is the gate, so the path ends in `handler` or follows
-/// it; any other class word is a pointed compile error, and the retired
-/// `manual` names its replacement (#7193).
+/// Why a handler's mail arrives (#7201). Each intent word is a spelling of
+/// the [`HandlerClass::Single`] reply class with a signature check
+/// ([`check_intent_signature`]): `request` must answer (`-> O` or
+/// `-> Pending<O>`), `tell` and `event` answer nothing, and `response` answers
+/// nothing and may take its stored request context as a fourth parameter
+/// (ADR-0243 §10). The intent drives no dispatch and is never published: the
+/// reply class and return type alone decide the arm, the manifest record, and
+/// the contract row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HandlerIntent {
+    Request,
+    Tell,
+    Event,
+    Response,
+}
+
+impl HandlerIntent {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Tell => "tell",
+            Self::Event => "event",
+            Self::Response => "response",
+        }
+    }
+}
+
+/// The stored request context a `#[handler::response]` takes as its fourth
+/// parameter (ADR-0243 §10): `ty` is `C`, read syntactically, and `optional`
+/// is set when the parameter spells `Option<C>`, so the handler runs with
+/// `None` when no context of that kind was stored. Without `optional`, a
+/// reply that arrives with no `C` does not run the handler, and the arm logs
+/// an error in the actor's own log ring.
+pub struct ResponseContext {
+    pub ty: Type,
+    pub optional: bool,
+}
+
+/// Read a handler's [`HandlerClass`] and [`HandlerIntent`] off its attribute
+/// path (ADR-0112, ADR-0134, #7201), given the already-parsed [`HandlerArgs`].
+/// The last path segment is the class word: `request` / `tell` / `event` /
+/// `response` are the single class with an intent, `single` is the single
+/// class with none (retired by #7202), and `unchecked` is the unchecked class.
+/// A bare `handler` segment is the classless task exemption for
+/// [`HandlerVariant::Task`] (its reply rides `TaskDone`, not the handler
+/// class) and a pointed compile error for [`HandlerVariant::Mail`] — the class
+/// is no longer defaulted. `attr_is_handler` is the gate, so the path ends in
+/// `handler` or follows it; any other class word is a pointed compile error,
+/// and the retired `manual` names its replacement (#7193).
 ///
 /// The unchecked class gives up the reply check, so it must say why: a
 /// `reason` that is non-empty after trimming is required on `unchecked` and
-/// refused on every other class.
-pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<HandlerClass> {
+/// refused on every other class. The four intent words take no parenthesized
+/// arguments at all.
+pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<(HandlerClass, Option<HandlerIntent>)> {
     let last = attr.path().segments.last().expect("attr_is_handler guarantees a non-empty path");
-    let class = match last.ident.to_string().as_str() {
+    let (class, intent) = match last.ident.to_string().as_str() {
         "handler" => match args.variant {
             // The task variant has no reply class — its reply rides
             // `TaskDone`, not the handler class — so it stays classless.
-            HandlerVariant::Task => HandlerClass::Single,
+            HandlerVariant::Task => (HandlerClass::Single, None),
             HandlerVariant::Mail => {
                 return Err(syn::Error::new_spanned(
                     attr,
-                    "#[handler] requires an explicit reply class (ADR-0134): write \
-                     `#[handler::single]` (the return value is the reply) or \
-                     `#[handler::unchecked(reason = \"…\")]` (the handler issues replies \
-                     the engine does not check)",
+                    "#[handler] requires an explicit class (ADR-0134, #7201): write \
+                     `#[handler::request]` (the return value answers), `#[handler::tell]` or \
+                     `#[handler::event]` (answers nothing), `#[handler::response]` (the answer to \
+                     this actor's own request), or `#[handler::unchecked(reason = \"…\")]` (the \
+                     handler issues replies the engine does not check)",
                 ));
             }
         },
-        "single" => HandlerClass::Single,
-        "unchecked" => HandlerClass::Unchecked,
+        "request" => (HandlerClass::Single, Some(HandlerIntent::Request)),
+        "tell" => (HandlerClass::Single, Some(HandlerIntent::Tell)),
+        "event" => (HandlerClass::Single, Some(HandlerIntent::Event)),
+        "response" => (HandlerClass::Single, Some(HandlerIntent::Response)),
+        "single" => (HandlerClass::Single, None),
+        "unchecked" => (HandlerClass::Unchecked, None),
         "manual" => {
             return Err(syn::Error::new_spanned(
                 attr,
@@ -214,12 +271,33 @@ pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<
             return Err(syn::Error::new_spanned(
                 attr,
                 format!(
-                    "unknown #[handler::<class>] — accepts `single` or `unchecked(reason = \"…\")` \
-                     (ADR-0112 / ADR-0134); got `{other}`"
+                    "unknown #[handler::<class>] — accepts `request`, `tell`, `event`, `response`, or \
+                     `unchecked(reason = \"…\")` (ADR-0134, #7201); got `{other}`"
                 ),
             ));
         }
     };
+    if let Some(intent) = intent {
+        let word = intent.word();
+        if args.explicit_variant {
+            return Err(syn::Error::new_spanned(
+                attr,
+                format!(
+                    "`#[handler::{word}]` takes no `mail` / `task` argument: it is always an inbound-mail \
+                     handler, and a dispatch completion stays `#[handler(task)]` (ADR-0093 §3)"
+                ),
+            ));
+        }
+        if let Some(reason) = &args.reason {
+            return Err(syn::Error::new_spanned(
+                reason,
+                format!(
+                    "`reason` belongs only on `#[handler::unchecked(reason = \"…\")]` — a \
+                     `#[handler::{word}]` reply is checked, so it has nothing to explain"
+                ),
+            ));
+        }
+    }
     match (class, &args.reason) {
         (HandlerClass::Unchecked, None) => Err(syn::Error::new_spanned(
             attr,
@@ -237,7 +315,138 @@ pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<
             "`reason` belongs only on `#[handler::unchecked(reason = \"…\")]` — a single or \
              task handler's reply is checked, so it has nothing to explain",
         )),
-        _ => Ok(class),
+        _ => Ok((class, intent)),
+    }
+}
+
+/// Check a handler's signature against its [`HandlerIntent`] (#7201) and read
+/// a `#[handler::response]`'s fourth parameter. `request` must answer
+/// (`-> O` or `-> Pending<O>`); `tell`, `event`, and `response` answer
+/// nothing. Only `response` takes a fourth parameter, `context: C` or
+/// `context: Option<C>`, and never on a native `&[K]` slice handler, because
+/// a batched cast is never a reply. Each refusal names the attribute that
+/// fits. The kind extractors have already bounded the parameter count at four.
+pub fn check_intent_signature(
+    intent: HandlerIntent,
+    reply: &HandlerReply,
+    sig: &Signature,
+    is_slice: bool,
+) -> syn::Result<Option<ResponseContext>> {
+    let word = intent.word();
+    match (intent, reply) {
+        (HandlerIntent::Request, HandlerReply::None) => {
+            return Err(syn::Error::new_spanned(
+                &sig.ident,
+                "`#[handler::request]` must answer: return `O` or `Pending<O>`. A handler that \
+                 answers nothing is `#[handler::tell]`, `#[handler::event]`, or `#[handler::response]`",
+            ));
+        }
+        (
+            HandlerIntent::Tell | HandlerIntent::Event | HandlerIntent::Response,
+            HandlerReply::Sync(_) | HandlerReply::Deferred(_),
+        ) => {
+            return Err(syn::Error::new_spanned(
+                &sig.output,
+                format!(
+                    "`#[handler::{word}]` answers nothing, so it returns `()`. A handler that answers \
+                     is `#[handler::request]`"
+                ),
+            ));
+        }
+        _ => {}
+    }
+    let Some(fourth) = sig.inputs.get(3) else {
+        return Ok(None);
+    };
+    if intent != HandlerIntent::Response {
+        return Err(syn::Error::new_spanned(
+            fourth,
+            format!(
+                "`#[handler::{word}]` takes three parameters. A fourth parameter is the stored request \
+                 context, which only `#[handler::response]` takes (ADR-0243 §10)"
+            ),
+        ));
+    }
+    if is_slice {
+        return Err(syn::Error::new_spanned(
+            fourth,
+            "a batched `mail: &[K]` handler takes no context parameter: a batched cast is never a reply",
+        ));
+    }
+    let FnArg::Typed(pt) = fourth else {
+        return Err(syn::Error::new_spanned(
+            fourth,
+            "the context parameter must be `context: C` or `context: Option<C>`",
+        ));
+    };
+    if let Type::Path(type_path) = &*pt.ty
+        && type_path.qself.is_none()
+        && let Some(seg) = type_path.path.segments.last()
+        && seg.ident == "Option"
+        && let PathArguments::AngleBracketed(args) = &seg.arguments
+        && args.args.len() == 1
+        && let Some(GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Ok(Some(ResponseContext { ty: inner.clone(), optional: true }));
+    }
+    Ok(Some(ResponseContext { ty: (*pt.ty).clone(), optional: false }))
+}
+
+/// Push `#[allow(clippy::needless_pass_by_value)]` onto a response handler
+/// that takes its context parameter (ADR-0243 §10): the arm hands the taken
+/// context over by value, so a body that only reads it would trip the lint for
+/// a shape the author did not choose, as [`allow_abi_receiver`] does for the
+/// receiver.
+pub fn allow_context_by_value(attrs: &mut Vec<Attribute>, context: Option<&ResponseContext>) {
+    if context.is_some() {
+        attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
+    }
+}
+
+/// The dispatch statements of a silent single arm (ADR-0243 §10), shared by
+/// the wasm, native, and handler-set arms. `call` builds the handler call from
+/// the trailing arguments it is handed: none for a handler without a context
+/// parameter, and `, __aether_context` for a `#[handler::response]` that takes
+/// one. The context is taken on the full dispatch ctx `__aether_ctx`, which
+/// every reply mode on both runtimes carries `take_context` for.
+///
+/// An `Option<C>` parameter receives the take as it is. A `C` parameter whose
+/// context is absent — the reply was uncorrelated, its context was stored as
+/// another kind, or none was stored — does not run the handler: the arm logs an
+/// error in the actor's own log ring and returns `handled`, so the mail counts
+/// as handled and never reaches a `#[fallback]`. It does not panic, because the
+/// reply kind is mail any sender can send.
+pub fn silent_call(
+    context: Option<&ResponseContext>,
+    method: &syn::Ident,
+    kind_ty: &Type,
+    handled: &TokenStream2,
+    call: impl FnOnce(TokenStream2) -> TokenStream2,
+) -> TokenStream2 {
+    let Some(context) = context else {
+        return call(quote! {});
+    };
+    let context_ty = &context.ty;
+    let handler_call = call(quote! { , __aether_context });
+    if context.optional {
+        return quote! {
+            let __aether_context = __aether_ctx.take_context::<#context_ty>();
+            #handler_call
+        };
+    }
+    let method_name = method.to_string();
+    quote! {
+        let ::core::option::Option::Some(__aether_context) = __aether_ctx.take_context::<#context_ty>() else {
+            ::aether_actor::__macro_internals::tracing::error!(
+                handler = #method_name,
+                reply = <#kind_ty as ::aether_actor::__macro_internals::Kind>::NAME,
+                context = <#context_ty as ::aether_actor::__macro_internals::Kind>::NAME,
+                request = ?__aether_ctx.in_reply_to(),
+                "response handler did not run: its reply arrived without a stored context of this kind",
+            );
+            return #handled;
+        };
+        #handler_call
     }
 }
 
@@ -514,6 +723,10 @@ pub struct NativeActorHandlerFn {
     /// onto its dispatch arm, capability entry, measured-kind id, marker impl,
     /// and inventory submission.
     pub cfgs: Vec<Attribute>,
+    /// A `#[handler::response]`'s context parameter (ADR-0243 §10); see
+    /// [`HandlerFn::response_context`]. The intent word itself leaves no other
+    /// trace once [`check_intent_signature`] has passed (#7201).
+    pub response_context: Option<ResponseContext>,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
@@ -816,8 +1029,12 @@ pub fn rewrite_self_state_first_param(method: &mut syn::ImplItemFn, concrete: &T
     }
 }
 
-pub fn extract_native_actor_handler_kind(sig: &Signature, is_split: bool) -> syn::Result<(Type, bool)> {
-    if sig.inputs.len() != 3 {
+pub fn extract_native_actor_handler_kind(
+    sig: &Signature,
+    is_split: bool,
+    allow_context: bool,
+) -> syn::Result<(Type, bool)> {
+    if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,
             "#[actor] impl NativeActor #[handler] method must have signature \
@@ -857,14 +1074,22 @@ pub fn extract_native_actor_handler_kind(sig: &Signature, is_split: bool) -> syn
     Ok(((*pt.ty).clone(), false))
 }
 
+/// Whether a mail handler has three parameters, or four when the caller
+/// allows the intent words' context parameter (#7201): an intent handler's
+/// fourth parameter is then judged by [`check_intent_signature`], which names
+/// `#[handler::response]` as the one attribute that takes it.
+fn handler_arity_fits(sig: &Signature, allow_context: bool) -> bool {
+    sig.inputs.len() == 3 || (allow_context && sig.inputs.len() == 4)
+}
+
 /// Extract `K` from a handler method's third parameter (`arg: K`).
 /// Accepts any type path — trait-bound validation lives in the
 /// generated call site: the `mail.decode_typed::<K>()` in the
 /// synthesized dispatcher requires `K: Kind + AnyBitPattern + 'static`,
 /// so unsupported types surface as a trait-bound error pointing at
 /// the user's signature.
-pub fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
-    if sig.inputs.len() != 3 {
+pub fn extract_handler_kind_type(sig: &Signature, allow_context: bool) -> syn::Result<Type> {
+    if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,
             "#[handler] method must have signature `(&mut self, ctx: &mut Ctx<'_>, arg: K)`",

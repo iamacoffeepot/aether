@@ -1,4 +1,4 @@
-error: #[handler] requires an explicit reply class (ADR-0134): write `#[handler::single]` (the return value is the reply) or `#[handler::unchecked(reason = "…")]` (the handler issues replies the engine does not check)
+error: #[handler] requires an explicit class (ADR-0134, #7201): write `#[handler::request]` (the return value answers), `#[handler::tell]` or `#[handler::event]` (answers nothing), `#[handler::response]` (the answer to this actor's own request), or `#[handler::unchecked(reason = "…")]` (the handler issues replies the engine does not check)
   --> tests/ui/rejects_bare_mail_variant_native.rs:38:5
    |
 38 |     #[handler(mail)]

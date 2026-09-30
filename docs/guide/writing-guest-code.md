@@ -26,7 +26,7 @@ so spawning a despawned child's key again fails with
 
 ## Deferred replies
 
-A `#[handler::single]` that answers later returns `Pending<R>`, so its row still
+A `#[handler::request]` that answers later returns `Pending<R>`, so its row still
 declares the reply kind `R`
 ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)).
 `ctx.hold::<R>()` returns the pair: the handler returns the `Pending<R>` receipt,
@@ -39,7 +39,7 @@ replies from outside the actor, or relays a request, its `reason` says which,
 and it is never a default.
 
 ```rust
-#[handler::single]
+#[handler::request]
 fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) -> Pending<MeshLoadResult> {
     let (pending, held) = ctx.hold::<MeshLoadResult>();
     let read = Read { addr: NamespaceAddr::new(&msg.namespace, &msg.path) };
@@ -47,12 +47,17 @@ fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) -> Pending<MeshLoadR
     pending
 }
 
-#[handler::single]
-fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
-    let Some(context) = ctx.take_context::<MeshLoadContext>() else { return };
+#[handler::response]
+fn on_read(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult, context: MeshLoadContext) {
     context.held.answer(ctx, &MeshLoadResult::from(result));
 }
 ```
+
+`on_read` is a `#[handler::response]`: its fourth parameter is the context
+`on_load` stored, which the dispatch arm takes before the call (ADR-0243 §10).
+A `ReadResult` that arrives without a `MeshLoadContext` does not run it; the arm
+logs an error in the actor's log ring instead. Spell the parameter
+`Option<MeshLoadContext>` for a handler that is correct without it.
 
 A `Held<R>` is move-only. Park it in actor state, in a request context passed by
 value to `send_with_context`, or in the state `on_dehydrate` saves with

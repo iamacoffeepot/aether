@@ -1,6 +1,7 @@
 //! The request-context half of the inbound frame: a reply's correlation
-//! recovers the typed context the request stored, exactly once, and a `Held`
-//! the context carries comes back live (ADR-0243 §4).
+//! recovers the typed context the request stored, exactly once, a `Held`
+//! the context carries comes back live (ADR-0243 §4), and a response handler
+//! receives it as its context parameter (ADR-0243 §10).
 
 use aether_data::wire::{self, HeldClaim, HeldLedger, LedgerEncoder};
 use aether_data::{Kind, KindId};
@@ -64,6 +65,95 @@ fn native_ctx_take_context_consumes_stored_reply_context() {
         driver.read_state(|recaller| recaller.taken.clone()).flatten(),
         Some((Some(NativeRequestContext { value: 9 }), None)),
     );
+}
+
+/// A pumped root whose `#[handler::response]` takes its stored context as a
+/// `C` parameter (ADR-0243 §10), recording the context of each run.
+#[derive(Default)]
+struct RequiredResponder {
+    runs: Vec<u32>,
+}
+
+#[aether_actor::actor(singleton, root, depends(Bouncer))]
+impl NativeActor for RequiredResponder {
+    const NAMESPACE: &'static str = "test.native_ctx.required_responder";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self::default())
+    }
+
+    #[handler::tell]
+    fn on_recall(&mut self, ctx: &mut NativeCtx<'_>, recall: Recall) {
+        let _ = self;
+        let _request = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: recall.value });
+    }
+
+    #[handler::response]
+    fn on_poked(&mut self, _ctx: &mut NativeCtx<'_>, _poked: Poked, context: NativeRequestContext) {
+        self.runs.push(context.value);
+    }
+}
+
+/// A pumped root whose `#[handler::response]` takes its stored context as an
+/// `Option<C>` parameter, recording what each run received.
+#[derive(Default)]
+struct OptionalResponder {
+    runs: Vec<Option<u32>>,
+}
+
+#[aether_actor::actor(singleton, root, depends(Bouncer))]
+impl NativeActor for OptionalResponder {
+    const NAMESPACE: &'static str = "test.native_ctx.optional_responder";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self::default())
+    }
+
+    #[handler::tell]
+    fn on_recall(&mut self, ctx: &mut NativeCtx<'_>, recall: Recall) {
+        let _ = self;
+        let _request = ctx.send_with_context::<Bouncer>(&Poke, NativeRequestContext { value: recall.value });
+    }
+
+    #[handler::response]
+    fn on_poked(&mut self, _ctx: &mut NativeCtx<'_>, _poked: Poked, context: Option<NativeRequestContext>) {
+        self.runs.push(context.map(|c| c.value));
+    }
+}
+
+/// Catches a response arm that passes the wrong context, or runs a `C` handler
+/// with none to give it: the reply to a request delivers the context the
+/// request stored, and a `Poked` sent straight to the actor, which answers no
+/// request, does not run the handler.
+#[test]
+fn a_required_context_response_runs_only_with_its_stored_context() {
+    let (registry, mailer) = bare_substrate();
+    let mut driver =
+        PumpedDriver::<RequiredResponder>::boot(boot_test_chassis_with::<Bouncer>(&registry, &mailer, (), ()), (), ());
+    let responder = driver.chassis().actor_ref::<RequiredResponder>();
+
+    driver.send_and_settle(responder, &Recall { value: 9 }, None);
+    driver.send_and_settle(responder, &Poked, None);
+
+    assert_eq!(driver.read_state(|responder| responder.runs.clone()), Some(vec![9]));
+}
+
+/// Catches a response arm that skips an `Option<C>` handler or hands it a
+/// context it did not take: the reply delivers the stored context, and an
+/// uncorrelated `Poked` runs the handler with `None`.
+#[test]
+fn an_optional_context_response_runs_with_or_without_its_context() {
+    let (registry, mailer) = bare_substrate();
+    let mut driver =
+        PumpedDriver::<OptionalResponder>::boot(boot_test_chassis_with::<Bouncer>(&registry, &mailer, (), ()), (), ());
+    let responder = driver.chassis().actor_ref::<OptionalResponder>();
+
+    driver.send_and_settle(responder, &Recall { value: 9 }, None);
+    driver.send_and_settle(responder, &Poked, None);
+
+    assert_eq!(driver.read_state(|responder| responder.runs.clone()), Some(vec![Some(9), None]));
 }
 
 /// Catches a `Held` drop that fires when its context parks, and a claim that
