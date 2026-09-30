@@ -103,10 +103,11 @@ impl Pct {
 }
 
 /// A measured count (nanoseconds, bytes) as the `f64` the paired statistics
-/// run over. Measurements sit far below 2^53, where the conversion is exact.
-#[allow(clippy::cast_precision_loss)]
-pub(super) const fn measured(v: u64) -> f64 {
-    v as f64
+/// run over. Each 32-bit half converts exactly, so the result is exact below
+/// 2^53 (every measurement) and correctly rounded above it.
+pub(super) fn measured(v: u64) -> f64 {
+    let half = |bits: u64| f64::from(u32::try_from(bits).unwrap_or(u32::MAX));
+    half(v >> 32).mul_add(4_294_967_296.0, half(v & 0xFFFF_FFFF))
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
