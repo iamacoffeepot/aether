@@ -32,7 +32,10 @@ declares the reply kind `R`
 `ctx.hold::<R>()` returns the pair: the handler returns the `Pending<R>` receipt,
 and keeps the `Held<R>` ticket to answer from any later handler with
 `held.answer(ctx, &reply)`. The host keeps the request's reply handle and holds
-its settlement open until the ticket answers.
+its settlement open until the ticket answers. This still declares one reply
+kind and answers it exactly once — `#[handler::manual]` is for a handler that
+replies more than once, replies from outside the actor, or relays a request,
+and is never a default.
 
 ```rust
 #[handler::single]

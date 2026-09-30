@@ -38,8 +38,6 @@ use aether_kinds::{
     LoadComponent, Publish, PublishResult, Spawn, SpawnResult,
 };
 
-pub use aether_actor::Manual;
-
 // Crate-local wiring the `#[runtime] impl` handler bodies name (the
 // `MailboxCategory` vocabulary) and the state struct — all used within this
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
@@ -292,12 +290,8 @@ impl NativeActor for ComponentHostCapability {
     /// The registry owns publication and wake coalescing; this consumer reads
     /// one coherent snapshot, egresses it at most once per generation pair,
     /// and always acknowledges so a publication racing the clear is re-armed.
-    #[handler::manual]
-    fn on_registry_changed(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_, Erased, Manual>,
-        _payload: RegistryChanged,
-    ) {
+    #[handler::single]
+    fn on_registry_changed(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Erased>, _payload: RegistryChanged) {
         state.refresh_registry_inventory();
     }
 
@@ -375,28 +369,28 @@ impl NativeActor for ComponentHostCapability {
     }
 
     /// A member answered its republish prepare (ADR-0241 §7).
-    #[handler::manual]
-    fn on_prepared(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: Prepared) {
+    #[handler::single]
+    fn on_prepared(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepared) {
         state.finish_prepare(ctx, payload);
     }
 
     /// A member installed its prepared candidate (ADR-0241 §7).
-    #[handler::manual]
-    fn on_committed(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _payload: Committed) {
+    #[handler::single]
+    fn on_committed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Committed) {
         state.finish_commit(ctx);
     }
 
     /// A member reinstated its old guest (ADR-0241 §7).
-    #[handler::manual]
-    fn on_aborted(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _payload: Aborted) {
+    #[handler::single]
+    fn on_aborted(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Aborted) {
         state.finish_abort(ctx);
     }
 
     /// The chain a member's commit started has settled: the mail its
     /// candidate held and every chain that mail caused are done (ADR-0241
     /// §7). `Settled` notices for other roots are ignored.
-    #[handler::manual]
-    fn on_commit_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: Settled) {
+    #[handler::single]
+    fn on_commit_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Settled) {
         state.settle_commit(ctx, payload.root);
     }
 

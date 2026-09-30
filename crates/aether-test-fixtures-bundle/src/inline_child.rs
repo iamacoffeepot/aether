@@ -87,8 +87,8 @@
 #![allow(clippy::needless_pass_by_value)] // aether-suppression-request: narrowed from the existing pair (#7148); `rehydrate` takes its state by value
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, SpawnError, Subname, WasmActor, WasmCtx,
-    WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, SpawnError, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
@@ -263,8 +263,8 @@ impl WasmActor for InlineDespawnParent {
     /// alias route is retired with it (#4228), so a later probe to the dead
     /// alias settles as mail to a retired address rather than falling through
     /// to this parent — and either way never leaks.
-    #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _trigger: DespawnChild) {
+    #[handler::single]
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
             let _ = ctx.despawn_inline_child(child);
         }
