@@ -66,28 +66,33 @@ pub struct SpawnSubstrateArgs {
 }
 
 /// One component in a `spawn_substrate` boot list. Mirrors the
-/// `load_component` arguments (registry selector, ADR-0096 export
-/// selector). aether-mcp pre-resolves each selector against the hub's
-/// component registry (ADR-0116) and stages the resolved bytes for the
-/// substrate to read at boot — the substrate boot path stays path-based,
-/// now fed by the registry rather than host build paths. The engine binds
-/// its RPC port only after every boot instance has answered its load, so a
-/// spec that fails to load, or two specs that derive one name, fail the
-/// spawn.
+/// `load_component` arguments (registry selector, `namespace`, `key`).
+/// aether-mcp pre-resolves each selector against the hub's component
+/// registry (ADR-0116) and stages the resolved bytes for the substrate to
+/// read at boot — the substrate boot path stays path-based, now fed by the
+/// registry rather than host build paths. The engine binds its RPC port only
+/// after every boot instance has answered its load, so a spec that fails to
+/// load fails the spawn.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentSpec {
     /// Registry selector for the component, resolved against the hub's
     /// content-addressed store (ADR-0116) — `upload_component` first if it
     /// isn't stored. An exact token: a content `hash`, a `name`, or a
-    /// `module@actor` (the `@actor` half picks an exported actor type from
-    /// a multi-actor module). The host wasm path is gone — the path
-    /// survives only as the `upload_component` input.
+    /// `module@actor` (the `@actor` half names the exported type). The host
+    /// wasm path is gone — the path survives only as the `upload_component`
+    /// input.
     pub selector: String,
-    /// Optional human-readable load name. The substrate defaults one
-    /// from the wasm if omitted. A name that collides with another boot
-    /// spec's name or a replica-derived name fails the spawn.
+    /// The exported type to instantiate, by its `Actor::NAMESPACE`. Omit
+    /// only when the module exports one type; a `module@actor` selector
+    /// fills it from its `@actor` half, and an explicit value wins.
     #[serde(default)]
-    pub name: Option<String>,
+    pub namespace: Option<String>,
+    /// The instance's key (ADR-0241 §5): an instanced type is born at
+    /// `NS:key`. Omit for a singleton, or to let the engine draw a counter
+    /// key. Refused together with `replicas`, which draws a counter key per
+    /// instance.
+    #[serde(default)]
+    pub key: Option<String>,
     /// Optional inline init-config JSON (ADR-0090), schema-encoded to the
     /// component's `Config` kind before boot. Omit for a no-config component.
     #[serde(default)]
@@ -97,25 +102,11 @@ pub struct ComponentSpec {
     /// boot. Mutually exclusive with `config`.
     #[serde(default)]
     pub config_path: Option<String>,
-    /// ADR-0096: which exported actor type to instantiate from a
-    /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit only
-    /// for a single-actor module or a multi-actor module that explicitly
-    /// declares `export!(default = A, ...)`; a defaultless module requires a
-    /// selection. A `module@actor` selector populates this from its `@actor`
-    /// half — set it explicitly to override.
-    #[serde(default)]
-    pub export: Option<String>,
-    /// Fan this entry out into N instances at boot (issue 2626), one
-    /// shared config: replica 0 is named for the bare `base` and each
-    /// later instance `{base}-{index}`, where `base` follows the same
-    /// precedence as an unreplicated load (`name` > `export` > the default
-    /// actor's own namespace) — so `replicas: 1` loads exactly what an
-    /// omitted field loads, and a co-hosted peer's typed send,
-    /// `ctx.send::<R>(..)`, reaches replica 0. Pairs with `#[router(shared)]`
-    /// (ADR-0136) to scale an HTTP handler to N instances in one spec.
-    /// Omit (or `null`) for one instance, today's behaviour.
-    /// `replicas: 0` is a tool error, not a silent no-op. Every derived
-    /// name must remain unique across the full boot list.
+    /// Fan this entry out into N instances at boot (issue 2626), one shared
+    /// config, each keyed by the engine's counter. Pairs with
+    /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N instances
+    /// in one spec. Omit (or `null`) for one instance. `replicas: 0` is a
+    /// tool error, not a silent no-op, and `replicas` with `key` is refused.
     #[serde(default)]
     pub replicas: Option<u32>,
 }
@@ -637,7 +628,8 @@ pub struct ReplyEventJson {
     pub payload_bytes: Option<String>,
 }
 
-/// `load_component` arguments.
+/// `load_component` arguments: a `publish` of the selector's module, then a
+/// `spawn` of one of its types.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadComponentArgs {
     /// Engine UUID the component loads into (from `list_engines`). Omit to
@@ -649,51 +641,42 @@ pub struct LoadComponentArgs {
     /// Registry selector for the component, resolved against the hub's
     /// content-addressed store (ADR-0116) — `upload_component` first if it
     /// isn't stored. An exact token: a content `hash`, a `name` (latest
-    /// upload under it), or a `module@actor` (the `@actor` half picks an
-    /// exported actor type from a multi-actor module). The host wasm path
-    /// is retired — the only path anywhere is the `upload_component` input.
-    /// aether-mcp resolves the selector hub-local to the wasm bytes, then
-    /// forwards them to the substrate's `aether.component` mailbox.
+    /// upload under it), or a `module@actor` (the `@actor` half names the
+    /// exported type to spawn). aether-mcp resolves the selector hub-local to
+    /// the wasm bytes, then publishes them to the substrate's
+    /// `aether.component` mailbox.
     pub selector: String,
-    /// Optional human-readable name. The substrate defaults one from
-    /// the wasm if omitted; the reply echoes the resolved name.
+    /// The exported type to spawn, by its `Actor::NAMESPACE` (e.g.
+    /// `"ui.panel"`). Omit only when the module exports exactly one type; a
+    /// namespace-less load of a module exporting several is refused before
+    /// any mail is sent, naming the exports. A `module@actor` selector fills
+    /// it from its `@actor` half, and an explicit value wins.
     #[serde(default)]
-    pub name: Option<String>,
+    pub namespace: Option<String>,
+    /// The instance's key (ADR-0241 §5): an instanced type is born at
+    /// `NS:key`. Omit for a singleton, or to let the engine draw a counter
+    /// key. Refused together with `replicas`.
+    #[serde(default)]
+    pub key: Option<String>,
     /// ADR-0090 (issue 1257): optional inline init-config JSON.
-    /// `aether-mcp` schema-encodes it to the component's `Config` kind and
-    /// forwards the resulting bytes on the load mail. Omit for a no-config
-    /// component; `describe_component` reports the expected config kind.
+    /// `aether-mcp` schema-encodes it to the type's `Config` kind and sends
+    /// the resulting bytes on the spawn. Omit for a no-config component;
+    /// `describe_component` reports the expected config kind.
     #[serde(default)]
     pub config: Option<serde_json::Value>,
     /// ADR-0090 (issue 1257): optional path to a JSON file holding the
     /// component's init-config. Mutually exclusive with `config`.
     #[serde(default)]
     pub config_path: Option<String>,
-    /// ADR-0096: which exported actor type to instantiate from a
-    /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
-    /// `"ui.panel"`). Omit only when the module declares a default: the
-    /// sole type in a single-actor module or the type selected by
-    /// `export!(default = A, ...)`. A defaultless `export!(public = [A, B, ...])`
-    /// requires an explicit selection. A `module@actor` selector
-    /// populates this from its `@actor` half. An export the module doesn't
-    /// declare comes back as a `LoadResult::Err`.
-    #[serde(default)]
-    pub export: Option<String>,
-    /// Load N instances of this component in one call (issue 2626), one
-    /// shared config: loops the single-load dispatch N times, naming
-    /// replica 0 for the bare `base` and each later instance
-    /// `{base}-{index}` (`base` = `name` > `export` > the default actor's
-    /// own namespace — the same precedence a plain load resolves against),
-    /// so a co-hosted peer's typed send, `ctx.send::<R>(..)`, reaches replica 0.
-    /// Pairs with `#[router(shared)]` (ADR-0136) to scale an HTTP handler
-    /// to N instances in one call. Returns one shared `capabilities` block plus
-    /// `instances: [{address}, …]` (issue 3006) instead of the
-    /// single-load shape. A mid-loop failure reports which replica failed
-    /// and how many loaded before it — already-loaded replicas stay live,
-    /// the same as N manual `load_component` calls. Omit (or `null`) for
-    /// today's single-instance load. `replicas: 0` is a tool error;
-    /// values above the MCP fan-out ceiling (`MAX_REPLICAS`, 256) are also
-    /// rejected before any dispatch.
+    /// Spawn N instances of the published type in one call (issue 2626), one
+    /// shared config, each keyed by the engine's counter: the module is
+    /// published once and spawned N times. Returns one shared `capabilities`
+    /// block plus `instances: [{address, state}, …]` (issue 3006) instead of
+    /// the single-instance shape. A mid-loop failure reports which instance
+    /// failed and how many spawned before it — already-spawned instances
+    /// stay live. `replicas: 0`, values above the fan-out ceiling
+    /// (`MAX_REPLICAS`, 256), and `replicas` with `key` are refused before
+    /// any mail is sent.
     #[serde(default)]
     pub replicas: Option<u32>,
     /// When `true`, each capabilities doc field carries the full rustdoc
@@ -704,26 +687,26 @@ pub struct LoadComponentArgs {
     pub full: bool,
 }
 
-/// `replace_component` arguments.
+/// `publish` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReplaceComponentArgs {
-    /// Engine UUID hosting the module's instances (from `list_engines`).
-    /// Omit to target the sole supervised engine; with zero or several
-    /// engines an omitted id is an error naming the situation, never a
-    /// guess. The reply echoes the engine that answered.
+pub struct PublishArgs {
+    /// Engine UUID to publish into (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id is
+    /// an error naming the situation, never a guess. The reply echoes the
+    /// engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Registry selector for the successor module, resolved against the
-    /// hub's content-addressed store (ADR-0116) — hash-primary, so a `hash`
-    /// pins or rolls a module to an exact build; a `name` resolves too. A
-    /// replace names no actor: every live instance of the module's
-    /// namespaces moves, so a `module@actor` selector is refused.
+    /// Registry selector for the module, resolved against the hub's
+    /// content-addressed store (ADR-0116) — hash-primary, so a `hash` pins
+    /// or rolls a module to an exact build; a `name` resolves too. A publish
+    /// binds every namespace the module exports, so a `module@actor`
+    /// selector is refused.
     pub selector: String,
-    /// New init configs for live instances (ADR-0090 §5, ADR-0241 §4). An
-    /// instance whose type's config kind changed needs one; every other
-    /// instance keeps its stored config.
+    /// New init configs for live instances when the publish republishes
+    /// them (ADR-0090 §5, ADR-0241 §4). An instance whose type's config kind
+    /// changed needs one; every other instance keeps its stored config.
     #[serde(default)]
-    pub configs: Vec<ReplaceConfigArgs>,
+    pub configs: Vec<InstanceConfigArgs>,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first
     /// non-empty rustdoc line (summary convention; issue 3006).
@@ -731,12 +714,12 @@ pub struct ReplaceComponentArgs {
     pub full: bool,
 }
 
-/// One instance's config in [`ReplaceComponentArgs::configs`].
+/// One instance's config in [`PublishArgs::configs`].
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReplaceConfigArgs {
+pub struct InstanceConfigArgs {
     /// The live instance: its canonical lineage (`NS`, `NS:key`, or
-    /// `parent/NS:key`, the `address` `load_component` returned) or an
-    /// unambiguous ADR-0166 short path.
+    /// `parent/NS:key`, the `address` a spawn returned) or an unambiguous
+    /// ADR-0166 short path.
     pub address: String,
     /// Inline init-config JSON, schema-encoded to the successor module's
     /// Config kind for the instance's type.
@@ -748,6 +731,49 @@ pub struct ReplaceConfigArgs {
     pub config_path: Option<String>,
 }
 
+/// `spawn` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpawnArgs {
+    /// Engine UUID to spawn in (from `list_engines`). Omit to target the
+    /// sole supervised engine; with zero or several engines an omitted id is
+    /// an error naming the situation, never a guess. The reply echoes the
+    /// engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// The published type, by the name a publish reported: `NS`, or
+    /// `NS.<hash>` for a content-addressed module.
+    pub namespace: String,
+    /// The instance's key (ADR-0241 §5): an instanced type is born at
+    /// `NS:key`. Omit for a singleton, or to let the engine draw a counter
+    /// key. Refused together with `replicas`.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// The live actor to spawn the instance beneath (its canonical lineage
+    /// or an unambiguous ADR-0166 short path), whose type the spawned type
+    /// must declare `child_of`. Omit to spawn at the root.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Optional inline init-config JSON (ADR-0090), schema-encoded to the
+    /// published type's `Config` kind. Omit for a no-config type.
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
+    /// Optional path to a JSON file holding the init-config. Mutually
+    /// exclusive with `config`.
+    #[serde(default)]
+    pub config_path: Option<String>,
+    /// Spawn N instances, one shared config, each keyed by the engine's
+    /// counter. Returns one shared `capabilities` block plus
+    /// `instances: [{address, state}, …]`. `replicas: 0`, values above 256,
+    /// and `replicas` with `key` are refused before any mail is sent.
+    #[serde(default)]
+    pub replicas: Option<u32>,
+    /// When `true`, each capabilities doc field carries the full rustdoc
+    /// string. When `false` (default), each doc is projected to its first
+    /// non-empty rustdoc line (summary convention; issue 3006).
+    #[serde(default)]
+    pub full: bool,
+}
+
 /// `describe_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeComponentArgs {
@@ -757,14 +783,19 @@ pub struct DescribeComponentArgs {
     /// reply echoes the engine that answered.
     #[serde(default)]
     pub engine_id: Option<String>,
-    /// Address of the component to describe: its full ADR-0099 lineage
-    /// (returned by `load_component`, or retained/derived from an explicit
-    /// boot spec) or an unambiguous ADR-0166 short path. `spawn_substrate`
-    /// returns engine information only and `list_components` reports stored
-    /// artifacts. The engine resolves the
-    /// address to its canonical lineage, the cache key; a cache miss asks
-    /// the substrate live, while a cache hit does not prove current liveness.
-    pub address: String,
+    /// Address of a live component to describe: its canonical lineage
+    /// (returned by `spawn` / `load_component`, or retained/derived from an
+    /// explicit boot spec) or an unambiguous ADR-0166 short path. The engine
+    /// resolves the address to its canonical lineage, the cache key; a cache
+    /// miss asks the substrate live, while a cache hit does not prove
+    /// current liveness. Set exactly one of `address` and `namespace`.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// A published type to describe, by the name a publish reported (`NS`,
+    /// or `NS.<hash>` for a content-addressed module), whether or not any
+    /// instance of it is live. Set exactly one of `address` and `namespace`.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first
     /// non-empty rustdoc line (summary convention; issue 3006).

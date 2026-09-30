@@ -1,6 +1,6 @@
 # Replacement failure states
 
-`replace_component` republishes a module over every live instance of its
+A `publish` of a successor republishes a module over every live instance of its
 namespaces as one group (ADR-0241 §7): on success every instance runs the
 successor behind its unchanged mailbox, and on failure every instance runs its
 old guest. An error is still not a clean rollback signal. Depending on which

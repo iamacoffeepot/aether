@@ -24,9 +24,10 @@ on one engine, or into several engines.
 | `list_components` | list/filter stored component artifacts |
 | `pin_artifact` | durable explicit pin by exact stored content hash |
 | `unpin_artifact` | drop only the explicit pin; a name still protects |
-| `load_component` | instantiate stored wasm in one engine |
-| `replace_component` | republish a stored module over every live instance of its namespaces |
-| `describe_component` | inspect a live component's receive surface |
+| `publish` | bind a stored module's namespaces in one engine; a successor republishes every live instance of them |
+| `spawn` | stand up (or find live) an instance of a published type |
+| `load_component` | `publish` then `spawn` in one call |
+| `describe_component` | inspect a live instance's or a published type's receive surface |
 | `describe_kinds` | inspect its config, input, and reply schemas in the engine's live vocabulary |
 | `send_mail` | drive a component, including the generic `aether.component.drop` lifecycle mail |
 
@@ -46,8 +47,8 @@ waits until the replace answers. Load under a new name to bring the component ba
 
 ## Upload before selector
 
-Only `upload_component` accepts a filesystem path. `load_component`,
-`replace_component`, and boot component specs accept registry selectors—not
+Only `upload_component` accepts a filesystem path. `publish`,
+`load_component`, and boot component specs accept registry selectors—not
 paths and not inline wasm bytes.
 
 The reliable sequence is:
@@ -105,13 +106,14 @@ schema.
 
 ## Loading into an engine
 
-`load_component` resolves the selector at the hub, sends the bytes to the target
-engine's `aether.component` cap, and waits for `LoadResult`.
+`load_component` resolves the selector at the hub, publishes the bytes to the
+target engine's `aether.component` cap, then spawns the selected type and waits
+for its `SpawnResult`.
 
 On a single load, record both outputs:
 
 - `address`: the full lineage address used as `send_mail.address`, the
-  `aether.component.drop` kind's `target`, a `replace_component` config's
+  `aether.component.drop` kind's `target`, a `publish` config's
   `address`, and by live `describe_component`.
 - `capabilities`: handled kinds, reply contracts, fallback, docs, and config
   kind for the selected actor type.
@@ -188,9 +190,9 @@ engine reachability matters.
 
 ## Replacing safely
 
-`replace_component` republishes a module (ADR-0241 §7). Pass the current engine
-id and a previously uploaded selector; prefer a content hash so the successor is
-unambiguous. A replace names no instance and takes no `module@actor` selector:
+A `publish` of a successor republishes a module (ADR-0241 §7). Pass the current
+engine id and a previously uploaded selector; prefer a content hash so the
+successor is unambiguous. A publish names no instance and takes no `module@actor` selector:
 every live instance of every namespace the module publishes moves to the
 successor together, or none does, and each keeps its address and mailbox.
 

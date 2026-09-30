@@ -2,15 +2,19 @@
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
-use crate::tools::components::{binary_listing_response, component_listing_response, store_listing_response};
+use crate::tools::components::store::{binary_listing_response, component_listing_response, store_listing_response};
 use aether_actor::actor;
 use aether_kinds::{
-    ListComponentBinariesResult, ListEngineBinariesResult, SetArtifactPinned, SetArtifactPinnedResult, UploadBinary,
-    UploadBinaryResult, UploadComponent, UploadComponentResult,
+    ComponentActor, ComponentManifest, ListComponentBinariesResult, ListEngineBinariesResult, Publish, PublishResult,
+    PublishedType, SetArtifactPinned, SetArtifactPinnedResult, Spawn, SpawnResult, UploadBinary, UploadBinaryResult,
+    UploadComponent, UploadComponentResult,
 };
+use aether_rpc::ForwardEnvelope;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::testing::boot_authority;
+use rmcp::model::ErrorCode;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// Hub-local fleet double for pin/upload forwarding tests. Installed at
@@ -26,6 +30,7 @@ struct FleetLocalCells {
     binary_reply: Arc<Mutex<UploadBinaryResult>>,
     component_reply: Arc<Mutex<UploadComponentResult>>,
     pin_reply: Arc<Mutex<SetArtifactPinnedResult>>,
+    resolve_reply: Arc<Mutex<ResolveComponentResult>>,
 }
 
 impl FleetLocalCells {
@@ -40,6 +45,9 @@ impl FleetLocalCells {
                 name: None,
             })),
             pin_reply: Arc::new(Mutex::new(SetArtifactPinnedResult::Ok { hash: "pin-hash".to_owned(), pinned: true })),
+            resolve_reply: Arc::new(Mutex::new(ResolveComponentResult::Err {
+                error: "no scripted resolve".to_owned(),
+            })),
         }
     }
 }
@@ -74,6 +82,11 @@ impl NativeActor for FleetLocalSink {
     fn on_set_artifact_pinned(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetArtifactPinned) -> SetArtifactPinnedResult {
         self.cells.pins.lock().expect("pin log mutex").push(mail);
         self.cells.pin_reply.lock().expect("pin reply mutex").clone()
+    }
+
+    #[handler::single]
+    fn on_resolve_component(&mut self, _ctx: &mut NativeCtx<'_>, _mail: ResolveComponent) -> ResolveComponentResult {
+        self.cells.resolve_reply.lock().expect("resolve reply mutex").clone()
     }
 }
 
@@ -117,12 +130,8 @@ fn config_struct_schema() -> SchemaType {
     }
 }
 
-fn config_kind(schema: &SchemaType) -> KindDescriptorWire {
-    KindDescriptorWire {
-        id: KindId(kind_id_from_parts("test.config", schema)),
-        name: "test.config".to_owned(),
-        schema_wire: wire::to_vec(schema).expect("SchemaType wire-encodes"),
-    }
+fn config_kind(schema: &SchemaType) -> KindDescriptor {
+    KindDescriptor { name: "test.config".to_owned(), schema: schema.clone() }
 }
 
 #[test]
@@ -175,7 +184,7 @@ fn binary_listing_wraps_entries_and_match_count() {
 
 #[test]
 fn component_listing_names_kinds_omits_union_and_preserves_manifest_fields() {
-    use aether_kinds::{ComponentActor, ComponentEntry, ComponentManifest, Tick};
+    use aether_kinds::{ComponentEntry, Tick};
 
     let unknown = KindId(0xDEAD_BEEF_DEAD_BEEF);
     let response = component_listing_response(ListComponentBinariesResult {
@@ -207,7 +216,6 @@ fn component_listing_names_kinds_omits_union_and_preserves_manifest_fields() {
     assert!(manifest.get("handled_kinds").is_none(), "the redundant manifest-wide union is omitted");
     assert_eq!(manifest["fallback"], true);
     assert_eq!(manifest["provenance"], "rustc 1.test");
-    assert_eq!(manifest["default_entry"], "test.probe");
 }
 
 #[tokio::test]
@@ -291,30 +299,6 @@ async fn component_config_field_mismatch_is_invalid_params() {
     assert!(err.to_string().contains("does not match"), "unexpected error: {err}");
 }
 
-/// `replica_base_name` follows the same precedence the component host
-/// applies at load: caller `name` wins over `export`, which wins over
-/// the default actor namespace — the bug this catches is a fan-out base
-/// name that disagrees with what an unreplicated load would resolve to.
-#[test]
-fn replica_base_name_follows_name_export_namespace_precedence() {
-    assert_eq!(replica_base_name(Some("caller"), Some("export-ns"), Some("default-ns")), Some("caller".to_owned()),);
-    assert_eq!(replica_base_name(None, Some("export-ns"), Some("default-ns")), Some("export-ns".to_owned()),);
-    assert_eq!(replica_base_name(None, None, Some("default-ns")), Some("default-ns".to_owned()),);
-    assert_eq!(replica_base_name(None, None, None), None);
-}
-
-/// `replica_names` names replica 0 for the bare base and suffixes the rest,
-/// so a fan-out registers the name a peer's `ctx.send::<R>(..)` folds and
-/// `replicas: 1` loads exactly what an omitted field loads. The bug this
-/// catches is a boot-readiness prediction that drifts from the names the
-/// chassis fan-out actually registers — `spawn_substrate` would then wait
-/// out its readiness budget on a name nothing ever claims.
-#[test]
-fn replica_names_claim_the_bare_base_then_suffix() {
-    assert_eq!(replica_names("handler", 3), vec!["handler", "handler-1", "handler-2"],);
-    assert_eq!(replica_names("handler", 1), vec!["handler"]);
-}
-
 /// `reject_replicas_out_of_range` rejects 0 and values above [`MAX_REPLICAS`]
 /// (ADR-0090 §4 + review bounds-cap); in-range and omitted stay ok.
 #[test]
@@ -338,10 +322,10 @@ async fn load_component_unresolvable_selector_is_tool_error() {
         .load_component(Parameters(LoadComponentArgs {
             engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             selector: "no-such-component".to_owned(),
-            name: None,
+            namespace: None,
+            key: None,
             config: None,
             config_path: None,
-            export: None,
             replicas: None,
             full: false,
         }))
@@ -360,10 +344,10 @@ async fn load_component_replicas_zero_is_tool_error() {
         .load_component(Parameters(LoadComponentArgs {
             engine_id: Some("00000000-0000-0000-0000-000000000001".to_owned()),
             selector: "irrelevant".to_owned(),
-            name: None,
+            namespace: None,
+            key: None,
             config: None,
             config_path: None,
-            export: None,
             replicas: Some(0),
             full: false,
         }))
@@ -566,4 +550,260 @@ async fn pin_and_unpin_artifact_propagate_typed_errors() {
     assert!(forwarded[0].pinned);
     assert_eq!(forwarded[1].hash, "missing");
     assert!(!forwarded[1].pinned);
+}
+
+/// The engine every scripted component-door test routes to.
+const DOOR_ENGINE: EngineId = EngineId(Uuid::from_u128(0x7157));
+
+/// A hub whose `aether.fleet` is the [`FleetLocalSink`] (answering the
+/// hub-local resolve) and whose route for [`DOOR_ENGINE`] is a scripted
+/// sink answering the component host's doors from `replies`, recording
+/// every engine request in `requests`.
+fn boot_hub_with_component_doors(
+    cells: FleetLocalCells,
+    requests: &Arc<Mutex<Vec<ForwardEnvelope>>>,
+    replies: &Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
+) -> (PassiveChassis<TestChassis>, u16) {
+    let (chassis, port) = boot_hub_with_fleet_local_sink(cells);
+    add_scripted_route(&chassis, DOOR_ENGINE, &ListKindsResult { kinds: Vec::new() }, requests, replies);
+    (chassis, port)
+}
+
+/// A resolve answer for a stored module exporting `exports`, with no config
+/// kind.
+fn resolved_module(exports: &[&str]) -> ResolveComponentResult {
+    ResolveComponentResult::Ok {
+        hash: "cmp-hash".to_owned(),
+        wasm: vec![0, 0x61, 0x73, 0x6d],
+        name: Some("probe".to_owned()),
+        manifest: ComponentManifest {
+            namespaces: exports.iter().map(|export| (*export).to_owned()).collect(),
+            actors: exports
+                .iter()
+                .map(|export| ComponentActor {
+                    namespace: (*export).to_owned(),
+                    handled_kinds: Vec::new(),
+                    fallback: false,
+                })
+                .collect(),
+            handled_kinds: Vec::new(),
+            fallback: false,
+            provenance: "rustc 1.test".to_owned(),
+            default_entry: None,
+        },
+        export: None,
+        config_kind: None,
+    }
+}
+
+fn surface(handler: &str) -> ComponentCapabilities {
+    ComponentCapabilities {
+        handlers: vec![HandlerCapability {
+            id: KindId(0x71),
+            name: handler.to_owned(),
+            doc: None,
+            reply: aether_data::ReplyContract::None,
+        }],
+        ..ComponentCapabilities::default()
+    }
+}
+
+fn scripted<K: Kind>(reply: &K) -> ScriptedRouteReply {
+    ScriptedRouteReply { events: vec![ScriptedReplyEvent { kind: K::ID, payload: reply.encode_into_bytes() }] }
+}
+
+/// The component-door requests the engine received, in order, leaving out
+/// the inventory reads.
+fn door_calls(requests: &Arc<Mutex<Vec<ForwardEnvelope>>>) -> Vec<ForwardEnvelope> {
+    requests
+        .lock()
+        .expect("route requests mutex is never poisoned")
+        .iter()
+        .filter(|call| call.kind != ListKinds::ID)
+        .cloned()
+        .collect()
+}
+
+/// A replicated load publishes its module once and then spawns it N times
+/// with no key, so the engine draws a counter key per instance. The bugs
+/// this catches are a re-publish per replica (N module check-ins) and a
+/// derived per-replica key (the retired `{base}-{index}` names).
+#[tokio::test]
+async fn load_component_with_replicas_publishes_once_then_spawns_counter_keyed() {
+    let cells = FleetLocalCells::new();
+    *cells.resolve_reply.lock().expect("resolve reply mutex") = resolved_module(&["test.probe"]);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::from([
+        scripted(&PublishResult::Ok {
+            types: vec![PublishedType { namespace: "test.probe".to_owned(), capabilities: surface("test.on") }],
+        }),
+        scripted(&SpawnResult::Spawned {
+            path: ErasedActorPath::new("test.probe:0").expect("fixture is an actor path"),
+            capabilities: surface("test.on"),
+        }),
+        scripted(&SpawnResult::Spawned {
+            path: ErasedActorPath::new("test.probe:1").expect("fixture is an actor path"),
+            capabilities: surface("test.on"),
+        }),
+        scripted(&SpawnResult::Live {
+            path: ErasedActorPath::new("test.probe:2").expect("fixture is an actor path"),
+            capabilities: surface("test.on"),
+        }),
+    ])));
+    let (_chassis, port) = boot_hub_with_component_doors(cells, &requests, &replies);
+    let mcp = connect_mcp(port);
+
+    let output = mcp
+        .load_component(Parameters(LoadComponentArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            selector: "probe".to_owned(),
+            namespace: None,
+            key: None,
+            config: None,
+            config_path: None,
+            replicas: Some(3),
+            full: false,
+        }))
+        .await
+        .expect("replicated load publishes and spawns");
+
+    let doors = door_calls(&requests);
+    let kinds: Vec<KindId> = doors.iter().map(|call| call.kind).collect();
+    assert_eq!(kinds, vec![Publish::ID, Spawn::ID, Spawn::ID, Spawn::ID], "one publish, then one spawn per replica");
+    for call in &doors[1..] {
+        let spawn = Spawn::decode_from_bytes(&call.payload).expect("spawn request decodes");
+        assert_eq!(spawn.namespace, "test.probe", "each spawn names the published type");
+        assert_eq!(spawn.key, None, "each replica takes a counter key");
+    }
+    let output: serde_json::Value = serde_json::from_str(&output).expect("json");
+    assert_eq!(output["instances"][0], serde_json::json!({ "address": "test.probe:0", "state": "spawned" }));
+    assert_eq!(output["instances"][2], serde_json::json!({ "address": "test.probe:2", "state": "live" }));
+}
+
+/// A load that names no type of a module exporting two is refused before
+/// any mail reaches the engine. The bug this catches is a silent pick of
+/// one export (the retired `default_entry` fallback).
+#[tokio::test]
+async fn load_component_without_namespace_of_a_two_type_module_is_refused_before_mail() {
+    let cells = FleetLocalCells::new();
+    *cells.resolve_reply.lock().expect("resolve reply mutex") = resolved_module(&["test.left", "test.right"]);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_component_doors(cells, &requests, &Arc::new(Mutex::new(VecDeque::new())));
+    let mcp = connect_mcp(port);
+
+    let error = mcp
+        .load_component(Parameters(LoadComponentArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            selector: "probe".to_owned(),
+            namespace: None,
+            key: None,
+            config: None,
+            config_path: None,
+            replicas: None,
+            full: false,
+        }))
+        .await
+        .expect_err("a namespace-less load of a two-type module is refused");
+
+    assert!(error.message.contains("exports 2 types"), "the refusal names the exports: {error}");
+    assert!(requests.lock().expect("route requests mutex is never poisoned").is_empty(), "no engine mail was sent");
+}
+
+/// `spawn` refuses `key` with `replicas` before any mail: each replica takes
+/// a counter key, so one caller key cannot name them all.
+#[tokio::test]
+async fn spawn_key_with_replicas_is_refused() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let error = mcp
+        .spawn(Parameters(SpawnArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            namespace: "test.probe".to_owned(),
+            key: Some("main".to_owned()),
+            parent: None,
+            config: None,
+            config_path: None,
+            replicas: Some(2),
+            full: false,
+        }))
+        .await
+        .expect_err("key with replicas is refused");
+    assert!(error.message.contains("cannot be combined with `replicas`"), "got {error}");
+}
+
+/// A publish's reply fills the published-type cache and refreshes every
+/// cached instance of a namespace it bound: a later describe by namespace or
+/// by address answers the successor's surface with no describe mail. The
+/// bugs this catches are a lost republish refresh (describe answering the
+/// predecessor's handlers) and a type cache the publish never fills.
+#[tokio::test]
+async fn publish_fills_the_type_cache_and_refreshes_cached_instances() {
+    let cells = FleetLocalCells::new();
+    *cells.resolve_reply.lock().expect("resolve reply mutex") = resolved_module(&["test.probe"]);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::from([scripted(&PublishResult::Ok {
+        types: vec![PublishedType { namespace: "test.probe".to_owned(), capabilities: surface("test.successor") }],
+    })])));
+    let (_chassis, port) = boot_hub_with_component_doors(cells, &requests, &replies);
+    let mcp = connect_mcp(port);
+    let instance = ErasedActorPath::new("test.probe:a").expect("fixture is an actor path");
+    mcp.components.record_instance(DOOR_ENGINE, instance, surface("test.predecessor"));
+
+    let published = mcp
+        .publish(Parameters(PublishArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            selector: "probe".to_owned(),
+            configs: Vec::new(),
+            full: false,
+        }))
+        .await
+        .expect("publish binds the module");
+    let published: serde_json::Value = serde_json::from_str(&published).expect("json");
+    assert_eq!(published["types"][0]["namespace"], "test.probe");
+
+    let by_namespace = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            address: None,
+            namespace: Some("test.probe".to_owned()),
+            full: false,
+        }))
+        .await
+        .expect("the published type describes from the cache");
+    let by_address = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: Some(DOOR_ENGINE.0.to_string()),
+            address: Some("test.probe:a".to_owned()),
+            namespace: None,
+            full: false,
+        }))
+        .await
+        .expect("the cached instance describes");
+
+    let by_namespace: serde_json::Value = serde_json::from_str(&by_namespace).expect("json");
+    let by_address: serde_json::Value = serde_json::from_str(&by_address).expect("json");
+    assert_eq!(by_namespace["namespace"], "test.probe");
+    assert_eq!(by_namespace["capabilities"]["handlers"][0]["name"], "test.successor");
+    assert_eq!(by_address["capabilities"]["handlers"][0]["name"], "test.successor");
+    let kinds: Vec<KindId> = door_calls(&requests).iter().map(|call| call.kind).collect();
+    assert_eq!(kinds, vec![Publish::ID], "both describes answer from the cache");
+}
+
+/// `describe_component` takes exactly one of `address` and `namespace`.
+#[tokio::test]
+async fn describe_component_takes_exactly_one_selector() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    for (address, namespace) in [(None, None), (Some("test.probe:a".to_owned()), Some("test.probe".to_owned()))] {
+        let error = mcp
+            .describe_component(Parameters(DescribeComponentArgs {
+                engine_id: Some(DOOR_ENGINE.0.to_string()),
+                address,
+                namespace,
+                full: false,
+            }))
+            .await
+            .expect_err("both or neither selector is invalid params");
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS, "got {error}");
+    }
 }

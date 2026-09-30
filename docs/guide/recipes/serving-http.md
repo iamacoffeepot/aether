@@ -228,7 +228,7 @@ method beats a method-agnostic route at the same prefix. A prefix already
 claimed by another component is answered
 `aether.http.server.register_route_result::Err` — first claimant keeps it.
 Routes follow the component: the route holds a proof of the registrant that
-survives `replace_component`, and it is released automatically when the
+survives a republish, and it is released automatically when the
 component drops, or explicitly via
 `aether.http.server.unregister_route_self`. External callers (an MCP session,
 a test) use the `register_route` / `unregister_route` forms, which name the

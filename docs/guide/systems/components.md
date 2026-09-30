@@ -201,9 +201,10 @@ A drop closes the instance, and its name tombstones for the engine's lifetime
 second drop at the path is refused. Load under a new name to bring the component
 back.
 
-In practice you drive this through the MCP harness — `load_component(engine_id,
-selector, name?, config?, config_path?, export?)`, `replace_component(...)`,
-`terminate_substrate(...)` — where
+In practice you drive this through the MCP harness — `publish(engine_id,
+selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,
+`load_component(engine_id, selector, namespace?, key?, config?, config_path?)`
+(publish then spawn), `terminate_substrate(...)` — where
 `selector` resolves against the hub's content-addressed component registry
 ([ADR-0116](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0116-component-registry.md)). Stage the wasm first with `upload_component`, which
 takes the **path** and reads the bytes for you (tool JSON never carries the wasm

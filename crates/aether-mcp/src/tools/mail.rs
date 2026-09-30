@@ -107,8 +107,7 @@ pub(super) async fn settle_mail_item(
             // forward, so a short-path spelling consults the same
             // component-capability cache entry as its canonical spelling.
             let declared_reply = ErasedActorPath::new(&delivered.canonical_recipient).ok().and_then(|canonical| {
-                let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
-                cache.get(&(delivered.engine, canonical)).and_then(|caps| {
+                mcp.components.instance(delivered.engine, &canonical).and_then(|caps| {
                     caps.handlers.iter().find(|handler| handler.name == delivered.kind_name).and_then(|handler| {
                         match handler.reply {
                             aether_data::ReplyContract::One(id) => Some(id),

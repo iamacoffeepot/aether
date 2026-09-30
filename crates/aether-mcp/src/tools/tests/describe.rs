@@ -423,14 +423,12 @@ async fn describe_component_reads_the_cache() {
         }],
         ..ComponentCapabilities::default()
     };
-    mcp.components
-        .lock()
-        .expect("test setup: component cache mutex is never poisoned")
-        .insert((engine, ErasedActorPath::new(canonical).expect("fixture is an actor path")), seeded);
+    mcp.components.record_instance(engine, ErasedActorPath::new(canonical).expect("fixture is an actor path"), seeded);
     let hit = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
-            address: canonical.to_owned(),
+            address: Some(canonical.to_owned()),
+            namespace: None,
             full: false,
         }))
         .await
@@ -448,7 +446,8 @@ async fn describe_component_reads_the_cache() {
     let hit_full = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
-            address: canonical.to_owned(),
+            address: Some(canonical.to_owned()),
+            namespace: None,
             full: true,
         }))
         .await
@@ -497,7 +496,8 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
     let output = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine.0.to_string()),
-            address: supplied.to_owned(),
+            address: Some(supplied.to_owned()),
+            namespace: None,
             full: false,
         }))
         .await
@@ -505,10 +505,7 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
     let output: serde_json::Value = serde_json::from_str(&output).expect("json");
     assert_eq!(output["capabilities"]["handlers"][0]["name"], "test.by_name");
     assert!(
-        mcp.components
-            .lock()
-            .expect("component cache mutex is never poisoned")
-            .contains_key(&(engine, ErasedActorPath::new(canonical).expect("fixture is an actor path"))),
+        mcp.components.instance(engine, &ErasedActorPath::new(canonical).expect("fixture is an actor path")).is_some(),
         "capabilities cache uses the engine-returned canonical path"
     );
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");

@@ -81,9 +81,9 @@ Per-engine work is keyed by `engine_id`. A session has a recognizable arc:
    the MCP-build-static `describe_transforms` do not take one.
 2. **Set it up.** Stage the wasm into the hub's component registry with
    `upload_component(staged_path)` — it returns `{hash, name}` — then
-   `load_component(engine_id, selector)` resolves that selector and loads the
-   component, returning its canonical lineage `address` and advertised
-   capabilities.
+   `load_component(engine_id, selector)` resolves that selector, publishes the
+   module, and spawns an instance of its type, returning the instance's
+   canonical lineage `address` and advertised capabilities.
 3. **Drive it.** `send_mail(…)` delivers a kind to a mailbox. By default it blocks
    until the dispatch chain settles and hands you the correlated reply.
 4. **Watch it.** `capture_frame` reads the rendered frame back as a PNG;
@@ -202,13 +202,14 @@ notation remains inside its named field; it does not become a top-level key.
 Use `names: ["aether.fs.write"]` for exact kinds, then add `detail: "schema"` when you
 need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `detail: "schema"` call is refused so schema output
-stays bounded. `describe_component` reports a loaded component's handler kinds,
-their docs, whether it has a fallback, and its boot-config kind, addressed by
-the component's loaded lineage name or an unambiguous ADR-0166 short path.
-`load_component` returns the canonical
-address, the component's published name (`NS`, or `NS:key` for an instanced
-type). For a boot load, retain the
-configured name from the component spec or derive the expected lineage from
+stays bounded. `describe_component` reports a component's handler kinds,
+their docs, whether it has a fallback, and its boot-config kind. It takes
+exactly one of `address` — a live instance's lineage or an unambiguous
+ADR-0166 short path — or `namespace` — a published type, as a publish named
+it, whether or not an instance is live. `spawn` and `load_component` return
+the canonical address (`NS`, `NS:key` for an instanced type, or
+`parent/NS:key`). For a boot load, retain the
+configured key from the component spec or derive the expected lineage from
 that spec; `spawn_substrate` itself returns only engine information. Registry
 `list_components` entries describe stored artifacts and are not loaded lineage
 addresses.
@@ -227,23 +228,32 @@ lists the native transforms linked into the current `aether-mcp` process; it
 does not query an engine.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
-stages it in the hub's component registry. `load_component` and
-`replace_component` then take that upload's registry `selector` (hash, name, or,
-for a load only, `module@actor`), never a host wasm path or inline wasm bytes. For a typed-config
+stages it in the hub's component registry. The component tools follow the
+component host's two doors (ADR-0241 §9). `publish` takes that upload's
+registry `selector` (hash or name, never `module@actor`) and binds every
+namespace the module exports, standing no instance up; its reply names each
+type as published (`NS`, or `NS.<hash>` for a content-addressed module).
+`spawn` takes such a `namespace`, an optional `key` and `parent`, and asks for
+an instance: a live name answers with that instance (`state: "live"`), an
+absent one stands it up (`state: "spawned"`). `load_component` is publish then
+spawn: it takes a `selector` (hash, name, or `module@actor`) and a `namespace`
+that may be omitted only when the module exports one type. No tool takes a host
+wasm path or inline wasm bytes. For a typed-config
 component, pass either `config` as inline structured JSON or `config_path` as a
 path to a JSON file; they are mutually exclusive. The harness schema-encodes the
 JSON to the Config kind that `describe_component` identifies; `describe_kinds`
 shows its schema. `config_path` does not contain pre-encoded wire bytes.
-`load_component` with `replicas: N` returns one shared `capabilities` block plus
-`instances: [{address}, …]` rather than repeating capabilities per
+`spawn` or `load_component` with `replicas: N` publishes once and spawns N
+counter-keyed instances, returning one shared `capabilities` block plus
+`instances: [{address, state}, …]` rather than repeating capabilities per
 replica; docs on that block also follow the summary-vs-`full` projection.
-`replace_component` names no instance: it republishes the selected module, and
-every live instance of the module's namespaces moves to it as one group, or none
-does (ADR-0241 §7). Its `configs: [{address, config | config_path}]` give named
-instances a config, encoded to the successor's Config kind for each instance's
-type; the reply lists each republished type with its capabilities. There is no
-drop tool: send `aether.component.drop` through `send_mail`. A drop closes the
-instance and retires its name, so a later load needs a new name.
+`replicas` with `key` is refused. Replacing code is a `publish` of a successor:
+every live instance of the module's namespaces moves to it as one group, or
+none does (ADR-0241 §7). Its `configs: [{address, config | config_path}]` give
+named instances a config, encoded to the successor's Config kind for each
+instance's type; the reply lists each published type with its capabilities.
+There is no drop tool: send `aether.component.drop` through `send_mail`. A drop
+closes the instance and retires its name, so a later spawn needs a new key.
 
 `list_binaries` and registry `list_components` return
 `{entries, total_matched, shown, truncated, notice}` in stable newest-first
@@ -255,7 +265,7 @@ pass `include_history: true` for unnamed historical hashes and an explicit
 `total_matched`. Component actor `handled_kinds` are readable static kind names
 with tagged `knd-…` fallbacks; the redundant manifest-wide handled-kind union
 is omitted. These registry rows identify stored wasm, not live component
-instances; use the lineage returned by `load_component`, or the known expected
+instances; use the lineage returned by `spawn` / `load_component`, or the known expected
 lineage of a boot spec, for `describe_component`.
 
 **Observation.** `capture_frame` returns one window's current frame as an
@@ -289,7 +299,7 @@ one handler.
   `aether.audio.note_on` to the mailbox `aether.audio`. See
   [Mail, kinds & scheduling](systems/mail-and-kinds.md).
 - **Paths, not bytes.** `upload_component` takes the fleet-host filesystem path;
-  `load_component` and `replace_component` take registry selectors. Tool JSON
+  `publish` and `load_component` take registry selectors. Tool JSON
   never carries the wasm buffer itself. Host paths are not sandboxed task paths;
   see [Host paths and artifacts](operating/host-paths-and-artifacts.md).
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as

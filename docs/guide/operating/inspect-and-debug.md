@@ -72,7 +72,7 @@ a lineage name resolves live against the substrate. Keep the exact name returned
 by load or boot discovery; it enables that fallback. A tagged mailbox id works
 only when the local MCP cache already has that `(engine, mailbox)` entry.
 
-`load_component` and `replace_component` populate the cache. A generic component
+`publish`, `spawn`, and `load_component` populate the cache. A generic component
 drop through `send_mail` does not invalidate it, so a later same-process describe
 can show stale pre-drop capabilities. Likewise, component kind descriptors
 remain in the engine registry after drop. Neither observation alone proves the

@@ -27,7 +27,7 @@ boundary:
 |---|---|---|
 | `upload_binary.staged_path` | hub | reads bytes, then executes the path with `--describe` |
 | `upload_component.staged_path` | hub | reads wasm bytes and parses embedded manifests without executing the module |
-| `load_component.config_path` or a `replace_component` config's `config_path` | `aether-mcp` | reads structured JSON and schema-encodes it for the selected component or instance type |
+| `load_component.config_path`, `spawn.config_path`, or a `publish` config's `config_path` | `aether-mcp` | reads structured JSON and schema-encodes it for the selected component or instance type |
 | a Bytes parameter/config's `{"$file": path}` | `aether-mcp` | reads the whole host file, then rejects it if it exceeds the RPC frame cap |
 | `capture_frame.similarity.reference_path` | substrate render capability | joins a relative path beneath the configured assets root and reads the reference PNG |
 | `capture_frame.save_path` | `aether-mcp` | rejects a relative path up front, then creates missing parent directories and overwrites the destination with the full-resolution PNG |
@@ -42,8 +42,8 @@ of these fields.
 The syntax does not say whether a path is passive:
 
 - `upload_binary` executes the supplied file immediately with `--describe`;
-- `upload_component` parses wasm metadata, while `load_component` and
-  `replace_component` instantiate it later;
+- `upload_component` parses wasm metadata, while `publish` and
+  `load_component` instantiate it later;
 - `config_path` and a Bytes field's `$file` embed read host data;
 - `save_path` writes host data and can replace an existing file;
 - spill paths point to files the MCP process already created.

@@ -189,8 +189,9 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     mcp.merge_into_engine_cache(engine, vec![reply_descriptor.clone()]);
     let request_descriptor = mcp.cache_lookup(engine, "aether.fs.list").expect("static request descriptor is cached");
     let request_kind_id = KindId(kind_id_from_parts(&request_descriptor.name, &request_descriptor.schema));
-    mcp.components.lock().expect("component cache mutex is never poisoned").insert(
-        (engine, ErasedActorPath::new(canonical).expect("fixture is an actor path")),
+    mcp.components.record_instance(
+        engine,
+        ErasedActorPath::new(canonical).expect("fixture is an actor path"),
         ComponentCapabilities {
             handlers: vec![HandlerCapability {
                 id: request_kind_id,
@@ -202,10 +203,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         },
     );
     assert!(
-        !mcp.components
-            .lock()
-            .expect("component cache mutex is never poisoned")
-            .contains_key(&(engine, ErasedActorPath::new(supplied).expect("fixture is an actor path"))),
+        mcp.components.instance(engine, &ErasedActorPath::new(supplied).expect("fixture is an actor path")).is_none(),
         "only the engine-returned canonical path owns the handler contract"
     );
 

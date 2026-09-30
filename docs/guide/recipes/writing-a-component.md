@@ -218,14 +218,14 @@ export and rebuild the wasm instead of trusting an old artifact.
 
 ## 7. Replace in place
 
-Edit the actor, rebuild, and upload the new bytes. Replacement also resolves a
-registry selector:
+Edit the actor, rebuild, and upload the new bytes. Replacement is a `publish` of
+the successor, which also resolves a registry selector:
 
 ```text
 upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev")
   → { hash: new_hash, ... }
 
-replace_component(
+publish(
   engine_id,
   selector = "<new_hash>"
 )

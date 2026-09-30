@@ -165,8 +165,8 @@ pub(super) fn internal_msg(msg: &str) -> McpError {
 }
 
 /// iamacoffeepot/aether#1271: tools that ship potentially-large
-/// payloads through the RPC framing (currently `load_component` /
-/// `replace_component`) surface a `FrameTooLarge` / `EncodeTooLarge`
+/// payloads through the RPC framing (currently `publish` /
+/// `load_component`) surface a `FrameTooLarge` / `EncodeTooLarge`
 /// failure as `invalid_params` rather than `internal_error`. The
 /// payload is a client-controllable input (the user picked the wasm
 /// path), and the actionable remediation — build the release wasm,
