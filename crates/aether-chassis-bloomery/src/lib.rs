@@ -1,8 +1,8 @@
 //! aether-chassis-bloomery: the bloomery chassis (issue #6244), the
 //! journal-driven engine. Boots the shared base stratum plus the component
-//! host, HTTP egress, the workspace actor, and the RPC server, mounts the journal owner and the
-//! bundle driver over one journal root, and only then binds the RPC listener
-//! (issue #6399). Produces the `aether-bloomery` binary over the shared
+//! host, HTTP egress, the workspace actor, and the RPC server, mounts the
+//! journal owner, the bundle driver, and the inspect actor over one journal
+//! root, and only then binds the RPC listener (issue #6399). Produces the `aether-bloomery` binary over the shared
 //! `aether-chassis` composition layer.
 //!
 //! HTTP egress is one of the engine's two integrations (ADR-0234 decision 7):
@@ -18,7 +18,9 @@
 //! and the journal become RPC-addressable mailboxes on this engine, so journal
 //! writes are reachable from any local process that can reach a bound RPC
 //! port. The port binds only once both are mounted, so reachable means
-//! ready. The RPC server rides every substrate chassis (ADR-0155 §3); argv
+//! ready. The inspect actor, `aether.bloomery.inspect:<key>`, reads any
+//! journal entry or artifact as JSON over the same port, so the engine can be
+//! inspected with `send_mail` and no Rust. The RPC server rides every substrate chassis (ADR-0155 §3); argv
 //! stays the machine channel (ADR-0162), so a flag this engine does not
 //! understand —
 //! `--boot-manifest` — fails at clap parse rather than booting half-configured.
@@ -28,6 +30,7 @@
 pub mod chassis;
 pub mod cli;
 pub mod config;
+pub mod inspect;
 mod mount;
 
 pub use chassis::BloomeryChassis;

@@ -1,4 +1,5 @@
-//! The post-build mount seam: spawn the journal owner and the bundle driver.
+//! The post-build mount seam: spawn the journal owner, the bundle driver, and
+//! the inspect actor.
 //!
 //! [`mount`] runs after `build()` seals the composed chain and before `run()`
 //! blocks on the driver. [`BuiltChassis::spawn_actor`] is the production
@@ -21,17 +22,20 @@ use aether_substrate::chassis::builder::BuiltChassis;
 use aether_substrate::chassis::error::BootError;
 
 use crate::chassis::BloomeryChassis;
+use crate::inspect::{InspectActor, InspectParams};
 
-/// The proven references `mount` took back from its two spawns: the journal
-/// owner and the bundle driver it wired to that journal. An embedder that
-/// drives the mounted engine in process addresses both through these rather
-/// than resolving either by path.
+/// The proven references `mount` took back from its three spawns: the journal
+/// owner, the bundle driver it wired to that journal, and the inspect actor
+/// reading through both. An embedder that drives the mounted engine in
+/// process addresses each through these rather than resolving any by path.
 #[derive(Debug, Clone, Copy)]
 pub struct Mounted {
     /// The journal owner, `aether.bloomery.journal:<key>` for the unit's key.
     pub journal: ActorRef<JournalActor>,
     /// The bundle driver, `aether.bloomery.driver:driver`.
     pub driver: ActorRef<BundleDriver>,
+    /// The inspect actor, `aether.bloomery.inspect:<key>` for the unit's key.
+    pub inspect: ActorRef<InspectActor>,
 }
 
 /// What the bundle driver spawns over besides its journal: the closure limit,
@@ -50,8 +54,10 @@ pub struct DriverSetup {
 /// over the unit's key, the journal's born reference, the composed
 /// workspace's reference, and `driver`'s limit, clock, and tick, so the engine
 /// answers as
-/// `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, and
-/// hand both references back as [`Mounted`]. The journal's name is already the
+/// `aether.bloomery.journal:<key>` and `aether.bloomery.driver:driver`, then
+/// the inspect actor under `Subname::Named(unit)` over both references, so it
+/// answers as `aether.bloomery.inspect:<key>`, and hand all three references
+/// back as [`Mounted`]. The journal's name is already the
 /// unit-root name ADR-0240 D1 gives it.
 ///
 /// Takes the already-opened journal and lowered budgets rather than the config:
@@ -61,7 +67,7 @@ pub struct DriverSetup {
 ///
 /// # Errors
 ///
-/// Returns [`BootError`] when either spawn fails.
+/// Returns [`BootError`] when a spawn fails.
 pub fn mount(
     built: &BuiltChassis<BloomeryChassis>,
     unit: &UnitKey,
@@ -80,7 +86,11 @@ pub fn mount(
         .spawn_actor::<BundleDriver>(Subname::Named("driver"), limit, params)
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.driver:driver", &error))?;
-    Ok(Mounted { journal, driver })
+    let inspect = built
+        .spawn_actor::<InspectActor>(Subname::Named(unit.as_str()), (), InspectParams { journal, driver })
+        .finish()
+        .map_err(|error| spawn_failed(&format!("aether.bloomery.inspect:{unit}"), &error))?;
+    Ok(Mounted { journal, driver, inspect })
 }
 
 /// Wrap a spawn failure the way `impl From<wasmtime::Error> for BootError`

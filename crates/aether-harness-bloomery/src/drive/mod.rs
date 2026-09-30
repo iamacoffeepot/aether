@@ -1,5 +1,5 @@
 //! Drive: requests to the mounted journal owner, the bundle driver, the
-//! component host (loads, code publishes, spawns, and listings), and the
+//! inspect actor, the component host (loads, code publishes, spawns, and listings), and the
 //! workspace, and the replies the sink forwards back.
 //!
 //! Every request goes out through the embedder's
@@ -22,6 +22,7 @@ use aether_bloomery_kinds::{
     PublishResult, Seq, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_workspace::{Import, ImportResult, Run, RunResult, WorkspaceCapability};
+use aether_chassis_bloomery::inspect::{InspectArtifact, InspectArtifactResult, InspectEvents, InspectEventsResult};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent, LoadResult, Spawn, SpawnResult};
@@ -52,7 +53,8 @@ pub struct Pending<K> {
 /// A reply kind the harness's sink receives: [`CallOutcome`],
 /// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`DeclarationsResult`], [`LoadResult`],
 /// [`aether_kinds::PublishResult`], [`SpawnResult`], [`ListComponentsResult`],
-/// [`WatchHeadResult`], [`ImportResult`], or [`RunResult`].
+/// [`WatchHeadResult`], [`ImportResult`], [`RunResult`], [`InspectArtifactResult`], or
+/// [`InspectEventsResult`].
 pub trait Answer: sealed::Sealed {}
 
 mod sealed {
@@ -173,6 +175,24 @@ impl sealed::Sealed for RunResult {
     }
 }
 
+impl sealed::Sealed for InspectArtifactResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::InspectArtifact(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
+impl sealed::Sealed for InspectEventsResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::InspectEvents(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
 impl Answer for CallOutcome {}
 impl Answer for MoveHeadResult {}
 impl Answer for PublishResult {}
@@ -185,6 +205,8 @@ impl Answer for ListComponentsResult {}
 impl Answer for WatchHeadResult {}
 impl Answer for ImportResult {}
 impl Answer for RunResult {}
+impl Answer for InspectArtifactResult {}
+impl Answer for InspectEventsResult {}
 
 impl BloomeryHarness {
     /// Send one `Call` to the bundle driver as a tracked root, wait for its
@@ -363,6 +385,27 @@ impl BloomeryHarness {
     /// Panics when no answer arrives within thirty seconds.
     pub fn declarations(&mut self) -> DeclarationsResult {
         let pending = self.request(self.mounted.driver, &Declarations);
+        self.wait(pending)
+    }
+
+    /// Ask the inspect actor for one artifact as JSON and wait for the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no answer arrives within thirty seconds.
+    pub fn inspect_artifact(&mut self, request: &InspectArtifact) -> InspectArtifactResult {
+        let pending = self.request(self.mounted.inspect, request);
+        self.wait(pending)
+    }
+
+    /// Ask the inspect actor for journal entries with their values decoded and
+    /// wait for the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no answer arrives within thirty seconds.
+    pub fn inspect_events(&mut self, request: &InspectEvents) -> InspectEventsResult {
+        let pending = self.request(self.mounted.inspect, request);
         self.wait(pending)
     }
 

@@ -11,6 +11,7 @@ use aether_bloomery_kinds::{
     CallOutcome, DeclarationsResult, MoveHeadResult, Processed, PublishResult, WatchHeadResult,
 };
 use aether_bloomery_workspace::{ImportResult, RunResult};
+use aether_chassis_bloomery::inspect::{InspectArtifactResult, InspectEventsResult};
 use aether_kinds::{ListComponentsResult, LoadResult, SpawnResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -46,6 +47,10 @@ pub enum Reply {
     /// The workspace's answer to a `Run`, boxed: an outcome carries every
     /// step's record.
     Run(Box<RunResult>),
+    /// The inspect actor's answer to an `InspectArtifact`.
+    InspectArtifact(InspectArtifactResult),
+    /// The inspect actor's answer to an `InspectEvents`.
+    InspectEvents(InspectEventsResult),
 }
 
 /// A reply and the correlation the harness minted for the request it answers.
@@ -132,5 +137,15 @@ impl NativeActor for ReplySink {
     #[aether_actor::handler::response]
     fn on_run_result(&mut self, ctx: &mut NativeCtx<'_>, result: RunResult) {
         self.forward(ctx, Reply::Run(Box::new(result)));
+    }
+
+    #[aether_actor::handler::response]
+    fn on_inspect_artifact_result(&mut self, ctx: &mut NativeCtx<'_>, result: InspectArtifactResult) {
+        self.forward(ctx, Reply::InspectArtifact(result));
+    }
+
+    #[aether_actor::handler::response]
+    fn on_inspect_events_result(&mut self, ctx: &mut NativeCtx<'_>, result: InspectEventsResult) {
+        self.forward(ctx, Reply::InspectEvents(result));
     }
 }
