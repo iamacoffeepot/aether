@@ -14,7 +14,7 @@
 //! flat `send`, `send_with_context` and `send_detached`, which compile only
 //! on a ctx whose actor declares the target (ADR-0232 §1). The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
-//! [`MailSender`] on every mode and [`OutboundReply`] on [`Manual`] only, so
+//! [`MailSender`] on every mode and [`OutboundReply`] on [`Unchecked`] only, so
 //! a handler whose class disagrees with what it does fails to unify rather
 //! than lying in its manifest.
 //!
@@ -29,8 +29,8 @@
 //! blob, so its raw sends go out unwalked.
 
 use aether_actor::{
-    CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode,
-    SendableTo, Singleton, Target,
+    CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, OutboundReply, ReplyMode, SendableTo,
+    Singleton, Target, Unchecked,
 };
 use aether_data::{ActorMail, Encoded, Kind, KindId, MailId, RequestId};
 
@@ -251,7 +251,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// producer is an encode of a `K`, so the pair cannot disagree. The
     /// target is kind-checked through [`Target`] as [`Self::send_to`]'s is: a
     /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) compiles only for a kind
-    /// `P` lists, a manual row included. `K: ActorMail` keeps engine-only mail
+    /// `P` lists, an unchecked row included. `K: ActorMail` keeps engine-only mail
     /// out at compile time, so no runtime refusal repeats it. The bytes'
     /// tag-1 fields resolve, or refuse with `None`, as the raw verbs' do.
     ///
@@ -291,12 +291,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The target is kind-checked as [`Self::send_to`]'s is: an
     /// [`ActorRef<R>`](aether_actor::ActorRef) accepts only kinds `R`
     /// handles, while a [`ProtocolRef<P>`](aether_actor::ProtocolRef) accepts
-    /// only kinds listed by `P`, including an explicitly manual row. The row
+    /// only kinds listed by `P`, including an explicitly unchecked row. The row
     /// index `I` is inferred and the send performs only the existing encode
     /// and buffered push.
     ///
     /// ```
-    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::Ping;
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -305,7 +305,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn detached(ctx: &mut NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Ping) {
+    /// fn detached(ctx: &mut NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
     ///     let _mail_id = ctx.send_detached_to(target, mail);
     /// }
     /// ```
@@ -579,15 +579,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// A concrete actor reference therefore accepts only kinds that actor
     /// handles, while a protocol reference accepts only its listed rows. The
     /// target's reply row is deliberately unchecked: a relay preserves the
-    /// inbound reply destination, and the forwarding handler's manual row
+    /// inbound reply destination, and the forwarding handler's unchecked row
     /// declares no reply shape (ADR-0231 §9).
     ///
     /// Its consumer is the `aether.window` root's forward of a per-window
     /// command to the sole live window.
-    /// A manual protocol row is a valid relay target:
+    /// An unchecked protocol row is a valid relay target:
     ///
     /// ```
-    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::Ping;
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -596,7 +596,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn forward(ctx: &NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Ping) {
+    /// fn forward(ctx: &NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
     ///     ctx.forward_to(target, mail);
     /// }
     /// ```
@@ -604,7 +604,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// A kind outside the target's protocol is rejected at compile time:
     ///
     /// ```compile_fail,E0277
-    /// use aether_actor::{Erased, Manual, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::{Ping, Pong};
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -613,7 +613,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn wrong(ctx: &NativeCtx<'_, Erased, Manual>, target: ProtocolRef<Pings>, mail: &Pong) {
+    /// fn wrong(ctx: &NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Pong) {
     ///     ctx.forward_to(target, mail);
     /// }
     /// ```
@@ -660,11 +660,11 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     }
 }
 
-// ADR-0112: the reply surface is per-mode. `Manual` carries it (a
-// manual-class handler issues its own replies); `Single` deliberately
+// ADR-0112: the reply surface is per-mode. `Unchecked` carries it (a
+// unchecked-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
+impl<A> OutboundReply for NativeCtx<'_, A, Unchecked> {
     type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher

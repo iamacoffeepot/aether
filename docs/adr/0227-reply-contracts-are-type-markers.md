@@ -7,7 +7,7 @@
 Amends [ADR-0109](0109-handler-reply-contracts.md) (the handler return
 type is the reply contract, published on the inputs manifest) and
 [ADR-0112](0112-handler-reply-classes.md) / [ADR-0134](0134-multi-reply-class-and-explicit-handler-classes.md)
-(single / manual / multi). Parallel to `HandlesKind<K>`
+(single / unchecked / multi). Parallel to `HandlesKind<K>`
 ([ADR-0075](0075-actor-typed-sender-api-and-chassis-cap-marker-split.md)
 decision 1, `crates/aether-actor/src/model/mod.rs`).
 
@@ -28,7 +28,7 @@ in two other places, neither of which a Rust caller can bound on:
 2. **The inputs manifest** (`ReplyContract` on
    `InputsRecord::Handler`). `(0, 0)` for single `-> ()`, `(1, R::ID)`
    for single `-> R` / `Pending<R>`, `(2, K::ID)` for multi emitting
-   `K`, `(3, 0)` for manual. Tools can read this. Generic Rust cannot.
+   `K`, `(3, 0)` for unchecked. Tools can read this. Generic Rust cannot.
 
 So a caller can be told at compile time "do not send `Fetch` to an actor
 that does not handle it," and cannot be told "when you send `Fetch` to
@@ -36,8 +36,8 @@ that does not handle it," and cannot be told "when you send `Fetch` to
 by convention (`*_result` names) or by reading the manifest at runtime.
 
 `HttpCapability::on_fetch` (`crates/aether-http/src/client/runtime.rs`)
-shows the hole: it is `#[handler::manual]`, replies `FetchResult` from
-the task path, and the manifest records `ReplyContract::Manual` — no
+shows the hole: it is `#[handler::unchecked(reason = "…")]`, replies `FetchResult` from
+the task path, and the manifest records `ReplyContract::Unchecked` — no
 kind. The rustdoc says `Reply: FetchResult`. Callers have nothing to
 bound on.
 
@@ -69,7 +69,7 @@ handler signature is already the source of truth.
    | `#[handler::single]` `-> Pending<R>` | `Replies<K, Reply = R>` |
    | `#[handler::single]` `-> ()` | `HandlesKind<K>` only |
    | `#[handler::multi]` emitting `I` | `Streams<K, Item = I>` |
-   | `#[handler::manual]` | `HandlesKind<K>` only |
+   | `#[handler::unchecked(reason = "…")]` | `HandlesKind<K>` only |
 
    `Pending<R>` and `-> R` are the same marker: the caller gets `R`.
    When it arrives is ADR-0109 / ADR-0093, not this trait.
@@ -78,7 +78,7 @@ handler signature is already the source of truth.
    (ADR-0109). Changing the return type changes the marker. A kind does
    not impl `Request`; the actor does.
 
-3. **Manual is the escape hatch, not a typed reply.** A manual handler
+3. **Unchecked is the escape hatch, not a typed reply.** An unchecked handler
    can `ctx.reply` any kind, so it does not get `Replies` or `Streams`.
    A cap that wants callers to bound on a reply kind names that kind on
    the signature (`-> Pending<R>` for deferred work). HTTP's `on_fetch`
@@ -103,10 +103,10 @@ handler signature is already the source of truth.
 - `aether-actor` grows two marker traits. `aether-actor-derive` emits
   the impls wherever it already emits `HandlesKind` (wasm `#[actor]`,
   native `#[runtime]`, split identity structs, handler sets).
-- Caps that today reply from `#[handler::manual]` and want a typed
+- Caps that today reply from `#[handler::unchecked(reason = "…")]` and want a typed
   caller migrate the reply kind onto `-> Pending<R>` (or `-> R`). HTTP
   `on_fetch` is the first of those. Caps that genuinely reply with an
-  unbound kind stay manual and stay uncallable from `Replies`-bounded
+  unbound kind stay unchecked and stay uncallable from `Replies`-bounded
   helpers.
 - The inputs manifest `ReplyContract` stays the tool-facing copy of the
   same fact. The markers are the Rust copy. They must not disagree: both
@@ -126,8 +126,8 @@ handler signature is already the source of truth.
 - **Read `ReplyContract` from the manifest at the call site.** Rejected:
   that is runtime / proc-macro reflection, not an `E0277`. `HandlesKind`
   already proved the compile-time shape.
-- **Give `#[handler::manual]` `Replies` from rustdoc or a comment.**
-  Rejected: not the signature, not checked. Manual stays unbound.
+- **Give `#[handler::unchecked(reason = "…")]` `Replies` from rustdoc or a comment.**
+  Rejected: not the signature, not checked. Unchecked stays unbound.
 - **One trait with an associated `enum { None, One, Stream }`.**
   Rejected: `notify` / `request` / `request_many` want distinct bounds,
   and `type Reply = ()` would collide with a real unit kind. Absence of

@@ -66,7 +66,13 @@ fn contract(rows: &[(KindId, ReplyContract)], fallback: bool) -> RouteContract {
     RouteContract::from_capabilities(&ComponentCapabilities {
         handlers: rows
             .iter()
-            .map(|(id, reply)| HandlerCapability { id: *id, name: String::new(), doc: None, reply: *reply })
+            .map(|(id, reply)| HandlerCapability {
+                id: *id,
+                name: String::new(),
+                doc: None,
+                reply: *reply,
+                reason: None,
+            })
             .collect(),
         fallback: fallback.then_some(FallbackCapability { doc: None }),
         ..ComponentCapabilities::default()
@@ -94,7 +100,7 @@ fn refusal(result: Result<(), RegistryEffectError>) -> Option<ContractBreak> {
 
 /// ADR-0231 §5 at the registry: a republish that keeps every published row
 /// replaces the contract. Catches a guard that compares contracts for
-/// equality, which would refuse every added row and every `Manual` row a
+/// equality, which would refuse every added row and every `Unchecked` row a
 /// replacement declares.
 #[test]
 fn republish_accepts_a_contract_that_keeps_the_published_rows() {
@@ -102,7 +108,7 @@ fn republish_accepts_a_contract_that_keeps_the_published_rows() {
     let id = published_route(&registry, "test.contract.keeps");
 
     let extended = contract(
-        &[(PING, ReplyContract::None), (QUERY, ReplyContract::One(REPORT)), (PROBE, ReplyContract::Manual)],
+        &[(PING, ReplyContract::None), (QUERY, ReplyContract::One(REPORT)), (PROBE, ReplyContract::Unchecked)],
         true,
     );
     registry.publish_contract(&auth(), id, extended.clone()).expect("added rows and a fallback are kept");
@@ -112,7 +118,7 @@ fn republish_accepts_a_contract_that_keeps_the_published_rows() {
         &[(PING, ReplyContract::None), (QUERY, ReplyContract::One(REPORT)), (PROBE, ReplyContract::One(REPORT))],
         true,
     );
-    registry.publish_contract(&auth(), id, declared.clone()).expect("a manual row may declare its reply");
+    registry.publish_contract(&auth(), id, declared.clone()).expect("an unchecked row may declare its reply");
     assert_eq!(registry.published_contract(id), Some(declared));
 }
 

@@ -1,6 +1,6 @@
 //! Issue #2460: a `#[handler(task)]` always dispatches with the single
 //! reply class — the completion reply rides `TaskDone`, not the handler
-//! class — so a non-`Single` marker like `#[handler::manual(task)]` would
+//! class — so a non-`Single` marker like `#[handler::unchecked(task, reason = "…")]` would
 //! be silently discarded. The macro rejects it at the boundary instead of
 //! dropping the designation without a diagnostic.
 
@@ -17,7 +17,7 @@ pub struct TaskCap;
 impl aether_substrate::actor::native::NativeActor for TaskCap {
     type Config = ();
 
-    const NAMESPACE: &'static str = "test.manual_task_cap";
+    const NAMESPACE: &'static str = "test.unchecked_task_cap";
 
     fn init(
         _config: (),
@@ -26,7 +26,7 @@ impl aether_substrate::actor::native::NativeActor for TaskCap {
         Ok(TaskCap)
     }
 
-    #[handler::manual(task)]
+    #[handler::unchecked(task, reason = "test: a task handler cannot be unchecked")]
     fn on_done(
         &mut self,
         ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,

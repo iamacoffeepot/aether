@@ -14,7 +14,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// Compiles only on a ctx typed by an actor that declares `P` with
     /// `#[actor(depends(P))]`, only when `P` publishes `K`, and only when the
-    /// actor's handler for `K` is silent or manual (ADR-0231 §8): a published
+    /// actor's handler for `K` is silent or unchecked (ADR-0231 §8): a published
     /// event has no one waiting for a reply. The erased ctx has no subscribe
     /// verb. The body is a flat send of the request `P` builds
     /// ([`Publisher::subscribe_request`](crate::Publisher::subscribe_request)).

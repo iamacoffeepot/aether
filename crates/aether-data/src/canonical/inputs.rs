@@ -16,14 +16,14 @@ use super::primitives::{
 /// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
 /// encoding from its `(tag, id)` pair. The selector is a fixed `u32`; the
 /// `One` arm carries a trailing `KindId` (a bare `u64`), the `None` /
-/// `Manual` arms carry nothing. The selectors are `None` = 0, `One` = 1,
-/// `Manual` = 3; 2 is reserved (retired by #6440).
+/// `Unchecked` arms carry nothing. The selectors are `None` = 0, `One` = 1,
+/// `Unchecked` = 3; 2 is reserved (retired by #6440).
 #[must_use]
 pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
     match reply_tag {
         // One carries a trailing `KindId` (bare u64).
         1 => U32_WIDTH + U64_WIDTH,
-        // None / Manual (and any other) carry just the selector.
+        // None / Unchecked (and any other) carry just the selector.
         _ => U32_WIDTH,
     }
 }
@@ -44,15 +44,28 @@ pub const fn write_reply_contract(reply_tag: u8, reply_id: u64, out: &mut [u8], 
 /// Byte length of a `Handler` record's aether-wire encoding. A `u32` LE
 /// variant selector (`0`) + the `KindId` id (bare `u64`) + `wire(name)` +
 /// `option_str(doc)` + `reply_contract(reply_tag, reply_id)` — the
-/// ADR-0112 reply class.
+/// ADR-0112 reply class — + `option_str(reason)`, an unchecked handler's
+/// stated reason (#7193).
 #[must_use]
-pub const fn inputs_handler_len(_id: u64, name: &str, doc: Option<&str>, reply_tag: u8, reply_id: u64) -> usize {
-    U32_WIDTH + U64_WIDTH + str_len(name) + option_borrowed_str_len(doc) + reply_contract_len(reply_tag, reply_id)
+pub const fn inputs_handler_len(
+    _id: u64,
+    name: &str,
+    doc: Option<&str>,
+    reply_tag: u8,
+    reply_id: u64,
+    reason: Option<&str>,
+) -> usize {
+    U32_WIDTH
+        + U64_WIDTH
+        + str_len(name)
+        + option_borrowed_str_len(doc)
+        + reply_contract_len(reply_tag, reply_id)
+        + option_borrowed_str_len(reason)
 }
 
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized
 /// by `inputs_handler_len`. Exact aether-wire shape for
-/// `InputsRecord::Handler { id, name, doc, reply }`.
+/// `InputsRecord::Handler { id, name, doc, reply, reason }`.
 #[must_use]
 pub const fn write_inputs_handler<const N: usize>(
     id: u64,
@@ -60,6 +73,7 @@ pub const fn write_inputs_handler<const N: usize>(
     doc: Option<&str>,
     reply_tag: u8,
     reply_id: u64,
+    reason: Option<&str>,
 ) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = write_u32_le(0, &mut out, 0); // variant selector: Handler
@@ -67,6 +81,7 @@ pub const fn write_inputs_handler<const N: usize>(
     pos = write_str(name, &mut out, pos);
     pos = write_option_borrowed_str(doc, &mut out, pos);
     pos = write_reply_contract(reply_tag, reply_id, &mut out, pos);
+    pos = write_option_borrowed_str(reason, &mut out, pos);
     // Silence "assigned but never read" warning on the final write.
     let _ = pos;
     out

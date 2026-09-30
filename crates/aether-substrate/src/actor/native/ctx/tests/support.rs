@@ -9,7 +9,7 @@
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, mpsc};
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind, HeldReply, Manual};
+use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind, HeldReply, Unchecked};
 use aether_data::{ErasedActorPath, Kind, KindId, MailId};
 
 use crate::actor::native::envelope::Envelope;
@@ -50,7 +50,7 @@ impl aether_actor::Lifecycle<Self> for StubActor {
 impl Dispatch<Self> for StubActor {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, Manual>,
+        _ctx: &mut NativeCtx<'_, Self, Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

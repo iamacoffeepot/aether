@@ -22,6 +22,7 @@ pub(super) fn project_capabilities(caps: &ComponentCapabilities, full: bool) -> 
                 name: h.name.clone(),
                 doc: h.doc.as_deref().map(first_doc_line).map(str::to_owned),
                 reply: h.reply,
+                reason: h.reason.clone(),
             })
             .collect(),
         fallback: caps

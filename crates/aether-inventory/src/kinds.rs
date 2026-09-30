@@ -211,8 +211,9 @@ pub struct ListKindsResult {
 /// `namespace` is the owning cap's mailbox; `id` / `name` are the
 /// handler's input kind; `reply` is its reply contract (ADR-0231 §4):
 /// `None` for a `-> ()` silent handler, `One(R)` for a `-> R`
-/// synchronous or `-> Pending<R>` deferred reply, and `Manual` for a
-/// manual handler that replies at run time with no declared kind. Carries no
+/// synchronous or `-> Pending<R>` deferred reply, and `Unchecked` for an
+/// unchecked handler that replies at run time with no declared kind, whose
+/// stated reason rides in `reason` (#7193). Carries no
 /// `doc` — the native link-time inventory holds ids + names, so a
 /// native cap's per-handler docs are out of scope here (the wasm
 /// `HandlerCapability` carries them from the custom section instead).
@@ -222,6 +223,9 @@ pub struct HandlerEntryWire {
     pub id: aether_data::KindId,
     pub name: String,
     pub reply: aether_data::ReplyContract,
+    /// The unchecked handler's stated reason, present exactly for an
+    /// `Unchecked` reply (#7193).
+    pub reason: Option<String>,
 }
 
 /// `aether.inventory.handlers` — request the running substrate's

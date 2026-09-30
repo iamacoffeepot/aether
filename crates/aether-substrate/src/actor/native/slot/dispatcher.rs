@@ -620,7 +620,7 @@ where
         // named it in its ctx signature can parent a child under it. The
         // framework arms below are generic over the dispatched actor, and none
         // of them spawns.
-        let mut ctx = NativeCtx::<'_, A, crate::Manual>::with_inbound(binding, sender, mail_id, root, env);
+        let mut ctx = NativeCtx::<'_, A, crate::Unchecked>::with_inbound(binding, sender, mail_id, root, env);
         let replied = ctx.in_reply_to();
         let payload = payload_view.bytes();
         // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128 framework-built-in

@@ -100,7 +100,13 @@ fn capabilities(rows: &[KindId], fallback: bool) -> ComponentCapabilities {
     ComponentCapabilities {
         handlers: rows
             .iter()
-            .map(|id| HandlerCapability { id: *id, name: id.to_string(), doc: None, reply: ReplyContract::None })
+            .map(|id| HandlerCapability {
+                id: *id,
+                name: id.to_string(),
+                doc: None,
+                reply: ReplyContract::None,
+                reason: None,
+            })
             .collect(),
         fallback: fallback.then_some(FallbackCapability { doc: None }),
         ..ComponentCapabilities::default()
@@ -206,7 +212,13 @@ fn a_republish_that_narrows_a_contract_is_refused() {
     let predecessor = surface(&[("test.a", contract(&[KEPT], true))], &[]);
     let narrowed = |successor: RouteContract| surface(&[("test.a", successor)], &[]);
     let changed_reply = RouteContract::from_capabilities(&ComponentCapabilities {
-        handlers: vec![HandlerCapability { id: KEPT, name: String::new(), doc: None, reply: ReplyContract::Manual }],
+        handlers: vec![HandlerCapability {
+            id: KEPT,
+            name: String::new(),
+            doc: None,
+            reply: ReplyContract::Unchecked,
+            reason: Some("test: unchecked row".into()),
+        }],
         fallback: Some(FallbackCapability { doc: None }),
         ..ComponentCapabilities::default()
     });
@@ -378,6 +390,7 @@ fn inputs_section<'a>(groups: impl Iterator<Item = (&'a str, &'a [KindId], bool)
             name: id.to_string().into(),
             doc: None,
             reply: ReplyContract::None,
+            reason: None,
         });
         let cardinality = instanced.then_some(InputsRecord::Instanced);
         for record in iter::once(boundary).chain(handlers).chain(cardinality) {

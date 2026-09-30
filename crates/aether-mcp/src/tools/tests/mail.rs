@@ -198,6 +198,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
                 name: "aether.fs.list".to_owned(),
                 doc: None,
                 reply: aether_data::ReplyContract::One(reply_kind_id),
+                reason: None,
             }],
             ..ComponentCapabilities::default()
         },

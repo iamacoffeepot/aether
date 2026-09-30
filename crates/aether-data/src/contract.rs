@@ -11,11 +11,11 @@ use crate::{KindId, ReplyContract};
 /// the successor keeps every row. Rows the successor adds are allowed.
 ///
 /// A row is kept when the successor declares the same kind with an equal
-/// contract. A predecessor `Manual` row is also kept by any successor
-/// contract (`One(O)`, `None`, or `Manual`): this is the ADR-0231 §6
+/// contract. A predecessor `Unchecked` row is also kept by any successor
+/// contract (`One(O)`, `None`, or `Unchecked`): this is the ADR-0231 §6
 /// migration rule, since no caller was ever checked against an undeclared
-/// reply, and it goes when `Manual` goes. A declared row that becomes
-/// `Manual` is a break.
+/// reply, and it goes when `Unchecked` goes. A declared row that becomes
+/// `Unchecked` is a break.
 #[must_use]
 pub fn first_contract_break(
     predecessor: impl IntoIterator<Item = (KindId, ReplyContract)>,
@@ -23,7 +23,7 @@ pub fn first_contract_break(
 ) -> Option<KindId> {
     let successor: BTreeMap<KindId, ReplyContract> = successor.into_iter().collect();
     predecessor.into_iter().find_map(|(kind, before)| {
-        let kept = successor.get(&kind).is_some_and(|after| before == ReplyContract::Manual || *after == before);
+        let kept = successor.get(&kind).is_some_and(|after| before == ReplyContract::Unchecked || *after == before);
         (!kept).then_some(kind)
     })
 }
@@ -59,13 +59,13 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_row_that_becomes_manual_breaks() {
-        assert_eq!(break_between(&[(A, ReplyContract::One(REPLY_A))], &[(A, ReplyContract::Manual)]), Some(A));
+    fn a_declared_row_that_becomes_unchecked_breaks() {
+        assert_eq!(break_between(&[(A, ReplyContract::One(REPLY_A))], &[(A, ReplyContract::Unchecked)]), Some(A));
     }
 
     #[test]
-    fn a_manual_row_that_becomes_declared_is_kept() {
-        assert_eq!(break_between(&[(A, ReplyContract::Manual)], &[(A, ReplyContract::One(REPLY_A))]), None);
+    fn an_unchecked_row_that_becomes_declared_is_kept() {
+        assert_eq!(break_between(&[(A, ReplyContract::Unchecked)], &[(A, ReplyContract::One(REPLY_A))]), None);
     }
 
     #[test]

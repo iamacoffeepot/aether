@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Manual, ReplyMode, Single};
+use aether_actor::{ReplyMode, Single, Unchecked};
 use aether_data::{ActorMail, MailId};
 use core::marker::PhantomData;
 use core::ptr;
@@ -164,7 +164,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 /// spelling `Erased` in its ctx; one that omits its actor is typed by it
 /// (ADR-0231 §7).
 ///
-/// A type-position marker like [`Single`] / [`Manual`], never a value: it is
+/// A type-position marker like [`Single`] / [`Unchecked`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub use aether_actor::Erased;
 impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
@@ -261,17 +261,17 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     }
 }
 
-impl<'a, A> NativeCtx<'a, A, Manual> {
-    /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
+impl<'a, A> NativeCtx<'a, A, Unchecked> {
+    /// ADR-0112 downgrade-only coercion: view this [`Unchecked`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
     /// handler whose marker disagrees with its class fails to unify.
-    /// There is deliberately no `as_manual` — the runtime only ever
+    /// There is deliberately no `as_unchecked` — the runtime only ever
     /// downgrades.
     #[doc(hidden)]
     #[must_use]
     pub fn as_single(&mut self) -> &mut NativeCtx<'a, A, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, A, Manual>` and
+        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, A, Unchecked>` and
         // `NativeCtx<'a, A, Single>` are layout-identical (the marker field is
         // a ZST for every `M` — see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field and
@@ -282,7 +282,7 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
     /// Accept a returned [`Pending<R>`] receipt. The `#[actor]` and
     /// `#[handler_set]` native dispatch arms call this on the value a
     /// `-> Pending<R>` handler returns, once its `as_single` reborrow has
-    /// ended; a single handler never holds this `<Manual>` view, so it
+    /// ended; a single handler never holds this `<Unchecked>` view, so it
     /// cannot disarm its own receipt and declare a false `Silent` row.
     #[doc(hidden)]
     pub fn __accept_pending<R: ActorMail>(&mut self, pending: Pending<R>) {

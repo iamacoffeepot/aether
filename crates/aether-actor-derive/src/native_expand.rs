@@ -10,7 +10,7 @@ use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, allow_abi_receiver, attr_is_fallback, attr_is_handler, classify_handler_reply,
     classify_task_reply_mode, erase_unless_ctx_names_actor, extract_native_actor_handler_kind,
-    extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_class, parse_handler_variant,
+    extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
     reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq,
     validate_addressable_consts, validate_native_fallback_sig,
 };
@@ -18,7 +18,8 @@ use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 use crate::reply_markers::{
     ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl, contract_rows_expr,
-    contracts_impl, declared_impl, native_reply_contract, position, reply_marker_impl, rows_list,
+    contracts_impl, declared_impl, native_reply_contract, owned_reason, position, reply_marker_impl, rows_list,
+    static_reason,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,11 +168,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     return Err(syn::Error::new_spanned(&f, "method cannot be both #[handler] and #[fallback]"));
                 }
                 if let Some(idx) = handler_attr_idx {
-                    let variant = parse_handler_variant(&f.attrs[idx])?;
+                    let args = parse_handler_args(&f.attrs[idx])?;
+                    let variant = args.variant;
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path. A task handler always receives the downgraded
                     // `Single` ctx, so it carries no class field.
-                    let class = parse_handler_class(&f.attrs[idx], variant)?;
+                    let class = parse_handler_class(&f.attrs[idx], &args)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -183,20 +185,28 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             let reply = classify_handler_reply(&f.sig.output);
                             fill_ctx_actor(&mut f.sig);
                             allow_abi_receiver(&mut f);
-                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
+                            handlers.push(NativeActorHandlerFn {
+                                method: f,
+                                kind_ty,
+                                is_slice,
+                                reply,
+                                class,
+                                unchecked_reason: args.reason,
+                                cfgs,
+                            });
                         }
                         HandlerVariant::Task => {
                             // A task handler always dispatches with the `Single`
                             // reply class — the completion reply rides `TaskDone`,
                             // not the handler class — so the `NativeActorTaskHandlerFn`
                             // carries no class field and any non-`Single` marker
-                            // (e.g. `#[handler::manual(task)]`) would be silently
+                            // (e.g. `#[handler::unchecked(task, reason = "…")]`) would be silently
                             // discarded. Reject it at the boundary instead.
                             if class != HandlerClass::Single {
                                 return Err(syn::Error::new_spanned(
                                     &f,
                                     "#[handler(task)] always uses the single reply class; \
-                                     drop the `manual` class marker — task replies \
+                                     drop the `unchecked` class marker — task replies \
                                      go through `TaskDone`, not the handler class \
                                      (ADR-0112 / ADR-0134)",
                                 ));
@@ -370,6 +380,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     kind: h.kind_ty.clone(),
                     reply: h.reply.clone(),
                     class: h.class,
+                    reason: h.unchecked_reason.clone(),
                     cfgs: h.cfgs.clone(),
                 })
                 .collect();
@@ -442,13 +453,13 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
-        // ADR-0112: the dispatch ctx is the full `Manual` view. A single
+        // ADR-0112: the dispatch ctx is the full `Unchecked` view. A single
         // handler is called with the downgraded `as_single()` view and the
         // macro auto-replies a `-> R` return through `OutboundReply::reply`
-        // on the `Manual` ctx (`-> ()` returns nothing; for `-> Pending<R>` the
-        // macro accepts the returned receipt through the `Manual` view's
-        // `__accept_pending`, ADR-0243 §7). A manual handler is called with
-        // the `Manual` ctx directly and issues its own replies — no
+        // on the `Unchecked` ctx (`-> ()` returns nothing; for `-> Pending<R>` the
+        // macro accepts the returned receipt through the `Unchecked` view's
+        // `__accept_pending`, ADR-0243 §7). An unchecked handler is called with
+        // the `Unchecked` ctx directly and issues its own replies — no
         // auto-reply, regardless of return type.
         // Folded shape: dispatch is a `NativeActor` associated fn over
         // `__aether_state: &mut Self::State`, and every handler is an
@@ -477,7 +488,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     __aether_state, __aether_ctx.as_single() #erase, __aether_decoded);
                 __aether_ctx.__accept_pending(__aether_pending);
             },
-            (HandlerClass::Manual, _) => quote! {
+            (HandlerClass::Unchecked, _) => quote! {
                 #self_ty::#method_ident(__aether_state, __aether_ctx #erase, __aether_decoded);
             },
         };
@@ -551,7 +562,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // `resolve_value`s it; `&TaskDone -> ()` releases the hold via
             // `release_no_reply` with no reply.
             //
-            // ADR-0112: the dispatch ctx is the full `Manual` view; a task
+            // ADR-0112: the dispatch ctx is the full `Unchecked` view; a task
             // handler (and `TaskDone::resolve_value`) take the single-mode
             // ctx, so downgrade with `as_single()`.
             // Folded shape: UFCS `Self::method(state, …)` (see the mail-arm
@@ -626,7 +637,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         quote! {
             fn dispatch_fallback(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Unchecked>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
                 #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_env);
@@ -652,6 +663,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         let kind_ty = &h.kind_ty;
         let cfgs = &h.cfgs;
         let reply = native_reply_contract(h.class, &h.reply);
+        let reason = owned_reason(h.unchecked_reason.as_ref());
         quote! {
             #(#cfgs)*
             __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
@@ -659,6 +671,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
                 reply: #reply,
+                reason: #reason,
             });
         }
     });
@@ -874,10 +887,10 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             for #self_ty #where_clause
         {
             // ADR-0112: the dispatch seam carries the most-permissive
-            // `Manual` ctx; the arms downgrade per handler class.
+            // `Unchecked` ctx; the arms downgrade per handler class.
             fn dispatch(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Unchecked>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
@@ -926,6 +939,7 @@ struct HandlerMarker {
     kind: Type,
     reply: HandlerReply,
     class: HandlerClass,
+    reason: Option<syn::LitStr>,
     cfgs: Vec<syn::Attribute>,
 }
 
@@ -1305,6 +1319,7 @@ fn emit_native_identity_markers(
             let kind_ty = &marker.kind;
             let cfgs = &marker.cfgs;
             let reply_expr = native_reply_contract(marker.class, &marker.reply);
+            let reason = static_reason(marker.reason.as_ref());
             quote! {
                 #(#cfgs)*
                 #[cfg(not(target_family = "wasm"))]
@@ -1314,6 +1329,7 @@ fn emit_native_identity_markers(
                         id: <#kind_ty as ::aether_data::Kind>::ID,
                         name: <#kind_ty as ::aether_data::Kind>::NAME,
                         reply: #reply_expr,
+                        reason: #reason,
                     }
                 }
             }
@@ -1695,18 +1711,24 @@ fn harvest_native_actor_impl(
             continue;
         };
         saw_handler = true;
-        let variant = parse_handler_variant(handler_attr).map_err(remap)?;
+        let args = parse_handler_args(handler_attr).map_err(remap)?;
         // Task completions get no `HandlesKind` / inventory marker.
-        if variant == HandlerVariant::Task {
+        if args.variant == HandlerVariant::Task {
             continue;
         }
-        let class = parse_handler_class(handler_attr, variant).map_err(remap)?;
+        let class = parse_handler_class(handler_attr, &args).map_err(remap)?;
         let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
         let handler_reply = classify_handler_reply(&f.sig.output);
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
         // the markers this identity emits so both halves strip together.
-        handler_kinds.push(HandlerMarker { kind, reply: handler_reply, class, cfgs: handler_cfgs(&f.attrs) });
+        handler_kinds.push(HandlerMarker {
+            kind,
+            reply: handler_reply,
+            class,
+            reason: args.reason,
+            cfgs: handler_cfgs(&f.attrs),
+        });
     }
 
     // A `NativeActor` impl with no `#[handler]`, no `#[fallback]`, and no

@@ -692,18 +692,20 @@ pub struct KindLabels {
 /// A handler's reply class as reported by the manifest (ADR-0112,
 /// ADR-0134). The successor to ADR-0109's `Option<KindId>` reply field: a
 /// single-class handler reports `None` (`-> ()`) or `One(R)`
-/// (`-> R` / `-> Pending<R>`); a manual-class handler reports `Manual` (it
-/// issues its own replies, so no single static reply kind). `describe_*`
+/// (`-> R` / `-> Pending<R>`); an unchecked-class handler reports `Unchecked`
+/// (it issues its own replies, which the engine does not check, so no single
+/// static reply kind). The handler's stated reason rides beside this contract
+/// on the manifest record, never inside it (#7193). `describe_*`
 /// surfaces this so a caller reads the real reply shape, not a `None` that
 /// lies for a handler that replies by hand.
 ///
-/// **The wire selectors are fixed** — `None` = 0, `One` = 1, `Manual` = 3.
+/// **The wire selectors are fixed** — `None` = 0, `One` = 1, `Unchecked` = 3.
 /// Selector 2 is reserved (retired by #6440) and is never reused: a record
 /// still carrying it fails to decode. The const-fn encoders in
 /// [`crate::canonical`], the owned codec, and the macro emission depend on
 /// these numbers; do not renumber.
 ///
-/// The serde impls are hand-written so `Manual` keeps selector 3 on the
+/// The serde impls are hand-written so `Unchecked` keeps selector 3 on the
 /// positional serde path despite the gap, following the `LabelNode` /
 /// `VariantLabel` precedent above. The `Schema` impl is hand-written too
 /// (aether-data has no `extern crate self` alias and never self-derives
@@ -717,9 +719,10 @@ pub enum ReplyContract {
     /// `-> R` / `-> Pending<R>` — a single-class handler whose reply kind
     /// is `R`.
     One(KindId),
-    /// A manual-class handler that issues its own replies — no single
-    /// static reply kind to report.
-    Manual,
+    /// An unchecked-class handler (`#[handler::unchecked(reason = "…")]`)
+    /// that issues its own replies — the engine does not check them, so there
+    /// is no single static reply kind to report.
+    Unchecked,
 }
 
 impl Serialize for ReplyContract {
@@ -727,7 +730,7 @@ impl Serialize for ReplyContract {
         match self {
             Self::None => serializer.serialize_unit_variant("ReplyContract", 0, "None"),
             Self::One(id) => serializer.serialize_newtype_variant("ReplyContract", 1, "One", id),
-            Self::Manual => serializer.serialize_unit_variant("ReplyContract", 3, "Manual"),
+            Self::Unchecked => serializer.serialize_unit_variant("ReplyContract", 3, "Unchecked"),
         }
     }
 }
@@ -737,19 +740,19 @@ impl<'de> Deserialize<'de> for ReplyContract {
         use serde::de::Error as _;
 
         // Positional shadow of the selectors: the placeholder holds index 2
-        // so `Manual` decodes at 3, and a record carrying 2 is refused.
+        // so `Unchecked` decodes at 3, and a record carrying 2 is refused.
         #[derive(Deserialize)]
         enum ReplyContractDe {
             None,
             One(KindId),
             RetiredSelector2,
-            Manual,
+            Unchecked,
         }
         match ReplyContractDe::deserialize(deserializer)? {
             ReplyContractDe::None => Ok(Self::None),
             ReplyContractDe::One(id) => Ok(Self::One(id)),
             ReplyContractDe::RetiredSelector2 => Err(D::Error::custom("ReplyContract selector 2 is reserved")),
-            ReplyContractDe::Manual => Ok(Self::Manual),
+            ReplyContractDe::Unchecked => Ok(Self::Unchecked),
         }
     }
 }
@@ -763,7 +766,7 @@ impl crate::Schema for ReplyContract {
                 discriminant: 1,
                 fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
             },
-            EnumVariant::Unit { name: Cow::Borrowed("Manual"), discriminant: 3 },
+            EnumVariant::Unit { name: Cow::Borrowed("Unchecked"), discriminant: 3 },
         ]),
     };
 
@@ -778,7 +781,7 @@ impl crate::Schema for ReplyContract {
         variants: Cow::Borrowed(&[
             VariantLabel::Unit { name: Cow::Borrowed("None") },
             VariantLabel::Tuple { name: Cow::Borrowed("One"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
-            VariantLabel::Unit { name: Cow::Borrowed("Manual") },
+            VariantLabel::Unit { name: Cow::Borrowed("Unchecked") },
         ]),
     };
 }
@@ -803,10 +806,15 @@ pub enum InputsRecord {
         doc: Option<Cow<'static, str>>,
         /// ADR-0112 / ADR-0134: the handler's reply class — `None` / `One(R)`
         /// for a single-class handler (the ADR-0109 return-type contract),
-        /// `Manual` for a manual-class handler that replies by hand. Lets a
-        /// caller read the real `In -> Out` before issuing the call.
+        /// `Unchecked` for an unchecked-class handler that replies by hand.
+        /// Lets a caller read the real `In -> Out` before issuing the call.
         /// Successor to ADR-0109's `Option<KindId>` reply field.
         reply: ReplyContract,
+        /// #7193: an unchecked handler's stated reason for giving up the reply
+        /// check — `Some` exactly when `reply` is [`ReplyContract::Unchecked`],
+        /// and never blank. Beside the contract rather than inside it, so a
+        /// reworded reason is not a contract change.
+        reason: Option<Cow<'static, str>>,
     },
     /// A `#[fallback]` method's presence and optional description.
     Fallback { doc: Option<Cow<'static, str>> },
@@ -865,19 +873,21 @@ pub const PRIVATE_INPUTS_SECTION: &str = "aether.kinds.inputs.private";
 /// v0x03 (ADR-0109 / issue 1803) added the `reply` kind id to the
 /// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
 /// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
-/// *class* (single / manual) is reported, not just a single
+/// *class* (single / unchecked) is reported, not just a single
 /// reply kind; v0x05 (ADR-0118 / issue 1984) moved every record
 /// onto the owned aether-wire format (fixed little-endian
 /// selectors / ids / counts); v0x06 (ADR-0241 §5 / issue 7017) added the
 /// `InputsRecord::Instanced` cardinality record, whose absence now means
-/// "singleton" — a v0x05 module cannot say otherwise. A component built
+/// "singleton" — a v0x05 module cannot say otherwise; v0x07 (issue 7193)
+/// appended the unchecked handler's stated `reason` to the `Handler`
+/// variant — a v0x06 unchecked row carries none. A component built
 /// before any of these and a substrate after would otherwise disagree on
 /// the record shape, so the reader rejects an older version byte loudly —
 /// a hard rebuild boundary.
 ///
 /// Distinct from the `aether.kinds` section's own version
 /// ([`KINDS_SECTION_VERSION`]): the two sections version independently.
-pub const INPUTS_SECTION_VERSION: u8 = 0x06;
+pub const INPUTS_SECTION_VERSION: u8 = 0x07;
 
 /// One anonymous actor-placement fact in the `aether.actor.lineage` wasm
 /// custom section (ADR-0166).

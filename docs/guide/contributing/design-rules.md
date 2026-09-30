@@ -647,15 +647,18 @@ namespace its predecessor did.
 ### R-0022: Treat a handler's replies as undeclared unless its class declares them {#r-0022}
 
 A handler promises a reply only through its class and return type: a single
-handler returning `R` replies `R`, and one returning `()` is silent. A manual
-handler may reply with any kind, any number of times, or not at all, and
-declares nothing. A kind never declares its reply kind.
+handler returning `R` replies `R`, and one returning `()` is silent. An
+unchecked handler (`#[handler::unchecked(reason = "…")]`) may reply with any
+kind, any number of times, or not at all, and declares nothing; its stated
+`reason` names why it gives up the reply check. A kind never declares its reply
+kind.
 
 - **Why:** the same kind sent to different handlers may be answered
   differently, so a reply belongs to the handler.
 - **Settled:** ADR-0109 (the return type is the reply contract); ADR-0231 §6
-  (manual rows declare no reply kind); #6486 (a reply-typed manual handler
-  declined).
+  (unchecked rows declare no reply kind); #6486 (a reply-typed unchecked
+  handler declined); #7193 (the class is named unchecked and states its
+  reason).
 
 ### R-0023: Compose an absent capability as an honest stub {#r-0023}
 

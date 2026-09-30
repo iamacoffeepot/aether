@@ -144,8 +144,8 @@ fn reply_snapshot(
         ReplyContract::None => {
             return Ok(ReplyContractSnapshot { class: "none".to_owned(), id: None, name: None, schema: None });
         }
-        ReplyContract::Manual => {
-            return Ok(ReplyContractSnapshot { class: "manual".to_owned(), id: None, name: None, schema: None });
+        ReplyContract::Unchecked => {
+            return Ok(ReplyContractSnapshot { class: "unchecked".to_owned(), id: None, name: None, schema: None });
         }
         ReplyContract::One(id) => ("one", id),
     };

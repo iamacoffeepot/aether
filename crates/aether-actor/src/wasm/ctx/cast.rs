@@ -18,7 +18,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// reads, and this verb applies the same sealed [`CastTarget::admits`]
     /// rule to them, so the two answers cannot drift apart. `T` is sealed to
     /// two arms: [`Subscriber<K>`](crate::Subscriber) admits a silent or
-    /// manual row for `K`, and a `#[protocol]` type admits a route that
+    /// unchecked row for `K`, and a `#[protocol]` type admits a route that
     /// publishes every one of its rows with the exact reply.
     ///
     /// The reference usually arrived untyped, as [`Self::sender`] does, and

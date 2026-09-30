@@ -57,7 +57,7 @@
 //! `ctx.send::<R>(..)` and its siblings, and a route that sends to `R` needs
 //! `depends(R)`. A ctx that names its actor, including an explicit erased one,
 //! passes through unchanged. Every route takes the single ctx the generated
-//! handler has; one that names the `Manual` reply mode is a compile error at
+//! handler has; one that names the `Unchecked` reply mode is a compile error at
 //! the method.
 
 #![forbid(unsafe_code)]
@@ -532,7 +532,7 @@ fn parse_ctx_type(method: &mut ImplItemFn) -> syn::Result<Type> {
             _ => None,
         })
         .ok_or_else(|| syn::Error::new(ty_span, "http::Ctx needs a transport ctx type argument: `http::Ctx<'_, C>`"))?;
-    reject_manual_ctx(transport)?;
+    reject_unchecked_ctx(transport)?;
     fill_actor(transport);
     Ok(transport.clone())
 }
@@ -804,12 +804,12 @@ fn fill_actor(ty: &mut Type) {
     }
 }
 
-/// Refuse a route's transport ctx that names the `Manual`
-/// reply mode, as `NativeCtx<'_, Self, Manual>` does: its second type
-/// argument's last segment is `Manual`. The generated handler covers the
+/// Refuse a route's transport ctx that names the `Unchecked`
+/// reply mode, as `NativeCtx<'_, Self, Unchecked>` does: its second type
+/// argument's last segment is `Unchecked`. The generated handler covers the
 /// `HttpRouter` row with a single handler, so it passes a single ctx, and a
 /// route answers by returning. The match is syntactic, like [`fill_actor`]'s.
-fn reject_manual_ctx(ty: &Type) -> syn::Result<()> {
+fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
     let Type::Path(TypePath { path, .. }) = ty else {
         return Ok(());
     };
@@ -821,10 +821,10 @@ fn reject_manual_ctx(ty: &Type) -> syn::Result<()> {
     else {
         return Ok(());
     };
-    if mode.segments.last().is_some_and(|seg| seg.ident == "Manual") {
+    if mode.segments.last().is_some_and(|seg| seg.ident == "Unchecked") {
         return Err(syn::Error::new(
             ty.span(),
-            "a route takes the single ctx the #[http::router] handler passes, not a Manual one: it answers by \
+            "a route takes the single ctx the #[http::router] handler passes, not an `Unchecked` one: it answers by \
              returning, and a handler that answers later is a hand-written one that holds its reply (ADR-0243)",
         ));
     }

@@ -129,7 +129,7 @@ impl<R: ActorMail> Pending<R> {
     }
 
     /// Accept the receipt as returned from its handler. Reachable only from
-    /// `NativeCtx::<A, Manual>::__accept_pending`, which the `#[actor]` and
+    /// `NativeCtx::<A, Unchecked>::__accept_pending`, which the `#[actor]` and
     /// `#[handler_set]` native dispatch arms call on the value a
     /// `-> Pending<R>` handler returns; a single handler never holds that
     /// view, so it cannot disarm its own receipt and declare a false row.
@@ -529,7 +529,7 @@ impl DeferredReply {
     /// Release the obligation with no reply because the actor that owned its
     /// pending state is itself closing. Every other close while the engine
     /// keeps running answers its debts (ADR-0243 §1): the ledger sends
-    /// `R::unanswered()` for each `Held<R>`, and a manual owner replies to
+    /// `R::unanswered()` for each `Held<R>`, and an unchecked owner replies to
     /// its `DeferredReply`s in `unwire`. This
     /// survives only for the component host's boot waiters (`PendingBoot`),
     /// which close through a slot drop that runs no `unwire`, until #7008
@@ -1226,7 +1226,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use aether_actor::{ErasedActorRef, Manual};
+    use aether_actor::{ErasedActorRef, Unchecked};
     use aether_data::{MailId, MailboxId, SessionToken, Source, Uuid};
     use aether_kinds::{MonitorNotice, Tick};
 
@@ -1424,8 +1424,8 @@ mod tests {
             Ok(Self { gate: Some(gate), buffered: None })
         }
 
-        #[handler::manual]
-        fn on_accept(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _accept: Accept) {
+        #[handler::unchecked(reason = "test: buffers the reply target past the handler")]
+        fn on_accept(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _accept: Accept) {
             self.buffered = Some((ctx.acquire_settlement_hold(), ctx.reply_target()));
         }
 
@@ -1509,8 +1509,8 @@ mod tests {
             Ok(Self { offset })
         }
 
-        #[handler::manual]
-        fn on_count(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, _count: Count) {
+        #[handler::unchecked(reason = "test: dispatches blocking work without replying")]
+        fn on_count(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _count: Count) {
             let _id = ctx.dispatch_blocking_with(self.offset, move || 7u64);
         }
 
@@ -1874,7 +1874,7 @@ mod tests {
         engine_only: bool,
     }
 
-    /// A pumped root whose manual handler defers its reply, forwards
+    /// A pumped root whose unchecked handler defers its reply, forwards
     /// encoded replies through the debt, reads the holds open on its chain,
     /// and then sends the typed terminal reply.
     struct Relayer {
@@ -1895,8 +1895,8 @@ mod tests {
             Ok(Self { counter, held_after_forwards: None })
         }
 
-        #[handler::manual]
-        fn on_relay(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, relay: Relay) {
+        #[handler::unchecked(reason = "test: relays the request and replies from the relay")]
+        fn on_relay(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, relay: Relay) {
             let root = ctx.in_flight_root().expect("the relay runs on a tracked root");
             let owed = ctx.defer_reply_to(ctx.reply_target());
             if relay.engine_only {

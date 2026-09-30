@@ -6,7 +6,7 @@
 //! compiles both `desktop` (for the desktop chassis) and `synthetic` (for the
 //! harnesses) into one crate, and only the composer knows which it wants.
 
-use aether_actor::{Manual, OutboundReply, runtime};
+use aether_actor::{OutboundReply, Unchecked, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::MonitorNotice;
 use aether_substrate::actor::native::{Erased, Pending, SpawnOutcome, TaskDone};
@@ -249,56 +249,60 @@ impl NativeActor for WindowCapability {
     }
 
     /// Close the sole window.
-    #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CloseWindow) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: CloseWindow) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&CloseWindowResult::Err { error });
         }
     }
 
     /// Change the sole window's presentation mode.
-    #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMode) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowMode) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowModeResult::Err { error });
         }
     }
 
     /// Change the sole window's title.
-    #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowTitle) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowTitle) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowTitleResult::Err { error });
         }
     }
 
     /// Install the sole window's native menu bar.
-    #[handler::manual]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMenu) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowMenu) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowMenuResult::Err { error });
         }
     }
 
     /// Set the sole window's pointer shape.
-    #[handler::manual]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowCursor) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowCursor) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowCursorResult::Err { error });
         }
     }
 
     /// Bring the sole window to the foreground.
-    #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FocusWindow) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: FocusWindow) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&FocusWindowResult::Err { error });
         }
     }
 
     /// Schedule the sole window for redraw.
-    #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: RequestWindowRedraw) {
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_request_redraw(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Erased, Unchecked>,
+        mail: RequestWindowRedraw,
+    ) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&RequestWindowRedrawResult::Err { error });
         }

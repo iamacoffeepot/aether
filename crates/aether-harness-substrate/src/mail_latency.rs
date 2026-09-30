@@ -107,12 +107,14 @@ impl Dispatch<Self> for RingRelay {
                     name: <Ping as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
                 HandlerCapability {
                     id: RingLink::ID,
                     name: <RingLink as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
             ],
             ..ComponentCapabilities::default()
@@ -121,7 +123,7 @@ impl Dispatch<Self> for RingRelay {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -196,6 +198,7 @@ impl Dispatch<Self> for HoldRelay {
                 name: <Ping as Kind>::NAME.to_owned(),
                 doc: None,
                 reply: ReplyContract::None,
+                reason: None,
             }],
             ..ComponentCapabilities::default()
         }
@@ -203,7 +206,7 @@ impl Dispatch<Self> for HoldRelay {
 
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

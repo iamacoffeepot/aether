@@ -369,6 +369,7 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
             name: "aether.test.on".to_owned(),
             doc: Some("One line.\n\nMore body.".to_owned()),
             reply: ReplyContract::None,
+            reason: None,
         }],
         ..ComponentCapabilities::default()
     };
@@ -601,6 +602,7 @@ fn surface(handler: &str) -> ComponentCapabilities {
             name: handler.to_owned(),
             doc: None,
             reply: aether_data::ReplyContract::None,
+            reason: None,
         }],
         ..ComponentCapabilities::default()
     }

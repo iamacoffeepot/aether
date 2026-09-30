@@ -7,7 +7,7 @@ use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, attr_is_fallback,
     attr_is_handler, classify_handler_reply, ctx_names_actor, extract_handler_kind_type, fill_ctx_actor, handler_cfgs,
-    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
     validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
@@ -116,8 +116,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // dispatch yet. Reject `#[handler(task)]` here with a
                     // clear diagnostic rather than letting it expand into
                     // a guest dispatch table that can't satisfy it.
-                    let variant = parse_handler_variant(&f.attrs[idx])?;
-                    if variant == HandlerVariant::Task {
+                    let args = parse_handler_args(&f.attrs[idx])?;
+                    if args.variant == HandlerVariant::Task {
                         return Err(syn::Error::new_spanned(
                             &f,
                             "dispatch completions are native-only (ADR-0093 §7); \
@@ -129,7 +129,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     let reply = classify_handler_reply(&f.sig.output);
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path.
-                    let class = parse_handler_class(&f.attrs[idx], variant)?;
+                    let class = parse_handler_class(&f.attrs[idx], &args)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -137,7 +137,15 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
                     allow_abi_receiver(&mut f);
-                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, cfgs });
+                    handlers.push(HandlerFn {
+                        method: f,
+                        kind_ty,
+                        agent_doc,
+                        reply,
+                        class,
+                        unchecked_reason: args.reason,
+                        cfgs,
+                    });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
@@ -728,7 +736,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         impl #impl_generics ::aether_actor::WasmDispatch<Self> for #self_ty #where_clause {
             fn dispatch(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #self_ty::__aether_dispatch(__aether_state, __aether_ctx, __aether_mail)
@@ -755,7 +763,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -784,19 +792,19 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
             }
             // ADR-0112: the lifecycle ctx is `WasmCtx<'_, Self>` (= Single);
             // upgrade the carried erased ctx to the actor once, where it is
-            // born, and downgrade the `Manual` view here. `on_rehydrate` takes
+            // born, and downgrade the `Unchecked` view here. `on_rehydrate` takes
             // the same typed ctx (#6533) and upgrades the same way below.
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
+            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
             fn erased_on_dehydrate(
@@ -807,7 +815,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
                 <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(
@@ -890,18 +898,18 @@ fn build_dispatch_body(
         // `__for_actor::<Self>()` upgrade, ahead of the per-class downgrade
         // below; one that spells `Erased` receives the erased ctx.
         let ctx = upgrade_ctx_when_named(&h.method.sig);
-        // ADR-0112: the dispatch ctx is the full `Manual` view. A single
+        // ADR-0112: the dispatch ctx is the full `Unchecked` view. A single
         // handler is called with the downgraded `as_single()` view and the
         // macro auto-replies a `-> R` return through `OutboundReply::reply`
-        // on the `Manual` ctx; a `-> ()` handler sends nothing. A manual
-        // handler is called with the `Manual` ctx directly and issues its own
+        // on the `Unchecked` ctx; a `-> ()` handler sends nothing. An unchecked
+        // handler is called with the `Unchecked` ctx directly and issues its own
         // replies — no auto-reply, regardless of return type. The arm's return
         // code carries its class to the host (#6412): a single arm returns
         // `DISPATCH_HANDLED_RELEASE`, so the substrate frees the dispatch's
-        // reply handle, and a manual arm returns `DISPATCH_HANDLED`, so the
+        // reply handle, and an unchecked arm returns `DISPATCH_HANDLED`, so the
         // handle it may have kept stays live. ADR-0243 §6: a single
         // `-> Pending<R>` arm accepts the receipt its handler returned,
-        // through the `Manual` view's `__accept_pending`, and returns
+        // through the `Unchecked` view's `__accept_pending`, and returns
         // `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle and
         // holds the requester's settlement for the `Held<R>` minted beside
         // the receipt.
@@ -926,7 +934,7 @@ fn build_dispatch_body(
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_HOLD },
             ),
-            (HandlerClass::Manual, _) => (
+            (HandlerClass::Unchecked, _) => (
                 quote! {
                     self.#method(#ctx, __aether_decoded);
                 },
@@ -990,7 +998,7 @@ fn build_dispatch_body(
         // `__for_actor::<Self>()` upgrade, like a handler.
         let ctx = upgrade_ctx_when_named(&f.method.sig);
         // ADR-0112: a `#[fallback]` keeps its `WasmCtx<'_>` (= Single)
-        // signature; the dispatch ctx is `Manual`, so downgrade.
+        // signature; the dispatch ctx is `Unchecked`, so downgrade.
         quote! {
             self.#method(#ctx.as_single(), __aether_mail);
             ::aether_actor::DISPATCH_HANDLED

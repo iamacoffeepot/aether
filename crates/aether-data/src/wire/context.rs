@@ -87,8 +87,8 @@ impl<'a> DecodeCtx<'a> {
     /// publishes every one of `rows` with the exact same [`ReplyContract`]. A
     /// path whose actor has closed proves here, so its receiver's handler
     /// sees it and answers the closure itself. Protocol coverage is exact:
-    /// replacement compatibility is a separate rule and does not make a
-    /// manual row interchangeable with a declared one.
+    /// replacement compatibility is a separate rule and does not make an
+    /// unchecked row interchangeable with a declared one.
     ///
     /// # Errors
     ///
@@ -133,7 +133,7 @@ mod tests {
 
     // Catches reversed subset comparison (which accepts a route publishing
     // fewer rows than asked and refuses a superset), a loose reply comparison,
-    // substitution of replacement's Manual wildcard, and a wrong or missing
+    // substitution of replacement's Unchecked wildcard, and a wrong or missing
     // first-row refusal.
     #[test]
     fn context_proves_route_coverage_and_names_each_refusal() {
@@ -142,27 +142,27 @@ mod tests {
             (path("test.superset"), Vec::from([(ASKED, ReplyContract::One(REPLY)), (OTHER, ReplyContract::None)])),
             (path("test.missing"), Vec::from([(OTHER, ReplyContract::None)])),
             (path("test.other_reply"), Vec::from([(ASKED, ReplyContract::One(ANOTHER_REPLY))])),
-            (path("test.manual_for_declared"), Vec::from([(ASKED, ReplyContract::Manual)])),
-            (path("test.manual_exact"), Vec::from([(ASKED, ReplyContract::Manual)])),
-            (path("test.manual_silent"), Vec::from([(ASKED, ReplyContract::None)])),
-            (path("test.manual_reply"), Vec::from([(ASKED, ReplyContract::One(REPLY))])),
+            (path("test.unchecked_for_declared"), Vec::from([(ASKED, ReplyContract::Unchecked)])),
+            (path("test.unchecked_exact"), Vec::from([(ASKED, ReplyContract::Unchecked)])),
+            (path("test.unchecked_silent"), Vec::from([(ASKED, ReplyContract::None)])),
+            (path("test.unchecked_reply"), Vec::from([(ASKED, ReplyContract::One(REPLY))])),
             (path("test.first_missing"), Vec::from([(OTHER, ReplyContract::None)])),
         ]));
         let ctx = DecodeCtx::empty().routes(&stub);
 
         assert_eq!(ctx.prove_route_covers(&path("test.superset"), &asked), Ok(()));
-        for uncovered in ["test.missing", "test.other_reply", "test.manual_for_declared"] {
+        for uncovered in ["test.missing", "test.other_reply", "test.unchecked_for_declared"] {
             assert_eq!(
                 ctx.prove_route_covers(&path(uncovered), &asked),
                 Err(Error::UncoveredProtocolPath { path: path(uncovered), kind: ASKED }),
             );
         }
 
-        let manual = [(ASKED, ReplyContract::Manual)];
-        assert_eq!(ctx.prove_route_covers(&path("test.manual_exact"), &manual), Ok(()));
-        for uncovered in ["test.manual_silent", "test.manual_reply"] {
+        let unchecked = [(ASKED, ReplyContract::Unchecked)];
+        assert_eq!(ctx.prove_route_covers(&path("test.unchecked_exact"), &unchecked), Ok(()));
+        for uncovered in ["test.unchecked_silent", "test.unchecked_reply"] {
             assert_eq!(
-                ctx.prove_route_covers(&path(uncovered), &manual),
+                ctx.prove_route_covers(&path(uncovered), &unchecked),
                 Err(Error::UncoveredProtocolPath { path: path(uncovered), kind: ASKED }),
             );
         }

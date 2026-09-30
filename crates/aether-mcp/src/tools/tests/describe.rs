@@ -420,6 +420,7 @@ async fn describe_component_reads_the_cache() {
             name: "test.request".to_owned(),
             doc: Some(multi_doc.to_owned()),
             reply: aether_data::ReplyContract::One(KindId(0x22)),
+            reason: None,
         }],
         ..ComponentCapabilities::default()
     };
@@ -483,6 +484,7 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
                         name: "test.by_name".to_owned(),
                         doc: None,
                         reply: aether_data::ReplyContract::None,
+                        reason: None,
                     }],
                     ..ComponentCapabilities::default()
                 },

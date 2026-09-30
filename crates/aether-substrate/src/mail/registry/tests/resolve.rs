@@ -109,15 +109,15 @@ impl Protocol for Loading {
     type Rows = (Row<Load, Loaded>,);
 }
 
-/// The ordinary protocol cast arm for a manual row, distinct from the
+/// The ordinary protocol cast arm for an unchecked row, distinct from the
 /// subscriber exception exercised below.
-struct ManualLoading;
+struct UncheckedLoading;
 
-impl Protocol for ManualLoading {
+impl Protocol for UncheckedLoading {
     type Rows = (Row<Load, Undeclared>,);
 }
 
-impl ProtocolCast for ManualLoading {}
+impl ProtocolCast for UncheckedLoading {}
 
 #[aether_data::kind(name = "test.resolve_protocol.carries", no_serde)]
 struct Carries {
@@ -210,7 +210,13 @@ fn contract(rows: &[(KindId, ReplyContract)]) -> RouteContract {
     RouteContract::from_capabilities(&ComponentCapabilities {
         handlers: rows
             .iter()
-            .map(|(id, reply)| HandlerCapability { id: *id, name: String::new(), doc: None, reply: *reply })
+            .map(|(id, reply)| HandlerCapability {
+                id: *id,
+                name: String::new(),
+                doc: None,
+                reply: *reply,
+                reason: None,
+            })
             .collect(),
         ..ComponentCapabilities::default()
     })
@@ -301,16 +307,16 @@ fn route_rows_answer_live_and_dropped_routes_under_the_path() {
 }
 
 /// ADR-0231 §4's guard cast types a held reference as `Subscriber<Load>`
-/// only while its route is `Live` and publishes a silent or manual `Load`
-/// row, and as `ManualLoading` only for the exact manual row. Each case names
+/// only while its route is `Live` and publishes a silent or unchecked `Load`
+/// row, and as `UncheckedLoading` only for the exact unchecked row. Each case names
 /// the bug it catches:
 ///
-/// - a `Live` route publishing `(Load, None)` or `(Load, Manual)` mints: a
+/// - a `Live` route publishing `(Load, None)` or `(Load, Unchecked)` mints: a
 ///   cast that reads anything but the published rows, or that refuses the
-///   manual row a subscriber may answer an event with;
-/// - the ordinary manual protocol admits `(Load, Manual)` but refuses
+///   unchecked row a subscriber may answer an event with;
+/// - the ordinary unchecked protocol admits `(Load, Unchecked)` but refuses
 ///   `(Load, None)`, `(Load, One(Loaded))`, a missing row, and a fallback-only
-///   route: a cast that treats manual as a
+///   route: a cast that treats unchecked as a
 ///   wildcard or applies the subscriber exception to every protocol;
 /// - a `Starting` reservation and a dropped route answer `None`: a cast that
 ///   mints for a sender that is not live.
@@ -333,14 +339,15 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
         registry.resolve_live(id).expect("the route is live")
     };
     let cast = |reference| registry.cast::<Subscriber<Load>>(reference).is_some();
-    let cast_manual = |reference| registry.cast::<ManualLoading>(reference).is_some();
+    let cast_unchecked = |reference| registry.cast::<UncheckedLoading>(reference).is_some();
 
     let silent = stand("test.cast.silent", &[(Load::ID, ReplyContract::None)]);
-    let manual = stand("test.cast.manual", &[(Loaded::ID, ReplyContract::None), (Load::ID, ReplyContract::Manual)]);
+    let unchecked =
+        stand("test.cast.unchecked", &[(Loaded::ID, ReplyContract::None), (Load::ID, ReplyContract::Unchecked)]);
     assert!(cast(silent), "a silent row answers the subscriber protocol");
-    assert!(cast(manual), "a manual row answers it too");
-    assert!(cast_manual(manual), "the exact manual row answers an ordinary manual protocol");
-    assert!(!cast_manual(silent), "a silent row does not answer a manual protocol");
+    assert!(cast(unchecked), "an unchecked row answers it too");
+    assert!(cast_unchecked(unchecked), "the exact unchecked row answers an ordinary unchecked protocol");
+    assert!(!cast_unchecked(silent), "a silent row does not answer an unchecked protocol");
 
     let replying = stand("test.cast.replying", &[(Load::ID, ReplyContract::One(Loaded::ID))]);
     let unrelated = stand("test.cast.unrelated", &[(Loaded::ID, ReplyContract::None)]);
@@ -353,7 +360,7 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
         [("replying", replying), ("unrelated", unrelated), ("closure", closure), ("fallback", fallback)]
     {
         assert!(!cast(reference), "{name}: the published rows do not answer the protocol");
-        assert!(!cast_manual(reference), "{name}: the published rows do not answer the manual protocol");
+        assert!(!cast_unchecked(reference), "{name}: the published rows do not answer the unchecked protocol");
     }
 
     let starting = "test.cast.starting";
@@ -368,6 +375,6 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
     registry.drop_mailbox(&auth(), dropped.id()).expect("the live route retires");
     assert!(!cast(starting), "a Starting route is not live");
     assert!(!cast(dropped), "a dropped route is not live");
-    assert!(!cast_manual(starting), "a Starting route cannot mint the manual protocol");
-    assert!(!cast_manual(dropped), "a dropped route cannot mint the manual protocol");
+    assert!(!cast_unchecked(starting), "a Starting route cannot mint the unchecked protocol");
+    assert!(!cast_unchecked(dropped), "a dropped route cannot mint the unchecked protocol");
 }

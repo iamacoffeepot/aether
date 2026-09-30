@@ -142,9 +142,9 @@ impl From<String> for ActorInitError {
 pub trait WasmDispatch<S> {
     /// Route one inbound mail to the matching `#[handler]` over the state.
     /// Returns the dispatch result code the `receive` FFI shim relays.
-    /// ADR-0112: the seam carries the most-permissive [`Manual`](crate::Manual)
+    /// ADR-0112: the seam carries the most-permissive [`Unchecked`](crate::Unchecked)
     /// view; the synthesized dispatcher downgrades per handler class.
-    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, mail: crate::Mail<'_>) -> u32;
+    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>) -> u32;
 }
 
 // Bare `Actor` collides with `model::Actor`; the `Wasm` prefix is the deliberate native-vs-wasm disambiguator.
@@ -393,19 +393,20 @@ pub trait ErasedWasmActor {
 
     /// Forwards to the `#[actor]`-synthesized `__aether_dispatch`.
     /// ADR-0112: the object-safe seam carries the most-permissive
-    /// [`Manual`](crate::Manual) view; the synthesized dispatcher
+    /// [`Unchecked`](crate::Unchecked) view; the synthesized dispatcher
     /// downgrades per handler class.
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, mail: crate::Mail<'_>) -> u32;
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>)
+    -> u32;
 
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire). The synthesized
     /// impl upgrades the carried erased ctx to the actor, whose lifecycle ctx
-    /// is typed by it, and downgrades the [`Manual`](crate::Manual) view to
+    /// is typed by it, and downgrades the [`Unchecked`](crate::Unchecked) view to
     /// `Single`.
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
+    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
 
     /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire), upgrading
     /// the ctx the same way as [`Self::erased_wire`].
-    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
+    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
@@ -414,7 +415,7 @@ pub trait ErasedWasmActor {
     /// as [`Self::erased_wire`].
     fn erased_on_rehydrate(
         &mut self,
-        ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
         prior: crate::PriorState<'_>,
     );
 }
@@ -1227,7 +1228,7 @@ macro_rules! __export_internal {
             // host calls `wire` without a prior `init_with_config` on this
             // instance (idempotent — same value).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            // ADR-0112: the runtime builds the erased `Manual` view. The
+            // ADR-0112: the runtime builds the erased `Unchecked` view. The
             // lifecycle ctx is `WasmCtx<'_, $component>` (= Single), so upgrade
             // it to the actor once, here where it is born, and downgrade.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
@@ -1289,7 +1290,7 @@ macro_rules! __export_internal {
             // inline-child alias dispatches the co-located child. For a
             // normally-addressed actor the recipient equals `mailbox_id`,
             // so the closure runs verbatim. ADR-0112: dispatch receives
-            // the full `Manual` ctx; `__aether_dispatch` downgrades per
+            // the full `Unchecked` ctx; `__aether_dispatch` downgrades per
             // handler class.
             //
             // The top-level dispatch's `&mut instance` borrow is scoped so it
@@ -1958,7 +1959,7 @@ macro_rules! __export_multi_internal {
             // here, idempotently, so the cluster self-identity is set even if
             // a future host calls `wire` without a prior init on this slot).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
+            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Unchecked`
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_wire(&mut ctx);
@@ -1971,7 +1972,7 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
+            // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Unchecked`
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_unwire(&mut ctx);
@@ -2013,7 +2014,7 @@ macro_rules! __export_multi_internal {
             // ADR-0114: same receive membrane as the single-actor arm —
             // own id dispatches the boxed type, an inline-child
             // alias dispatches the co-located child. ADR-0112: the boxed
-            // `ErasedWasmActor` seam carries the `Manual` view; the
+            // `ErasedWasmActor` seam carries the `Unchecked` view; the
             // synthesized impl downgrades to `Single` per hook. The
             // top-level dispatch's borrow is scoped so it is released before
             // the cluster-queue drain, which re-acquires the instance fresh
@@ -2179,7 +2180,7 @@ macro_rules! __export_multi_internal {
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedWasmActor` seam carries the
-                    // `Manual` view; the synthesized impl downgrades per hook.
+                    // `Unchecked` view; the synthesized impl downgrades per hook.
                     let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {

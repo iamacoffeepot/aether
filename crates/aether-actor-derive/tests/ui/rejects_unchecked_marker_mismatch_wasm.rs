@@ -1,11 +1,11 @@
 //! ADR-0112: the class marker and the ctx marker must agree — the macro
-//! passes the manual view to a `#[handler::manual]` and the single view
+//! passes the unchecked view to a `#[handler::unchecked(..)]` and the single view
 //! to a `#[handler]`, so a signature whose ctx marker disagrees fails to
 //! unify. Two mismatches on the wasm path:
-//!   - manual class + `WasmCtx<'_>` (= Single) ctx,
-//!   - single class + `WasmCtx<'_, Erased, Manual>` ctx.
+//!   - unchecked class + `WasmCtx<'_>` (= Single) ctx,
+//!   - single class + `WasmCtx<'_, Erased, Unchecked>` ctx.
 
-use aether_actor::{Erased, Manual, WasmCtx, actor};
+use aether_actor::{Erased, Unchecked, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(
@@ -46,15 +46,15 @@ impl aether_actor::WasmActor for MismatchProbe {
         Ok(MismatchProbe)
     }
 
-    // manual class but a single-mode ctx — the macro passes the `Manual`
+    // unchecked class but a single-mode ctx — the macro passes the `Unchecked`
     // ctx, which doesn't unify with `WasmCtx<'_>`.
-    #[handler::manual]
+    #[handler::unchecked(reason = "test: the class and ctx marker disagree")]
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 
-    // single class but a manual-mode ctx — the macro passes `as_single()`,
-    // which doesn't unify with `WasmCtx<'_, Erased, Manual>`.
+    // single class but an unchecked-mode ctx — the macro passes `as_single()`,
+    // which doesn't unify with `WasmCtx<'_, Erased, Unchecked>`.
     #[handler::single]
-    fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _pong: Pong) {}
+    fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _pong: Pong) {}
 }
 
 fn main() {}

@@ -23,7 +23,7 @@
 //! replacement's reply-lineage counter continues past its predecessor's.
 
 use aether_actor::{
-    ActorInitError, Erased, Manual, OutboundReply, PriorState, ReplyHandle, WasmActor, WasmCtx, WasmDropCtx,
+    ActorInitError, Erased, OutboundReply, PriorState, ReplyHandle, Unchecked, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
@@ -90,15 +90,15 @@ impl WasmActor for ReplyHolder {
         Ok(ReplyHolder { parked: Vec::new() })
     }
 
-    #[handler::manual]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, request: CarriedRequest) {
+    #[handler::unchecked(reason = "test: parks the reply target for a later release")]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Unchecked>, request: CarriedRequest) {
         if let Some(handle) = ctx.reply_target() {
             self.parked.push((handle, request.tag));
         }
     }
 
-    #[handler::manual]
-    fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _release: ReleaseCarried) {
+    #[handler::unchecked(reason = "test: answers parked requests from another handler")]
+    fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Unchecked>, _release: ReleaseCarried) {
         for (handle, tag) in self.parked.drain(..) {
             ctx.reply_to(handle, &CarriedRequestResult { tag });
         }

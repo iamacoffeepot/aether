@@ -193,8 +193,8 @@ impl NativeActor for InventoryCapability {
     /// # Agent
     /// Reply: `HandlersResult`. One `HandlerEntryWire` per native
     /// handler; `reply` is its reply contract — `One(R)` for a `-> R`
-    /// handler, `Manual` for a manual handler that replies at run time
-    /// with no declared kind, `None` for a silent `-> ()` handler. Fold per
+    /// handler, `Unchecked` for an unchecked handler that replies at run time
+    /// with no declared kind (its stated `reason` beside it), `None` for a silent `-> ()` handler. Fold per
     /// `namespace` to read each native cap (`aether.fs`,
     /// `aether.render`, …) as a `describe_component`-style
     /// `In -> Out` handler list.
@@ -202,7 +202,7 @@ impl NativeActor for InventoryCapability {
     //
     // Field-identical rows are deduped (ADR-0160 §Decision 2): two
     // `#[actor]` blocks that share one `NAMESPACE` and are linked into one
-    // binary each submit the same `(namespace, id, name, reply)` handler
+    // binary each submit the same `(namespace, id, name, reply, reason)` handler
     // rows into the link-time-global inventory. No capability pairs a
     // served actor with a stand-in at its namespace any more (ADR-0232 §6),
     // but nothing in the link-time inventory forbids a shared namespace. The
@@ -214,12 +214,13 @@ impl NativeActor for InventoryCapability {
     fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
         let mut seen = HashSet::new();
         let handlers = handler_entries()
-            .filter(|entry| seen.insert((entry.namespace, entry.id, entry.name, entry.reply)))
+            .filter(|entry| seen.insert((entry.namespace, entry.id, entry.name, entry.reply, entry.reason)))
             .map(|entry| HandlerEntryWire {
                 namespace: entry.namespace.into(),
                 id: entry.id,
                 name: entry.name.into(),
                 reply: entry.reply,
+                reason: entry.reason.map(str::to_owned),
             })
             .collect();
         HandlersResult { handlers }
@@ -559,7 +560,7 @@ mod tests {
     // Two field-identical link-time `HandlerEntry` rows submitted directly
     // into the process-global inventory — the shape a binary linking two
     // `#[actor]` blocks that share one `NAMESPACE` produces (ADR-0160
-    // §Decision 2): each emits the same `(namespace, id, name, reply)` rows.
+    // §Decision 2): each emits the same `(namespace, id, name, reply, reason)` rows.
     // `HandlerEntry` holds only `'static` data, so a bare `inventory::submit!`
     // reproduces the duplicate without standing up either actor.
     inventory::submit! {
@@ -568,6 +569,7 @@ mod tests {
             id: KindId(0x0D1D_0000_0000_0001),
             name: "aether.test.window_dedup.set_mode",
             reply: aether_data::ReplyContract::One(KindId(0x0D1D_0000_0000_0002)),
+            reason: None,
         }
     }
     inventory::submit! {
@@ -576,13 +578,14 @@ mod tests {
             id: KindId(0x0D1D_0000_0000_0001),
             name: "aether.test.window_dedup.set_mode",
             reply: aether_data::ReplyContract::One(KindId(0x0D1D_0000_0000_0002)),
+            reason: None,
         }
     }
 
     /// Two field-identical link-time `HandlerEntry` rows fold to a single
     /// served row. Guards the ADR-0160 §Decision 2 dedup: a binary linking two
     /// actors that share one namespace submits identical
-    /// `(namespace, id, name, reply)` rows into the link-time-global
+    /// `(namespace, id, name, reply, reason)` rows into the link-time-global
     /// inventory; without the dedup `describe_handlers` double-reports every
     /// shared handler.
     #[test]

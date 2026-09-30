@@ -81,8 +81,8 @@ impl NativeActor for SubstrateHarnessCapability {
     /// receiver is gone (chassis shutting down) the send hands the event
     /// back and the handler replies `Err` through the recovered guard so the
     /// caller doesn't hang.
-    #[handler::manual]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: Advance) {
+    #[handler::unchecked(reason = "answers from the embedder thread (ADR-0243 §5)")]
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: Advance) {
         let event = ChassisEvent::Advance {
             reply: Box::new(ctx.take_inbound()),
             ticks: mail.ticks,
@@ -107,7 +107,7 @@ mod runtime {
     use super::EventSender;
 
     pub use crate::events::ChassisEvent;
-    pub use aether_actor::Manual;
+    pub use aether_actor::Unchecked;
     pub use aether_kinds::AdvanceResult;
     pub use aether_substrate::Erased;
     pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};

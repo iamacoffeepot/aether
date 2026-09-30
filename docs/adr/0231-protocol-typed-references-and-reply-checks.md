@@ -42,7 +42,7 @@ request elicits a reply at all.
 
 The compiler already knows half of this. `#[actor]` emits, per handler, a
 `HandlesKind<K>` marker and a `Contract<K>` row whose `Reply` is the reply kind
-`O`, `Silent`, or `Undeclared` for a manual handler
+`O`, `Silent`, or `Undeclared` for an unchecked handler
 (`crates/aether-actor/src/model/contract.rs`,
 `crates/aether-actor-derive/src/reply_markers.rs`), and per actor one
 `Contracts` impl carrying the same rows twice: as the type-level list
@@ -136,10 +136,10 @@ The rules:
    through a typed reference, or through a cast of the erased reference over
    the published rows. The only untyped targets are fallback actors (§4).
 5. A replace may add rows and may not drop or change one (§5).
-6. A manual row declares no reply kind and covers only an explicit manual
+6. An unchecked row declares no reply kind and covers only an explicit unchecked
    protocol row for the same kind (§6).
 7. Every ctx `#[actor]` hands out is typed by its actor (§7).
-8. A subscriber's or watcher's handler for the event is silent or manual (§8).
+8. A subscriber's or watcher's handler for the event is silent or unchecked (§8).
 9. Relays forward through typed references; the reply they pass through is not
    checked (§9).
 10. A contract row, a declared dependency, a declared inline child, and a
@@ -153,7 +153,7 @@ The rules:
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the `Live` or `Dropped` route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Reference narrowing built: `ActorRef::narrow` (`crates/aether-actor/src/reference/actor_ref.rs`) and its spawn-result sibling `InlineChild::narrow` (`crates/aether-actor/src/wasm/ctx/child.rs`), with the guest `send_to` verbs taking a `ProtocolRef<P>` target, and a wasm handler set's rows reaching its adopter's `Contracts::Rows` so an adopter covers a protocol listing a set kind; the widget panel holds its children as such references (`crates/aether-widget/src/lanes.rs`). Not built: the guest's published-routes answer (ADR-0241), so a guest refuses a `ProtocolPath<P>` at decode; `ProtocolRef<P>` narrowing, which needs protocol-to-protocol coverage (§2) |
 | 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm and its protocol arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). The protocol arm's exact-rows rule is written once in `crates/aether-actor/src/model/protocol.rs`, and `#[protocol]` opts each protocol in through a hidden marker. Its consumers are the window's and the lifecycle capability's typed subscriber fan-out and the tcp session's `ProtocolRef<TcpConsumer>`, cast from a `connect_self` or `bind_listener_self` sender. The guest cast is built (`WasmCtx::cast` in `crates/aether-actor/src/wasm/ctx/cast.rs`): one host fn, `published_rows_p32`, answers the rows `Registry::published_rows_at` reads for both casts, and the guest applies the same `CastTarget::admits`; its first consumers are the HTTP stream handles, whose `ProtocolRef<ResponseSink>`, `ProtocolRef<RequestCreditSink>`, and `ProtocolRef<WebSocketSink>` are cast from the dispatching sender. The erased send verb's removal (#6895) and the cast's `AnyKind` arm are not built |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
-| 6 | Manual rows | built: `Undeclared` row, `ReplyContract::Manual` on both manifests, and explicit `-> Undeclared` protocol rows with exact static and runtime coverage |
+| 6 | Unchecked rows | built: `Undeclared` row, `ReplyContract::Unchecked` on both manifests, and explicit `-> Undeclared` protocol rows with exact static and runtime coverage |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
 | 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`) and for the window's and the lifecycle capability's subscriber references (`ProtocolRef<Subscriber<K>>`, `crates/aether-window/src/runtime/subscribers.rs`, `crates/aether-lifecycle/src/subscribers.rs`); the `monitor` bound is not |
 | 9 | Relays | `forward_to` and `DeferredReply::hand_off` exist; the typed target is not built |
@@ -164,7 +164,7 @@ The rules:
 A typed send of `K` to a target whose row for `K` replies `O` (single `-> O`,
 deferred `-> Pending<O>`) requires the sending actor `A: HandlesKind<O>`.
 Otherwise it does not compile. A silent row (`-> ()`) needs nothing from the
-sender, and neither does a manual row, whose replier picks the kind at run
+sender, and neither does an unchecked row, whose replier picks the kind at run
 time (§6).
 
 ```rust
@@ -247,7 +247,7 @@ pub trait MeshLoader {
 A signature with no return type is a silent row and `-> O` is a single row; a
 target's deferred `-> Pending<O>` handler has the row `O` and covers it, and
 `-> Pending<O>` in a protocol is refused. An explicit `-> Undeclared` is a
-manual row (§6), using the same return-type grammar and emission as `-> O`.
+unchecked row (§6), using the same return-type grammar and emission as `-> O`.
 The method name labels the row in the protocol's rustdoc; a target
 matches rows by kind, never by method name. Each parameter needs a name or `_`,
 because an attribute's input must parse.
@@ -311,12 +311,12 @@ it collides with the blanket.
 The trait solver decides coverage. A target covers a row only with the same
 kind and the exact reply type: a silent row is covered only by a silent
 handler, a row `O` only by a handler that replies `O`, and an `Undeclared` row
-only by a manual handler. Manual is neither silent nor a wildcard for a reply
+only by an unchecked handler. Unchecked is neither silent nor a wildcard for a reply
 kind. A kind the target handles only through `#[fallback]` has no row and never
 covers. `CoveredBy<R>`
 holds for any actor whose `#[actor]` rows match. `RowSet::CONTRACTS` maps each
 row as `#[actor]`'s `Contracts::CONTRACTS` does, `One(O::ID)` for a row `O`,
-`None` for a silent row, and `Manual` for an `Undeclared` row, so the
+`None` for a silent row, and `Unchecked` for an `Undeclared` row, so the
 protocol's list and a live target's published
 rows (§4) compare in one vocabulary.
 
@@ -508,9 +508,9 @@ context, so it refuses a `ProtocolPath<P>`.
 
 An actor-typed path and a protocol-typed path claim different things, as the
 two references do. `resolve` of an `ActorPath<R>` yields an `ActorRef<R>`,
-through which every kind `R` handles is sendable, its manual rows included.
+through which every kind `R` handles is sendable, its unchecked rows included.
 A protocol names exactly the rows its holder needs, including an explicit
-manual row when the target promises only that it handles the kind (§6). The
+unchecked row when the target promises only that it handles the kind (§6). The
 Bloomery bootstrap names its concrete driver by `ActorPath<BundleDriver>`
 (ADR-0240 D8), while a holder that needs only some rows and should not depend
 on the implementation type takes a `ProtocolPath<P>` narrowed by whoever can
@@ -581,7 +581,7 @@ subscription enum with one variant per published kind (`WindowSubscription`,
 protocol is fixed by the variant. Each publisher decodes the request against
 the engine and resolves the path on receipt. The http server's
 `aether.http.server.register_route` carries its handler as a
-`ProtocolPath<HttpRouter>`, the one manual row
+`ProtocolPath<HttpRouter>`, the one unchecked row
 `aether.http.server.request -> Undeclared`
 (`crates/aether-http/src/kinds.rs`), decoded against the engine and resolved
 at receipt; the route then holds that proof, and its per-request dispatch
@@ -673,7 +673,7 @@ they emit. The `AnyKind` arm lands with its consumer.
 |---|---|
 | a protocol `P` | every row of `<P::Rows as RowSet>::CONTRACTS`, kind and `ReplyContract` alike |
 | `AnyKind` | a `#[fallback]` |
-| `Subscriber<K>`, the built-in one-row marker for a published kind (§8) | a row for `K` that is `None` or `Manual` |
+| `Subscriber<K>`, the built-in one-row marker for a published kind (§8) | a row for `K` that is `None` or `Unchecked` |
 
 A cast that fails returns `None`. The holder decides: refuse the request that
 carried the reference, or drop the row. Nothing is parked and no mail is sent.
@@ -719,7 +719,7 @@ kinds fixed at compile time (`HttpRequestStreamOpen`, `HttpRequestChunk`,
 
 Nor is the http server's routed request (`dispatch_prepared`,
 `crates/aether-http/src/server/runtime/state.rs`). Every route holder covers
-one manual protocol, `HttpRouter { fn request(mail: HttpServerRequest) ->
+one unchecked protocol, `HttpRouter { fn request(mail: HttpServerRequest) ->
 Undeclared; }`, proven from a `ProtocolPath<HttpRouter>` or cast from a
 `_self` sender, so the kind is fixed at compile time. The reader encodes the
 request as an `Encoded<HttpServerRequest>`, bytes only an encode of that kind
@@ -730,7 +730,7 @@ produces, and the shard sends it through the route's
 
 | Group | Sites | Becomes |
 |---|---|---|
-| Subscriber fan-out | the window (`crates/aether-window/src/runtime/subscribers.rs`), the lifecycle capability (`crates/aether-lifecycle/src/subscribers.rs`), and the tcp session's `fanout` to its one consumer (`crates/aether-tcp/src/session/runtime.rs`) all fan out through typed references | the tcp consumer held as the two-row `ProtocolRef<TcpConsumer>` (`SessionData` and `SessionClosed`, both silent), taken from a `ProtocolPath<TcpConsumer>` or cast from a `_self` sender, so a consumer that handles data but not close is refused; each other subscriber held as `ProtocolRef<Subscriber<K>>` (§8): an explicit request carries a `ProtocolPath<Subscriber<K>>`, which decodes against the exact silent row and is resolved at receipt, and a reflexive request's sender is cast at receipt, which also admits a manual row, so a manual-row subscriber subscribes through the reflexive form; a runtime `KindId`, from a reflexive request or the synthetic window's `InjectWindowEvent`, dispatches to the typed table of the published kind it names and any other is refused |
+| Subscriber fan-out | the window (`crates/aether-window/src/runtime/subscribers.rs`), the lifecycle capability (`crates/aether-lifecycle/src/subscribers.rs`), and the tcp session's `fanout` to its one consumer (`crates/aether-tcp/src/session/runtime.rs`) all fan out through typed references | the tcp consumer held as the two-row `ProtocolRef<TcpConsumer>` (`SessionData` and `SessionClosed`, both silent), taken from a `ProtocolPath<TcpConsumer>` or cast from a `_self` sender, so a consumer that handles data but not close is refused; each other subscriber held as `ProtocolRef<Subscriber<K>>` (§8): an explicit request carries a `ProtocolPath<Subscriber<K>>`, which decodes against the exact silent row and is resolved at receipt, and a reflexive request's sender is cast at receipt, which also admits an unchecked row, so an unchecked-row subscriber subscribes through the reflexive form; a runtime `KindId`, from a reflexive request or the synthetic window's `InjectWindowEvent`, dispatches to the typed table of the published kind it names and any other is refused |
 | Relays | `forward_to` in `crates/aether-window/src/runtime/manager.rs` and `crates/aether-component/src/component/runtime/mod.rs` | a typed target for the forwarded kind (§9) |
 | Embedder chassis push | `PassiveChassis::send_tracked` / `send_for_reply` and their test-support `BuiltChassis` siblings in `crates/aether-substrate/src/chassis/builder/built.rs` | an `ActorRef<R>` or `ProtocolRef<P>` through the sealed, kind-checked `ChassisTarget`; runtime bytes enter only through the embedder boundary row above |
 | Ingress bridges | above | the private stand-in |
@@ -768,13 +768,13 @@ The comparison (`first_contract_break`, `crates/aether-data/src/contract.rs`)
 runs over the rows the cast reads. A row changes when its `ReplyContract`
 changes, including silent to replying, since a caller checked against a silent
 row does not handle the new reply. `KindId` hashes a kind's schema, so a
-changed input schema is a dropped row. A predecessor `Manual` row is kept by
-any successor row (`One(O)`, `None`, or `Manual`), because no caller was
-checked against an undeclared reply; a declared row that becomes `Manual` is a
+changed input schema is a dropped row. A predecessor `Unchecked` row is kept by
+any successor row (`One(O)`, `None`, or `Unchecked`), because no caller was
+checked against an undeclared reply; a declared row that becomes `Unchecked` is a
 break. This compatibility is replacement-only. A new protocol cast or
 contextual path decode compares every required row with the route's current
-published row exactly, so `Manual` admits only `Manual`. A proof made while the
-row was manual remains valid after the replacement strengthens it: the proof
+published row exactly, so `Unchecked` admits only `Unchecked`. A proof made while the
+row was unchecked remains valid after the replacement strengthens it: the proof
 promised only that the target handles the kind and imposed no reply obligation.
 
 This makes a contract monotone, the property ADR-0230 §1 requires of anything a
@@ -784,29 +784,29 @@ assumption compiled into any peer goes stale, and neither the cast nor a
 contextual decode's answer is invalidated by a replace. Native capabilities are not replaced at run
 time; their rows are fixed at link time.
 
-### 6. Manual rows
+### 6. Unchecked rows
 
-A `#[handler::manual]` handler replies with any kind, or none, through
+A `#[handler::unchecked(reason = "…")]` handler replies with any kind, or none, through
 `ctx.reply` or a reply handle, so it declares no reply kind:
 
 - Its `Contract` row is `Undeclared` and its manifest row
-  `ReplyContract::Manual`, on both the wasm inputs manifest and the native
+  `ReplyContract::Unchecked`, on both the wasm inputs manifest and the native
   `HandlerEntry`. Both are permanent. It gets no `Replies` marker, and reply
   handles stay untyped.
-- A send to a manual row carries no reply bound (§1).
-- A protocol names a manual row explicitly as `-> Undeclared`. It promises
+- A send to an unchecked row carries no reply bound (§1).
+- A protocol names an unchecked row explicitly as `-> Undeclared`. It promises
   that the target handles the kind and makes no promise about how it replies;
   it does not require the sender to handle any reply kind.
-- A manual row covers only a manual protocol row for the same kind, never a
+- An unchecked row covers only an unchecked protocol row for the same kind, never a
   single or silent row. Statically,
   `R: Contract<K, Reply = O>` and `R: Contract<K, Reply = Silent>` both fail
   for `Reply = Undeclared`, while `R: Contract<K, Reply = Undeclared>` is the
-  exact manual match; at run time the cast and the contextual decode compare
-  `ReplyContract` exactly, and `Manual` equals only `Manual`.
-- The one place a manual row passes as silent is §8, the subscriber and watcher
+  exact unchecked match; at run time the cast and the contextual decode compare
+  `ReplyContract` exactly, and `Unchecked` equals only `Unchecked`.
+- The one place an unchecked row passes as silent is §8, the subscriber and watcher
   bound, and its runtime twin `Subscriber<K>`.
-- Across a replace, a manual row may become declared and a declared row may not
-  become manual (§5).
+- Across a replace, an unchecked row may become declared and a declared row may not
+  become unchecked (§5).
 
 ### 7. The ctx is typed by its actor
 
@@ -815,7 +815,7 @@ typed by its actor, on both transports: handlers, `#[fallback]`s,
 `#[handler(task)]` completions, `wire`, `unwire`, and `on_rehydrate`. A ctx
 that omits its actor reads as `Self` (`WasmCtx<'_>` is `WasmCtx<'_, Self>`,
 `NativeCtx<'_>` is `NativeCtx<'_, Self>`, reply mode second:
-`WasmCtx<'_, Self, Manual>`). One that spells `Erased` receives the erased
+`WasmCtx<'_, Self, Unchecked>`). One that spells `Erased` receives the erased
 view, which has no typed send (ADR-0232). A `#[handler_set]` member is typed by
 the adopting actor, and the set states what its default bodies reach as
 supertraits (`WidgetDefaults: DependsOn<TextCapability>`,
@@ -837,7 +837,7 @@ where
 A published event and a monitor notice arrive as ordinary mail from the
 publisher or the host, and nobody at the other end is waiting for an answer.
 An event handler reached by subscription or monitoring must therefore be
-silent or manual.
+silent or unchecked.
 
 - `ctx.subscribe::<P, K>()` requires the publisher `P: Publishes<K>` and the
   subscriber's own row for `K` to be one, `<A as Contract<K>>::Reply: SilentRow`
@@ -852,8 +852,8 @@ silent or manual.
   and fan-out sends through those references. A subscriber named explicitly
   in a request, rather than by its sender, is a typed path (§3), never an
   `ErasedActorPath`: a `ProtocolPath<Subscriber<K>>`, whose decode requires
-  the exact silent row `(K, None)`. A manual row does not cover that silent
-  protocol row (§6), so a manual-row subscriber, such as a widget root's manual `on_tick`,
+  the exact silent row `(K, None)`. An unchecked row does not cover that silent
+  protocol row (§6), so an unchecked-row subscriber, such as a widget root's unchecked `on_tick`,
   subscribes through the reflexive form, whose cast admits it.
 
 ### 9. Relays
@@ -864,13 +864,13 @@ original caller. Today's relays are the native `forward_to`
 the component host's `DropComponent` forward and the window root's forward to
 the sole live window, and `DeferredReply::hand_off`
 (`crates/aether-substrate/src/actor/native/offload/blocking.rs`), whose
-consumer is the component host's load reply. All run from manual handlers.
+consumer is the component host's load reply. All run from unchecked handlers.
 
 - A relay's target is typed: `forward_to` takes a `Target<K>` for the forwarded
   kind, as `hand_off` already takes `ActorRef<R>` with `R: HandlesKind<K>` (§4).
 - The reply the target sends back is not checked. The relaying handler's row is
-  `Manual`, so its caller was checked against no reply kind (§1), and the
-  target's reply reaches that caller as any manual reply does.
+  `Unchecked`, so its caller was checked against no reply kind (§1), and the
+  target's reply reaches that caller as any unchecked reply does.
 - A relay from a declared row, bounding the target's reply for the forwarded
   kind to equal the relaying handler's `O`, is not decided here. No consumer
   needs it.
@@ -1027,7 +1027,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | single `-> O` | `O` | compiles if `A: HandlesKind<O>`, else compile error naming the missing handler |
 | deferred `-> Pending<O>` | `O` | as single |
 | enum reply `-> O`, `O` an enum kind | `O` | compiles if `A` handles `O`; one handler matches the variants |
-| `#[handler::manual]` | `Undeclared` | compiles with no reply bound; the replier picks the kind |
+| `#[handler::unchecked(reason = "…")]` | `Undeclared` | compiles with no reply bound; the replier picks the kind |
 | no handler | none | compile error (`T: Contract<K>` unsatisfied) |
 | `#[fallback]` only | none | compile error through a typed reference; through `ProtocolRef<AnyKind>`, compiles with no reply bound |
 
@@ -1041,7 +1041,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `ActorPath::<R>::instance(&key)`, `ActorPath::<C>::child(&parent, &key)` | compiles if `R: Root + Instanced`, or `C: ChildOf<P> + Instanced`, else compile error; `R`'s own canonical path, with no registry read and no position |
 | `ActorPath<R>` narrowed to `ProtocolPath<P>` | compiles if `P: CoveredBy<R>`, else compile error; the same text, with no registry read and no position |
 | `ActorPath<R>` decoded from mail, config, or saved state | the decode refuses a short path or a leaf namespace other than `R::NAMESPACE` |
-| `ActorPath<R>` held or received | `ctx.resolve`: `NotLive` refuses, else an `ActorRef<R>`, which sends every kind `R` handles, manual rows included; no row comparison |
+| `ActorPath<R>` held or received | `ctx.resolve`: `NotLive` refuses, else an `ActorRef<R>`, which sends every kind `R` handles, unchecked rows included; no row comparison |
 | `ProtocolPath<P>` decoded from mail, config, or saved state | a contextual decode (`decode_with`) against the engine: refused unless the rows the `Live` or `Dropped` route at the path published cover `P`; a decode without a context is refused at decode |
 | `ProtocolPath<P>` held or received, narrowed or decoded | `ctx.resolve`: `NotLive` refuses, else a `ProtocolRef<P>`; no row comparison |
 | `ErasedActorPath` received untyped (config, MCP, RPC) | a field its receiver sends to is never one: it is a typed path (§3); at the MCP/RPC boundary, delivered through the stand-in (§4); otherwise `resolve_path` to an `ErasedActorRef` for naming, identity, or monitoring |
@@ -1093,8 +1093,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | cast failure | `None`; the holder refuses or drops, nothing parked |
 | a peer compiled against a different build of `R` | refused at the registry-consulting `ActorRef<R>` door |
 | a protocol reached twice through `includes` | rows appear once |
-| a manual row where a protocol expects a single or silent row | not covered, statically and at run time |
-| a manual row where a protocol explicitly expects `Undeclared` | covered with no sender reply-handler bound; exact `Manual` match at a cast or contextual decode |
+| an unchecked row where a protocol expects a single or silent row | not covered, statically and at run time |
+| an unchecked row where a protocol explicitly expects `Undeclared` | covered with no sender reply-handler bound; exact `Unchecked` match at a cast or contextual decode |
 | a hand-written `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, or `Rebuildable<M>` for an actor `#[actor]` built or a module `export!` built | compile error: `E0119` when it repeats an emitted impl, else `E0277` on its `Index` bound (§10) |
 | a public actor handling a crate-private kind, or declaring a crate-private dependency or inline child | compile error `E0446` at the `#[actor]`; declare the type `pub` inside a private module (§10) |
 | a type no `#[actor]` built, whose hand-written `Declared::Depends` lists `R` | refused at birth, before `init`, while `R` is not `Live` (§10) |
@@ -1140,7 +1140,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   the old one.
 - The route record grows per-route rows and a fallback flag, written at `Live`
   and at replace, and kept by the `Dropped` tombstone.
-- A handler that serves a protocol row cannot be manual; it declares its row
+- A handler that serves a protocol row cannot be unchecked; it declares its row
   single, deferred, or silent.
 - A typed path needs its writer to name the target's actor type and its
   placement. A writer that cannot name them sends an untyped
@@ -1208,7 +1208,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   compiler, so either would attach a claim this compiler did not check.
 - **One typed path, protocol-typed only, with every actor also a protocol.**
   An actor's protocol would still be only a projection of its rows, including
-  any explicit manual rows, without its placement or `#[fallback]`. Two typed
+  any explicit unchecked rows, without its placement or `#[fallback]`. Two typed
   paths mirror the two typed references: an `ActorPath<R>` carries the
   concrete actor identity and resolves to the `ActorRef<R>` that sends every
   kind `R` handles, while a `ProtocolPath<P>` carries only the rows its holder
@@ -1220,7 +1220,7 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 - **Keep untyped sends through erased references for publishing.** Replaced by
   typed subscriber references: the publisher proves each subscriber once and
   every later send is typed.
-- **A declared manual reply (`Manual<O>` in the ctx).** A manual handler
+- **A declared unchecked reply (`Unchecked<O>` in the ctx).** An unchecked handler
   replies with any kind, so a declared kind would be a claim the handler does
   not keep.
 - **`#[protocol(of = R)]`, deriving a protocol from one actor's rows.**
@@ -1299,10 +1299,10 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
   gains an `on_unimplemented` message. Typed sends bound on `Contract<K>` plus
   the sender's `ReplyHandledBy`, not on `HandlesKind<K>` alone.
 - **ADR-0109 §5.** The native `HandlerEntry.reply` is a `ReplyContract`
-  (`None`, `One(O)`, `Manual`), the wasm manifest's vocabulary. The ban on a
-  reply annotation stands: a manual handler states no reply kind.
+  (`None`, `One(O)`, `Unchecked`), the wasm manifest's vocabulary. The ban on a
+  reply annotation stands: an unchecked handler states no reply kind.
 - **ADR-0227.** `Replies` stays the narrower bound for helpers; a send through
-  it carries the same sender bound. Decision 3 stands: a manual handler has no
+  it carries the same sender bound. Decision 3 stands: an unchecked handler has no
   `Replies` marker.
 - **ADR-0230.** `ProtocolRef<P>` joins the proven types with no codec, and
   `ProtocolPath<P>`, narrowed from ADR-0230's `ActorPath<R>`, is an

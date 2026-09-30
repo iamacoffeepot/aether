@@ -117,12 +117,14 @@ impl Dispatch<Self> for Relay {
                     name: <Ping as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::None,
+                    reason: None,
                 },
                 HandlerCapability {
                     id: CountQuery::ID,
                     name: <CountQuery as Kind>::NAME.to_owned(),
                     doc: None,
                     reply: ReplyContract::One(CountReport::ID),
+                    reason: None,
                 },
             ],
             ..ComponentCapabilities::default()
@@ -131,7 +133,7 @@ impl Dispatch<Self> for Relay {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {

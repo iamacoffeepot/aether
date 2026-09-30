@@ -124,7 +124,7 @@ stored subscription row that never fires. The failure it replaces is entirely
 silent: the row is accepted, the event is dropped at its source for want of a
 matching subscriber, and the component just looks dead. The actor must also
 declare `depends(WindowCapability)`, and its handler for `K` must not declare a
-reply (a `-> ()` handler, or a manual one), because a broadcast event has no one
+reply (a `-> ()` handler, or an unchecked one), because a broadcast event has no one
 waiting for a reply. `unsubscribe` carries the first two checks: a kind that
 cannot be subscribed cannot be unsubscribed either.
 
@@ -143,8 +143,8 @@ every window, as the flat verb does. If one mailbox matches both selectors, it
 receives one copy. `UnsubscribeWindowSelf` with the same selector removes the
 row. The kind send carries a bare `KindId`, so it skips the `Publishes<K>`
 check the flat verb makes. The window checks the handler bound at run time
-instead: the subscriber, of either form, must handle the kind silently or
-manually, and the window refuses a sender whose published rows lack that
+instead: the subscriber, of either form, must handle the kind with a silent or
+unchecked handler, and the window refuses a sender whose published rows lack that
 handler, since its events could never be handled (ADR-0231 §4).
 
 Then handle the event as ordinary mail and inspect its source id:
@@ -161,7 +161,7 @@ fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
 with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The flat `ctx.subscribe` / `ctx.unsubscribe` verbs use the sending actor's
 host-stamped mailbox and are the normal component API. The runtime monitors

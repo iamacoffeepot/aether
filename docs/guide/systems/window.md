@@ -189,7 +189,7 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 The flat verb selects `WindowSelector::All`, which is prospective. If the same
 actor subscribes through both `All` and `One(id)`, recipient lookup unions the
 sets and sends one copy. Both forms subscribe the sending actor, which must
-handle the kind silently or manually; the manager types it as a
+handle the kind with a silent or unchecked handler; the manager types it as a
 `Subscriber<K>` with the guard cast (ADR-0231 §4), refuses a sender whose
 published rows lack that handler, monitors it, and removes all of its rows
 when it departs.

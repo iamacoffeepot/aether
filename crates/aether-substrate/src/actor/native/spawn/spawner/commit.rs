@@ -389,7 +389,7 @@ impl Spawner {
             // self-deduplicates so either outcome is fine.
             let _ = wake.wake();
         }));
-        // Manual catch-up wake for inbox mail that landed before the
+        // Unchecked catch-up wake for inbox mail that landed before the
         // closure was installed (see comment above).
         let _ = manual_wake.wake();
 

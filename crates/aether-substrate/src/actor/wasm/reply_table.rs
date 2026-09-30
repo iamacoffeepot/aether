@@ -30,7 +30,7 @@
 // An entry is freed when the guest answers it, when a single-class
 // dispatch returns (the guest's `DISPATCH_HANDLED_RELEASE`, ADR-0112), or
 // when a delivery is unhandled (`DISPATCH_UNKNOWN_KIND`). A handle a
-// manual handler or a `#[fallback]` keeps lives until it is answered.
+// unchecked handler or a `#[fallback]` keeps lives until it is answered.
 //
 // A single arm that returned a `Pending<R>` (`DISPATCH_HANDLED_HOLD`,
 // ADR-0243 §6) keeps its handle too, and its slot also holds a
@@ -386,7 +386,7 @@ impl ReplyTable {
     }
 
     /// Free every held slot and return its entry and chain, in slot order.
-    /// Slots a manual handler keeps without a chain stay live, and a slot
+    /// Slots an unchecked handler keeps without a chain stay live, and a slot
     /// reserved to a held answer, whose chain is out with that answer, is
     /// skipped. The consumer is `Component::answer_held_at_close`: once the
     /// guest unloads or closes, no ticket is left to answer a held slot, so
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(trace.settlement_counter().held_open(root(2)), 0);
     }
 
-    // Catches: a drain that frees a manual handler's handle, which could still
+    // Catches: a drain that frees an unchecked handler's handle, which could still
     // answer, or that leaves a held slot live, so the close answers it twice or
     // never.
     #[test]
@@ -548,7 +548,7 @@ mod tests {
         drop(drained);
         assert_eq!(trace.settlement_counter().held_open(root(3)), 0);
         assert!(t.take(held).is_none());
-        assert!(t.take(kept).is_some(), "a manual handler's handle stays answerable");
+        assert!(t.take(kept).is_some(), "an unchecked handler's handle stays answerable");
     }
 
     // Catches: a restore that drops the chain or lands on another slot, so

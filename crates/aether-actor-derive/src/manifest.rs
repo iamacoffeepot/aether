@@ -4,6 +4,7 @@ use syn::Type;
 
 use crate::handler_parse::{FallbackFn, HandlerClass, HandlerFn};
 use crate::opts::{ActorCardinality, ActorOpts};
+use crate::reply_markers::static_reason;
 
 fn to_screaming_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
@@ -76,15 +77,17 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> Record
     let doc_expr = option_str_token(h.agent_doc.as_ref());
     // ADR-0112 / ADR-0134: the reply class rides the handler record as a
     // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
-    // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(3, 0)` for a
-    // manual handler (no single static reply kind). Tag 2 is reserved.
+    // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(3, 0)` for an
+    // unchecked handler (no single static reply kind). Tag 2 is reserved. The
+    // unchecked handler's stated reason rides last (#7193, v0x07).
     let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
-        (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
+        (HandlerClass::Unchecked, _) => (quote! { 3u8 }, quote! { 0u64 }),
         (HandlerClass::Single, Some(r)) => {
             (quote! { 1u8 }, quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 })
         }
         (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
     };
+    let reason_expr = static_reason(h.unchecked_reason.as_ref());
     // `inputs_handler_len` / `write_inputs_handler` take a raw `u64` for the
     // wire bytes; `Kind::ID` is `KindId` post-issue 466 so we drop into `.0`.
     let record_len = quote! {
@@ -94,6 +97,7 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> Record
             #doc_expr,
             #reply_tag_expr,
             #reply_id_expr,
+            #reason_expr,
         )
     };
     let copy_block = emit_record_copy_block(
@@ -106,6 +110,7 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> Record
                 #doc_expr,
                 #reply_tag_expr,
                 #reply_id_expr,
+                #reason_expr,
             )
         },
     );

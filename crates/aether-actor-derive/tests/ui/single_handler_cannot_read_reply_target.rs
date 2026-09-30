@@ -1,10 +1,10 @@
-//! ADR-0112 amendment (#6412): the reply handle belongs to the manual reply
+//! ADR-0112 amendment (#6412): the reply handle belongs to the unchecked reply
 //! surface. A single-class dispatch returns `DISPATCH_HANDLED_RELEASE` and
 //! the substrate frees its handle when the handler returns, so a single
 //! handler that kept the handle would answer nothing. `reply_target` lives
-//! only on the `Manual` ctx, so reading it from a `#[handler::single]` body
+//! only on the `Unchecked` ctx, so reading it from a `#[handler::single]` body
 //! is a compile error. A handler that keeps its handle declares
-//! `#[handler::manual]`.
+//! `#[handler::unchecked(..)]`.
 
 use aether_actor::{WasmCtx, actor};
 

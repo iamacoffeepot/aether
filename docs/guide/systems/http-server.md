@@ -53,7 +53,7 @@ Every route holder covers one protocol, `HttpRouter`: one single row taking
 `aether.http.server.request` and replying `HttpRouterResult`, whose three
 variants name a buffered response, a stream open, and a websocket accept. The
 holder's request handler returns it, or returns `Pending<HttpRouterResult>` and
-answers later through a held reply (ADR-0243); a manual handler does not cover
+answers later through a held reply (ADR-0243); an unchecked handler does not cover
 the row. A router that closes while it holds a reply answers `502`.
 An actor registers itself with `register_route_self`, and the server casts the
 sender to `HttpRouter`, refusing one that does not cover it. Another actor is

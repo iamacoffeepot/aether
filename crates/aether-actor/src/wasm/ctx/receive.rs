@@ -13,7 +13,7 @@ use aether_data::{Kind, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
-use crate::model::ctx::reply_mode::{Manual, ReplyMode, Single};
+use crate::model::ctx::reply_mode::{ReplyMode, Single, Unchecked};
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Singleton,
 };
@@ -90,10 +90,10 @@ fn decode_source(source: u64) -> Option<ErasedActorRef> {
     NonZeroU64::new(source).map(|raw| ErasedActorRef::new(MailboxId(raw.get())))
 }
 
-impl<'a> WasmCtx<'a, Erased, Manual> {
+impl<'a> WasmCtx<'a, Erased, Unchecked> {
     /// Not part of the public API; called only by [`crate::export!`] and
     /// the inline membrane / drain. The runtime builds the most-permissive
-    /// [`Manual`] view, with the actor [`Erased`] — the entry points run
+    /// [`Unchecked`] view, with the actor [`Erased`] — the entry points run
     /// where no actor type is in scope, so the `#[actor]` macro upgrades to
     /// the typed form per handler with [`Self::__for_actor`] and downgrades
     /// per handler class with [`Self::as_single`].
@@ -138,17 +138,17 @@ impl<'a> WasmCtx<'a, Erased, Manual> {
     }
 }
 
-impl<'a, A> WasmCtx<'a, A, Manual> {
-    /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
+impl<'a, A> WasmCtx<'a, A, Unchecked> {
+    /// ADR-0112 downgrade-only coercion: view this [`Unchecked`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
     /// handler whose marker disagrees with its class fails to unify.
-    /// There is deliberately no `as_manual` — the runtime only ever
+    /// There is deliberately no `as_unchecked` — the runtime only ever
     /// downgrades. Preserves the actor marker `A`.
     #[doc(hidden)]
     #[must_use]
     pub fn as_single(&mut self) -> &mut WasmCtx<'a, A, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, A, Manual>` and
+        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, A, Unchecked>` and
         // `WasmCtx<'a, A, Single>` are layout-identical (the marker field is a
         // ZST for every `M` — see `reply_mode_types_are_zsts` and
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
@@ -160,7 +160,7 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
     /// Accept a returned [`Pending<R>`](super::Pending) receipt. The
     /// `#[actor]` macro calls this on the value a `-> Pending<R>` handler
     /// returns, once its `as_single` reborrow has ended; a single handler
-    /// never holds this `<Manual>` view, so it cannot disarm its own receipt
+    /// never holds this `<Unchecked>` view, so it cannot disarm its own receipt
     /// and declare a false `Silent` row.
     #[doc(hidden)]
     pub fn __accept_pending<R>(&mut self, pending: super::Pending<R>) {
@@ -170,7 +170,7 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
     /// Reply target for the mail currently being dispatched. Mirrors
     /// [`OutboundReply::reply_target`](crate::OutboundReply::reply_target).
     ///
-    /// The handle belongs to the manual reply surface: a manual handler may
+    /// The handle belongs to the unchecked reply surface: an unchecked handler may
     /// keep it and answer later with `reply_to`. A single handler cannot read
     /// it, because the substrate frees a single-class dispatch's handle when
     /// the handler returns (ADR-0112, #6412).
