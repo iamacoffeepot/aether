@@ -43,7 +43,8 @@ Drop runs the guest's `unwire`, releases the wasm, and closes the instance
 through each watcher's `MonitorNotice`, and the name tombstones for the engine's
 lifetime: a later load of it is refused as retired, and a second drop at the
 path is refused. A drop that arrives while the instance's module republishes
-waits until the replace answers. Load under a new name to bring the component back.
+waits until the republish answers. Load or spawn under a new name to bring the
+component back.
 
 ## Upload before selector
 
@@ -63,8 +64,8 @@ The reliable sequence is:
 5. Use the hash or name as the later selector.
 
 Upload reads the wasm manifest without executing the module. It records exported
-actor namespaces, handled kind ids, fallback presence, provenance, and the
-default entry. Identical bytes deduplicate to one hash.
+actor namespaces, handled kind ids, fallback presence, and provenance.
+Identical bytes deduplicate to one hash.
 
 ### Which selector?
 
@@ -75,8 +76,10 @@ default entry. Identical bytes deduplicate to one hash.
 | `module@actor` | stored module plus exported actor type | multi-actor module selection |
 
 An explicit `export` field overrides the actor half of `module@actor`. A
-defaultless multi-actor module must be given an export; an omitted export is a
-clean load error, not “first actor wins.”
+module exporting several types must be given an export; an omitted export
+resolves only against a module with exactly one selectable (non-boot) export,
+and is otherwise a clean load error naming the exports, not “first actor
+wins.”
 
 Names are mutable. Re-uploading under the same name repoints it. The old hash
 remains stored and, once no other name points at it, becomes unnamed history
@@ -132,27 +135,26 @@ name and `describe_kinds` for its exact live schema.
 
 ### Replicas
 
-`replicas: N` performs N sequential loads with shared wasm/config. Replica 0 is
-named for the bare `base` and each later instance `{base}-{index}`. The base is
-selected from explicit load name, export, or default entry namespace in that
-order, so a fan-out over the default namespace leaves replica 0 reachable from a
-co-hosted component's typed send, `ctx.send::<R>(..)`, and `replicas: 1` loads
-exactly what an omitted field loads. The result carries one shared capabilities
-block and an `instances` list of ids/names.
+`replicas: N` (`1..=256`; `replicas: 0` is refused, and a `key` combined with
+`replicas` is refused, since each replica draws its own counter key) publishes
+the module once, then spawns `N` counter-keyed instances of the selected type
+(`NS:0`, `NS:1`, …). An entry that names no `replicas` spawns the one instance
+its `key` (or `name`, for `load_component`) keys. The result carries one
+shared `capabilities` block, since every instance is the same type, and an
+`instances` list of each spawned address and whether it was already live.
 
-A replica fan-out is not transactional. If replica K fails, instances before K
-remain live and the error says how many loaded. The failed call does not return
-the successful prefix's `instances` records. Their lineage names follow the
-deterministic naming rule; `aether.component.list` reports which are live. On a
-task-owned engine, terminate and start clean. On a shared engine, stop and
-report the partial prefix rather than guessing names or retrying into occupied
-ones.
+A replica fan-out is not transactional. If instance K fails, the instances
+before it remain live and the error says how many spawned. The failed call
+does not return the successful prefix's `instances` records.
+`aether.component.list` reports which are live. On a task-owned engine,
+terminate and start clean. On a shared engine, stop and report the partial
+prefix rather than guessing addresses or retrying into occupied ones.
 
-Boot-time replicas use the same naming rule. The substrate binds only after
-every boot instance has answered its load, so a successful `spawn_substrate`
-means every instance is live. A derived name that collides with another boot
-instance fails that load, which fails the spawn with a `spawn_failed` entry
-rather than reporting the engine ready.
+Boot-time replicas use the same counter-keyed expansion. The substrate binds
+only after every boot instance has answered its spawn, so a successful
+`spawn_substrate` means every instance is live. A derived key that collides
+with another boot instance fails that spawn, which fails the boot with a
+`spawn_failed` entry rather than reporting the engine ready.
 
 ## Live introspection
 
@@ -197,7 +199,7 @@ every live instance of every namespace the module publishes moves to the
 successor together, or none does, and each keeps its address and mailbox.
 
 Identical bytes answer `Ok` with no swap. Before any instance is touched the
-host refuses the whole replace, naming each instance a check refuses, when the
+host refuses the whole republish, naming each instance a check refuses, when the
 module has no predecessor (nothing publishes its namespaces: load it instead),
 is content-addressed, already has a republish in flight, declares a boot or
 succeeds one that did, drops a namespace or narrows a handler row or fallback of
@@ -243,17 +245,17 @@ it. This does not delete the hub's stored component artifacts.
 ## Source routes
 
 - Tool contracts and shapes: `crates/aether-mcp/src/tools/mod.rs` and `args.rs`
-- Upload/list/load/replace orchestration:
-  `crates/aether-mcp/src/tools/components.rs`
+- Upload/list/publish/spawn/load orchestration:
+  `crates/aether-mcp/src/tools/components/`
 - Selector resolution, boot staging, and live kind caching:
   `crates/aether-mcp/src/tools/state.rs`
 - Hub artifact store: `crates/aether-fleet/src/store/`
-- Component host load/list/describe/drop/replace:
+- Component host publish/spawn/load/list/describe/drop:
   `crates/aether-component/src/component/`
 - Drop-closes-the-instance behavior:
   `crates/aether-component/src/trampoline/runtime/mod.rs`
-- Trampoline replace behavior:
-  `crates/aether-component/src/trampoline/runtime/replace.rs`
+- Trampoline republish behavior:
+  `crates/aether-component/src/trampoline/runtime/republish.rs`
 - Live kinds: `crates/aether-inventory/src/`
 
 For failure branches, continue with [Recovery](recovery.md).

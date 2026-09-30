@@ -7,7 +7,7 @@ Aether has two integration harnesses because “use the real actor runtime” an
 |---|---|---|
 | Unit/pure test | function/module only | codecs, parsers, state machines, validation |
 | `SubstrateHarness` | real substrate, scheduler, capabilities; in process | actor chains, settlement, frames, filesystem, component behavior |
-| `FleetHarness` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/replace |
+| `FleetHarness` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/publish |
 
 Choose the narrowest harness that can falsify the contract. Process tests are
 valuable, but they are slower and produce less-local failures.
@@ -150,34 +150,23 @@ The three that wait are covered above under [Choosing a wait](#choosing-a-wait).
 the retired YAML scenario runner: the compiler checks kind construction, while
 the harness owns ordering.
 
-Component-composition tests can place a loaded actor beneath any already-live
-logical parent with `HarnessOp::load_component_under`, sent through the
-component host's reference:
+Component-composition tests place an instanced type beneath any already-live
+logical parent with `SubstrateHarness::spawn_child::<P, C>`, which takes the
+parent's already-proven reference and the child's key:
 
 ```rust,ignore
-let host = harness.actor_ref::<ComponentHostCapability>();
-let operation = HarnessOp::load_component_under(
-    &host,
-    parent_name,
-    LoadComponent {
-        wasm,
-        name: Some("worker".to_owned()),
-        config: Vec::new(),
-        export: Some("example.worker".to_owned()),
-    },
-);
-let result = harness.execute(vec![("load-worker", operation)])?;
-let loaded = result.reply::<LoadResult>("load-worker")?;
+let panel = harness.load::<RootManager>(load)?;
+let worker = harness.spawn_child::<RootManager, Worker>(&panel, &LoadName::new("worker")?)?;
 ```
 
-The component host resolves `parent_name` through the live registry, uses its
-canonical path as the new actor's lineage, and returns the ordinary
-`LoadResult`. It admits the load only when the selected type declares
-`child_of` the parent's type (ADR-0241 §5). On success, `LoadResult::Ok.path`
-is the canonical child address, for example `PARENT/example.worker:worker`; an
-unknown parent or an undeclared placement produces `LoadResult::Err`.
-Ordinary `LoadComponent` mail loads at the root, and this harness constructor
-does not add an MCP or production-hub load mode.
+`spawn_child` admits the spawn only when `Worker` declares `child_of`
+`RootManager` (ADR-0241 §5); a parent with no retained actor path, or a child
+type that doesn't declare the placement, is refused with
+`SubstrateHarnessError::Spawn`. The child's canonical path, for example
+`PARENT/example.worker:worker`, comes from `harness.actor_path(&worker)`.
+Ordinary `aether.component.load` places its guest at the root: a parent is a
+`Spawn` field, not a load field, and the hub and MCP surfaces send it the same
+way `spawn`'s `parent?` argument does.
 
 A load reply carries the component's path and no position: the loaded
 trampoline sends the successful reply itself, so the reference to the loaded
@@ -198,12 +187,18 @@ let panel = harness.load::<WidgetPanel>(LoadComponent {
 `harness.actor_path(&panel)` reads its canonical path for an assertion or a
 `CaptureWithMails` recipient. `load_any` sends the load as given and returns
 the erased reference and its path, for a fixture actor the test cannot name,
-which the test types with `SubstrateHarness::cast::<P>` before it sends. A
-drop takes the path,
-`DropComponent { target: path }`; a replace names no instance,
-`ReplaceComponent { wasm, configs }`, and moves every live instance of the
-module's namespaces (ADR-0241 §7), so a test that swaps identical code builds a
-new hash with `aether_substrate::testing::successor_wasm(&wasm, generation)`.
+which the test types with `SubstrateHarness::cast::<P>` before it sends.
+Beside these two, `SubstrateHarness` carries the rest of the component verbs:
+`publish` / `publish_configured` bind a module's namespaces without spawning
+anything, `spawn::<R>` / `spawn_keyed::<R>` / `spawn_child::<P, C>` stand up an
+instance of an already-published type, `spawn_any` does the same for a type
+the test cannot name, and `actor_ref::<R>` / `actor_path` prove and read back
+a composed capability's reference and any reference's canonical path. A
+drop takes the path, `DropComponent { target: path }`; a republish names no
+instance — `publish_configured(successor_code, configs)` moves every live
+instance of the module's namespaces (ADR-0241 §7), so a test that swaps
+identical code builds a new hash with
+`aether_substrate::testing::successor_wasm(&wasm, generation)`.
 FleetHarness sends the same kinds over the wire: `load(engine, &LoadComponent)`
 returns the path as text — `Loaded { addr, capabilities }` —
 `publish(engine, wasm)` returns the published types, and `spawn(engine, &Spawn)`
@@ -215,7 +210,7 @@ every harness wait drains it, and between waits it holds still.
 `step_component_host_through::<K>(n)` runs it one envelope at a time until it
 has dispatched `n` mails of kind `K`, so a test can hold a republish after its
 members answered `Prepared` and before any commit, send mail with
-`send_tracked`, and then await the replace.
+`send_tracked`, and then await the republish.
 
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.
@@ -390,7 +385,7 @@ Use it for:
 - binary/component artifact store and selector behavior;
 - spawn failure, heartbeat, recently-dead, and terminate semantics;
 - cross-process mail/reply routing;
-- component load, describe, replace, drop, and state transfer;
+- component publish, spawn, load, describe, drop, and state transfer;
 - inline-child addressing over the wire;
 - TCP/load and handler-cost behavior at a process boundary.
 
@@ -409,7 +404,7 @@ The fixture crates cover distinct contracts:
 - shared kind vocabulary and a main multi-actor bundle;
 - typed and reshaped state replacement;
 - split capability surface;
-- defaultless multi-actor selection.
+- multi-export selection (`aether-test-fixtures-defaultless`).
 
 Reuse these when the contract matches. A new fixture creates another build
 artifact and CI cost, so it should prove a boundary the current matrix cannot.

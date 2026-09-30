@@ -145,11 +145,11 @@ impl fmt::Display for ActorPathError {
             }
             Self::RetiredShortForm => f.write_str(
                 "invalid actor path: `://` was removed; name the one instanced child with a hole, \
-                 e.g. `test.trunk/:leaf`",
+                 e.g. `aether.window/:main`",
             ),
             Self::ShortPathFromInstance => f.write_str(
                 "invalid actor path: a short path must start at a root namespace, not an instance; start it at \
-                 the root (e.g. `test.trunk/:leaf`) or spell every step canonically",
+                 the root (e.g. `aether.window/:main`) or spell every step canonically",
             ),
         }
     }

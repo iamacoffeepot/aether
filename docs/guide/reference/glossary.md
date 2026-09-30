@@ -76,19 +76,21 @@ stored/selected as an artifact; loading creates actor instances.
 
 **Export**
 
-One actor identity declared by a multi-actor wasm module. Export order does not
-implicitly choose the default.
+One actor identity declared by a multi-actor wasm module. Export order carries
+no meaning; a load or boot entry that names none must resolve to the module's
+sole selectable export, or is refused, naming every export.
 
 **Default actor**
 
-The sole actor in a single-actor module, or the explicit multi-actor default
-selected with `export!(default = …)`. A defaultless multi-actor module requires a
-selector naming an export.
+The module's sole selectable (non-boot) export — the one a load or boot entry
+that names no export resolves to. A module exporting several has no such
+actor: the load is refused, naming every export.
 
 **Trampoline**
 
-The native/wasm host actor machinery that routes mail into one loaded component
-instance and supports replacement/state transfer.
+The native host actor a guest runs in, born under the guest's own published
+name, with the diagnostics label `aether.component.trampoline`; it routes mail
+into the loaded instance and carries state across a republish.
 
 **Inline actor / cluster**
 

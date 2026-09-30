@@ -14,7 +14,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::LoadComponent;
 
-/// The bundle's default export, a singleton.
+/// A singleton root export of the bundle.
 const SINGLETON_EXPORT: &str = "test.probe";
 /// An instanced root export of the same bundle.
 const INSTANCED_EXPORT: &str = "test.ui.panel";

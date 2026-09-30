@@ -9,7 +9,7 @@ builds a minimal ping/pong actor, uploads its bytes to the hub registry, loads
 an instance, sends one request, then replaces it without changing its mailbox.
 
 Use `crates/aether-actor/examples/hello.rs` as the current in-tree exemplar and
-`crates/aether-test-fixtures-*/` for load/replace edge cases.
+`crates/aether-test-fixtures-*/` for load/publish edge cases.
 
 ## 1. Create a dual-purpose crate
 
@@ -76,21 +76,20 @@ The contracts are visible in the types:
 - Actor state is only touched through serialized `&mut self` dispatch.
 - `export!` emits FFI and actor/kind manifests; do not write host exports by hand.
 
-## 3. Make default selection explicit
+## 3. Select an export when the module has several
 
 `export!` takes keyed entries only. For one actor, `export!(public = [Echo])` is
-unambiguous. For several actors choose whether the module has a default:
+unambiguous. For several actors, every load must name one explicitly:
 
 ```rust
-// Bare loads select Console; other actors remain selectable.
-aether_actor::export!(default = Console, public = [Inspector, Worker]);
-
-// No default: every load must select Alpha or Beta explicitly.
+// A load must select Alpha or Beta explicitly.
 aether_actor::export!(public = [Alpha, Beta]);
 ```
 
-Declaration order does **not** make the first actor the default. Defaultless
-modules omit `aether.namespace` and a bare load fails (ADR-0138).
+Declaration order carries **no** meaning: a bare load against a multi-export
+module is refused, naming the exports (ADR-0241 §9, superseding ADR-0138's
+opt-in default). A module that exports exactly one actor still loads without
+a selector, and only that case emits `aether.namespace`.
 
 ## 4. Build the wasm artifact
 
@@ -187,8 +186,9 @@ load_component(engine_id, selector = "<returned hash or name>")
 ```
 
 `upload_component` is the only step above that takes a host wasm path.
-`load_component` resolves a registry selector. For a defaultless module, select
-an export (for example `module@actor`) as described by the live tool schema.
+`load_component` resolves a registry selector. For a module exporting several
+types, select an export (for example `module@actor`) as described by the live
+tool schema.
 
 Record the returned `address`, the component's published name: `example.echo`
 for a singleton, `example.echo:key` for an instanced type. Do not substitute the
@@ -247,8 +247,9 @@ before sending a newly introduced kind.
 ## 8. Clean up what you own
 
 Drop a task-owned component from a shared engine only when other actors no
-longer depend on it. Drop clears the guest but leaves an empty trampoline at
-that lineage; the name is not a fresh reusable slot in the same engine.
+longer depend on it. Drop closes the instance's trampoline entirely — nothing
+resident is left at that lineage — and the name tombstones for the engine's
+lifetime; it is not a fresh reusable slot in the same engine.
 
 If you spawned the engine for this recipe, terminate that exact `engine_id`.
 Do not terminate an engine merely because it is the only one you can see.
@@ -258,7 +259,7 @@ Do not terminate an engine merely because it is the only one you can see.
 | Symptom | Check |
 |---|---|
 | Wasm has no callable actor | `export!` is present in the wasm build |
-| Bare load fails | module is defaultless; select an export |
+| Bare load fails | module exports several types; select an export |
 | Config decode fails | pass JSON shape, not encoded bytes |
 | Mail warn-drops | use returned lineage, not namespace/artifact name |
 | New build did not load | replacement selector still points at old hash |

@@ -35,9 +35,10 @@ impl WasmTrampolineState {
     /// this trampoline hosts, which a republish never changes (ADR-0241 §4),
     /// with its actor-type tag and its receive surface. The hosted type is
     /// the one the resident module's tag names, or the resident module's
-    /// first exported type for a guest loaded by the module's default. The
-    /// candidate's tag names the type explicitly, so a successor that adds
-    /// an export ahead of it still instantiates the hosted type.
+    /// first exported type for a guest whose load named no type (its
+    /// module's sole export). The candidate's tag names the type explicitly,
+    /// so a successor that adds an export ahead of it still instantiates the
+    /// hosted type.
     pub(super) fn candidate_type(&self, module: Module) -> Result<CandidateType, String> {
         let resident = self.module.manifest();
         let hosted = self

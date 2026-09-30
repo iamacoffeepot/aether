@@ -94,9 +94,10 @@ cargo xtask package \
   --title aether
 ```
 
-`my-game` stands for a component crate whose module declares a default export.
-A defaultless multi-actor module such as `aether-kit` needs the `--spec` form
-described below, and `crates/aether-demo/demo.json` is the worked spec.
+`my-game` stands for a component crate whose module exports exactly one
+selectable type. A module exporting several, such as `aether-kit`, needs the
+`--spec` form described below, naming an `export`, and
+`crates/aether-demo/demo.json` is the worked spec.
 
 `--chassis` selects `desktop` or `headless`. Component order is autoload order.
 Repeated `--config` flags pair by position with `--components`; trailing
@@ -176,8 +177,9 @@ before the RPC server binds. A boot load that does not answer within the
 boot-load budget (`AETHER_BOOT_LOAD_BUDGET_SECS` / `--boot-load-budget-secs`,
 default 20 s, never zero) fails the boot, naming the component, so a
 hub spawn fails with that name in its `spawn_failed` detail. The runtime boot
-manifest can expand a configured `replicas` count into named instances; the
-package manifest carries the same `replicas` field.
+manifest can expand a configured `replicas` count into counter-keyed
+instances, not named ones; the package manifest carries the same `replicas`
+field.
 
 ## Choosing a packaging path
 

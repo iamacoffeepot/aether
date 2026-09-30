@@ -94,7 +94,7 @@ For a binary:
 For a component:
 
 1. require the upload result, then confirm the stored manifest and exact hash;
-2. load or replace by hash;
+2. load or publish by hash;
 3. require the explicit success result;
 4. retain the returned lineage and mailbox id;
 5. verify a behavior the selected component is expected to provide.
@@ -120,6 +120,6 @@ stop. Do not improvise trust from content addressing.
   `crates/aether-fleet/src/store/`
 - Native spawn realization:
   `crates/aether-fleet/src/server/runtime.rs`
-- Component load and replacement:
+- Component load and republish:
   `crates/aether-component/src/component/` and
-  `crates/aether-component/src/trampoline/runtime/replace.rs`
+  `crates/aether-component/src/trampoline/runtime/republish.rs`
