@@ -5,13 +5,14 @@ use core::borrow::Borrow;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Head, Ref, Tree, Utf8Text};
+use aether_bloomery_kinds::{Detail, FaultReason, Head, ProgramName, Ref, Tree, Utf8Text};
 use aether_data::Invariant;
 
 use crate::input::{
     Endpoint, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem,
     TurnItems, TurnItemsError, check_order,
 };
+use crate::result::TurnResult;
 
 /// Every field of a turn but its conversation: what a session sends with each
 /// turn.
@@ -180,7 +181,7 @@ impl TurnLimit {
 }
 
 /// Why a session rests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum RestReason {
     /// The model finished its answer.
     Completed,
@@ -191,6 +192,40 @@ pub enum RestReason {
     /// The activation made as many turns as its limit allowed, and every call
     /// the last one asked for has its output.
     TurnLimit,
+    /// The activation stopped without a turn resting it.
+    Failed(Failure),
+}
+
+/// Why a session stopped without a turn resting it.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub enum Failure {
+    /// A run the loop requested faulted: a tool, `muse.turn`, the clock's
+    /// wait, or `muse.session.record`.
+    Faulted {
+        /// The program whose run faulted.
+        program: ProgramName,
+        /// Why the driver recorded the fault.
+        reason: FaultReason,
+    },
+    /// One of the loop's own rules produced no records: the driver's
+    /// `ReactionFailed` reason.
+    Reaction {
+        /// The reason the driver recorded.
+        reason: Detail,
+    },
+    /// The vendor ended the turn: `Rejected`, `Unreadable`, or `Transient`
+    /// past the retry cap.
+    Turn {
+        /// The cited result of the turn that ended the session.
+        result: Ref<TurnResult>,
+    },
+    /// The loop could not build its next request from its own records: the
+    /// next turn would pass [`TurnItems::MAX_ITEMS`], an input did not
+    /// encode, or a run's result answered no offered call.
+    Unbuilt {
+        /// What the loop could not build.
+        reason: Detail,
+    },
 }
 
 /// The name of one session: the seq of the `muse.session.open` run that
@@ -267,8 +302,8 @@ impl Session {
 
     /// Why the session rests.
     #[must_use]
-    pub const fn rested(&self) -> RestReason {
-        self.rested
+    pub const fn rested(&self) -> &RestReason {
+        &self.rested
     }
 
     /// The tree the session's tools left, which a continue works on.

@@ -60,6 +60,10 @@
 //! [`RestReason::TurnLimit`].
 //! A turn the vendor refuses as transient is sent again, byte-identical,
 //! after a wait on the driver's clock (ADR-0245), a few times at most.
+//! A session that fails (a faulted run, a failed rule, a turn the vendor
+//! ended, or a request the loop cannot build) rests with
+//! [`RestReason::Failed`] naming the [`Failure`], so every activation ends
+//! with one head move, and a continue picks it up like any other rest.
 
 /// Implement [`aether_data::Invariant`], `Display`, and `Error` for error
 /// enums that carry a `const fn reason(self) -> &'static str`.
@@ -99,8 +103,9 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    CallAnswer, ContinueInput, MUSE, MuseSession, OpenInput, RecordInput, RestReason, Session, SessionContinue,
-    SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnLimitError, TurnSettings,
+    Answered, CallAnswer, ContinueInput, Failure, MUSE, MuseSession, OpenInput, RecordInput, RestReason, Session,
+    SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit,
+    TurnLimitError, TurnSettings,
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, GrepArgs, ListArgs, MAX_TEXT_BYTES, ReadArgs, TreeEdit, TreeGrep, TreeList,

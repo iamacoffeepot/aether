@@ -35,9 +35,25 @@
 //! A session opens on a tree, and a continue picks up the tree its record
 //! rested with. Every record holds the session's latest tree.
 //!
-//! Calls run one at a time. A tool run that faults ends the session, and the
-//! fault is its record. A turn refused past the retry cap, or a wait the
-//! clock refuses, ends the session the same way.
+//! Calls run one at a time.
+//!
+//! Every activation ends with one head move. A session that fails rests with
+//! [`RestReason::Failed`], recorded through `muse.session.record` like any
+//! other rest and moved by `rest`: `rest_faulted` records it when a run the
+//! loop requested faults (a tool, `muse.turn`, the clock's wait, or a record),
+//! and `rest_failed` when one of the loop's own rules fails. `call` and
+//! `resume` record it when the vendor ends a turn (rejected, unreadable, or
+//! transient past the retry cap) or the loop cannot build its next request.
+//! The record keeps the conversation the last turn sent, followed by that
+//! turn's text, the calls answered before the failure, and their outputs, and
+//! the session's latest tree. A continue from it works like one from any other
+//! rest, so retrying a failed turn is a continue with a user message.
+//!
+//! One case cannot record itself: a failure of the failed rest's own record
+//! (its `muse.session.record` run faults, or the rule emitting it fails), or a
+//! refused head move of any rest. The session is dropped after that one
+//! attempt, so nothing loops; the driver's `Fault` or `ReactionFailed` entry
+//! is the only mark, and the session keeps its previous head.
 
 mod continue_;
 mod conversations;
@@ -50,15 +66,15 @@ mod retry;
 mod state;
 mod tools;
 
-use aether_bloomery_kinds::{CallInput, CallProgram, SetHeads, Transition};
+use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, SetHeads, Transition};
 use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;
 pub use open::{OpenInput, SessionOpen};
-pub use record::{CallAnswer, RecordInput, SessionRecord};
+pub use record::{Answered, CallAnswer, RecordInput, SessionRecord, TurnEnd};
 pub use state::{
-    RestReason, Session, SessionItems, SessionItemsError, SessionKey, TurnLimit, TurnLimitError, TurnSettings,
+    Failure, RestReason, Session, SessionItems, SessionItemsError, SessionKey, TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::MUSE;
 pub use tools::program_name;
@@ -66,7 +82,8 @@ pub use tools::program_name;
 use crate::program::MuseTurn;
 use tools::call;
 
-/// The loop's next call after a turn or a call that keeps the session going.
+/// The loop's next call after a turn or a call that keeps the session going,
+/// or the record of a session that failed.
 struct Step(CallProgram);
 
 impl Guard<Ran<MuseTurn>> for Step {
@@ -89,6 +106,22 @@ impl Guard<Ran<ClockUntil>> for Step {
     type Views = Conversations;
 
     fn resolve(_run: &Ran<ClockUntil>, at: At, conversations: &Conversations) -> Option<Self> {
+        conversations.step(at).map(Self)
+    }
+}
+
+impl Guard<Fault> for Step {
+    type Views = Conversations;
+
+    fn resolve(_fault: &Fault, at: At, conversations: &Conversations) -> Option<Self> {
+        conversations.step(at).map(Self)
+    }
+}
+
+impl Guard<ReactionFailed> for Step {
+    type Views = Conversations;
+
+    fn resolve(_failure: &ReactionFailed, at: At, conversations: &Conversations) -> Option<Self> {
         conversations.step(at).map(Self)
     }
 }
@@ -170,6 +203,16 @@ impl Reactor for MuseSession {
 
     #[rule]
     fn retry(&self, _run: Ran<ClockUntil>, step: Step) -> CallProgram {
+        step.0
+    }
+
+    #[rule]
+    fn rest_faulted(&self, _fault: Fault, step: Step) -> CallProgram {
+        step.0
+    }
+
+    #[rule]
+    fn rest_failed(&self, _failure: ReactionFailed, step: Step) -> CallProgram {
         step.0
     }
 
