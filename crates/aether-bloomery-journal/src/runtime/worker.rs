@@ -157,11 +157,10 @@ impl WorkerReader {
     /// The artifact stored under `digest`, claiming `digest` unhashed for its
     /// receiver to verify, or `None` when it has no row. A member already in
     /// `cache` is returned without opening a connection. Otherwise, over a
-    /// read-only connection opened on the
-    /// calling thread, the payload is read straight into one buffer of its
-    /// exact length, checked in through `check_in` once, and cached as a
-    /// group of its own. There is no slab: a single artifact lives and dies
-    /// alone.
+    /// read-only connection opened on the calling thread, the payload is read
+    /// straight into one buffer of its exact length, checked in through
+    /// `check_in` once, and cached as a group of its own. There is no slab: a
+    /// single artifact lives and dies alone.
     ///
     /// # Errors
     ///
