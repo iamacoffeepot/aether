@@ -2,11 +2,12 @@
 //!
 //! Each generated record is a documented const-assembled byte layout built
 //! from the program `NAME` / `INTENT` / `DOC` literals, the input/result
-//! [`KindId`]s, and the input's doc tree. wasm-ld concatenates same-named custom sections, so the decoder
-//! walks concatenated records:
+//! [`KindId`]s, the input's doc tree, and the input and result kinds' names
+//! and schemas. wasm-ld concatenates same-named custom sections, so the
+//! decoder walks concatenated records:
 //!
 //! ```text
-//! version:     u8  = 3
+//! version:     u8  = 4
 //! name_len:    u16 little-endian
 //! name:        name_len UTF-8 bytes
 //! input:       u64 little-endian KindId
@@ -18,10 +19,19 @@
 //! doc_len:     u32 little-endian
 //! doc:         doc_len UTF-8 bytes
 //! input_docs:  the input's DocNode as aether-wire bytes (self-delimiting)
+//! input_kind:  the input's canonical (name, shape) bytes, as `aether.kinds`
+//!              carries them (self-delimiting)
+//! input_labels:  the input's LabelNode as aether-wire bytes, as
+//!              `aether.kinds.labels` carries it (self-delimiting)
+//! result_kind: the result's canonical (name, shape) bytes
+//! result_labels: the result's LabelNode as aether-wire bytes
 //! ```
 //!
 //! The doc and the input's doc tree never enter a kind id: they describe the
-//! program as a tool, beside the schema its input kind is hashed from.
+//! program as a tool, beside the schema its input kind is hashed from. The
+//! shape and labels pairs merge back into each kind's named schema, so a
+//! reader that does not link the kinds' Rust types can still decode their
+//! values.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -29,13 +39,16 @@ use core::error::Error as StdError;
 use core::fmt;
 use core::str;
 
-use aether_data::canonical::{canonical_len_docs, canonical_write_docs};
-use aether_data::{DocNode, KindId, wire};
+use aether_data::canonical::{
+    canonical_len_docs, canonical_len_kind, canonical_len_label_node, canonical_write_docs, canonical_write_kind,
+    canonical_write_label_node, merge_schema,
+};
+use aether_data::{DocNode, KindId, KindShape, LabelNode, SchemaType, wire};
 
 use crate::kinds::{Mode, Program, ProgramApi, ProgramName};
 
 /// Record version byte written at the start of every program declaration.
-pub const SECTION_VERSION: u8 = 3;
+pub const SECTION_VERSION: u8 = 4;
 /// [`Mode::Pure`] discriminant in a declaration record.
 pub const MODE_PURE: u8 = 0;
 /// [`Mode::Sampled`] discriminant in a declaration record.
@@ -74,6 +87,20 @@ pub struct Declaration {
     /// The doc tree of the program's input: a doc for every field and
     /// variant it exposes.
     pub input_docs: DocNode,
+    /// The input kind's name and named schema.
+    pub input_kind: ProgramKind,
+    /// The result kind's name and named schema.
+    pub result_kind: ProgramKind,
+}
+
+/// A program's input or result kind as its record names it: the kind's
+/// `Kind::NAME` and its schema, field and variant names included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramKind {
+    /// The kind's `Kind::NAME`.
+    pub name: String,
+    /// The kind's named schema.
+    pub schema: SchemaType,
 }
 
 /// One program's declaration record, as the bundle generator assembles it
@@ -96,6 +123,18 @@ pub struct ProgramRecord<'a> {
     pub doc: &'a [u8],
     /// The input's doc tree.
     pub input_docs: &'a DocNode,
+    /// The input kind's `Kind::NAME`.
+    pub input_name: &'a str,
+    /// The input kind's schema.
+    pub input_schema: &'a SchemaType,
+    /// The input kind's labels.
+    pub input_labels: &'a LabelNode,
+    /// The result kind's `Kind::NAME`.
+    pub result_name: &'a str,
+    /// The result kind's schema.
+    pub result_schema: &'a SchemaType,
+    /// The result kind's labels.
+    pub result_labels: &'a LabelNode,
 }
 
 /// Byte length of `record`.
@@ -112,6 +151,10 @@ pub const fn program_record_len(record: &ProgramRecord<'_>) -> usize {
         + 4
         + record.doc.len()
         + canonical_len_docs(record.input_docs)
+        + canonical_len_kind(record.input_name, record.input_schema)
+        + canonical_len_label_node(record.input_labels)
+        + canonical_len_kind(record.result_name, record.result_schema)
+        + canonical_len_label_node(record.result_labels)
 }
 
 /// Const-assemble one version-prefixed declaration record.
@@ -119,8 +162,8 @@ pub const fn program_record_len(record: &ProgramRecord<'_>) -> usize {
 /// # Panics
 ///
 /// Panics when `N` is not [`program_record_len`] for `record`, when its name
-/// or intent is longer than `u16::MAX`, or when its input doc tree holds an
-/// undocumented field.
+/// or intent is longer than `u16::MAX`, when its input doc tree holds an
+/// undocumented field, or when a schema or labels tree holds an `Owned` cell.
 #[must_use]
 pub const fn write_program_record<const N: usize>(record: &ProgramRecord<'_>) -> [u8; N] {
     assert!(N == program_record_len(record), "aether-bloomery-program: program record length mismatch");
@@ -140,7 +183,11 @@ pub const fn write_program_record<const N: usize>(record: &ProgramRecord<'_>) ->
     write_slice(&mut out, &mut pos, record.intent);
     write_u32_le(&mut out, &mut pos, u32_len(record.doc));
     write_slice(&mut out, &mut pos, record.doc);
-    let _ = canonical_write_docs(record.input_docs, &mut out, pos);
+    pos = canonical_write_docs(record.input_docs, &mut out, pos);
+    pos = canonical_write_kind(record.input_name, record.input_schema, &mut out, pos);
+    pos = canonical_write_label_node(record.input_labels, &mut out, pos);
+    pos = canonical_write_kind(record.result_name, record.result_schema, &mut out, pos);
+    let _ = canonical_write_label_node(record.result_labels, &mut out, pos);
     out
 }
 
@@ -205,7 +252,7 @@ const fn write_slice(out: &mut [u8], pos: &mut usize, bytes: &[u8]) {
 pub enum DeclarationsError {
     /// The remaining bytes were shorter than a record header or declared field.
     Truncated,
-    /// The record version byte is not the current version, 3.
+    /// The record version byte is not the current version, 4.
     UnsupportedVersion(u8),
     /// A name, intent, or doc field was not UTF-8.
     InvalidUtf8,
@@ -219,6 +266,9 @@ pub enum DeclarationsError {
     DuplicateName(ProgramName),
     /// The input doc tree did not decode.
     InvalidDocs,
+    /// An input or result kind's shape or labels did not decode, or did not
+    /// merge into a schema.
+    InvalidSchema,
 }
 
 impl fmt::Display for DeclarationsError {
@@ -232,6 +282,7 @@ impl fmt::Display for DeclarationsError {
             Self::UnknownApi(apis) => write!(f, "unknown program api bits {apis:#010b}"),
             Self::DuplicateName(name) => write!(f, "program declaration repeats program {}", name.as_str()),
             Self::InvalidDocs => f.write_str("program declaration input doc tree does not decode"),
+            Self::InvalidSchema => f.write_str("program declaration input or result schema does not decode"),
         }
     }
 }
@@ -243,7 +294,8 @@ impl StdError for DeclarationsError {}
 /// # Errors
 ///
 /// [`DeclarationsError`] when a record is truncated, versioned incorrectly,
-/// or carries an invalid name, UTF-8 field, mode, API bit, or doc tree, or when two
+/// or carries an invalid name, UTF-8 field, mode, API bit, doc tree, or kind
+/// schema, or when two
 /// records share a program name.
 pub fn declarations(section: &[u8]) -> Result<Vec<Declaration>, DeclarationsError> {
     let mut rest = section;
@@ -277,8 +329,27 @@ fn read_record(rest: &mut &[u8]) -> Result<Declaration, DeclarationsError> {
     let doc = read_string(rest, doc_len)?;
     let (input_docs, tail) = wire::take_from_bytes::<DocNode>(rest).map_err(|_| DeclarationsError::InvalidDocs)?;
     *rest = tail;
+    let input_kind = read_kind(rest)?;
+    let result_kind = read_kind(rest)?;
     let name = ProgramName::new(name).map_err(|_| DeclarationsError::InvalidName)?;
-    Ok(Declaration { program: Program { name, input, result, mode, intent }, apis, doc, input_docs })
+    Ok(Declaration {
+        program: Program { name, input, result, mode, intent },
+        apis,
+        doc,
+        input_docs,
+        input_kind,
+        result_kind,
+    })
+}
+
+/// One kind's canonical `(name, shape)` bytes and its labels, merged back
+/// into its named schema.
+fn read_kind(rest: &mut &[u8]) -> Result<ProgramKind, DeclarationsError> {
+    let (shape, tail) = wire::take_from_bytes::<KindShape>(rest).map_err(|_| DeclarationsError::InvalidSchema)?;
+    let (labels, tail) = wire::take_from_bytes::<LabelNode>(tail).map_err(|_| DeclarationsError::InvalidSchema)?;
+    *rest = tail;
+    let schema = merge_schema(&shape.schema, Some(&labels)).map_err(|_| DeclarationsError::InvalidSchema)?;
+    Ok(ProgramKind { name: shape.name.into_owned(), schema })
 }
 
 fn read_apis(mask: u8) -> Result<Vec<ProgramApi>, DeclarationsError> {
@@ -341,12 +412,12 @@ fn read_string(rest: &mut &[u8], len: usize) -> Result<String, DeclarationsError
 mod tests {
     use alloc::borrow::Cow;
 
-    use aether_data::{Doc, DocCell, DocNode, FieldDoc, KindId};
+    use aether_data::{Doc, DocCell, DocNode, FieldDoc, KindId, Schema, SchemaType, StaticSchema};
 
     use super::{
         DeclarationsError, MODE_PURE, ProgramRecord, api_mask, declarations, program_record_len, write_program_record,
     };
-    use crate::kinds::{Mode, ProgramApi, ProgramName};
+    use crate::kinds::{Fault, Mode, Program, ProgramApi, ProgramName};
 
     static LEAF: DocNode = DocNode::Leaf;
     static FIRST_DOCS: DocNode = DocNode::Struct {
@@ -357,7 +428,7 @@ mod tests {
         }]),
     };
 
-    /// A pure record.
+    /// A pure record whose input and result kinds are both an anonymous unit.
     const fn record(
         name: &'static [u8],
         input: u64,
@@ -367,13 +438,38 @@ mod tests {
         doc: &'static [u8],
         input_docs: &'static DocNode,
     ) -> ProgramRecord<'static> {
-        ProgramRecord { name, input, result, mode: MODE_PURE, apis, intent, doc, input_docs }
+        ProgramRecord {
+            name,
+            input,
+            result,
+            mode: MODE_PURE,
+            apis,
+            intent,
+            doc,
+            input_docs,
+            input_name: "test.unit.input",
+            input_schema: StaticSchema::<()>::SCHEMA,
+            input_labels: StaticSchema::<()>::LABEL_NODE,
+            result_name: "test.unit.result",
+            result_schema: StaticSchema::<()>::SCHEMA,
+            result_labels: StaticSchema::<()>::LABEL_NODE,
+        }
     }
 
     #[test]
     fn concatenated_records_decode_name_ids_mode_intent_and_docs() {
-        // Catches a v3 record whose doc bytes or doc tree shift the next record.
-        const FIRST: ProgramRecord<'static> = record(b"test.program.one", 1, 2, 0, b"first", b"Do first.", &FIRST_DOCS);
+        // Catches a record whose doc bytes, doc tree, or kind schemas shift the next record, and a kind schema that
+        // decodes without the field and variant names only its labels carry (the result nests them below a struct
+        // field and an enum).
+        const FIRST: ProgramRecord<'static> = ProgramRecord {
+            input_name: "test.read.input",
+            input_schema: StaticSchema::<Program>::SCHEMA,
+            input_labels: StaticSchema::<Program>::LABEL_NODE,
+            result_name: "test.read.result",
+            result_schema: StaticSchema::<Fault>::SCHEMA,
+            result_labels: StaticSchema::<Fault>::LABEL_NODE,
+            ..record(b"test.program.one", 1, 2, 0, b"first", b"Do first.", &FIRST_DOCS)
+        };
         const SECOND: ProgramRecord<'static> = record(
             b"test.program.two",
             3,
@@ -399,6 +495,10 @@ mod tests {
         assert_eq!(decoded[0].program.intent, "first");
         assert_eq!(decoded[0].doc, "Do first.");
         assert_eq!(decoded[0].input_docs, FIRST_DOCS);
+        assert_eq!(decoded[0].input_kind.name, "test.read.input");
+        assert_eq!(decoded[0].input_kind.schema, <Program as Schema>::SCHEMA);
+        assert_eq!(decoded[0].result_kind.name, "test.read.result");
+        assert_eq!(decoded[0].result_kind.schema, <Fault as Schema>::SCHEMA);
         assert!(decoded[0].apis.is_empty());
         assert_eq!(decoded[1].program.name.as_str(), "test.program.two");
         assert_eq!(decoded[1].program.input, KindId(3));
@@ -406,6 +506,8 @@ mod tests {
         assert_eq!(decoded[1].program.intent, "second");
         assert_eq!(decoded[1].doc, "Do second.");
         assert_eq!(decoded[1].input_docs, DocNode::Leaf);
+        assert_eq!(decoded[1].input_kind.schema, SchemaType::Unit);
+        assert_eq!(decoded[1].result_kind.name, "test.unit.result");
         assert_eq!(decoded[1].apis, [ProgramApi::Http, ProgramApi::Workspace]);
     }
 

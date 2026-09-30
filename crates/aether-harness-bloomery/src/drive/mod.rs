@@ -18,8 +18,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use aether_bloomery_kinds::{
-    AwaitProcessed, Call, CallOutcome, MoveHead, MoveHeadResult, Processed, Publish, PublishResult, Seq, WatchHead,
-    WatchHeadResult,
+    AwaitProcessed, Call, CallOutcome, Declarations, DeclarationsResult, MoveHead, MoveHeadResult, Processed, Publish,
+    PublishResult, Seq, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_workspace::{Import, ImportResult, Run, RunResult, WorkspaceCapability};
 use aether_component::ComponentHostCapability;
@@ -50,7 +50,7 @@ pub struct Pending<K> {
 }
 
 /// A reply kind the harness's sink receives: [`CallOutcome`],
-/// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`LoadResult`],
+/// [`MoveHeadResult`], [`PublishResult`], [`Processed`], [`DeclarationsResult`], [`LoadResult`],
 /// [`aether_kinds::PublishResult`], [`SpawnResult`], [`ListComponentsResult`],
 /// [`WatchHeadResult`], [`ImportResult`], or [`RunResult`].
 pub trait Answer: sealed::Sealed {}
@@ -137,6 +137,15 @@ impl sealed::Sealed for ListComponentsResult {
     }
 }
 
+impl sealed::Sealed for DeclarationsResult {
+    fn take(reply: Reply) -> Result<Self, Reply> {
+        match reply {
+            Reply::Declarations(result) => Ok(result),
+            other => Err(other),
+        }
+    }
+}
+
 impl sealed::Sealed for WatchHeadResult {
     fn take(reply: Reply) -> Result<Self, Reply> {
         match reply {
@@ -168,6 +177,7 @@ impl Answer for CallOutcome {}
 impl Answer for MoveHeadResult {}
 impl Answer for PublishResult {}
 impl Answer for Processed {}
+impl Answer for DeclarationsResult {}
 impl Answer for LoadResult {}
 impl Answer for aether_kinds::PublishResult {}
 impl Answer for SpawnResult {}
@@ -343,6 +353,17 @@ impl BloomeryHarness {
     /// waiting, for a scenario that acts while the barrier is outstanding.
     pub fn await_processed(&mut self, through: Seq) -> Pending<Processed> {
         self.request(self.mounted.driver, &AwaitProcessed { through: through.0 })
+    }
+
+    /// Ask the bundle driver for every decoded bundle's programs, each with its
+    /// input and result kinds' names and schemas, and wait for the answer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no answer arrives within thirty seconds.
+    pub fn declarations(&mut self) -> DeclarationsResult {
+        let pending = self.request(self.mounted.driver, &Declarations);
+        self.wait(pending)
     }
 
     /// Drive the barrier at `through` to quiescence: re-send `AwaitProcessed`
