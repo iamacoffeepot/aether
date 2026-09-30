@@ -274,7 +274,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config_bytes = config.encode_into_bytes();
     let mut harness = bench(240, 220);
 
-    let (panel, _) = harness
+    let panel = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),

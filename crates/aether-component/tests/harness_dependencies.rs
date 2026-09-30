@@ -82,7 +82,7 @@ fn missing_declared_dependency_refuses_the_load() {
     let baseline = harness.count_observed(TICK_OBSERVED);
 
     load(&mut harness, &wasm, None, TARGET_EXPORT).expect("the target loads");
-    let (dependent, _) = harness
+    let dependent = harness
         .load::<DependentProbe>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
         .expect("the satisfied dependent loads");
 

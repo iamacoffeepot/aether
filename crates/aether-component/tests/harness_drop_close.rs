@@ -128,8 +128,8 @@ fn a_dropped_instance_closes_and_its_name_is_spent() {
 
     harness.publish(wasm.clone()).unwrap_or_else(|error| panic!("the bundle publishes: {error}"));
     let victim_key = LoadName::new("victim").expect("a valid instance key");
-    let (victim, path) =
-        harness.spawn_keyed::<Panel>(&victim_key).unwrap_or_else(|error| panic!("the panel spawns: {error}"));
+    let victim = harness.spawn_keyed::<Panel>(&victim_key).unwrap_or_else(|error| panic!("the panel spawns: {error}"));
+    let path = harness.actor_path(&victim);
     assert_eq!(path.as_str(), format!("{PANEL_EXPORT}:victim"));
 
     let drop = DropComponent { target: path.clone() };

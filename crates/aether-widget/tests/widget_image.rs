@@ -112,7 +112,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
         owns_input: true,
         editor_region: String::new(),
     };
-    let (panel, path) = harness
+    let panel = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -120,6 +120,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
             export: Some("aether.widget.panel".to_owned()),
         })
         .unwrap_or_else(|error| panic!("load image panel: {error}"));
+    let path = harness.actor_path(&panel);
     (panel, path.to_string())
 }
 

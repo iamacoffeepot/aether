@@ -31,8 +31,8 @@ const HOST_EXPORT: &str = Host::NAMESPACE;
 
 /// Spawn the published root singleton `R`, returning its canonical path.
 fn spawn<R: Root + Singleton>(harness: &mut SubstrateHarness) -> ErasedActorPath {
-    let (_, path) = harness.spawn::<R>().unwrap_or_else(|error| panic!("spawn {}: {error}", R::NAMESPACE));
-    path
+    let actor = harness.spawn::<R>().unwrap_or_else(|error| panic!("spawn {}: {error}", R::NAMESPACE));
+    harness.actor_path(&actor)
 }
 
 /// Spawn a `MatrixChild` keyed `k` beneath `parent` through the erased door,
@@ -97,7 +97,7 @@ fn a_guest_reaches_its_declared_root_dependency_by_type() {
     };
 
     let target = spawn::<ParentPeerTarget>(&mut harness);
-    let (caller, _) = harness.spawn::<ParentPeerCaller>().expect("spawn the caller");
+    let caller = harness.spawn::<ParentPeerCaller>().expect("spawn the caller");
     assert_eq!(target.to_string(), TARGET_EXPORT, "a root singleton guest is named by its namespace");
 
     let baseline = harness.count_observed(TickObserved::NAME);
@@ -148,7 +148,7 @@ fn holes_beneath_guest_parents_expand_through_private_inline_children() {
         return;
     };
 
-    let (trunk, _) = harness.spawn::<Trunk>().expect("spawn the trunk");
+    let trunk = harness.spawn::<Trunk>().expect("spawn the trunk");
     harness.execute(vec![("bump", HarnessOp::send_and_settle(&trunk, &Bump))]).expect("bump the trunk");
 
     let branch = format!("{TRUNK_EXPORT}/{}:branch", Branch::NAMESPACE);
@@ -167,8 +167,9 @@ fn a_hole_beneath_a_guest_parent_expands_to_its_spawned_child() {
         return;
     };
 
-    let (host, _) = harness.spawn::<Host>().expect("spawn the host");
-    let (_, path) = harness.spawn_child::<Host, Placed>(&host, &key()).expect("spawn the placed child");
+    let host = harness.spawn::<Host>().expect("spawn the host");
+    let placed = harness.spawn_child::<Host, Placed>(&host, &key()).expect("spawn the placed child");
+    let path = harness.actor_path(&placed);
 
     assert_eq!(resolve(&mut harness, &format!("{HOST_EXPORT}/:k")), canonical(&path.to_string()));
 }

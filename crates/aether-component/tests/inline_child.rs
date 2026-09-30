@@ -85,9 +85,8 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
-    // its path for the replace.
-    let (parent, _) = harness
+    // Load `InlineStatefulParent` from the `inline_child` bundle.
+    let parent = harness
         .load::<InlineStatefulParent>(LoadComponent {
             wasm,
             name: None,
@@ -153,7 +152,7 @@ fn replace_rebuilds_a_private_inline_child() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (parent, _) = harness
+    let parent = harness
         .load::<InlineParent>(LoadComponent {
             wasm,
             name: None,
@@ -227,7 +226,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let (root, _) = harness
+    let root = harness
         .load::<NestedLineageParent>(LoadComponent {
             wasm,
             name: None,
@@ -294,8 +293,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load `InlineTagParent`, capturing its path for the replace.
-    let (parent, _) = harness
+    // Load `InlineTagParent`.
+    let parent = harness
         .load::<InlineTagParent>(LoadComponent {
             wasm,
             name: None,
@@ -391,7 +390,7 @@ fn despawn_inline_child_retires_the_alias_address() {
     // the *live* child's alias: the membrane demuxes to the child, which
     // answers with the child marker, and the chain settles. The parent spawns
     // the child under the `Named("widget")` subname in `wire`.
-    let (parent, _) = harness
+    let parent = harness
         .load::<InlineDespawnParent>(LoadComponent {
             wasm,
             name: None,
@@ -457,7 +456,7 @@ fn a_despawned_inline_key_is_refused_when_respawned() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (parent, _) = harness
+    let parent = harness
         .load::<InlineDespawnParent>(LoadComponent {
             wasm,
             name: None,
@@ -568,7 +567,7 @@ fn inline_child_matches_host_replies_to_its_own_requests() {
     let path = write_fixture("inline-child-reply.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let (parent, _path) = harness
+    let parent = harness
         .load::<InlineFsDemuxParent>(LoadComponent {
             wasm,
             name: None,

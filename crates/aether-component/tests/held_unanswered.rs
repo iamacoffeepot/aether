@@ -74,7 +74,7 @@ fn drop_while_held(before: BeforeDrop) -> Option<(SubstrateHarness, Option<Publi
     load(RELAY);
     let (_, keeper_path) = load(KEEPER);
     let (_, forgetter_path) = load(FORGETTER);
-    let (requester, _) = harness
+    let requester = harness
         .load::<HeldRequester>(LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None })
         .unwrap_or_else(|error| panic!("load {REQUESTER}: {error}"));
 

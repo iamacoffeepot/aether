@@ -82,15 +82,14 @@ fn region(name: &str, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpe
 }
 
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ActorRef<EditorRegionProbe> {
-    let (probe, _) = harness
+    harness
         .load::<EditorRegionProbe>(LoadComponent {
             wasm: fs::read(wasm_path).expect("read wasm component"),
             name: Some(name.to_owned()),
             config: EditorRegionProbeConfig { name: name.to_owned() }.encode_into_bytes(),
             export: None,
         })
-        .unwrap_or_else(|error| panic!("load the region probe as {name}: {error}"));
-    probe
+        .unwrap_or_else(|error| panic!("load the region probe as {name}: {error}"))
 }
 
 fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<RegionSpec>) {

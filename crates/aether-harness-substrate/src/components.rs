@@ -33,8 +33,8 @@ pub struct SpawnedActor {
 }
 
 impl SubstrateHarness {
-    /// Load the component export `R` and return its proven reference and
-    /// canonical lineage path (ADR-0230 §3).
+    /// Load the component export `R` and return its proven reference; its
+    /// path for diagnostics is [`Self::actor_path`].
     ///
     /// Sets `component.export` to `R::NAMESPACE`, sends the load to the
     /// component host with this harness's session as the reply target, and
@@ -51,16 +51,11 @@ impl SubstrateHarness {
     /// # Panics
     ///
     /// Panics when the harness composed no component host.
-    pub fn load<R: Addressable>(
-        &mut self,
-        mut component: LoadComponent,
-    ) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
+    pub fn load<R: Addressable>(&mut self, mut component: LoadComponent) -> Result<ActorRef<R>, SubstrateHarnessError> {
         component.export = Some(R::NAMESPACE.to_owned());
-        let (sender, path) = self.load_any(&component)?;
-        let actor =
-            self.passive.adopt_load::<R>(sender).map_err(|error| SubstrateHarnessError::Load(error.to_string()))?;
+        let (sender, _) = self.load_any(&component)?;
 
-        Ok((actor, path))
+        self.passive.adopt_load::<R>(sender).map_err(|error| SubstrateHarnessError::Load(error.to_string()))
     }
 
     /// [`Self::load`] for a component whose actor type the test cannot name,
@@ -138,8 +133,9 @@ impl SubstrateHarness {
     }
 
     /// Spawn the published singleton `R` at the root and return its proven
-    /// reference and canonical path, `R::NAMESPACE`. A live instance answers
-    /// as the requested one, since the name is the instance.
+    /// reference; its path for diagnostics is [`Self::actor_path`].
+    /// `R::NAMESPACE` names it — a live instance answers as the requested
+    /// one, since the name is the instance.
     ///
     /// # Errors
     ///
@@ -149,7 +145,7 @@ impl SubstrateHarness {
     /// # Panics
     ///
     /// Panics when the harness composed no component host.
-    pub fn spawn<R: Root + Singleton>(&mut self) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
+    pub fn spawn<R: Root + Singleton>(&mut self) -> Result<ActorRef<R>, SubstrateHarnessError> {
         self.spawn_typed::<R>(&Spawn {
             namespace: R::NAMESPACE.to_owned(),
             key: None,
@@ -159,7 +155,8 @@ impl SubstrateHarness {
     }
 
     /// Spawn the published instanced type `R` at the root, keyed by `key`
-    /// (`NS:key`), and return its proven reference and canonical path.
+    /// (`NS:key`), and return its proven reference; its path for diagnostics
+    /// is [`Self::actor_path`].
     ///
     /// # Errors
     ///
@@ -168,10 +165,7 @@ impl SubstrateHarness {
     /// # Panics
     ///
     /// Panics when the harness composed no component host.
-    pub fn spawn_keyed<R: Root + Instanced>(
-        &mut self,
-        key: &LoadName,
-    ) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
+    pub fn spawn_keyed<R: Root + Instanced>(&mut self, key: &LoadName) -> Result<ActorRef<R>, SubstrateHarnessError> {
         self.spawn_typed::<R>(&Spawn {
             namespace: R::NAMESPACE.to_owned(),
             key: Some(key.as_str().to_owned()),
@@ -182,7 +176,7 @@ impl SubstrateHarness {
 
     /// Spawn the published instanced type `C` beneath the held `parent`,
     /// keyed by `key` (`parent/NS:key`, ADR-0241 §5), and return its proven
-    /// reference and canonical path.
+    /// reference; its path for diagnostics is [`Self::actor_path`].
     ///
     /// # Errors
     ///
@@ -196,7 +190,7 @@ impl SubstrateHarness {
         &mut self,
         parent: &ActorRef<P>,
         key: &LoadName,
-    ) -> Result<(ActorRef<C>, ErasedActorPath), SubstrateHarnessError>
+    ) -> Result<ActorRef<C>, SubstrateHarnessError>
     where
         P: Addressable,
         C: ChildOf<P> + Instanced,
@@ -262,15 +256,10 @@ impl SubstrateHarness {
     }
 
     /// [`Self::spawn_any`], with the answering instance proven as `R`.
-    fn spawn_typed<R: Addressable>(
-        &mut self,
-        spawn: &Spawn,
-    ) -> Result<(ActorRef<R>, ErasedActorPath), SubstrateHarnessError> {
-        let SpawnedActor { actor, path, .. } = self.spawn_any(spawn)?;
-        let actor =
-            self.passive.adopt_load::<R>(actor).map_err(|error| SubstrateHarnessError::Spawn(error.to_string()))?;
+    fn spawn_typed<R: Addressable>(&mut self, spawn: &Spawn) -> Result<ActorRef<R>, SubstrateHarnessError> {
+        let SpawnedActor { actor, .. } = self.spawn_any(spawn)?;
 
-        Ok((actor, path))
+        self.passive.adopt_load::<R>(actor).map_err(|error| SubstrateHarnessError::Spawn(error.to_string()))
     }
 
     /// Send `request` to the component host with this harness's session as

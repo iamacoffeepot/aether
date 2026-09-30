@@ -79,7 +79,7 @@ fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
     let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
 
     let config = ProbeConfig { seed: 0x6134_0001, label: "before-replace".to_owned() };
-    let (probe, path) = harness
+    let probe = harness
         .load::<ProbeWithConfig>(LoadComponent {
             wasm: wasm.clone(),
             name: None,
@@ -87,6 +87,7 @@ fn a_config_that_does_not_decode_refuses_and_keeps_the_running_guest() {
             export: None,
         })
         .expect("load test.probe_with_config");
+    let path = harness.actor_path(&probe);
 
     // A `ProbeConfig` cut one byte short: its label's length prefix runs past
     // the end, so it does not decode as the successor's config kind.
