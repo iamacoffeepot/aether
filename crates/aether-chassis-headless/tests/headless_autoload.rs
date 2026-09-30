@@ -118,22 +118,12 @@ mod tests {
 
     #[test]
     fn replicated_boot_component_spawns_every_instance() {
-        // A `replicas: 2` manifest entry must publish its module once and
-        // spawn two counter-keyed instances of the selected (instanced)
-        // export before `build` returns — the bug this catches is a
-        // fan-out that spawns only one instance, or spawns both under the
-        // same key (which the component host refuses as already live).
-        // `test.ui.panel` (`aether_test_fixtures_bundle::Panel`) is
-        // `#[actor(instanced, root)]` with no dependencies, so nothing else
-        // in a fresh chassis draws a counter-keyed spawn ahead of it: its
-        // two instances land at the spawner's first two counter keys, `0`
-        // and `1`.
-        //
-        // There is no embedder hook to compose a custom reply-capturing
-        // actor into a production `HeadlessChassis::build`, so unlike the
-        // MCP `list_components`-based approach the issue's plan preferred,
-        // this asserts liveness the same way the sibling test above does:
-        // `built.resolve_address` on each instance's ADR-0241 §5 name.
+        // A `replicas: 2` entry must stand up two counter-keyed instances of
+        // its instanced export before `build` returns; the bug this catches
+        // is a fan-out that spawns one instance, or both under one key.
+        // `test.ui.panel` is the first counter-keyed spawn in a fresh
+        // chassis, so its instances are `:0` and `:1`, resolved as the
+        // sibling test resolves its entry.
         let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
         let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
             assert!(
@@ -148,8 +138,10 @@ mod tests {
             return;
         };
 
-        let sandbox = init_save_sandbox("headless-runtime-manifest-replicas");
-        let manifest_path = sandbox.join("boot-manifest.json");
+        // The sandbox is shared per process, so this test's manifest carries
+        // its own name.
+        let sandbox = init_save_sandbox("headless-runtime-manifest");
+        let manifest_path = sandbox.join("replicas-boot-manifest.json");
         let manifest_json = serde_json::json!({
             "components": [{ "wasm": wasm_path, "export": "test.ui.panel", "replicas": 2 }],
         });
@@ -157,8 +149,6 @@ mod tests {
             .expect("write boot manifest");
 
         let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
-        assert_eq!(autoload.len(), 1, "one AutoloadComponent carries both replicas' keys");
-        assert_eq!(autoload[0].keys, vec![None, None], "replicas: 2 is two counter-keyed instance keys");
 
         // `build` returns only once every boot component's publish and
         // every one of its spawns has answered, so both instances resolve
@@ -182,11 +172,7 @@ mod tests {
         fs::write(&wasm_path, b"not a wasm module").expect("write broken component bytes");
         let manifest_path = sandbox.join("broken-boot-manifest.json");
         let manifest_json = serde_json::json!({
-            // `export` is set so `expand_replicas` never inspects the wasm
-            // for a declared default namespace: the point of this test is
-            // that a genuinely malformed module fails at `Publish` (build
-            // time), not at the manifest read that precedes it.
-            "components": [{ "wasm": wasm_path, "name": "broken", "export": "irrelevant" }],
+            "components": [{ "wasm": wasm_path, "name": "broken" }],
         });
         fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
             .expect("write boot manifest");

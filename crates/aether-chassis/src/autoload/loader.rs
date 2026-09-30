@@ -19,6 +19,7 @@ use aether_actor::{DependsOn, actor};
 use aether_component::ComponentHostCapability;
 use aether_kinds::{Publish, PublishResult, PublishedType, Spawn, SpawnResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::chassis::error::BootError;
 
 use super::AutoloadComponent;
@@ -112,7 +113,12 @@ impl Autoloader {
         let Some(component) = self.remaining.pop_front() else {
             return;
         };
-        let AutoloadComponent { wasm, config, namespace, keys, .. } = component;
+        let AutoloadComponent { wasm, config, namespace, keys } = component;
+        // An entry that names no type spawns the module's default, the type
+        // its `aether.namespace` section names. A section the read refuses is
+        // left to the publish, which parses the same section and refuses the
+        // module naming why.
+        let namespace = namespace.or_else(|| kind_manifest::read_namespace_from_bytes(&wasm).ok().flatten());
         self.current = Some(CurrentEntry { namespace, config, keys: keys.into() });
         ctx.send::<ComponentHostCapability>(&Publish { code: wasm.into(), configs: Vec::new() });
     }
@@ -141,19 +147,17 @@ impl Autoloader {
         let _ = self.report.send(Err(error));
     }
 
-    /// Which of a `Publish`'s bound `types` the current entry spawns from:
-    /// the one named by its declared namespace (its `export`, or a
-    /// wasm-declared default — [`super::expand_replicas`]), matched exactly
-    /// or as its `NAME.<64-lowercase-hex>` content-addressed publication
-    /// name; or, absent a declared namespace, the sole type the module
-    /// binds — several with no declared namespace is a failure naming them.
+    /// Which of a `Publish`'s bound `types` the current entry spawns: the one
+    /// its namespace names, bound as that name or as its `NS.<64 hex>`
+    /// content-addressed publication (ADR-0241 §3); or, when the entry names
+    /// none and the module declares no default, the sole type it binds.
     fn resolve_namespace(&self, types: &[PublishedType]) -> Result<String, String> {
         let current = self.current.as_ref().expect("a publish result answers the entry that sent it");
         current.namespace.as_deref().map_or_else(
             || match types {
                 [one] => Ok(one.namespace.clone()),
                 _ => Err(format!(
-                    "no export or wasm-declared default namespace, and the module binds several types: {:?}",
+                    "the entry names no export and the module declares no default, but it binds several types: {:?}",
                     bound_names(types)
                 )),
             },

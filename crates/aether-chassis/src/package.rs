@@ -578,10 +578,7 @@ pub fn package_autoload(package_root: &Path) -> Result<(ChassisSettings, Vec<Aut
     // that domain onto the boot fault, then expand replicas.
     let (settings, packed) = read_and_resolve(package_root)
         .map_err(|e| ConfigError::unparseable("AETHER_PACKAGE", package_root.display().to_string(), e))?;
-    let mut components = Vec::new();
-    for entry in packed {
-        components.extend(expand_replicas(entry)?);
-    }
+    let components = packed.into_iter().map(expand_replicas).collect::<Result<_, _>>()?;
     Ok((settings, components))
 }
 
@@ -806,11 +803,13 @@ mod tests {
 
         let (returned_settings, components) = package_autoload(&root).expect("autoload");
         assert_eq!(returned_settings, settings, "the manifest's chassis settings surface to the depot boot path");
-        assert_eq!(components.len(), 1, "one AutoloadComponent carries every replica's keys");
-        assert_eq!(components[0].keys, vec![None, None], "replicas: 2 fans out to two counter-keyed instance keys");
-        assert_eq!(components[0].namespace.as_deref(), Some("handler"));
-        assert_eq!(components[0].wasm, vec![0x00, 0x61, 0x73, 0x6d]);
-        assert_eq!(components[0].config, vec![7, 8, 9]);
+        let [component] = components.as_slice() else {
+            panic!("one entry is one module: {} components", components.len());
+        };
+        assert_eq!(component.keys, vec![None, None], "replicas: 2 is two counter keys");
+        assert_eq!(component.namespace.as_deref(), Some("handler"));
+        assert_eq!(component.wasm, vec![0x00, 0x61, 0x73, 0x6d]);
+        assert_eq!(component.config, vec![7, 8, 9]);
 
         fs::remove_dir_all(&root).ok();
     }
