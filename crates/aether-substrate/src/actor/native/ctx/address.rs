@@ -115,7 +115,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the canonical path when its route is not `Live`. Neither names a
     /// position.
     ///
-    /// Its consumers are the component host's drop, replace, load-under, and
+    /// Its consumers are the component host's drop, replace, parented spawn, and
     /// describe receipts, the trampoline's replacement dependency check, and
     /// the HTTP server's `unregister_route` receipt, which needs only the
     /// identity its route table is keyed by.

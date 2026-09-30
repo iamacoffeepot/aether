@@ -1,9 +1,9 @@
 //! Placement refusal (ADR-0241 §1, §5): a guest's placement comes from its
-//! `#[actor]` declaration, exactly as a native type's does. A host `load`
-//! and every module boot place a guest at the root, so each of those types
-//! must declare `root`, which `#[actor(root)]` records as a `Root` lineage
-//! record for every cardinality. A `load_under` places it beneath a live
-//! parent, so its type must declare `child_of` the parent's type, a `Child`
+//! `#[actor]` declaration, exactly as a native type's does. A host `load`,
+//! a `Spawn` with no parent, and every module boot place a guest at the root,
+//! so each of those types must declare `root`, which `#[actor(root)]` records
+//! as a `Root` lineage record for every cardinality. A `Spawn` naming a parent
+//! places it beneath a live parent, so its type must declare `child_of` the parent's type, a `Child`
 //! record naming both. The checks run before the module publishes or
 //! anything is staged: a load whose selected or boot type has no `Root` is
 //! refused whole, and no route registers (#6821).
@@ -38,7 +38,7 @@ pub(super) fn root_refusal(lineage: &[ActorLineageRecord], actor_namespace: &str
         .any(|record| matches!(record, ActorLineageRecord::Root { namespace, .. } if namespace == actor_namespace));
     (!rooted).then(|| {
         format!(
-            "{actor_namespace} cannot be placed at the root: a host load or module boot needs \
+            "{actor_namespace} cannot be placed at the root: a load, a spawn with no parent, or a module boot needs \
              `#[actor(root)]` (ADR-0241 §5); its declared placements are [{}]",
             declared_placements(lineage, actor_namespace)
         )
@@ -64,7 +64,7 @@ pub(super) fn child_refusal(
     });
     (!edge).then(|| {
         format!(
-            "{child_namespace} cannot be placed beneath {parent_namespace}: a load_under needs \
+            "{child_namespace} cannot be placed beneath {parent_namespace}: a spawn beneath a parent needs \
              `#[actor(child_of(..))]` naming the parent's type (ADR-0241 §5); its declared placements are [{}]",
             declared_placements(lineage, child_namespace)
         )
@@ -103,7 +103,7 @@ mod tests {
         }
     }
 
-    // Catches: a load_under admitted by any declared edge rather than one
+    // Catches: a parented spawn admitted by any declared edge rather than one
     // naming the proven parent's type, so a guest lands beneath a parent its
     // type never declared (#6821).
     #[test]

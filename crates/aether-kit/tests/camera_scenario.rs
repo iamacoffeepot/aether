@@ -42,7 +42,7 @@ use std::fs;
 use std::path::Path;
 
 /// Load `aether-kit`'s pre-built wasm into the harness, selecting the
-/// `camera` export (ADR-0096; the kit is defaultless per ADR-0138, so
+/// `camera` export (ADR-0096; the kit has no unselected entry (ADR-0241 §9), so
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.

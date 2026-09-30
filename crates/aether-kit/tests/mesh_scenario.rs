@@ -76,7 +76,7 @@ fn load_kit_export<R: Addressable>(harness: &mut SubstrateHarness, wasm: &[u8]) 
 }
 
 /// Load `aether-kit`'s pre-built wasm into the harness, selecting the
-/// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
+/// `mesh_viewer` export (ADR-0096; the kit has no unselected entry (ADR-0241 §9), so
 /// the export selector is required), and await `LoadResult`. The viewer
 /// declares `aether.kit.camera` as a dependency, so the camera export loads
 /// first at its default name. Panics on load failure so the calling test

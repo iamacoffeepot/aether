@@ -466,8 +466,8 @@ impl ComponentHostCapabilityState {
 
     /// The key the selected type is born under, or the refusal of its
     /// placement (ADR-0241 §5). A guest is placed by its `#[actor]`
-    /// declaration: a root load needs `root`, and a `load_under` a `child_of`
-    /// edge naming the proven parent's type. A singleton is named by its
+    /// declaration: a root placement (a load, a spawn with no parent, a module
+    /// boot) needs `root`, and a spawn beneath a parent a `child_of` edge naming the proven parent's type. A singleton is named by its
     /// namespace alone, so a load names no key for it and places it at the
     /// root; an instanced load's name is its key, or the spawn allocates a
     /// counter. Both are refused before the module publishes, so a refused

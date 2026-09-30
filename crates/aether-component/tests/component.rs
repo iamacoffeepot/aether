@@ -257,14 +257,14 @@ fn multi_actor_unknown_export_errors() {
 /// `export: Some("test.defaultless.alpha")` load of the same module
 /// resolves `Ok` through the unchanged ADR-0096 typed-init path.
 #[test]
-fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
+fn multi_export_unselected_load_errors_selected_load_ok() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_defaultless") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Bare load (no selector): a defaultless module rejects it, naming its
+    // Bare load (no selector): a multi-export module rejects it, naming its
     // exports so the caller can pick one.
     let bare = harness
         .execute(vec![(
@@ -279,11 +279,11 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
         LoadResult::Err { error } => {
             assert!(
                 error.contains("test.defaultless.alpha") && error.contains("test.defaultless.beta"),
-                "a defaultless bare load must name the module's exports; got {error}",
+                "an unselected load must name the module's exports; got {error}",
             );
         }
         LoadResult::Ok { path: name, .. } => {
-            panic!("a bare load of a defaultless module must error, not instantiate {name}")
+            panic!("an unselected load of a multi-export module must error, not instantiate {name}")
         }
     }
 
@@ -306,12 +306,12 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
         LoadResult::Ok { path: name, .. } => {
             assert!(
                 name.to_string() == "test.defaultless.alpha",
-                "a named load of a defaultless module resolves to the selected \
+                "a named load of a multi-export module resolves to the selected \
                  export's NAMESPACE (test.defaultless.alpha); got {name}",
             );
         }
         LoadResult::Err { error } => {
-            panic!("a named load of a defaultless module must succeed; got err {error}")
+            panic!("a named load of a multi-export module must succeed; got err {error}")
         }
     }
 }

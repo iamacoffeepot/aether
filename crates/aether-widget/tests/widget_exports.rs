@@ -1,7 +1,7 @@
 //! Named-export and replace-reconstruct coverage for the widget module's
 //! `export!` lists (issue 5538).
 //!
-//! The widget wasm build is a grab-bag defaultless module (ADR-0138). A type
+//! The widget wasm build is a grab-bag module with no unselected entry (ADR-0241 §9). A type
 //! missing from `export!` cannot be loaded by `module@actor` selector, and
 //! ADR-0114 §5 reconstructs inline children from that same list — so a
 //! panel-spawned Dropdown, `TabStrip`, or `MenuBar` vanishes across
@@ -207,7 +207,7 @@ fn panel_config() -> PanelConfig {
     }
 }
 
-/// ADR-0138: a bare load of this grab-bag must error and name every omitted
+/// ADR-0241 §9: an unselected load of this grab-bag must error and name every omitted
 /// actor, while each of those seven NAMESPACEs must resolve as a named export.
 fn assert_selectors(wasm: &[u8], stem: &str) {
     let mut harness = bench(64, 48);
