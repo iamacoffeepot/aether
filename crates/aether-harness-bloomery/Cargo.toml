@@ -9,8 +9,10 @@ publish = false
 # chassis, in process (issue #6264). Seeds a scratch journal from `Batch`es,
 # boots `BloomeryChassis` over it, drives the mounted journal owner and bundle
 # driver by proven reference, and asserts the records the loop appended
-# against literals the scenario writes. Test support end to end: it is only
-# ever a dev-dependency. It never resolves a dist artifact itself — a
+# against literals the scenario writes. Test support end to end: its one
+# normal-dependency consumer is `aether-harness-perf`'s optional `bloomery`
+# feature, which builds the `aether-perf-bloomery` benchmark; everywhere else
+# it is a dev-dependency. It never resolves a dist artifact itself — a
 # scenario that needs fixture wasm reads it through
 # `aether_harness_substrate::test_helpers::require_wasm` and stages the bytes.
 

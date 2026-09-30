@@ -85,6 +85,7 @@ pub use self::core::{
     EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket,
     WarmTicket, WatchTicket,
 };
+pub use self::steps::STEP_TARGET;
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
@@ -108,7 +109,7 @@ use aether_substrate::chassis::error::BootError;
 use tracing::debug_span;
 
 use self::root::BundleRoot;
-use self::steps::{STEP_TARGET, StepSpans};
+use self::steps::StepSpans;
 use crate::BundleDriver;
 
 // Tripwire: the core reads the journal `EVENTS_PAGE` entries per page, and the

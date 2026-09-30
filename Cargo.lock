@@ -580,11 +580,18 @@ dependencies = [
 name = "aether-harness-perf"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-bloomery-driver",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-bloomery-muse",
+ "aether-harness-bloomery",
  "aether-harness-substrate",
  "plotters",
  "png",
  "serde",
  "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

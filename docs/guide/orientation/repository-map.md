@@ -63,7 +63,7 @@ compares this with native capabilities.
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
 | `aether-harness-bloomery` | in-process journal-content scenarios over the shipped bloomery chassis: a seeded journal in, the appended records asserted against literals |
-| `aether-harness-perf` | the `aether-perf-trial` / `-compare` / `-plot` / `-registry` binaries |
+| `aether-harness-perf` | the `aether-perf-trial` / `-compare` / `-plot` / `-registry` binaries, and `aether-perf-bloomery` behind the `bloomery` feature |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches; also carries the `aether-tunnel` binary |
 
 The substrate is mechanism. A capability is policy and I/O represented as an
