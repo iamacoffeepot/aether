@@ -10,10 +10,15 @@
 //! caller can reach already has every boot component live. Each wait is
 //! bounded by the chassis's boot-load budget (issue #6637): a load that never
 //! answers fails the boot naming its component rather than holding the engine
-//! short of serving forever. The loads target
-//! the generic `aether.component` mailbox — the same address the hub's
-//! `load_component` and the substrate harness load through — which is what
-//! makes the mechanism chassis-agnostic.
+//! short of serving forever.
+//!
+//! Each boot component is one `Publish` of its module to the component host,
+//! then one `Spawn` per instance key (issue #7155, ADR-0241 §9) — the same
+//! `aether.component` mailbox the hub's `load_component` and the substrate
+//! harness send through, which is what makes the mechanism
+//! chassis-agnostic. `boot_manifest.rs` and `package.rs` still call this
+//! entry point "load" in their doc prose where that reads more plainly; the
+//! wire shape underneath is publish-then-spawn.
 
 mod loader;
 
@@ -23,7 +28,6 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-use aether_kinds::{LoadComponent, replica_load_name};
 use aether_substrate::Subname;
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::chassis::Chassis;
@@ -35,35 +39,64 @@ use crate::boot_manifest::{self, PackedComponent};
 
 use loader::{Autoloader, AutoloaderParams, LoadAnswer};
 
-/// A component to auto-load on boot — its wasm bytes, optional init-config
-/// bytes (ADR-0090; empty for none), and the optional load name / export
-/// selector that `aether.component.load` carries (ADR-0096). The package
-/// depot boot and the JSON boot-manifest reader both feed these to the
-/// chassis env's `autoload` list.
+/// A component to auto-load on boot: its wasm bytes, optional init-config
+/// bytes (ADR-0090; empty for none), the namespace it publishes and spawns
+/// from, and the instance keys the loader spawns it at.
+///
+/// `namespace` is the manifest's `export`, else the wasm-declared default
+/// (its `aether.namespace` custom section) when the manifest names none;
+/// when neither is available it stays `None` until the loader resolves it
+/// against the module's `Publish` reply — the sole type it binds, or a
+/// failure naming every type it binds (issue #7155).
+///
+/// `keys` is one key for an unreplicated entry (`Some(name)`, or `None` to
+/// spawn the sole instance unnamed) — an unreplicated singleton always
+/// spawns this way — or N `None` (counter-keyed) instances for a
+/// `replicas: N` entry; a replicated entry's instances are never named,
+/// since [`expand_replicas`] refuses `name` together with `replicas`.
 pub struct AutoloadComponent {
     pub wasm: Vec<u8>,
     pub config: Vec<u8>,
-    pub name: Option<String>,
-    pub export: Option<String>,
+    pub namespace: Option<String>,
+    pub keys: Vec<Option<String>>,
+    /// The manifest's declared export, kept apart from `namespace` — which
+    /// [`expand_replicas`]'s wasm-declared-default fallback may fill — so a
+    /// boot failure names exactly what the manifest wrote
+    /// ([`Self::label`]), never a derived default.
+    label_export: Option<String>,
 }
 
 impl AutoloadComponent {
-    /// The `aether.component.load` request that loads this component — the
-    /// same request the hub's `load_component` and the substrate harness send.
-    fn load_request(self) -> LoadComponent {
-        LoadComponent { wasm: self.wasm, name: self.name, config: self.config, export: self.export }
+    /// Build a component to autoload: `namespace` selects the module's
+    /// exported type to publish and spawn (its label fallback too, absent a
+    /// key naming the one instance), and `keys` is the instance key list
+    /// [`loader::Autoloader`] spawns it at, in order.
+    #[must_use]
+    pub fn new(wasm: Vec<u8>, config: Vec<u8>, namespace: Option<String>, keys: Vec<Option<String>>) -> Self {
+        Self { wasm, config, label_export: namespace.clone(), namespace, keys }
     }
 
-    /// How a boot failure names this component: its `name`, else its
-    /// `export`, else `#<index>` for its position in the boot list.
+    /// How a boot failure names this component: its one key's name (an
+    /// unreplicated entry only — a replicated entry's keys are never
+    /// named), else its declared export, else `#<index>` for its position
+    /// in the boot list.
     fn label(&self, index: usize) -> String {
-        self.name.clone().or_else(|| self.export.clone()).unwrap_or_else(|| format!("#{index}"))
+        let name = match self.keys.as_slice() {
+            [one] => one.clone(),
+            _ => None,
+        };
+        name.or_else(|| self.label_export.clone()).unwrap_or_else(|| format!("#{index}"))
     }
 }
 
 impl From<PackedComponent> for AutoloadComponent {
+    /// The unreplicated conversion with no default-namespace resolution:
+    /// `namespace` is exactly the manifest's `export`, `None` staying
+    /// `None` until [`expand_replicas`]'s wasm-declared-default fallback
+    /// fills it. [`expand_replicas`] is every caller's entry point; this
+    /// impl is the plain field mapping it builds on.
     fn from(packed: PackedComponent) -> Self {
-        Self { wasm: packed.wasm, config: packed.config, name: packed.name, export: packed.export }
+        Self::new(packed.wasm, packed.config, packed.export, vec![packed.name])
     }
 }
 
@@ -94,72 +127,77 @@ pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, Con
     Ok(components)
 }
 
-/// Fan one manifest entry's optional `replicas` count into one
-/// [`AutoloadComponent`] per instance (issue 2626), so a `replicas: N`
-/// entry covers every manifest writer at one expansion site: JSON boot
-/// manifests (`AETHER_BOOT_MANIFEST`), the content-addressed package depot
-/// manifest, and hand-written manifests.
+/// Turn one manifest entry into its [`AutoloadComponent`] (issue 2626,
+/// issue #7155), resolving the namespace it publishes and spawns from and
+/// the instance keys it spawns at — the one expansion site every manifest
+/// writer shares: JSON boot manifests (`AETHER_BOOT_MANIFEST`), the
+/// content-addressed package depot manifest, and hand-written manifests.
+/// Always returns exactly one component, in a `Vec` so its callers can
+/// `.extend()` a growing list uniformly.
 ///
-/// An entry with no `replicas` set stays a single unmodified
-/// `AutoloadComponent` (today's byte-identical behaviour). Otherwise each
-/// instance is named by [`replica_load_name`] — replica 0 claims the bare
-/// `base`, later replicas `{base}-{index}` — where `base` is the caller
-/// name, else the export, else the wasm-declared entry namespace. Every
-/// replica load names a key, and the component host refuses a load that
-/// names a key for a singleton (ADR-0241 §5), so a replicated entry must
-/// select an `#[actor(instanced)]` type; a singleton loads once, unreplicated
-/// and unnamed.
+/// An entry with no `replicas` set spawns the one key its `name` names
+/// (`None` spawns the sole instance unnamed). Otherwise it spawns
+/// `replicas` counter-keyed (`None`) instances, sharing one wasm blob and
+/// one config; `name` together with `replicas` is refused, since a
+/// replicated entry's instances are never named individually.
+///
+/// The entry's `namespace` is its `export` when set. Otherwise the wasm's
+/// declared default (its `aether.namespace` custom section) fills it when
+/// present; when neither is available `namespace` stays `None` and the
+/// loader resolves it later against the module's `Publish` reply — the
+/// sole type it binds, or a failure naming every type it binds. This is
+/// the unselected-load default a defaultless multi-export module (the
+/// `xtask` package sweep, which packs every component with `export: None`)
+/// relied on before this rewrite, so it still resolves the same way.
 ///
 /// # Errors
 ///
 /// Returns a [`ConfigError`] (ADR-0090 §4: a bad known value aborts boot
-/// loudly, never a silent no-op) when `replicas` is `0`, when the wasm's
-/// `aether.namespace` custom section holds invalid UTF-8, or when none of
-/// `name`, `export`, or a wasm-declared namespace is available to name the
-/// replicas.
+/// loudly, never a silent no-op) when `replicas` is `0`, when `name` and
+/// `replicas` are both set, or — only when `export` is unset, so this
+/// entry's wasm is inspected for a declared default — when that wasm can't
+/// be parsed or its `aether.namespace` custom section holds invalid UTF-8.
+/// An entry that names its `export` is never inspected this way, so
+/// malformed wasm behind an explicit `export` still fails only later, at
+/// `Publish`.
 pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>, ConfigError> {
-    let Some(replicas) = packed.replicas else {
-        return Ok(vec![AutoloadComponent::from(packed)]);
-    };
-    if replicas == 0 {
+    if let Some(replicas) = packed.replicas
+        && replicas == 0
+    {
         return Err(ConfigError::unparseable(
             "replicas",
             "0",
             io::Error::new(io::ErrorKind::InvalidInput, "replicas must be at least 1"),
         ));
     }
-    let base = match packed.name.clone().or_else(|| packed.export.clone()) {
-        Some(base) => base,
-        None => match kind_manifest::read_namespace_from_bytes(&packed.wasm) {
-            Ok(Some(declared)) => declared,
-            Ok(None) => {
-                return Err(ConfigError::unparseable(
-                    "replicas",
-                    "wasm namespace",
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "cannot determine a base name for replicas: no `name`, `export`, or \
-                         wasm-declared entry namespace on this manifest entry",
-                    ),
-                ));
-            }
-            Err(e) => {
-                return Err(ConfigError::unparseable(
-                    "replicas",
-                    "wasm namespace",
-                    io::Error::new(io::ErrorKind::InvalidData, e),
-                ));
-            }
-        },
+    if packed.replicas.is_some() && packed.name.is_some() {
+        return Err(ConfigError::unparseable(
+            "replicas",
+            format!("name = {:?}", packed.name),
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "`replicas` and `name` cannot both be set: a replicated entry's instances are \
+                 always counter-keyed, never individually named",
+            ),
+        ));
+    }
+
+    let namespace = match &packed.export {
+        Some(export) => Some(export.clone()),
+        None => kind_manifest::read_namespace_from_bytes(&packed.wasm).map_err(|error| {
+            ConfigError::unparseable(
+                "export",
+                "wasm-declared default namespace",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?,
     };
-    Ok((0..replicas)
-        .map(|index| AutoloadComponent {
-            wasm: packed.wasm.clone(),
-            config: packed.config.clone(),
-            name: Some(replica_load_name(&base, index)),
-            export: packed.export.clone(),
-        })
-        .collect())
+    let keys = match packed.replicas {
+        Some(replicas) => vec![None; replicas as usize],
+        None => vec![packed.name.clone()],
+    };
+
+    Ok(vec![AutoloadComponent::new(packed.wasm, packed.config, namespace, keys)])
 }
 
 /// Load every boot component in list order and wait until each has answered
@@ -168,10 +206,10 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 /// With an empty list this returns at once. Otherwise it labels the
 /// components, spawns the loader at the chassis root, handing it the list and
 /// the sending half of a channel, and blocks the calling (chassis) thread on
-/// the receiving half, one answer per load. The loader sends one load at a
-/// time, so the components come up in manifest order and the answer awaited
-/// next always belongs to the next label: a failure or a timeout names its
-/// entry with no correlation map.
+/// the receiving half, one answer per label. The loader publishes and spawns
+/// one component at a time, so the components come up in manifest order and
+/// the answer awaited next always belongs to the next label: a failure or a
+/// timeout names its entry with no correlation map.
 ///
 /// The chassis is handed back once every load has answered. On a timeout it
 /// is leaked rather than dropped, because its teardown would wait on the load
@@ -260,42 +298,54 @@ mod tests {
         PackedComponent {
             wasm: vec![0, 1, 2, 3],
             config: vec![9, 9, 9],
-            name: Some("handler".to_owned()),
-            export: None,
+            name: None,
+            export: Some("test.handler".to_owned()),
             replicas,
         }
     }
 
     #[test]
-    fn expand_replicas_fans_out_named_instances_with_shared_config() {
-        // A 3-replica entry must yield 3 autoload components, each carrying
-        // the same wasm + config bytes (one shared load spec) but a
-        // distinct name — the bare base for replica 0, `{base}-{index}`
-        // after it. The bug this catches is a fan-out that drops an
-        // instance or lets two instances collide on the same name.
+    fn expand_replicas_fans_out_counter_keyed_instances_with_shared_config() {
+        // A 3-replica entry must yield one `AutoloadComponent` carrying 3
+        // `None` (counter-keyed) instance keys and the shared wasm + config
+        // bytes (one shared load spec). The bug this catches is a fan-out
+        // that drops an instance or produces a named (rather than
+        // counter-keyed) replica.
         let entries = expand_replicas(packed(Some(3))).expect("3 replicas expand");
-        assert_eq!(entries.len(), 3);
-        assert_eq!(
-            entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>(),
-            vec![Some("handler".to_owned()), Some("handler-1".to_owned()), Some("handler-2".to_owned())],
-        );
-        for entry in &entries {
-            assert_eq!(entry.wasm, vec![0, 1, 2, 3]);
-            assert_eq!(entry.config, vec![9, 9, 9]);
-            assert_eq!(entry.export, None);
-        }
+        assert_eq!(entries.len(), 1, "one AutoloadComponent carries every replica's keys");
+        let entry = &entries[0];
+        assert_eq!(entry.keys, vec![None, None, None]);
+        assert_eq!(entry.wasm, vec![0, 1, 2, 3]);
+        assert_eq!(entry.config, vec![9, 9, 9]);
+        assert_eq!(entry.namespace.as_deref(), Some("test.handler"));
     }
 
     #[test]
-    fn expand_replicas_no_replicas_stays_single_unmodified_instance() {
-        // An entry with no `replicas` set must expand to exactly the
-        // one-instance `AutoloadComponent` today's `From` conversion
-        // produces — a regression guard on the default (unreplicated) path.
-        let entries = expand_replicas(packed(None)).expect("no replicas expands to one");
+    fn expand_replicas_no_replicas_stays_single_named_instance() {
+        // An entry with no `replicas` set must expand to exactly one
+        // `AutoloadComponent` with one key — the caller's `name` — a
+        // regression guard on the default (unreplicated) path.
+        let mut entry = packed(None);
+        entry.name = Some("handler".to_owned());
+        let entries = expand_replicas(entry).expect("no replicas expands to one");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name.as_deref(), Some("handler"));
+        assert_eq!(entries[0].keys, vec![Some("handler".to_owned())]);
         assert_eq!(entries[0].wasm, vec![0, 1, 2, 3]);
         assert_eq!(entries[0].config, vec![9, 9, 9]);
+    }
+
+    #[test]
+    fn expand_replicas_rejects_name_with_replicas() {
+        // `name` together with `replicas` is meaningless under counter-keyed
+        // replicas and must abort boot loudly, not silently pick one
+        // instance to name.
+        let mut entry = packed(Some(2));
+        entry.name = Some("handler".to_owned());
+        match expand_replicas(entry) {
+            Err(ConfigError::UnparseableKnown { .. }) => {}
+            Err(e) => panic!("name + replicas returned the wrong config error: {e}"),
+            Ok(_) => panic!("name + replicas must be an error, not a silent pick"),
+        }
     }
 
     #[test]

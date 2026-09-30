@@ -382,13 +382,8 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
-            autoload: vec![AutoloadComponent {
-                wasm,
-                config: Vec::new(),
-                name: None,
-                // `HttpHandler` is a non-entry actor in the bundle.
-                export: Some(HANDLER_NAMESPACE.to_owned()),
-            }],
+            // `HttpHandler` is a non-entry actor in the bundle.
+            autoload: vec![AutoloadComponent::new(wasm, Vec::new(), Some(HANDLER_NAMESPACE.to_owned()), vec![None])],
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
@@ -480,12 +475,12 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
-            autoload: vec![AutoloadComponent {
+            autoload: vec![AutoloadComponent::new(
                 wasm,
-                config: Vec::new(),
-                name: None,
-                export: Some(STREAM_HANDLER_NAMESPACE.to_owned()),
-            }],
+                Vec::new(),
+                Some(STREAM_HANDLER_NAMESPACE.to_owned()),
+                vec![None],
+            )],
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
@@ -574,12 +569,12 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
-            autoload: vec![AutoloadComponent {
+            autoload: vec![AutoloadComponent::new(
                 wasm,
-                config: Vec::new(),
-                name: None,
-                export: Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
-            }],
+                Vec::new(),
+                Some(ROUTED_STREAM_HANDLER_NAMESPACE.to_owned()),
+                vec![None],
+            )],
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
@@ -673,12 +668,7 @@ mod tests {
             runtime: RuntimeConfig::default(),
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
-            autoload: vec![AutoloadComponent {
-                wasm,
-                config: Vec::new(),
-                name: None,
-                export: Some(WS_HANDLER_NAMESPACE.to_owned()),
-            }],
+            autoload: vec![AutoloadComponent::new(wasm, Vec::new(), Some(WS_HANDLER_NAMESPACE.to_owned()), vec![None])],
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
@@ -891,13 +881,8 @@ mod tests {
             chassis_boot: ChassisBootConfig::default(),
             package_settings: ChassisSettings::default(),
             autoload: vec![
-                AutoloadComponent {
-                    wasm: wasm.clone(),
-                    config: Vec::new(),
-                    name: None,
-                    export: Some(HANDLER_NAMESPACE.to_owned()),
-                },
-                AutoloadComponent { wasm, config: Vec::new(), name: None, export: Some(ROUTED_NAMESPACE.to_owned()) },
+                AutoloadComponent::new(wasm.clone(), Vec::new(), Some(HANDLER_NAMESPACE.to_owned()), vec![None]),
+                AutoloadComponent::new(wasm, Vec::new(), Some(ROUTED_NAMESPACE.to_owned()), vec![None]),
             ],
         };
 
