@@ -2,7 +2,6 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-23
-- **Amended:** 2026-09-24 — a transient vendor refusal (a 429 rate limit, a 503, or a 529, or any non-2xx the vendor's `x-should-retry: true` marks retryable) is the recorded outcome `Transient { retry_after_secs }` instead of `Rejected`; the program still sends one fetch and never retries, a caller retries under a new key, and the waiting mechanism is #6630 (#6618).
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (its
 Consequences leave Muse and HTTP out of scope: "Muse / HTTP is not this
