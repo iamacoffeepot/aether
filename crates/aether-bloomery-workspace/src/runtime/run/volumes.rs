@@ -1,21 +1,26 @@
-//! The run's volumes: one for `/work`, shared by every step's container, and
-//! one per mount.
+//! The run's volumes: one for `/work`, shared by every step's container, plus
+//! each mount's cached volume.
 //!
-//! Each is a named volume the daemon names, labelled `aether.workspace=run`,
-//! rather than an anonymous one, because every step runs in its own container
-//! and all of them must see the same `/work`. On a read-only root a volume
-//! mount is also what lets `PUT …/archive` write before `start`.
+//! `/work` is a named volume the daemon names, labelled
+//! `aether.workspace=run`, rather than an anonymous one, because every step
+//! runs in its own container and all of them must see the same `/work`. On a
+//! read-only root a volume mount is also what lets `PUT …/archive` write
+//! before `start`. `/work` is the only per-run volume: mount data and
+//! pointer volumes persist as rebuildable derivatives of the journal (see
+//! [`super::mounts`]) and are never registered for per-run removal.
 //!
-//! A mount's tree is written into its volume through one helper container
-//! from the environment image, created with every mount volume writable and
-//! never started. Step containers then mount those volumes read-only.
+//! A missed mount's tree is written into its data volume through one helper
+//! container from the environment image, created with each missed mount
+//! volume writable and never started. Step containers then mount those
+//! volumes read-only.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
 use super::cleanup::Cleanup;
-use super::{Stop, engine_failed, write_tree};
+use super::mounts;
+use super::{Stop, engine_failed};
 use crate::Mounts;
 use crate::runtime::engine::{Engine, VolumeName};
 use crate::runtime::storage::StorageSession;
@@ -37,7 +42,8 @@ impl Volumes {
     pub const WORK_PATH: &'static str = "/work";
 }
 
-/// Create the volumes and write each mount's tree into its own.
+/// Create the `/work` volume and make sure each mount's cached volume holds
+/// its tree.
 pub fn prepare(
     engine: &Engine,
     cleanup: &mut Cleanup<'_>,
@@ -45,35 +51,18 @@ pub fn prepare(
     image: &str,
     mounts: &Mounts,
 ) -> Result<Volumes, Stop> {
-    let labels = BTreeMap::from([RUN_LABEL]);
-    let mut create = |purpose: &str| {
-        let volume = engine.create_volume(&labels).map_err(engine_failed(format!("creating the {purpose} volume")))?;
-        cleanup.volume(volume.clone());
-        Ok::<_, Stop>(volume)
-    };
+    let work = engine
+        .create_volume(None, &BTreeMap::from([RUN_LABEL]))
+        .map_err(engine_failed(format!("creating the {} volume", Volumes::WORK_PATH)))?;
+    cleanup.volume(work.clone());
 
-    let work = create(Volumes::WORK_PATH)?;
-    let mut volumes = Vec::with_capacity(mounts.as_slice().len());
-    for mount in mounts.as_slice() {
-        let path = format!("/{}", mount.at.as_str());
-        let volume = create(&path)?;
-        volumes.push((path, volume));
-    }
-    if mounts.as_slice().is_empty() {
-        return Ok(Volumes { work, mounts: volumes });
-    }
-
-    let helper = engine.create(&helper_spec(image, &volumes)).map_err(engine_failed("creating the mount helper"))?;
-    cleanup.container(helper.clone());
-    for (mount, (path, _)) in mounts.as_slice().iter().zip(&volumes) {
-        write_tree(engine, session, &helper, path, &mount.tree)?;
-    }
-    Ok(Volumes { work, mounts: volumes })
+    Ok(Volumes { work, mounts: mounts::ensure(engine, cleanup, session, image, mounts)? })
 }
 
-/// A container that exists only to hold the mount volumes writable while
-/// their trees are written. Its command is a placeholder; it never starts.
-fn helper_spec(image: &str, volumes: &[(String, VolumeName)]) -> Value {
+/// A container that exists only to hold the missed mount volumes writable
+/// while their trees are written. Its command is a placeholder; it never
+/// starts.
+pub fn helper_spec(image: &str, volumes: &[(String, VolumeName)]) -> Value {
     let mounts: Vec<Value> = volumes.iter().map(|(path, volume)| volume_mount(volume, path, false)).collect();
     json!({
         "Image": image,

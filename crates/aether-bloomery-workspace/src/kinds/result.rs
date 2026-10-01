@@ -95,6 +95,9 @@ pub struct ToolRecord {
 pub enum Refusal {
     /// The environment cannot be provided. Never a mid-run failure.
     EnvironmentUnavailable,
+    /// A mount volume does not name the cited digest. Never a mid-run
+    /// failure.
+    MountUnavailable,
     /// The environment's platform is not the one the executor runs.
     PlatformMismatch { wanted: Platform, provided: Platform },
     /// The tree's `rust-toolchain.toml` asks for a toolchain the environment

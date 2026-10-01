@@ -54,7 +54,7 @@ impl fmt::Display for ContainerId {
 pub struct VolumeName(String);
 
 impl VolumeName {
-    fn new(name: &str) -> Result<Self, EngineError> {
+    pub(crate) fn new(name: &str) -> Result<Self, EngineError> {
         let valid = !name.is_empty()
             && name.len() <= 255
             && !name.starts_with(['.', '-'])
@@ -219,9 +219,33 @@ impl Engine {
         progress::drain(body).map_err(UploadError::Engine)
     }
 
-    /// Create a volume carrying `labels`, named by the daemon.
-    pub fn create_volume(&self, labels: &BTreeMap<&str, &str>) -> Result<VolumeName, EngineError> {
-        let body = json!({ "Labels": labels }).to_string();
+    /// The labels of the volume `name`, or `None` when the daemon holds
+    /// no such volume.
+    pub fn volume_labels(&self, name: &VolumeName) -> Result<Option<BTreeMap<String, String>>, EngineError> {
+        let target = format!("/{API_VERSION}/volumes/{name}");
+        let response = self.call(Method::Get, &target, RequestBody::Empty)?;
+        if response.status == 404 {
+            return Ok(None);
+        }
+        let inspect = read_json(response.success()?)?;
+        let labels = inspect
+            .get("Labels")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+            .collect();
+        Ok(Some(labels))
+    }
+
+    /// Create a volume carrying `labels`, named by the daemon when `name` is
+    /// `None` and named `name` otherwise.
+    pub fn create_volume(&self, name: Option<&str>, labels: &BTreeMap<&str, &str>) -> Result<VolumeName, EngineError> {
+        let mut body = json!({ "Labels": labels });
+        if let Some(name) = name {
+            body["Name"] = name.into();
+        }
+        let body = body.to_string();
         let target = format!("/{API_VERSION}/volumes/create");
         let created = read_json(self.call(Method::Post, &target, RequestBody::Json(body.as_bytes()))?.success()?)?;
         let name = created

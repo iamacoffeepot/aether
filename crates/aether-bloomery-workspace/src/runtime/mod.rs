@@ -185,8 +185,9 @@ impl NativeActor for WorkspaceCapability {
     /// `scratch`; `Err(Refused)` when the run cannot start as asked;
     /// `Err(Exhausted(Time | Memory))` when a step outran the allotment, after
     /// which a retry is given twice as much of it, up to the budget; or
-    /// `Err(Failed { detail })` when the executor failed. No container or volume
-    /// is left behind. Every input is read from `source` and every output
+    /// `Err(Failed { detail })` when the executor failed. No container and no
+    /// `/work` volume is left behind; the environment image and the mount
+    /// volumes stay as rebuildable derivatives. Every input is read from `source` and every output
     /// staged to it; an `Ok` answers only once every stage is answered, and
     /// what a run that ends any other way staged is cited by nothing. The
     /// reply lands when the whole run is done.

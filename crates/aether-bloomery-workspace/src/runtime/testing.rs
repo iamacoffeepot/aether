@@ -615,8 +615,21 @@ pub struct RunScript<'a> {
     pub output: &'a [u8],
 }
 
+/// What one scripted mount answers: its pointer inspect and, on a miss, the
+/// write that follows it.
+pub enum MountScript<'a> {
+    /// The pointer names `data_volume`, whose mount label equals `hex`.
+    Hit { hex: &'a str, data_volume: &'a str },
+    /// No pointer: the run writes `data_volume` and creates the pointer. A
+    /// `winner` loses the pointer race with 409 and re-inspects to it.
+    Miss { hex: &'a str, data_volume: &'a str, winner: Option<&'a str> },
+}
+
 /// The container id every scripted run's step container gets.
 pub const RUN_CONTAINER: &str = "c0ffee";
+
+/// The container id a scripted run's mount helper gets.
+pub const RUN_HELPER: &str = "dec0de";
 
 /// The name every scripted run's `/work` volume gets.
 pub const RUN_VOLUME: &str = "v0lume";
@@ -651,6 +664,122 @@ impl RunScript<'_> {
             StubReply::with_length(204, Vec::new()),
         ]
     }
+
+    /// The replies a single-step run with `mounts` and no stdin reads, in
+    /// order, when the environment image is already present: the platform and
+    /// image inspects, the `/work` volume create, one pointer inspect per
+    /// mount and one data volume create per miss, the helper container
+    /// create, one `PUT …/archive` per missed mount, each miss's pointer create (a lost race's
+    /// 409 is followed by its re-inspect), and one `PUT …/archive` for
+    /// `/work`, then the step's create, start, stats, wait, inspect, logs,
+    /// output, and removals, plus a lost race's own data volume removal.
+    #[must_use]
+    pub fn mount_replies(&self, mounts: &[MountScript<'_>]) -> Vec<StubReply> {
+        let only = |kind: u8| -> Vec<(u8, &[u8])> {
+            self.logs.iter().filter(|(stream, _)| *stream == kind).copied().collect()
+        };
+        let is_miss = |mount: &&MountScript<'_>| matches!(mount, MountScript::Miss { .. });
+        let misses: Vec<&MountScript<'_>> = mounts.iter().filter(is_miss).collect();
+        let lost: Vec<&MountScript<'_>> = misses.iter().filter(|mount| mount.winner().is_some()).copied().collect();
+
+        let mut replies = vec![
+            StubReply::with_length(200, r#"{"Architecture":"x86_64","OSType":"linux"}"#),
+            StubReply::with_length(
+                200,
+                format!(r#"{{"Config":{{"Labels":{{"aether.workspace.environment":"{}"}}}}}}"#, self.environment),
+            ),
+            StubReply::with_length(201, format!(r#"{{"Name":"{RUN_VOLUME}"}}"#)),
+        ];
+        replies.extend(mounts.iter().flat_map(|mount| match mount {
+            MountScript::Hit { hex, data_volume } => vec![pointer_reply(hex, data_volume)],
+            MountScript::Miss { data_volume, .. } => vec![
+                StubReply::with_length(404, r#"{"message":"No such volume"}"#),
+                StubReply::with_length(201, format!(r#"{{"Name":"{data_volume}"}}"#)),
+            ],
+        }));
+        if !misses.is_empty() {
+            replies.push(StubReply::with_length(201, format!(r#"{{"Id":"{RUN_HELPER}","Warnings":[]}}"#)));
+            replies.extend(misses.iter().map(|_| StubReply::with_length(200, Vec::new())));
+            replies.extend(misses.iter().map(|mount| match mount.winner() {
+                Some(_) => StubReply::with_length(
+                    409,
+                    format!(r#"{{"message":"volume aether-workspace-mount-{} exists"}}"#, mount.hex()),
+                ),
+                None => StubReply::with_length(201, format!(r#"{{"Name":"aether-workspace-mount-{}"}}"#, mount.hex())),
+            }));
+            replies.extend(lost.iter().map(|mount| {
+                let winner = mount.winner().unwrap_or_default();
+                pointer_reply(mount.hex(), winner)
+            }));
+        }
+        replies.extend([
+            StubReply::with_length(201, format!(r#"{{"Id":"{RUN_CONTAINER}","Warnings":[]}}"#)),
+            StubReply::with_length(200, Vec::new()),
+            StubReply::with_length(204, Vec::new()),
+            StubReply::chunked(200, RUN_SAMPLES.iter().map(|&sample| stats_stream(&[sample])).collect()),
+            StubReply::chunked(200, vec![br#"{"StatusCode":0,"Error":null}"#.to_vec()]),
+            StubReply::with_length(200, format!(r#"{{"State":{{"ExitCode":{},"OOMKilled":false}}}}"#, self.exit_code)),
+            StubReply::chunked(200, vec![log_stream(self.logs)]),
+            StubReply::chunked(200, vec![log_stream(&only(1))]),
+            StubReply::chunked(200, vec![log_stream(&only(2))]),
+            StubReply::chunked(200, self.output.chunks(64 * 1024).map(<[u8]>::to_vec).collect()),
+        ]);
+        if !misses.is_empty() {
+            replies.push(StubReply::with_length(204, Vec::new()));
+        }
+        replies.extend([StubReply::with_length(204, Vec::new()), StubReply::with_length(204, Vec::new())]);
+        replies.extend(lost.iter().map(|_| StubReply::with_length(204, Vec::new())));
+        replies
+    }
+
+    /// The pointer inspect's answer when its mount label names another hex:
+    /// a label check that refuses rather than mounts the wrong tree.
+    #[must_use]
+    pub fn mismatched_pointer(hex: &str) -> StubReply {
+        StubReply::with_length(
+            200,
+            format!(
+                r#"{{"Name":"aether-workspace-mount-{hex}","Labels":{{"aether.workspace.mount":"00","aether.workspace.mount.data":"v9left"}}}}"#
+            ),
+        )
+    }
+}
+
+impl MountScript<'_> {
+    /// The mount tree's digest, in hex.
+    #[must_use]
+    pub fn hex(&self) -> &str {
+        match *self {
+            Self::Hit { hex, .. } | Self::Miss { hex, .. } => hex,
+        }
+    }
+
+    /// The daemon-named data volume the hit mounts or the miss writes.
+    #[must_use]
+    pub fn data_volume(&self) -> &str {
+        match *self {
+            Self::Hit { data_volume, .. } | Self::Miss { data_volume, .. } => data_volume,
+        }
+    }
+
+    /// The winner's data volume a lost pointer race re-inspects to, if lost.
+    #[must_use]
+    pub fn winner(&self) -> Option<&str> {
+        match *self {
+            Self::Hit { .. } => None,
+            Self::Miss { winner, .. } => winner,
+        }
+    }
+}
+
+/// The pointer inspect's answer naming `data_volume` for `hex`.
+fn pointer_reply(hex: &str, data_volume: &str) -> StubReply {
+    StubReply::with_length(
+        200,
+        format!(
+            r#"{{"Name":"aether-workspace-mount-{hex}","Labels":{{"aether.workspace.mount":"{hex}","aether.workspace.mount.data":"{data_volume}"}}}}"#
+        ),
+    )
 }
 
 /// A ustar archive written entry by entry, as a daemon's export spells it.
