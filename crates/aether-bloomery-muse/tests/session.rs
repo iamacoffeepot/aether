@@ -14,14 +14,15 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_muse::{
     Answered, ContinueInput, Echo, EchoResult, Endpoint, Failure, ModelName, MuseSession, MuseTurn, OfferedTools,
-    OpenInput, OutputBudget, ReasoningEffort, RecordInput, RestReason, Role, Session, SessionContinue, SessionKey,
-    SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite,
-    TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
+    OpenInput, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session, SessionContinue,
+    SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead,
+    TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
     AsyncProgram, ClockUntil, Edited, Nil, Pending, PollResult, Program, Reactor, Started, invoke, start_async, tooled,
 };
+use aether_bloomery_workspace::TreePath;
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::{FetchResult, HttpHeader};
 
@@ -1006,5 +1007,66 @@ fn a_session_lists_reads_edits_and_greps_its_tree_and_rests_with_the_edit() -> T
     assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, edited.tree()));
 
     assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+/// The fixture's read call with its arguments replaced by `arguments`, a JSON object spelled as it sits in the
+/// fixture's escaped string.
+fn reading(arguments: &str) -> String {
+    CALLED_LIST_READ_EDIT_GREP.replace(r#"{\"path\": \"src/lib.rs\"}"#, arguments)
+}
+
+#[test]
+fn a_read_whose_integers_arrive_as_strings_runs_the_requested_window() -> TestResult {
+    // Catches string integers refused at the decode, and a coercion that runs the read over any other window.
+    let windowed = reading(r#"{\"path\": \"src/lib.rs\", \"from_line\": \"1\", \"lines\": \"1\"}"#);
+    let mut driver = Driver::new(&[&windowed, COMPLETED]);
+    let (opened, opened_tree) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let read = &calls[1];
+    let args = ReadArgs::new(TreePath::new("src/lib.rs")?, Some(1), Some(1));
+    assert_eq!(decoded(read).cast::<ReadArgs>(), Some(Ref::of_encoded(&args)?), "decodes as the integers would");
+
+    let listed = driver.follow(first_turn);
+    let asked = asked(&driver, listed);
+    assert_eq!(asked.name.as_str(), TreeRead::NAME);
+    assert_eq!(asked.input, bound(opened_tree, read));
+    let read_run = driver.follow(listed);
+    let viewed: Viewed = driver.result(read_run);
+    assert_eq!(viewed.text(), "1\tpub fn smelt() {}");
+    Ok(())
+}
+
+#[test]
+fn a_read_with_a_non_numeric_string_is_refused_with_how_to_fix_it_and_the_turn_continues() -> TestResult {
+    // Catches a mistyped integer that runs, or is answered with the codec's terse refusal instead of the correction.
+    let mistyped = reading(r#"{\"path\": \"src/lib.rs\", \"from_line\": \"one\"}"#);
+    let mut driver = Driver::new(&[&mistyped, COMPLETED]);
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let ToolInput::Refused { refusal, .. } = calls[1].input() else {
+        panic!("expected the read to refuse, got {:?}", calls[1].input());
+    };
+    let text = "The arguments do not decode as muse.tree.read.args: `from_line` must be a JSON number, a whole number \
+                from 0 to 4294967295, e.g. `3`, not `\"one\"`";
+    assert_eq!(*refusal, Ref::of_text(text));
+
+    let mut trigger = first_turn;
+    while asked(&driver, trigger).name.as_str() != MuseTurn::NAME {
+        trigger = driver.follow(trigger);
+    }
+    let CallInput::Value(next) = asked(&driver, trigger).input else {
+        panic!("expected the next turn as a value");
+    };
+    let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
+    let answered = next.items().iter().any(|item| {
+        matches!(item, TurnItem::CallOutput { call_id, output: ToolOutput::Refused(at) }
+            if call_id == calls[1].call_id() && *at == Ref::of_text(text))
+    });
+    assert!(answered, "the next turn carries the correction as the read's output");
     Ok(())
 }
