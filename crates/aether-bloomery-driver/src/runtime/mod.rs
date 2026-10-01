@@ -85,6 +85,7 @@ pub use self::core::{
     EvaluateTicket, EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, StatusTicket,
     WarmTicket, WatchTicket,
 };
+pub use self::programs::{InvocationLimit, InvocationLimitError};
 pub use self::steps::STEP_TARGET;
 
 use std::collections::{BTreeMap, HashMap};
@@ -119,7 +120,8 @@ const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 
 /// Composer-supplied construction input: the unit's key, the born journal
 /// owner's reference, the reference of the workspace the unit's programs
-/// run through, and the clock and tick period its timers fire on.
+/// run through, the clock and tick period its timers fire on, and how many
+/// requests one bundle runs at once.
 ///
 /// The journal reference is what the journal's own `spawn_actor(..).finish()`
 /// returns, so holding it proves the journal was born (ADR-0230); a driver
@@ -142,6 +144,9 @@ pub struct DriverParams {
     /// How long one tick waits before it reads the clock. A timer fires
     /// within about one tick after its due time while the engine is healthy.
     pub tick: Duration,
+    /// How many requests one bundle has active at once, each in its own
+    /// invocation; the rest wait in FIFO order (ADR-0226 decision 3).
+    pub invocations: InvocationLimit,
 }
 
 /// The output of one tick's wait: the period elapsed and the clock is due a
@@ -204,8 +209,8 @@ impl NativeActor for BundleDriver {
         params: DriverParams,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<BundleDriverState, BootError> {
-        let DriverParams { unit, journal, workspace, clock, tick } = params;
-        let (core, startup) = ProgramCore::start(limit);
+        let DriverParams { unit, journal, workspace, clock, tick, invocations } = params;
+        let (core, startup) = ProgramCore::start(limit, invocations);
         let source = ActorPath::<JournalActor>::instance(unit.as_load_name()).narrow::<ArtifactStorage>();
         Ok(BundleDriverState {
             core,

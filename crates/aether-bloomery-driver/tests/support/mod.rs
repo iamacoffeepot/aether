@@ -15,7 +15,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
 use aether_bloomery_driver::{
-    ArtifactsTicket, CallerId, Command, EvaluateTicket, LoadOutcome, LoadTicket, ProgramCore, RootRoles, WatchTicket,
+    ArtifactsTicket, CallerId, Command, EvaluateTicket, InvocationLimit, LoadOutcome, LoadTicket, ProgramCore,
+    RootRoles, WatchTicket,
 };
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
@@ -123,15 +124,25 @@ pub struct World {
 }
 
 impl World {
-    /// Start a core under [`LIMIT_BYTES`] over an empty journal truth.
+    /// Start a core under [`LIMIT_BYTES`] and the default invocation limit
+    /// over an empty journal truth.
+    #[must_use]
+    pub fn open() -> (Self, Vec<Command>) {
+        Self::open_with(InvocationLimit::DEFAULT.get())
+    }
+
+    /// Start a core under [`LIMIT_BYTES`] and an invocation limit of
+    /// `invocations` per bundle over an empty journal truth.
     ///
     /// # Panics
     ///
-    /// Panics if [`LIMIT_BYTES`] ever leaves the valid closure-limit range.
+    /// Panics if `invocations` is zero, or if [`LIMIT_BYTES`] ever leaves the
+    /// valid closure-limit range.
     #[must_use]
-    pub fn open() -> (Self, Vec<Command>) {
+    pub fn open_with(invocations: usize) -> (Self, Vec<Command>) {
+        let invocations = InvocationLimit::new(invocations).expect("test invocation limit is non-zero");
         let limit = ClosureLimit::new(LIMIT_BYTES).expect("test limit is valid");
-        let (core, commands) = ProgramCore::start(limit);
+        let (core, commands) = ProgramCore::start(limit, invocations);
         let world = Self {
             core,
             journal: Vec::new(),

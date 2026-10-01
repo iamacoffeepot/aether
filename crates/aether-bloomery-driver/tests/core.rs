@@ -7,6 +7,8 @@
 mod program_world;
 mod support;
 
+use std::collections::BTreeMap;
+
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
@@ -55,6 +57,48 @@ fn invoke_ticket(manual: &[Command]) -> InvokeTicket {
         panic!("expected exactly one manual invoke, got {manual:?}");
     };
     *ticket
+}
+
+/// Every manual command's invoke ticket, keyed by its request seq.
+fn invoke_tickets(manual: &[Command]) -> BTreeMap<u64, InvokeTicket> {
+    manual
+        .iter()
+        .map(|command| {
+            let Command::Invoke { ticket, request, .. } = command else {
+                panic!("expected only manual invokes, got {manual:?}");
+            };
+            (request.seq(), *ticket)
+        })
+        .collect()
+}
+
+/// Store one text input and script its closure.
+fn text_input(world: &mut World, text: &[u8]) -> Digest {
+    let input = world.store(Utf8Text::ID, text);
+    world.script_closure(input, vec![ClosureArtifact::new(Utf8Text::ID, text.to_vec())]);
+    input
+}
+
+/// A completed invocation of request `seq` staging one opaque result.
+fn completed(seq: u64, result: &[u8]) -> Invoked {
+    Invoked::Completed {
+        seq,
+        result: artifact_digest(OpaqueBytes::ID, result),
+        staged: vec![EncodedArtifact::opaque_bytes(result)],
+    }
+}
+
+/// Every committed transition's cause and input, in journal order.
+fn recorded_transitions(world: &World) -> Vec<(u64, Digest)> {
+    world
+        .committed
+        .iter()
+        .flat_map(|append| append.records())
+        .filter_map(|record| match record {
+            DriverRecord::Transition { cause, record } => Some((*cause, record.input)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -232,9 +276,65 @@ fn fence_conflict_refolds_and_resolves_the_head_again() {
 }
 
 #[test]
-fn one_invoke_in_flight_per_root() {
-    // Catches concurrent invocations and double loads of one digest.
-    let (mut world, initial) = World::open();
+fn invokes_up_to_the_limit_per_root_and_the_rest_wait() {
+    // Catches a bundle that still runs one request at a time, a shared read
+    // or load issued twice or waking only one of its waiters, a request
+    // started past the limit, an outcome recorded against another request
+    // when requests finish out of order, and a finished request that does
+    // not release the next waiter.
+    let (mut world, initial) = World::open_with(2);
+    let fixed = fixtures(&mut world);
+    let second_input = text_input(&mut world, b"second-text");
+    let third_input = text_input(&mut world, b"third-text");
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+
+    let (first, first_commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let (second, second_commands) = world.core.call(call(HEAD, PROGRAM, second_input, ORIGIN, 2));
+    let manual = world.drive(first_commands.into_iter().chain(second_commands).collect());
+    let tickets = invoke_tickets(&manual);
+    assert_eq!(tickets.keys().copied().collect::<Vec<_>>(), [2, 3], "both requests invoke before either answers");
+    assert_eq!(world.reads_seen, [fixed.bundle], "one bundle read");
+    assert_eq!(world.loads_seen, [fixed.bundle], "one load");
+
+    let (third, third_commands) = world.core.call(call(HEAD, PROGRAM, third_input, ORIGIN, 3));
+    let manual = world.drive(third_commands);
+    assert!(manual.is_empty(), "the third request waits past the limit");
+    assert_eq!(world.invokes_seen.len(), 2);
+
+    let reply = world.core.on_invoked(tickets[&3], completed(3, b"second-result"));
+    let manual = world.drive(reply);
+    let third_ticket = invoke_ticket(&manual);
+    assert_eq!(
+        world.invokes_seen.last().map(|(_, invoke)| invoke.seq()),
+        Some(4),
+        "the second's outcome releases the third"
+    );
+    assert!(world.answers.iter().map(|(caller, _)| *caller).eq([second]), "only the second has answered");
+
+    let reply = world.core.on_invoked(tickets[&2], completed(2, b"first-result"));
+    let manual = world.drive(reply);
+    assert!(manual.is_empty());
+    let reply = world.core.on_invoked(third_ticket, completed(4, b"third-result"));
+    let manual = world.drive(reply);
+    assert!(manual.is_empty());
+
+    assert!(world.abort.is_none(), "{:?}", world.abort);
+    assert_eq!(world.reads_seen.len(), 1, "the bundle is never re-read");
+    assert_eq!(world.loads_seen.len(), 1, "the bundle is never reloaded");
+    assert_eq!(
+        recorded_transitions(&world),
+        [(3, second_input), (2, fixed.input), (4, third_input)],
+        "each outcome is recorded against its own request, in completion order"
+    );
+    assert!(world.answers.iter().map(|(caller, _)| *caller).eq([second, first, third]));
+}
+
+#[test]
+fn a_limit_of_one_keeps_one_invoke_in_flight() {
+    // Catches an invocation limit of one that still runs two requests of one
+    // digest at once, and a double load of one digest.
+    let (mut world, initial) = World::open_with(1);
     let fixed = fixtures(&mut world);
     let other = world.store(Utf8Text::ID, b"other-text");
     world.script_closure(other, vec![ClosureArtifact::new(Utf8Text::ID, b"other-text".to_vec())]);
@@ -271,6 +371,37 @@ fn one_invoke_in_flight_per_root() {
     assert!(manual.is_empty());
     assert!(world.abort.is_none());
     assert_eq!(world.answers.len(), 2);
+}
+
+#[test]
+fn a_fault_on_one_request_leaves_the_other_in_flight() {
+    // Catches a fault that releases a request other than its own: the
+    // in-flight request's reply would then find no active request and abort.
+    let (mut world, initial) = World::open_with(2);
+    let fixed = fixtures(&mut world);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+    let (first, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    let ticket = invoke_ticket(&manual);
+
+    let (unknown, commands) = world.core.call(call(HEAD, "test.other", fixed.input, ORIGIN, 2));
+    let manual = world.drive(commands);
+    assert!(manual.is_empty(), "an unknown name faults at once");
+    assert_eq!(world.answers.len(), 1, "the unknown name is answered while the first is in flight");
+    assert_eq!(world.answers[0].0, unknown);
+    assert!(
+        matches!(&world.answers[0].1, CallOutcome::Fault { key: 2, fault, .. } if matches!(fault.reason, FaultReason::BundleUnavailable { .. }))
+    );
+
+    let reply =
+        world.core.on_invoked(ticket, Invoked::Completed { seq: 2, result: fixed.result, staged: vec![fixed.staged] });
+    let manual = world.drive(reply);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none(), "{:?}", world.abort);
+    assert_eq!(world.answers.len(), 2);
+    assert_eq!(world.answers[1].0, first);
+    assert!(matches!(&world.answers[1].1, CallOutcome::Transition { key: 1, .. }));
 }
 
 #[test]

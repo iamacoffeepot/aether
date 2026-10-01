@@ -3,8 +3,10 @@
 
 mod api;
 mod call;
+mod limit;
 mod outcome;
 mod pipeline;
 mod queue;
 
+pub use limit::{InvocationLimit, InvocationLimitError};
 pub use queue::DigestQueue;

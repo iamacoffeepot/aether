@@ -1,10 +1,10 @@
-//! One digest's program request queue: the active request's step plus its waiting FIFO.
+//! One digest's program request queue: the active requests' steps plus a waiting FIFO.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{ClosureArtifact, Program};
 
-/// The active request's progress through the pipeline.
+/// One active request's progress through the pipeline.
 #[derive(Debug)]
 pub enum Step {
     /// Waiting on the digest's shared read.
@@ -28,32 +28,26 @@ pub enum Step {
     },
 }
 
-/// The one request driving a digest, from its section check to its outcome.
-#[derive(Debug)]
-pub struct Active {
-    /// The `Requested` seq.
-    pub seq: u64,
-    /// The request's progress.
-    pub step: Step,
-}
-
-/// One digest's active request and waiting FIFO.
+/// One digest's active requests and waiting FIFO.
+///
+/// Up to the driver's invocation limit are active at once, each from its
+/// section check to its outcome; the rest wait in FIFO order.
 #[derive(Debug, Default)]
 pub struct DigestQueue {
-    /// The request driving this digest, if any.
-    pub active: Option<Active>,
+    /// Each active request's progress, keyed by its `Requested` seq.
+    pub active: BTreeMap<u64, Step>,
     /// Seqs waiting their turn, in FIFO order.
     pub waiting: VecDeque<u64>,
 }
 
 impl DigestQueue {
-    /// The active request's step, when `seq` is the one driving this digest.
+    /// The step of `seq`, when it is active on this digest.
     pub fn step(&self, seq: u64) -> Option<&Step> {
-        self.active.as_ref().filter(|active| active.seq == seq).map(|active| &active.step)
+        self.active.get(&seq)
     }
 
-    /// The active request's step, when `seq` is the one driving this digest.
+    /// The step of `seq`, when it is active on this digest.
     pub fn step_mut(&mut self, seq: u64) -> Option<&mut Step> {
-        self.active.as_mut().filter(|active| active.seq == seq).map(|active| &mut active.step)
+        self.active.get_mut(&seq)
     }
 }

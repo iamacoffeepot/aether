@@ -3,12 +3,14 @@
 //!
 //! Steps 3 and 5 use the digest's shared read and load, and either can be in
 //! flight for the reactor role: a request that finds the other role's read or
-//! load waits on it instead of issuing its own. One request per digest is
-//! active from its section check until its `Invoked` reply or its pre-`Invoke`
-//! fault. Each continuation below runs for a ticket the core issued, so a
-//! missing queue, a mismatched active request, or an unexpected state reports
-//! an internal inconsistency and aborts rather than deciding from a view the
-//! core cannot explain.
+//! load waits on it instead of issuing its own. Up to the invocation limit of
+//! requests per digest are active at once, each from its section check until
+//! its `Invoked` reply or its pre-`Invoke` fault; they share the digest's one
+//! read and one load, and each outcome is recorded against its own request in
+//! the order they finish. Each continuation below runs for a ticket the core
+//! issued, so a missing queue, a request that is not active, or an unexpected
+//! state reports an internal inconsistency and aborts rather than deciding
+//! from a view the core cannot explain.
 
 use std::mem::replace;
 
@@ -19,7 +21,7 @@ use aether_bloomery_kinds::{
 use aether_bloomery_program::unreachable_staged;
 
 use super::api::provided;
-use super::queue::{Active, Step};
+use super::queue::Step;
 use crate::runtime::bundles::{LoadState, Programs};
 use crate::runtime::clock::is_clock;
 use crate::runtime::core::{ClosureTicket, Command, InvokeTicket, PendingWrite, ProgramCore};
@@ -27,8 +29,9 @@ use crate::runtime::core::{ClosureTicket, Command, InvokeTicket, PendingWrite, P
 impl ProgramCore {
     /// Queue one recorded request on its bundle's digest queue.
     ///
-    /// A request that finds no active request drives the digest from its
-    /// current state; otherwise it waits its turn in the FIFO. A clock request
+    /// A request that finds the digest below its invocation limit starts from
+    /// the digest's current state; otherwise it waits its turn in the FIFO. A
+    /// clock request
     /// never enters a queue: it is armed on the driver's timer heap and holds
     /// no slot while it waits (ADR-0245).
     pub(crate) fn enqueue_request(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
@@ -39,30 +42,39 @@ impl ProgramCore {
             }
             return;
         }
-        let idle = {
+        let room = {
             let queue = self.queues.entry(bundle).or_default();
             queue.waiting.push_back(seq);
-            queue.active.is_none()
+            queue.active.len() < self.invocations.get()
         };
-        if idle {
-            self.release(bundle, out);
+        if room {
+            self.release(bundle, None, out);
         }
     }
 
-    /// Release a digest's active request, then start its waiters in FIFO
-    /// order until one is left waiting on a reply.
+    /// Release a digest's `finished` request, if any, then start its waiters
+    /// in FIFO order until the invocation limit is reached or none is left.
     ///
     /// A waiter that finishes at once (an unavailable digest or an unknown
-    /// name) queues its fault and the loop moves to the next, so a long
-    /// queue behind a failed bundle drains without recursion.
-    pub(crate) fn release(&mut self, bundle: Digest, out: &mut Vec<Command>) {
+    /// name) queues its fault, frees its place, and the loop moves to the
+    /// next, so a long queue behind a failed bundle drains without recursion.
+    pub(crate) fn release(&mut self, bundle: Digest, finished: Option<u64>, out: &mut Vec<Command>) {
+        let limit = self.invocations.get();
+        let mut done = finished;
         while let Some(queue) = self.queues.get_mut(&bundle) {
-            queue.active = None;
+            if let Some(seq) = done.take() {
+                queue.active.remove(&seq);
+            }
+            if queue.active.len() >= limit {
+                break;
+            }
             let Some(seq) = queue.waiting.pop_front() else {
                 break;
             };
-            queue.active = Some(Active { seq, step: Step::Declaring });
-            if !self.start_active(bundle, seq, out) {
+            queue.active.insert(seq, Step::Declaring);
+            if self.start_active(bundle, seq, out) {
+                done = Some(seq);
+            } else if self.aborted {
                 break;
             }
         }
@@ -71,7 +83,7 @@ impl ProgramCore {
         }
     }
 
-    /// Start a newly active request from its digest's shared state.
+    /// Start an active request from its digest's shared state.
     ///
     /// A digest the reactor role is reading or loading is a normal thing to
     /// find: the request waits on that read or load. A digest that declares
@@ -101,7 +113,7 @@ impl ProgramCore {
         }
     }
 
-    /// Check the active request's name against the decoded declarations,
+    /// Check an active request's name against the decoded declarations,
     /// then read the input's closure. An unknown name, or a program that
     /// binds an API with no provider in this unit, faults without any closure
     /// read or load; the bundle stays usable for its other programs.
@@ -141,35 +153,40 @@ impl ProgramCore {
         false
     }
 
-    /// Fault the active request, then release its digest to the next waiter.
+    /// Fault an active request, then release its place to the next waiter.
     fn fail_active(&mut self, bundle: Digest, seq: u64, reason: FaultReason, out: &mut Vec<Command>) {
         if self.record_fault(seq, reason, out) {
-            self.release(bundle, out);
+            self.release(bundle, Some(seq), out);
         }
     }
 
-    /// Wake the digest's program request after its shared read or load finished.
+    /// Wake the digest's program requests after its shared read or load finished.
     ///
-    /// A request waiting on the read reruns its start; a request waiting on
-    /// the load invokes or faults from the outcome. Any other step has its
-    /// own reply in flight, so there is nothing to resume.
+    /// Every request waiting on the read reruns its start; every request
+    /// waiting on the load invokes or faults from the outcome, in seq order.
+    /// Any other step has its own reply in flight, so there is nothing to
+    /// resume. The waiting seqs are taken before any resumes, so a waiter a
+    /// release starts here begins from the finished state on its own.
     pub(crate) fn resume_program(&mut self, bundle: Digest, out: &mut Vec<Command>) {
-        let Some(seq) = self.active_seq_for(&bundle) else {
+        let Some(queue) = self.queues.get(&bundle) else {
             return;
         };
-        if self
-            .queues
-            .get(&bundle)
-            .is_some_and(|queue| queue.active.as_ref().is_some_and(|active| matches!(active.step, Step::Declaring)))
-        {
-            if self.start_active(bundle, seq, out) {
-                self.release(bundle, out);
+        let declaring: Vec<u64> =
+            queue.active.iter().filter(|(_, step)| matches!(step, Step::Declaring)).map(|(seq, _)| *seq).collect();
+        let loading: Vec<u64> =
+            queue.active.iter().filter(|(_, step)| matches!(step, Step::Loading { .. })).map(|(seq, _)| *seq).collect();
+        for seq in declaring {
+            if self.aborted {
+                return;
             }
-            return;
+            if self.start_active(bundle, seq, out) {
+                self.release(bundle, Some(seq), out);
+            }
         }
-        if self.queues.get(&bundle).is_some_and(|queue| {
-            queue.active.as_ref().is_some_and(|active| matches!(active.step, Step::Loading { .. }))
-        }) {
+        for seq in loading {
+            if self.aborted {
+                return;
+            }
             self.resume_loading(bundle, seq, out);
         }
     }
@@ -199,7 +216,7 @@ impl ProgramCore {
         }
     }
 
-    /// Continue the active request with its input closure.
+    /// Continue an active request with its input closure.
     pub(crate) fn continue_closure(
         &mut self,
         bundle: Digest,
@@ -207,7 +224,7 @@ impl ProgramCore {
         result: ReadClosureResult,
         out: &mut Vec<Command>,
     ) {
-        if self.active_seq_for(&bundle) != Some(seq) {
+        if !self.is_active(&bundle, seq) {
             self.abort(format!("closure reply for request {seq} arrived with no matching active request"), out);
             return;
         }
@@ -227,9 +244,9 @@ impl ProgramCore {
         }
     }
 
-    /// Continue the active request with its invocation reply.
+    /// Continue an active request with its invocation reply.
     pub(crate) fn continue_invoked(&mut self, bundle: Digest, seq: u64, invoked: Invoked, out: &mut Vec<Command>) {
-        if self.active_seq_for(&bundle) != Some(seq) {
+        if !self.is_active(&bundle, seq) {
             self.abort(format!("invoked reply for request {seq} arrived with no matching active request"), out);
             return;
         }
@@ -268,9 +285,9 @@ impl ProgramCore {
         }
     }
 
-    /// The active request's seq, if its digest queue exists.
-    fn active_seq_for(&self, bundle: &Digest) -> Option<u64> {
-        self.queues.get(bundle)?.active.as_ref().map(|active| active.seq)
+    /// Whether `seq` is one of the digest's active requests.
+    fn is_active(&self, bundle: &Digest, seq: u64) -> bool {
+        self.queues.get(bundle).is_some_and(|queue| queue.active.contains_key(&seq))
     }
 
     /// Check a found closure's input kind, then load or invoke.
@@ -335,7 +352,7 @@ impl ProgramCore {
         }
     }
 
-    /// Park the active request on the digest's shared load.
+    /// Park an active request on the digest's shared load.
     fn wait_on_load(
         &mut self,
         bundle: Digest,
@@ -351,7 +368,7 @@ impl ProgramCore {
         *step = Step::Loading { declaration, closure };
     }
 
-    /// Send the active request's `Invoke` to its digest root.
+    /// Send an active request's `Invoke` to its digest root.
     fn emit_invoke(
         &mut self,
         bundle: Digest,
@@ -427,7 +444,7 @@ impl ProgramCore {
         }
         let record = DriverRecord::Transition { cause: seq, record: Transition { program, input, result } };
         self.journal.queue_back(PendingWrite::Outcome { request: seq, artifacts: staged, record });
-        self.release(bundle, out);
+        self.release(bundle, Some(seq), out);
     }
 }
 

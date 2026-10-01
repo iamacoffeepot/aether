@@ -28,7 +28,7 @@ use aether_bloomery_kinds::{
 use self::artifacts::{ARTIFACT_CACHE_BYTES, ArtifactCache};
 use crate::runtime::bundles::BundleTable;
 use crate::runtime::clock::{Timers, is_clock};
-use crate::runtime::programs::DigestQueue;
+use crate::runtime::programs::{DigestQueue, InvocationLimit};
 use crate::runtime::reactors::{CommittedRouting, Routing};
 
 pub use command::{ApiReply, Command, LoadOutcome, RootRoles};
@@ -72,6 +72,8 @@ pub struct ProgramCore {
     pub(crate) queues: BTreeMap<Digest, DigestQueue>,
     pub(crate) routing: Routing,
     pub(crate) limit: ClosureLimit,
+    /// How many requests one bundle has active at once.
+    pub(crate) invocations: InvocationLimit,
     pub(crate) next_ticket: u64,
     pub(crate) recovered: bool,
     pub(crate) aborted: bool,
@@ -94,15 +96,17 @@ pub struct ProgramCore {
 }
 
 impl ProgramCore {
-    /// Begin catching up from the empty prefix under a closure byte budget.
+    /// Begin catching up from the empty prefix under a closure byte budget
+    /// and a per-bundle invocation limit.
     #[must_use]
-    pub fn start(limit: ClosureLimit) -> (Self, Vec<Command>) {
+    pub fn start(limit: ClosureLimit, invocations: InvocationLimit) -> (Self, Vec<Command>) {
         let mut core = Self {
             journal: Journal::new(),
             bundles: BundleTable::default(),
             queues: BTreeMap::new(),
             routing: Routing::new(),
             limit,
+            invocations,
             next_ticket: 0,
             recovered: false,
             aborted: false,

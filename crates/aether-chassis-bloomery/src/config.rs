@@ -1,5 +1,6 @@
 //! The bloomery chassis knobs: the unit list, the closure byte budget, the
-//! read-cache budget, and the driver's clock tick.
+//! read-cache budget, the driver's clock tick, and its per-bundle invocation
+//! limit.
 //!
 //! [`BloomeryConfig`] is the chassis's own derive-`Config` member, resolved off
 //! the source stack into [`BloomeryEnv`](crate::chassis::BloomeryEnv) and declared
@@ -15,6 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use aether_bloomery_driver::InvocationLimit;
 use aether_bloomery_journal::ReadCacheBudget;
 use aether_bloomery_kinds::{ClosureLimit, UnitKey};
 use aether_substrate::chassis::error::BootError;
@@ -74,6 +76,17 @@ pub struct BloomeryConfig {
     /// only while a timer is armed. `0` is refused: a zero period would spin.
     #[config(default = 1000u64)]
     pub clock_tick_millis: u64,
+    /// How many program requests one bundle runs at once, each in its own
+    /// invocation (ADR-0226 decision 3); the rest wait in FIFO order.
+    ///
+    /// The limit is per bundle. Invocations share their bundle's wasm
+    /// instance, so CPU-bound programs still run one at a time; what overlaps
+    /// is their waits on vendor fetches, API calls, and the journal. Vendor
+    /// fetches are further bounded by `aether.http`'s per-sender cap,
+    /// `AETHER_HTTP_MAX_IN_FLIGHT_PER_SENDER`. `0` is refused: no request
+    /// would ever start.
+    #[config(default = 16u64)]
+    pub bundle_invocations: u64,
 }
 
 impl Default for BloomeryConfig {
@@ -88,6 +101,7 @@ impl Default for BloomeryConfig {
             closure_limit_bytes: ClosureLimit::MAX_BYTES,
             read_cache_bytes: ReadCacheBudget::DEFAULT_BYTES,
             clock_tick_millis: 1000,
+            bundle_invocations: 16,
         }
     }
 }
@@ -136,6 +150,23 @@ impl BloomeryConfig {
             ))));
         }
         Ok(Duration::from_millis(self.clock_tick_millis))
+    }
+
+    /// Lower the driver's per-bundle invocation limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] naming `AETHER_BLOOMERY_BUNDLE_INVOCATIONS` when
+    /// the limit is `0` or does not fit this platform's `usize`.
+    pub(crate) fn bundle_invocations(&self) -> Result<InvocationLimit, BootError> {
+        usize::try_from(self.bundle_invocations).ok().and_then(|count| InvocationLimit::new(count).ok()).ok_or_else(
+            || {
+                BootError::Other(Box::new(io::Error::other(format!(
+                    "AETHER_BLOOMERY_BUNDLE_INVOCATIONS={} is not a usable invocation limit: it must be at least 1",
+                    self.bundle_invocations,
+                ))))
+            },
+        )
     }
 }
 
@@ -209,6 +240,7 @@ fn refuse(detail: impl Display) -> BootError {
 #[cfg(test)]
 mod tests {
     use super::{BloomeryConfig, sole_unit};
+    use aether_bloomery_driver::InvocationLimit;
     use aether_bloomery_journal::ReadCacheBudget;
     use aether_bloomery_kinds::{ClosureLimit, UnitKey};
     use aether_substrate::config::ConfigSources;
@@ -239,6 +271,24 @@ mod tests {
         let config = BloomeryConfig { clock_tick_millis: 0, ..BloomeryConfig::default() };
         let error = config.clock_tick().expect_err("a zero tick is refused").to_string();
         assert!(error.contains("AETHER_BLOOMERY_CLOCK_TICK_MILLIS"), "{error}");
+    }
+
+    #[test]
+    fn bundle_invocations_lower_to_the_driver_default_and_refuse_zero() {
+        // Catches the derive's `default = 16u64` literal or the stated
+        // `Default` drifting from the driver's own default, and a zero limit
+        // reaching the driver, where no request would ever start.
+        let mut sources = ConfigSources::new(None);
+        let config = sources.resolve::<BloomeryConfig>().expect("resolve off an empty stack");
+        assert_eq!(config.bundle_invocations().expect("the default lowers"), InvocationLimit::DEFAULT);
+        assert_eq!(
+            BloomeryConfig::default().bundle_invocations().expect("the default lowers"),
+            InvocationLimit::DEFAULT
+        );
+
+        let zero = BloomeryConfig { bundle_invocations: 0, ..BloomeryConfig::default() };
+        let error = zero.bundle_invocations().expect_err("a zero limit is refused").to_string();
+        assert!(error.contains("AETHER_BLOOMERY_BUNDLE_INVOCATIONS"), "{error}");
     }
 
     #[test]
