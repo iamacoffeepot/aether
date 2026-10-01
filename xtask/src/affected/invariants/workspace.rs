@@ -68,10 +68,7 @@ impl Workspace {
     /// the package's own declared dependencies.
     pub(super) fn is_classified_dist_consumer(&self, package: &Package) -> bool {
         self.wasm_sources.contains(package.name.as_str())
-            || is_dist_consumer(
-                package.dependencies.iter().map(|dependency| dependency.name.as_str()),
-                &self.wasm_sources,
-            )
+            || is_dist_consumer(package.dependencies.iter().map(|dependency| dependency.name.as_str()))
     }
 }
 

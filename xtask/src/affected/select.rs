@@ -106,31 +106,34 @@ pub(super) fn select(
 }
 
 /// Whether a package's dependency list makes its tests need the
-/// `cargo xtask dist` pre-build: a dep on a wasm source means the tests
-/// execute that crate's wasm; a dep on one of
+/// `cargo xtask dist` pre-build: a dep on one of
 /// [`DIST_RESOLVING_HARNESSES`] means the tests reach a dist artifact by
-/// path instead (issue #3766).
+/// path (issue #3766).
 ///
-/// The harness half of that predicate is load-bearing once the affected set
-/// narrows (#4197). `aether-chassis-headless`'s autoload test locates
-/// `probe.wasm` through the capture harness and hard-fails under
+/// A dep on a wasm source alone does not count. A crate's tests execute
+/// component wasm only by resolving the dist artifact, and only the
+/// dist-resolving harnesses do that; a dependent that links a wasm source's
+/// rlib for its types (`xtask` building Muse inputs from
+/// `aether-bloomery-muse`) runs no wasm. Every crate that did execute a
+/// wasm source's component also depended on such a harness when the rule
+/// narrowed to it, so the selection moved only for that false positive.
+///
+/// The harness predicate is load-bearing once the affected set narrows
+/// (#4197). `aether-chassis-headless`'s autoload test locates `probe.wasm`
+/// through the capture harness and hard-fails under
 /// `AETHER_REQUIRE_RUNTIME` without the pre-build, yet the package deps no
 /// wasm source — under the old closure it got its `wasm_needed` by
 /// accident, from an unrelated dependent that happened to be selected
 /// alongside it.
-pub(super) fn is_dist_consumer<'a>(
-    mut dependency_names: impl Iterator<Item = &'a str>,
-    wasm_sources: &BTreeSet<String>,
-) -> bool {
-    dependency_names.any(|name| wasm_sources.contains(name) || DIST_RESOLVING_HARNESSES.contains(&name))
+pub(super) fn is_dist_consumer<'a>(mut dependency_names: impl Iterator<Item = &'a str>) -> bool {
+    dependency_names.any(|name| DIST_RESOLVING_HARNESSES.contains(&name))
 }
 
 /// Whether the `cargo xtask dist` wasm pre-build must run before the
-/// selected tests: the chassis package's scenario tests execute component
-/// wasm, a wasm-source crate's own tests may read its wasm, and a crate
-/// that depends on a wasm source can execute that source's wasm at test
-/// time (issue #3617). The rule stays generic for any consumer that would
-/// hard-fail under `AETHER_REQUIRE_RUNTIME` without the pre-build.
+/// selected tests: a wasm-source crate's own tests may read its wasm, and a
+/// dist consumer's tests resolve a dist artifact by path (issue #3617). The
+/// rule stays generic for any consumer that would hard-fail under
+/// `AETHER_REQUIRE_RUNTIME` without the pre-build.
 fn derive_wasm_needed(
     packages: &BTreeSet<String>,
     wasm_sources: &BTreeSet<String>,
@@ -189,21 +192,17 @@ mod tests {
         // path: aether-chassis-headless reaches it that way and deps no
         // wasm source, so a dep-on-a-source rule alone leaves its autoload
         // test with nothing to load.
-        let wasm_sources = string_set(&["aether-test-fixtures-bundle"]);
         for harness in ["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"] {
             assert!(
-                is_dist_consumer([harness].into_iter(), &wasm_sources),
+                is_dist_consumer([harness].into_iter()),
                 "a {harness} dependent needs the dist pre-build without any wasm dep"
             );
         }
         assert!(
-            is_dist_consumer(["aether-test-fixtures-bundle"].into_iter(), &wasm_sources),
-            "a wasm-source dependent stays a dist consumer"
+            !is_dist_consumer(["aether-test-fixtures-bundle"].into_iter()),
+            "a wasm-source dependent with no dist-resolving harness runs no wasm"
         );
-        assert!(
-            !is_dist_consumer(["aether-math", "serde"].into_iter(), &wasm_sources),
-            "unrelated deps must not force the pre-build"
-        );
+        assert!(!is_dist_consumer(["aether-math", "serde"].into_iter()), "unrelated deps must not force the pre-build");
     }
 
     #[test]

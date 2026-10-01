@@ -79,6 +79,9 @@ current source.
 - **Supplying secrets** (drive-only) — put each secret in a named file under
   `--secrets-dir`, bind it by name (`--http-secrets`), check it with
   `--print-config`, and rotate by restart (ADR-0235).
+- **Running a Muse session** (drive-only) — bind the Muse bundle on a
+  hub-run Bloomery engine, then open, wait for, export, and continue sessions
+  with the `cargo xtask muse` verbs.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 

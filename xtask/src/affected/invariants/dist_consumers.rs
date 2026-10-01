@@ -162,8 +162,8 @@ fn test_code_resolving_dist_artifacts_is_classified() {
             violations.push(format!(
                 "  {name}: test code resolves a `cargo xtask dist` artifact by filesystem path, but the \
                  package is not classified as a dist consumer.\n    {path}:{line}\n      {evidence}\n    \
-                 Fix: give {name} a dependency on one of the dist-resolving harnesses ({harnesses}) or on a \
-                 wasm-source crate, or stop resolving the artifact by path.",
+                 Fix: give {name} a dependency on one of the dist-resolving harnesses ({harnesses}), or stop \
+                 resolving the artifact by path.",
                 name = package.name,
                 path = workspace.relative(&file.path),
                 line = file.line_of(hit.offset),

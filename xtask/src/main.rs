@@ -25,6 +25,7 @@
 
 mod affected;
 mod bins;
+mod bloomery;
 mod build_wasm;
 mod bump;
 mod cargo;
@@ -35,6 +36,7 @@ mod docs;
 mod git;
 mod import_commit;
 mod inventory;
+mod muse;
 mod namespaces;
 mod package;
 mod surface;
@@ -53,6 +55,7 @@ use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
 use crate::import_commit::ImportCommitArgs;
+use crate::muse::MuseArgs;
 use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
 use crate::symbols::SymbolsArgs;
@@ -121,6 +124,10 @@ enum Commands {
     /// the engine's fenced publish, moving no head, and print `commit=` and
     /// `tree=` (ADR-0237 decision 3).
     ImportCommit(ImportCommitArgs),
+    /// Drive Muse sessions on a Bloomery engine: `bind` the muse bundle,
+    /// `open` a session on a commit's tree, `continue` it, `wait` for it to
+    /// rest, and `export` the difference between two trees into a directory.
+    Muse(MuseArgs),
 }
 
 fn main() -> Result<()> {
@@ -139,5 +146,6 @@ fn main() -> Result<()> {
         Commands::Bump(args) => bump::run(&args),
         Commands::Bins(args) => bins::run(&args),
         Commands::ImportCommit(args) => import_commit::run(&args),
+        Commands::Muse(args) => muse::run(&args),
     }
 }
