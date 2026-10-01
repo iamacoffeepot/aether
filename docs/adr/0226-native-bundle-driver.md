@@ -106,8 +106,11 @@ Nothing on main can carry any of this yet:
 
    Before recording a `Transition`, the driver checks the result's prefix
    against the declaration. `Transition` and `Fault` gain no request
-   field; the entry's `cause` is the link. Only one `Invoke` is in flight
-   per root. Other requests for that digest wait in a queue.
+   field; the entry's `cause` is the link. Up to the configured invocation
+   limit of `Invoke`s are in flight per root, each in its own invocation;
+   the rest wait in FIFO order. The digest's one bundle read and one load
+   stay shared by every request. Outcomes are recorded in the order the
+   invocations finish, each caused by its own `Requested` seq.
 
 4. **The driver assigns four more fault reasons.** `FaultReason` gains:
    - `ClosureTooLarge { limit_bytes }`: the closure exceeded the cap.
@@ -345,8 +348,10 @@ Nothing on main can carry any of this yet:
 
 - **Deduplication is complete, but the driver is a serialization
   point.** A single fenced writer makes dedup complete. Per-seq lockstep
-  means one slow reactor holds up every later seq, and one `Invoke` per
-  root serializes each bundle's programs.
+  means one slow reactor holds up every later seq, and the invocation
+  limit per root caps how many of a bundle's programs run at once. The
+  invocations share their root's instance, so CPU-bound programs still
+  run one at a time; only their waits overlap.
 - **Dormant instances hold memory.** They stay loaded for the engine's
   lifetime. A poisoned digest stays poisoned for reactor routing until
   restart, so moving a reactor-set head back to it is rejected. Its

@@ -3,7 +3,7 @@
 mod reactor_world;
 mod support;
 
-use aether_bloomery_driver::{Command, ProgramCore};
+use aether_bloomery_driver::{Command, InvocationLimit, ProgramCore};
 use aether_bloomery_kinds::{
     ActivationRejected, Detail, Digest, Evaluated, HeadChange, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead,
     RecordedHeadMove, Ref, RuleName, SetHeads, Status,
@@ -17,7 +17,7 @@ use support::{World, digest, program_head};
 /// Post-restart traffic is observed alone: recordings and injections reset
 /// while the journal, artifacts, loads, and scripted replies carry over.
 fn restart_world(world: &mut World) -> Vec<Command> {
-    let (core, commands) = ProgramCore::start(world.limit);
+    let (core, commands) = ProgramCore::start(world.limit, InvocationLimit::DEFAULT);
     world.core = core;
     world.parked.clear();
     world.watches_seen.clear();

@@ -101,6 +101,7 @@ impl BloomeryChassis {
         let bloomery = mem::take(&mut env.bloomery);
         let (units, limit) = bloomery.to_units_and_limit()?;
         let tick = bloomery.clock_tick()?;
+        let invocations = bloomery.bundle_invocations()?;
         // `read_cache_bytes` is the engine total, split equally among the
         // units (ADR-0240 I-6). The share is taken from the whole lowered list;
         // an empty list is refused by `sole_unit` on the next line, so its
@@ -127,7 +128,7 @@ impl BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
-        let driver = mount::DriverSetup { limit, clock, tick };
+        let driver = mount::DriverSetup { limit, clock, tick, invocations };
         let mounted = mount::mount(&built, &unit.key, journal, read_cache, driver)?;
         tracing::info!(
             unit = %unit.key,
@@ -268,6 +269,7 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_BLOOMERY_UNITS"), "bloomery must claim its units knob");
         assert!(!known.contains("AETHER_BLOOMERY_JOURNAL"), "the single-journal knob is retired");
         assert!(known.contains("AETHER_BLOOMERY_CLOSURE_LIMIT_BYTES"), "bloomery must claim its closure-limit knob");
+        assert!(known.contains("AETHER_BLOOMERY_BUNDLE_INVOCATIONS"), "bloomery must claim its invocation-limit knob");
         assert!(known.contains("AETHER_RPC_PORT"), "bloomery must claim the RPC port via the composed RpcServerConfig");
         assert!(known.contains("AETHER_HTTP_ALLOWLIST"), "bloomery must claim the http egress allowlist knob");
         assert!(known.contains("AETHER_HTTP_DISABLE"), "bloomery must claim the http egress disable knob");

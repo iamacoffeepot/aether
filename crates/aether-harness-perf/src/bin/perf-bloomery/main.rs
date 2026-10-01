@@ -23,9 +23,10 @@
 //! window, the journal root's growth per session, and the process's peak
 //! resident set from `/proc/self/status` (absent off Linux).
 //!
-//! One bundle serves one request at a time (#7275), so S sessions interleave
-//! request by request rather than running in parallel. The session cell
-//! reports that throughput as measured; the bench does not work around it.
+//! One bundle runs up to `AETHER_BLOOMERY_BUNDLE_INVOCATIONS` requests at once
+//! (default 16), and the rest wait in FIFO order, so S sessions past that
+//! limit queue rather than running in parallel. The session cell reports that
+//! throughput as measured; the bench does not work around it.
 //!
 //! One (sessions × shape) cell per process: the peak resident set and the
 //! step subscriber are process-wide, so a sweep is several invocations.
