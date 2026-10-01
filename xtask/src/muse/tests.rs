@@ -238,6 +238,7 @@ fn session(batch: &mut Batch, tree: Ref<Tree>) -> Result<Digest> {
             "tools": [],
             "max_output_tokens": 512,
             "reasoning": "Low",
+            "input_limit": 1_048_576,
         },
         "items": [message("User", "hi"), message("Assistant", "done")],
         "rested": "Completed",
