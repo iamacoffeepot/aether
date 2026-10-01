@@ -15,7 +15,8 @@
 //! - [`read`] resolves the commit and reads its listing and blob bytes.
 //! - [`tree`] maps Git modes onto tree entries and seals every directory.
 //! - [`batch`] splits the artifacts into ordered batches under a byte budget.
-//! - [`publish`] dials the engine and stages each batch at the journal fence.
+//! - [`publish`] stages each batch at the journal fence over the shared
+//!   [`crate::bloomery`] client.
 
 mod batch;
 mod publish;
@@ -27,11 +28,12 @@ mod tests;
 
 use std::path::Path;
 
-use aether_bloomery_kinds::UnitKey;
-use aether_codec::frame::{install_max_frame_size, max_frame_size};
-use aether_rpc::FrameSizeConfig;
+use aether_bloomery_kinds::{Digest, EncodedArtifact, UnitKey};
+use aether_codec::frame::max_frame_size;
 use anyhow::{Context, Result};
 use clap::Args;
+
+use crate::bloomery::{self, Engine};
 
 /// Arguments for `cargo xtask import-commit`.
 #[derive(Args, Debug)]
@@ -50,22 +52,56 @@ pub struct ImportCommitArgs {
 /// Import the commit's tracked files into the engine's journal and print the
 /// resolved commit and the root tree digest.
 ///
-/// The commit resolves in the repository around the working directory. A
-/// batch may use half the frame cap, leaving the other half for the envelope
-/// and each artifact's citations.
+/// The commit resolves in the repository around the working directory.
 pub fn run(args: &ImportCommitArgs) -> Result<()> {
     let unit = UnitKey::new(&args.unit).with_context(|| format!("--unit {:?} is not a unit key", args.unit))?;
-    install_max_frame_size(FrameSizeConfig::try_from_env()?.to_max_frame_size());
+    bloomery::install_frame_cap()?;
 
-    let listing = read::read_commit(Path::new("."), &args.commit)?;
-    let built = tree::build(&listing)?;
-    let batches = batch::split(built.artifacts, max_frame_size() / 2)?;
+    let imported = Imported::read(Path::new("."), &args.commit)?;
+    let mut engine = Engine::connect(args.rpc_port, &unit, "xtask import-commit")?;
+    let tree = imported.stage(&mut engine)?;
 
-    let mut journal = publish::EngineJournal::connect(args.rpc_port, &unit)?;
-    let fence = journal.read_head()?;
-    publish::publish(&mut journal, fence, batches)?;
-
-    println!("commit={}", listing.commit);
-    println!("tree={}", built.root);
+    println!("commit={}", tree.commit);
+    println!("tree={}", tree.root);
     Ok(())
+}
+
+/// One commit's tree, built and split into publish batches, not yet staged.
+pub struct Imported {
+    commit: String,
+    root: Digest,
+    batches: Vec<Vec<EncodedArtifact>>,
+}
+
+/// A staged commit: the resolved sha and its root tree's digest.
+pub struct ImportedTree {
+    pub commit: String,
+    pub root: Digest,
+}
+
+impl Imported {
+    /// Read the files `commit` tracks in the repository at `repo` and build
+    /// their tree. A batch may use half the frame cap, leaving the other half
+    /// for the envelope and each artifact's citations, so the cap must be
+    /// installed first.
+    ///
+    /// # Errors
+    /// The commit does not resolve, Git failed, an entry is refused, or an
+    /// artifact is over the batch budget.
+    pub fn read(repo: &Path, commit: &str) -> Result<Self> {
+        let listing = read::read_commit(repo, commit)?;
+        let built = tree::build(&listing)?;
+        let batches = batch::split(built.artifacts, max_frame_size() / 2)?;
+        Ok(Self { commit: listing.commit, root: built.root, batches })
+    }
+
+    /// Stage every batch into `engine`'s journal at its current fence.
+    ///
+    /// # Errors
+    /// The journal refused a batch or the transport failed.
+    pub fn stage(self, engine: &mut Engine) -> Result<ImportedTree> {
+        let fence = engine.read_head()?;
+        publish::publish(engine, fence, self.batches)?;
+        Ok(ImportedTree { commit: self.commit, root: self.root })
+    }
 }

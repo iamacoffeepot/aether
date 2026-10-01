@@ -7879,6 +7879,9 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
+ "aether-bloomery-muse",
+ "aether-bloomery-program",
+ "aether-bloomery-workspace",
  "aether-chassis",
  "aether-codec",
  "aether-data",

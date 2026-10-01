@@ -15,6 +15,16 @@ aether-chassis = { path = "../crates/aether-chassis" }
 # `import-commit` builds the journal's own `Tree` / `EncodedArtifact` values and
 # speaks its `read_head` / `publish` mail, so it links the kind vocabulary.
 aether-bloomery-kinds = { path = "../crates/aether-bloomery-kinds" }
+# The `muse` verbs build the session's own inputs and read its records:
+# `OpenInput`, `ContinueInput`, `TurnSettings`, `Session`, `TurnResult`, the
+# `offered()` tools, and the `MUSE` bundle head.
+aether-bloomery-muse = { path = "../crates/aether-bloomery-muse" }
+# The `muse` verbs name each session program by its `Program::NAME`, never a
+# hand-spelled string.
+aether-bloomery-program = { path = "../crates/aether-bloomery-program" }
+# `muse open` builds its seeded reads as `TreePath`s, the type `OpenInput`
+# takes; the identity half only, with no workspace runtime.
+aether-bloomery-workspace = { path = "../crates/aether-bloomery-workspace", default-features = false }
 # `import-commit` installs the frame cap the engine and `aether-mcp` share, so
 # its batch budget matches what the engine will read.
 aether-codec = { path = "../crates/aether-codec" }
