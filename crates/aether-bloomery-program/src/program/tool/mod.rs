@@ -1,9 +1,10 @@
 //! A declared program rendered as a responses-API function tool.
 //!
-//! A tool is a program whose input is [`Tooled<A>`]: the tree the call works
-//! on, which the loop that runs the call binds, and the arguments `A`, which
-//! the model writes. Its name is the program's name, its description is the
-//! program's `///` doc, and its parameters are the JSON Schema of the JSON
+//! A tool is a program whose input is [`Tooled<A, B>`]: the tree the call works
+//! on, which the loop that runs the call binds, the arguments `A`, which the
+//! model writes, and the bound `B`, which the loop binds and the model never
+//! sees. Its name is the program's name, its description is the program's
+//! `///` doc, and its parameters are the JSON Schema of the JSON
 //! `aether-codec` accepts for `A`, with each field's and variant's `///` doc
 //! attached. Rendering needs the program's crate linked: the arguments'
 //! schema is read from their type, not from the declaration record. A tool
@@ -12,7 +13,9 @@
 //! [`ToolSchema`] is the same type's schema as a stored value, so a program
 //! that links none of a tool's types can still decode its arguments and
 //! render its result: the caller, which links them, stores one for the
-//! tool's arguments and one for its result and cites both.
+//! tool's arguments and one for its result and cites both. The bound value and
+//! its schema travel with the offer, so the loop can bind them without
+//! linking the tool's types.
 
 mod edited;
 mod tooled;
@@ -31,7 +34,7 @@ use crate::Program;
 use crate::kinds::ProgramName;
 
 pub use edited::Edited;
-pub use tooled::{ErasedTooled, ToolArguments, Tooled, tooled};
+pub use tooled::{ErasedTooled, NoBound, ToolArguments, Tooled, tooled};
 
 /// The arguments of tool `P`: what the model writes for a call.
 type Arguments<P> = <<P as Program>::Input as ToolArguments>::Arguments;
@@ -78,8 +81,8 @@ impl From<JsonSchemaError> for ToolDefinitionError {
 /// leave `Option` fields out of `required`, which strict mode refuses; the
 /// codec's decode stays the authority on what the program accepts.
 ///
-/// The parameters are the arguments `A` of `P`'s [`Tooled<A>`] input, never
-/// the envelope: the model does not write the tree. Arguments with an
+/// The parameters are the arguments `A` of `P`'s [`Tooled<A, B>`] input, never
+/// the envelope: the model does not write the tree or the bound. Arguments with an
 /// undocumented field or variant do not compile here, the same check
 /// `#[program]` runs on an input, so a hand-written `impl Program` is refused
 /// too.

@@ -3,7 +3,8 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
+    ClosureArtifact, DigestMismatch, EncodedArtifact, ErasedRef, Invoke, Invoked, ProgramApi, ProgramName, Ref,
+    Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
     CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, ModelName, MuseTurn,
@@ -11,7 +12,7 @@ use aether_bloomery_muse::{
     TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
 use aether_bloomery_program::{
-    AsyncSession, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
+    AsyncSession, NoBound, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
 };
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
@@ -29,11 +30,14 @@ struct ReadInput {
     path: String,
 }
 
-/// One offered tool: the program, the definition sent for it, and its input and result schemas.
+/// One offered tool: the program, the definition sent for it, its input, bound, and result schemas, and the
+/// bound value.
 struct Tool {
     program: &'static str,
     definition: String,
     input: ToolSchema,
+    bound: EncodedArtifact,
+    bound_schema: ToolSchema,
     result: ToolSchema,
 }
 
@@ -70,9 +74,25 @@ fn start_turn(
 ) -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
     let mut offered = Vec::with_capacity(tools.len());
     for tool in tools {
-        let (input, result) = (Ref::of_encoded(&tool.input)?, Ref::of_encoded(&tool.result)?);
-        offered.push(OfferedTool::new(ProgramName::new(tool.program)?, Ref::of_text(&tool.definition), input, result));
-        closure.extend([text(&tool.definition), stored(&tool.input)?, stored(&tool.result)?]);
+        let (input, bound_schema, result) =
+            (Ref::of_encoded(&tool.input)?, Ref::of_encoded(&tool.bound_schema)?, Ref::of_encoded(&tool.result)?);
+        let (kind, payload, _) = tool.bound.clone().into_parts();
+        let bound = ErasedRef::new(kind, tool.bound.digest());
+        offered.push(OfferedTool::new(
+            ProgramName::new(tool.program)?,
+            Ref::of_text(&tool.definition),
+            input,
+            bound,
+            bound_schema,
+            result,
+        ));
+        closure.extend([
+            text(&tool.definition),
+            stored(&tool.input)?,
+            stored(&tool.bound_schema)?,
+            ClosureArtifact::new(kind, payload),
+            stored(&tool.result)?,
+        ]);
     }
     let input = TurnInput::new(
         Endpoint::new(URL)?,
@@ -230,12 +250,16 @@ fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(),
             program: "muse.turn",
             definition: definition("muse-turn", "Run one turn."),
             input: ToolSchema::of::<TurnInput>(),
+            bound: EncodedArtifact::new(&NoBound).expect("a bound encodes"),
+            bound_schema: ToolSchema::of::<NoBound>(),
             result: ToolSchema::of::<TurnResult>(),
         },
         Tool {
             program: "workspace.read",
             definition: definition("workspace-read", "Read one workspace file."),
             input: ToolSchema::of::<ReadInput>(),
+            bound: EncodedArtifact::new(&NoBound).expect("a bound encodes"),
+            bound_schema: ToolSchema::of::<NoBound>(),
             result: ToolSchema::of::<ReadInput>(),
         },
     ];
@@ -247,6 +271,10 @@ fn a_turn_offers_its_tools_and_records_the_calls_it_is_asked_for() -> Result<(),
     let sent_names: Vec<_> =
         sent["tools"].as_array().ok_or("tools are sent")?.iter().map(|tool| &tool["name"]).collect();
     assert_eq!(sent_names, ["muse-turn", "workspace-read"], "both offered definitions are sent, in order");
+    assert!(
+        sent["tools"].as_array().expect("tools are sent").iter().all(|tool| tool.get("bound").is_none()),
+        "the bound never reaches the vendor"
+    );
 
     let reply = FetchResult::Ok {
         request_id: 1,
@@ -300,6 +328,8 @@ fn a_call_to_a_tool_the_turn_did_not_offer_is_recorded_refused() -> Result<(), B
         program: "muse.echo",
         definition: tool_definition::<Echo>()?.to_string(),
         input: ToolSchema::of::<EchoArgs>(),
+        bound: EncodedArtifact::new(&NoBound).expect("a bound encodes"),
+        bound_schema: ToolSchema::of::<NoBound>(),
         result: ToolSchema::of::<EchoResult>(),
     }];
     let (items, closure) = opening();

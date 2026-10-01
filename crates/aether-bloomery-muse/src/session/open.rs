@@ -105,10 +105,10 @@ pub struct SessionOpen;
 /// start, which the loop runs before that turn.
 ///
 /// Refuses settings that offer a tool the session does not bind, or offer a
-/// bound tool with a definition or schema other than the one it renders;
-/// seeds when `tree.read` is not offered, since a seed's output renders with
-/// the offered tool's result schema; and more than [`ToolCalls::MAX_CALLS`]
-/// seeds.
+/// bound tool with a definition or schema other than the one it renders,
+/// ignoring the per-session bound digest; seeds when `tree.read` is not
+/// offered, since a seed's output renders with the offered tool's result
+/// schema; and more than [`ToolCalls::MAX_CALLS`] seeds.
 #[program]
 impl Program for SessionOpen {
     const NAME: &'static str = "muse.session.open";
@@ -119,7 +119,14 @@ impl Program for SessionOpen {
 
     fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         let (bound, _) = offered();
-        if let Some(tool) = input.settings.tools().iter().find(|tool| !bound.as_slice().contains(tool)) {
+        if let Some(tool) = input.settings.tools().iter().find(|tool| {
+            bound.as_slice().iter().find(|bound| bound.program() == tool.program()).is_none_or(|bound| {
+                bound.definition() != tool.definition()
+                    || bound.input() != tool.input()
+                    || bound.bound_schema() != tool.bound_schema()
+                    || bound.result() != tool.result()
+            })
+        }) {
             let reason = format!("{} is not offered as a tool the session binds", tool.program().as_str());
             return Err(Refusal::Refused { reason: Detail::new(reason) });
         }
@@ -175,7 +182,8 @@ mod tests {
     #[test]
     fn an_open_is_the_settings_and_the_user_message_over_bound_tools_only() {
         // Catches an open that drops a setting or sends more than the user message, one that admits a tool the
-        // loop cannot run, a bound tool offered with another definition, and seeds made up from no paths.
+        // loop cannot run, a bound tool offered with another definition or bound schema, and seeds made up from no
+        // paths.
         let (bound, _) = offered();
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), Vec::new())).expect("bound tools open");
         assert_eq!(opened.seeds(), None);
@@ -184,9 +192,24 @@ mod tests {
         assert_eq!(first.items(), [TurnItem::message(Role::User, Ref::of_text("hi"))]);
 
         let echo = &bound.as_slice()[0];
-        let redefined = OfferedTool::new(echo.program().clone(), Ref::of_text("{}"), echo.input(), echo.result());
+        let redefined = OfferedTool::new(
+            echo.program().clone(),
+            Ref::of_text("{}"),
+            echo.input(),
+            echo.bound(),
+            echo.bound_schema(),
+            echo.result(),
+        );
+        let rebound = OfferedTool::new(
+            echo.program().clone(),
+            echo.definition(),
+            echo.input(),
+            echo.bound(),
+            bound.as_slice()[1].bound_schema(),
+            echo.result(),
+        );
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
-        for tool in [redefined, unbound] {
+        for tool in [redefined, rebound, unbound] {
             let tools = OfferedTools::new(vec![tool]).expect("tools");
             let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
             assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());

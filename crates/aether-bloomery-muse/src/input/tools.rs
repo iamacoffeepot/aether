@@ -5,7 +5,10 @@
 //! `aether_bloomery_program::tool_definition`, so the recorded input holds
 //! exactly what was sent; nothing defaults to every declared program. The
 //! caller also cites the program's input and result schemas
-//! ([`ToolSchema::of`]), so `muse.turn` links no tool's types.
+//! ([`ToolSchema::of`]), so `muse.turn` links no tool's types. The caller
+//! cites the bound value the loop binds for the program and the schema of
+//! that bound, so the loop looks both up without linking the tool's types;
+//! the model never sees the bound.
 //!
 //! A call cites its arguments exactly as the model wrote them, to replay
 //! them unchanged, and records what `muse.turn` made of the call: a call to
@@ -20,7 +23,7 @@ use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Utf8Text};
 use aether_bloomery_program::{ToolDefinitionError, ToolSchema, function_name};
 
 /// One program offered to the model, with the definition sent for it and
-/// the schemas of its input and result.
+/// the schemas of its input, bound, and result.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct OfferedTool {
     /// The program the model may ask to run.
@@ -31,6 +34,11 @@ pub struct OfferedTool {
     /// The cited schema of the program's input, which a call's arguments
     /// decode against.
     input: Ref<ToolSchema>,
+    /// The bound value the loop binds for the program, unseen by the model.
+    bound: ErasedRef,
+    /// The cited schema of the program's bound, which the loop checks the
+    /// bound value against only through [`ToolSchema::of`].
+    bound_schema: Ref<ToolSchema>,
     /// The cited schema of the program's result, which the call's output
     /// renders with.
     result: Ref<ToolSchema>,
@@ -38,15 +46,18 @@ pub struct OfferedTool {
 
 impl OfferedTool {
     /// Offer `program`, sending the cited `definition` for it, with the cited
-    /// schemas of its `input` and `result`.
+    /// schemas of its `input` and `result` and the bound value `bound` with
+    /// the cited schema of that bound.
     #[must_use]
     pub const fn new(
         program: ProgramName,
         definition: Ref<Utf8Text>,
         input: Ref<ToolSchema>,
+        bound: ErasedRef,
+        bound_schema: Ref<ToolSchema>,
         result: Ref<ToolSchema>,
     ) -> Self {
-        Self { program, definition, input, result }
+        Self { program, definition, input, bound, bound_schema, result }
     }
 
     /// The program the model may ask to run.
@@ -65,6 +76,18 @@ impl OfferedTool {
     #[must_use]
     pub const fn input(&self) -> Ref<ToolSchema> {
         self.input
+    }
+
+    /// The bound value the loop binds for the program.
+    #[must_use]
+    pub const fn bound(&self) -> ErasedRef {
+        self.bound
+    }
+
+    /// The cited schema of the program's bound.
+    #[must_use]
+    pub const fn bound_schema(&self) -> Ref<ToolSchema> {
+        self.bound_schema
     }
 
     /// The cited schema of the program's result.

@@ -43,10 +43,10 @@ pub use clock::{ClockUntil, wait, wait_spread};
 pub use program::__macro_internals;
 pub use program::{
     Admission, Async, AsyncSession, Declaration, DeclarationsError, Edited, Env, ErasedTooled, Http, InjectedApi,
-    Invoke, Invoked, MAX_FUNCTION_NAME_BYTES, Pending, PendingArtifact, PendingCall, PollResult, Process, Program,
-    ProgramEntry, ProgramKind, ProgramTable, Ran, Refusal, Root, Started, Sync, ToolArguments, ToolDefinitionError,
-    ToolSchema, Tooled, Workspace, declarations, dispatch, function_name, invoke, kinds, program, program_name,
-    start_async, start_invocation, tool_definition, tooled, unreachable_staged,
+    Invoke, Invoked, MAX_FUNCTION_NAME_BYTES, NoBound, Pending, PendingArtifact, PendingCall, PollResult, Process,
+    Program, ProgramEntry, ProgramKind, ProgramTable, Ran, Refusal, Root, Started, Sync, ToolArguments,
+    ToolDefinitionError, ToolSchema, Tooled, Workspace, declarations, dispatch, function_name, invoke, kinds, program,
+    program_name, start_async, start_invocation, tool_definition, tooled, unreachable_staged,
 };
 #[doc(hidden)]
 pub use program::{AsyncProgram, SyncProgram};

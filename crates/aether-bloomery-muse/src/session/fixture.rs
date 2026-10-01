@@ -8,7 +8,7 @@ use aether_bloomery_kinds::{
     ReadArtifactResult, Ref, Refusal, Tree, artifact_digest,
 };
 use aether_bloomery_program::{
-    AsyncProgram, ErasedTooled, Pending, PollResult, Started, SyncProgram, invoke, start_async, tooled,
+    AsyncProgram, ErasedTooled, NoBound, Pending, PollResult, Started, SyncProgram, invoke, start_async, tooled,
 };
 use aether_bloomery_workspace::TreePath;
 use aether_codec::encode_storage_schema;
@@ -185,12 +185,15 @@ impl SmallTree {
         Ref::of_encoded(&self.root).expect("root")
     }
 
-    /// A call over this tree with `args`, as the loop builds it, and the
-    /// artifacts it could read.
+    /// A call over this tree with `args` and the canonical `NoBound` value,
+    /// as the loop builds it, and the artifacts it could read.
     pub fn call<A: Storage + Clone + Cites>(&self, args: &A) -> (ErasedTooled, Vec<ClosureArtifact>) {
-        let args = stored(args);
-        let cited = ErasedRef::new(args.kind(), args.claimed().unverified());
-        (tooled(self.tree(), cited), self.artifacts.iter().cloned().chain([args]).collect())
+        let (args, bound) = (stored(args), stored(&NoBound));
+        let cited = |artifact: &ClosureArtifact| ErasedRef::new(artifact.kind(), artifact.claimed().unverified());
+        (
+            tooled(self.tree(), cited(&args), cited(&bound)),
+            self.artifacts.iter().cloned().chain([args, bound]).collect(),
+        )
     }
 
     /// A call over this tree with the arguments `json` encodes as `A` by
@@ -200,7 +203,9 @@ impl SmallTree {
         let payload = encode_storage_schema(json, &A::SCHEMA).expect("the arguments match the schema");
         let cited = ErasedRef::new(A::ID, artifact_digest(A::ID, &payload));
         let args = ClosureArtifact::new(A::ID, payload);
-        (tooled(self.tree(), cited), self.artifacts.iter().cloned().chain([args]).collect())
+        let bound = stored(&NoBound);
+        let bound_cited = ErasedRef::new(bound.kind(), bound.claimed().unverified());
+        (tooled(self.tree(), cited, bound_cited), self.artifacts.iter().cloned().chain([args, bound]).collect())
     }
 }
 

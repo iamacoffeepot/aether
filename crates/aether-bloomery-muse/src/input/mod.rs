@@ -131,7 +131,7 @@ impl TurnInput {
 #[cfg(test)]
 pub mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref};
-    use aether_bloomery_program::{ToolSchema, function_name};
+    use aether_bloomery_program::{NoBound, ToolSchema, function_name};
 
     use super::{
         CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName, ModelNameError,
@@ -140,14 +140,17 @@ pub mod tests {
     };
     use crate::result::TurnResult;
 
-    /// `program` offered with a definition citing its own name and real schemas.
+    /// `program` offered with a definition citing its own name and real schemas, bound to nothing.
     pub fn offered_tool(program: ProgramName) -> OfferedTool {
         let schema = |schema: ToolSchema| Ref::of_encoded(&schema).expect("a schema encodes");
         let definition = Ref::of_text(program.as_str());
+        let bound = Ref::of_encoded(&NoBound).expect("a bound encodes");
         OfferedTool::new(
             program,
             definition,
             schema(ToolSchema::of::<TurnInput>()),
+            bound.erase(),
+            schema(ToolSchema::of::<NoBound>()),
             schema(ToolSchema::of::<TurnResult>()),
         )
     }

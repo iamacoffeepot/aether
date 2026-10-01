@@ -477,9 +477,11 @@ fn decoded(call: &ToolCall) -> ErasedRef {
     *input
 }
 
-/// The input the loop runs `call` over: `tree` and the arguments the call decoded to.
+/// The input the loop runs `call` over: `tree`, the arguments the call decoded to, and the offered bound.
 fn bound(tree: Ref<Tree>, call: &ToolCall) -> CallInput {
-    CallInput::Value(encoded(&tooled(tree, decoded(call))))
+    let program = call.program().expect("a decoded call names its program");
+    let tool = offered().0.as_slice().iter().find(|tool| tool.program() == program).expect("an offered tool").clone();
+    CallInput::Value(encoded(&tooled(tree, decoded(call), tool.bound())))
 }
 
 /// The program and input of the one call the entry at `seq` asked for.
