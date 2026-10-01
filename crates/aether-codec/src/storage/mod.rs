@@ -13,17 +13,19 @@
 //! - `Vec`, fixed arrays, and maps are one record each. A container of
 //!   positional elements carries their wire bytes under a schema-folded tag;
 //!   a container holding a flattened type carries each such element as a
-//!   length-framed record stream under the `__elements` tag.
+//!   length-framed record stream under the `__elements` tag. The decoder
+//!   reads which form a container took from the tag its record sits under.
 //! - A leaf body is the leaf's `aether_data::wire` encoding, written and read
 //!   by the wire codec's own helpers, so the JSON conventions are the wire
 //!   pair's.
 //!
 //! What the schema cannot say, the walk assumes:
 //!
-//! - A container element whose schema is a non-`repr(C)` struct or an enum
-//!   is taken as `#[derive(Storage)]` (a tagged element). The same schema
-//!   from a `#[derive(Schema)]` type is a positional element, and a schema
-//!   does not record which derive produced it.
+//! - The decoder reads a container's element form from its record tag, so it
+//!   decodes either form. The encoder still takes a container element whose
+//!   schema is a non-`repr(C)` struct or an enum as `#[derive(Storage)]` (a
+//!   tagged element), because JSON cannot say which derive wrote it: it
+//!   writes the tagged form even where the stored value was positional.
 //! - A validated newtype (`#[storage(validate)]`) has its inner type's
 //!   schema, so it encodes to the same bytes, but its invariant is not
 //!   checked: only the Rust type holds it.
@@ -133,10 +135,13 @@ fn too_deep(depth: u32) -> bool {
     depth > MAX_STORAGE_DEPTH
 }
 
-/// Whether a container element of this schema is tagged (a framed record
-/// stream) rather than positional (its wire bytes) — the schema-side reading
-/// of `StorageElement::TAGGED`. Only a flattened type is tagged, and a
-/// container is tagged when anything it holds is.
+/// Whether the encoder takes a container element of this schema as tagged (a
+/// framed record stream) rather than positional (its wire bytes) — the
+/// schema-side reading of `StorageElement::TAGGED`. A schema does not record
+/// which derive produced it, so a flattened shape (a non-`repr(C)` struct or
+/// an enum) is assumed tagged, and a container is tagged when anything it
+/// holds is. The decoder asks this only to find which tags a container may
+/// sit under, and takes the positional one when the tagged one is absent.
 fn tagged(schema: &SchemaType) -> bool {
     match schema {
         SchemaType::Struct { repr_c, .. } => !repr_c,
@@ -155,14 +160,26 @@ fn tagged(schema: &SchemaType) -> bool {
     }
 }
 
-/// The record tag of a container at `carry`, the schema-side
-/// `container_hash`.
+/// The record tag of a container at `carry` the encoder writes, the
+/// schema-side `container_hash`.
 fn container_hash(carry: u64, depth: u32, schema: &SchemaType) -> u64 {
     if tagged(schema) {
-        terminate_field_hash_runtime(fold_path_segment(carry, ELEMENTS_LEAF.as_bytes(), depth), &BYTES_SCHEMA)
+        elements_hash(carry, depth)
     } else {
-        terminate_field_hash_runtime(carry, schema)
+        positional_hash(carry, schema)
     }
+}
+
+/// The tag of a container whose elements are tagged: the `__elements` leaf,
+/// holding a bytes body.
+fn elements_hash(carry: u64, depth: u32) -> u64 {
+    terminate_field_hash_runtime(fold_path_segment(carry, ELEMENTS_LEAF.as_bytes(), depth), &BYTES_SCHEMA)
+}
+
+/// The tag of a container whose elements are positional: the container's own
+/// schema, folded at its path.
+fn positional_hash(carry: u64, schema: &SchemaType) -> u64 {
+    terminate_field_hash_runtime(carry, schema)
 }
 
 /// The discriminant a variant writes at its `__variant` leaf: its name

@@ -1,6 +1,7 @@
 //! End-to-end: the inspect actor reads journal entries and artifacts as JSON on the shipped bloomery composition —
 //! a rested Muse session's transcript, a kind no schema source knows, and a fan-out past the resolution budget.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
@@ -11,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery_journal::{Batch, Seq};
 use aether_bloomery_kinds::{
-    Call, CallOutcome, EncodedArtifact, Head, MoveHead, MoveHeadResult, NativeOrigin, OpaqueBytes, ProgramName,
-    ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree, Utf8Text,
+    Call, CallOutcome, EncodedArtifact, Head, MoveHead, MoveHeadResult, Name, NativeOrigin, Node, OpaqueBytes, Path,
+    ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree, Utf8Text,
 };
 use aether_bloomery_muse::{
     Endpoint, MUSE, ModelName, OfferedTools, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
@@ -283,6 +284,40 @@ fn a_kind_no_schema_source_knows_reads_as_hex() {
     assert_eq!(kind_id, kind.0);
     let json: Value = serde_json::from_str(&json).expect("the rendering is JSON");
     assert_eq!(json, json!({ "kind_id": kind.0, "length": 2, "hex": "0102" }));
+}
+
+#[test]
+fn a_stored_tree_reads_its_entries_by_name_and_variant() -> Result<(), Box<dyn Error>> {
+    // Catches a storage decode that reads a tree's positional map of enum entries as a tagged container, so the
+    // artifact renders as hex instead of its entries.
+    let mut batch = Batch::new();
+    let file = batch.stage_bytes(b"data");
+    let script = batch.stage_bytes(b"#!/bin/sh");
+    let inner = batch.stage_bytes(b"inner");
+    let subtree = batch.stage_encoded(&Tree::new(BTreeMap::from([(Name::new("leaf.txt")?, Node::File(inner))])))?;
+    let tree = batch.stage_encoded(&Tree::new(BTreeMap::from([
+        (Name::new("a.txt")?, Node::File(file)),
+        (Name::new("run")?, Node::Executable(script)),
+        (Name::new("link")?, Node::Symlink(Path::new("../bin/run")?)),
+        (Name::new("sub")?, Node::Directory(subtree)),
+    ])))?;
+    let mut harness = BloomeryHarness::start([batch]);
+
+    let answer = harness.inspect_artifact(&InspectArtifact { digest: *tree.digest().as_bytes(), depth: 1 });
+    let InspectArtifactResult::Found { kind, json, truncated: false, .. } = answer else {
+        panic!("a tree is found whole: {answer:?}");
+    };
+    assert_eq!(kind.as_deref(), Some("bloomery.tree"));
+    let tree: Value = serde_json::from_str(&json)?;
+    let entries = &tree["entries"];
+    assert!(entries.is_object(), "the entries read as a map, not a fallback: {tree:#}");
+    assert_eq!(entries["a.txt"]["File"]["kind"], json!("bloomery.artifact.bytes"), "{tree:#}");
+    assert_eq!(entries["run"]["Executable"]["kind"], json!("bloomery.artifact.bytes"), "{tree:#}");
+    assert_eq!(entries["link"], json!({"Symlink": "../bin/run"}), "{tree:#}");
+    let subtree = &entries["sub"]["Directory"];
+    assert_eq!(subtree["kind"], json!("bloomery.tree"), "{tree:#}");
+    assert!(subtree["value"]["entries"]["leaf.txt"]["File"].is_string(), "{tree:#}");
+    Ok(())
 }
 
 /// A stored kind citing many texts. Linked into this test binary, so the in-process engine's storage-kind inventory
