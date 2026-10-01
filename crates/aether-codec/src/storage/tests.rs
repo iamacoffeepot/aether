@@ -43,6 +43,39 @@ impl Cites for Point {
     fn cites(&self, _sink: &mut Citations) {}
 }
 
+/// A positional element that is an enum: `#[derive(Schema)]` and not `repr(C)`, so its schema reads as a flattened
+/// shape while the derive wrote its wire bytes.
+#[derive(Debug, Clone, PartialEq, aether_data::Schema)]
+enum Entry {
+    Gone,
+    Link(String),
+    File { size: u32, executable: bool },
+}
+
+impl Cites for Entry {
+    fn cites(&self, _sink: &mut Citations) {}
+}
+
+/// A positional element that is a non-`repr(C)` struct.
+#[derive(Debug, Clone, PartialEq, aether_data::Schema)]
+struct Stamp {
+    seconds: u64,
+    note: String,
+}
+
+impl Cites for Stamp {
+    fn cites(&self, _sink: &mut Citations) {}
+}
+
+#[derive(Debug, Clone, PartialEq, aether_data::Storage)]
+#[kind(name = "test.codec.storage.positional")]
+struct Positional {
+    entries: Vec<Entry>,
+    by_name: BTreeMap<String, Entry>,
+    stamps: Vec<Stamp>,
+    by_id: BTreeMap<u32, Stamp>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EmptyLabel;
 
@@ -231,6 +264,25 @@ fn every_enum_variant_matches_the_derived_encoding() {
         expected["shape"] = json;
         assert_conforms(record, &expected);
     }
+}
+
+#[test]
+fn containers_of_positional_enums_and_structs_decode_to_their_wire_json() {
+    let record = Positional {
+        entries: vec![Entry::Gone, Entry::Link("../bin/run".into()), Entry::File { size: 3, executable: true }],
+        by_name: BTreeMap::from([("a".into(), Entry::Link("b".into())), ("c".into(), Entry::Gone)]),
+        stamps: vec![Stamp { seconds: 9, note: "n".into() }],
+        by_id: BTreeMap::from([(4, Stamp { seconds: 1, note: String::new() })]),
+    };
+    let expected = json!({
+        "entries": ["Gone", {"Link": "../bin/run"}, {"File": {"size": 3, "executable": true}}],
+        "by_name": {"a": {"Link": "b"}, "c": "Gone"},
+        "stamps": [{"seconds": 9, "note": "n"}],
+        "by_id": {"4": {"seconds": 1, "note": ""}},
+    });
+
+    // The encoder keeps assuming a tagged element, so only the decode is held to the derive's bytes.
+    assert_eq!(decode_storage_schema(&derived(record), &Positional::SCHEMA, BUDGET).unwrap(), expected);
 }
 
 #[test]

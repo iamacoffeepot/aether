@@ -9,7 +9,7 @@ use aether_data::storage::{
 use aether_data::{EnumVariant, NamedField, SchemaType};
 use serde_json::{Map, Value};
 
-use super::{container_hash, tagged, too_deep, variant_discriminant};
+use super::{elements_hash, positional_hash, tagged, too_deep, variant_discriminant};
 use crate::DecodeError;
 use crate::decode::{decode_wire_prefix_strict, render_map_key};
 
@@ -19,6 +19,12 @@ pub(super) fn decode(bytes: &[u8], schema: &SchemaType, maximum_values: usize) -
     let value = walk.leaves(schema, field_path_root(), 0, "$", &mut records)?;
     reject_rest(records, "$")?;
     Ok(value)
+}
+
+/// How a container's body is laid out, read from the tag its record sat under.
+enum Form {
+    Tagged,
+    Positional,
 }
 
 /// One decode's value ceiling, shared by the record walk and every wire
@@ -76,9 +82,17 @@ impl Walk {
                 }
             }
             SchemaType::Vec(_) | SchemaType::Array { .. } | SchemaType::Map { .. } => {
-                let body = take(records, container_hash(carry, depth, schema), path)?;
+                // A container the encoder would tag may have been written positionally; the tag says which. A
+                // record under the other tag is left unread, and `reject_rest` reports it.
+                let (body, form) = match tagged(schema).then(|| records.take(elements_hash(carry, depth))).flatten() {
+                    Some(body) => (body, Form::Tagged),
+                    None => (take(records, positional_hash(carry, schema), path)?, Form::Positional),
+                };
                 let mut cursor = body.as_slice();
-                let value = self.element(schema, depth, path, &mut cursor)?;
+                let value = match form {
+                    Form::Tagged => self.element(schema, depth, path, &mut cursor)?,
+                    Form::Positional => self.wire(&mut cursor, schema, path)?,
+                };
                 exhausted(cursor, path)?;
                 Ok(value)
             }
