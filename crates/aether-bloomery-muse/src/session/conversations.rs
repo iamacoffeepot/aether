@@ -99,7 +99,8 @@ enum Next {
     Call { program: ProgramName, input: EncodedArtifact },
     /// The next turn, once every call has its output.
     Turn(TurnInput),
-    /// The record of a session resting at its turn limit.
+    /// The record of a session resting after its last call's output: at its
+    /// turn limit, or past its input limit.
     Limit(RecordInput),
     /// The record of a session whose turn rested it.
     Rest(RecordInput),
@@ -148,10 +149,7 @@ impl Conversation {
             }
         }
         self.next = Some(match waiting.result {
-            Some(result) if waiting.full => {
-                Next::Rest(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
-            }
-            Some(result) if self.turns >= self.limit.get() => {
+            Some(result) if waiting.full || self.turns >= self.limit.get() => {
                 Next::Limit(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
             _ => {
