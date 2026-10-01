@@ -240,10 +240,14 @@ impl Engine {
 
     /// Create a volume carrying `labels`, named by the daemon when `name` is
     /// `None` and named `name` otherwise.
-    pub fn create_volume(&self, name: Option<&str>, labels: &BTreeMap<&str, &str>) -> Result<VolumeName, EngineError> {
+    pub fn create_volume(
+        &self,
+        name: Option<&VolumeName>,
+        labels: &BTreeMap<&str, &str>,
+    ) -> Result<VolumeName, EngineError> {
         let mut body = json!({ "Labels": labels });
         if let Some(name) = name {
-            body["Name"] = name.into();
+            body["Name"] = name.as_str().into();
         }
         let body = body.to_string();
         let target = format!("/{API_VERSION}/volumes/create");
