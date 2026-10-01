@@ -163,6 +163,13 @@ impl OutputBudgetError {
 pub struct OutputBudget(u32);
 
 impl OutputBudget {
+    /// The budget a turn uses unless its caller has a reason to pick another: 32,768 tokens.
+    ///
+    /// It leaves room for High-effort reasoning, which has used up to about 22,600 tokens in one turn. A
+    /// budget stays required rather than optional because turns do not stream, so the vendor's
+    /// non-streaming time limit bounds how long a turn may reason.
+    pub const DEFAULT: Self = Self(32_768);
+
     /// Accept a non-zero budget.
     ///
     /// # Errors
