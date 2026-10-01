@@ -1,13 +1,16 @@
 //! The one `Fetch` a turn sends: the offered tools and the whole
 //! conversation, stateless.
 //!
+//! The body also carries a prompt cache key derived from the conversation's first item, which every turn of a session
+//! resends unchanged, so the vendor routes a session's turns to the servers that hold its prefix.
+//!
 //! Pure over the input and its read and rendered texts, so the request the recorded
 //! closure describes is testable without the invocation machinery. The
 //! program sets exactly one header and no credential.
 
 use std::borrow::Cow;
 
-use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
+use aether_bloomery_kinds::{Detail, ProgramName, Refusal, hash_bytes};
 use aether_bloomery_program::function_name;
 use aether_http::{Fetch, HttpHeader, HttpMethod};
 use serde::Serialize;
@@ -32,6 +35,7 @@ struct Body<'a> {
     store: bool,
     max_output_tokens: u32,
     reasoning: Reasoning,
+    prompt_cache_key: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Value>,
     input: Vec<Item<'a>>,
@@ -130,6 +134,12 @@ fn definition(tool: &OfferedTool, text: &str) -> Result<Value, Refusal> {
     Ok(definition)
 }
 
+/// The session's prompt cache key: the hex sha256 of the turn's first item as sent, which every turn of a session
+/// resends unchanged.
+fn cache_key(first: &Item<'_>) -> String {
+    hash_bytes(&serde_json::to_vec(first).expect("an item of strings always serializes")).to_string()
+}
+
 /// Build the turn's request. `texts[i]` is the text `input.items()[i]` sends
 /// (see [`crate::render`]) and `definitions[j]` the read definition of
 /// `input.tools()[j]`.
@@ -137,21 +147,24 @@ fn definition(tool: &OfferedTool, text: &str) -> Result<Value, Refusal> {
 /// # Errors
 ///
 /// `Refusal::Refused` when an offered definition is not a JSON object named
-/// for its program, or a program's function name is too long: the input was
-/// built wrong, and nothing is fetched.
+/// for its program, a program's function name is too long, or the turn sends
+/// no items: the input was built wrong, and nothing is fetched.
 pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Result<Fetch, Refusal> {
+    let items: Vec<Item<'_>> =
+        input.items().iter().zip(texts).map(|(item, text)| Item::new(item, text)).collect::<Result<_, _>>()?;
     let body = Body {
         model: input.model().as_str(),
         store: false,
         max_output_tokens: input.max_output_tokens().get(),
         reasoning: Reasoning { effort: effort(input.reasoning()) },
+        prompt_cache_key: cache_key(items.first().ok_or_else(|| refused("the turn sends no items".into()))?),
         tools: input
             .tools()
             .iter()
             .zip(definitions)
             .map(|(tool, text)| definition(tool, text))
             .collect::<Result<_, _>>()?,
-        input: input.items().iter().zip(texts).map(|(item, text)| Item::new(item, text)).collect::<Result<_, _>>()?,
+        input: items,
     };
 
     Ok(Fetch {
@@ -201,6 +214,52 @@ mod tests {
         OfferedTools::new(names.iter().map(|name| offered_tool(program(name))).collect()).expect("tools")
     }
 
+    /// The request body with its `prompt_cache_key` removed, after checking the key is a full lowercase hex sha256.
+    fn body_without_key(body: &[u8]) -> serde_json::Value {
+        let mut body: serde_json::Value = serde_json::from_slice(body).expect("body is JSON");
+        let key = body.as_object_mut().expect("body is an object").remove("prompt_cache_key").expect("a cache key");
+        let key = key.as_str().expect("the key is a string");
+        assert!(
+            key.len() == 64 && key.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "the key is 64 lowercase hex characters: {key}"
+        );
+        body
+    }
+
+    /// The `prompt_cache_key` the request for `input` sends, where `texts[i]` is the text of `input.items()[i]`.
+    fn cache_key(input: &TurnInput, texts: &[String]) -> serde_json::Value {
+        let body: serde_json::Value =
+            serde_json::from_slice(&fetch(input, texts, &[]).expect("a plain turn builds").body).expect("body is JSON");
+        body["prompt_cache_key"].clone()
+    }
+
+    #[test]
+    fn every_turn_of_a_session_sends_its_first_items_key() {
+        // Catches a key derived from the last item or the whole input, which would change every turn and route each
+        // one away from the cached prefix, and a key that ignores the role, which would route two sessions with
+        // different prefixes together.
+        let message = |role, text: &str| TurnItem::message(role, Ref::of_text(text));
+        let texts = ["What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
+        let first = input(OfferedTools::default(), vec![message(Role::User, &texts[0])]);
+        let second = first
+            .append([message(Role::Assistant, &texts[1]), message(Role::User, &texts[2])])
+            .expect("a reply and a follow-up append");
+        let other_texts = ["What is a forge?".to_owned()];
+        let other = input(OfferedTools::default(), vec![message(Role::User, &other_texts[0])]);
+        let developer_texts = [texts[0].clone(), texts[2].clone()];
+        let developer = input(
+            OfferedTools::default(),
+            vec![message(Role::Developer, &developer_texts[0]), message(Role::User, &developer_texts[1])],
+        );
+
+        let key = cache_key(&first, &texts[..1]);
+
+        assert!(key.is_string(), "the request sends a key");
+        assert_eq!(cache_key(&second, &texts), key, "a later turn of the session sends the same key");
+        assert_ne!(cache_key(&other, &other_texts), key, "a session with another first item sends another key");
+        assert_ne!(cache_key(&developer, &developer_texts), key, "the same text under another role sends another key");
+    }
+
     #[test]
     fn request_resends_every_item_in_order_with_store_off() {
         // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, a
@@ -224,7 +283,7 @@ mod tests {
             vec![HttpHeader { name: "Content-Type".into(), value: "application/json".into() }],
             "exactly one header, and no credential"
         );
-        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("body is JSON");
+        let body = body_without_key(&request.body);
         assert_eq!(
             body,
             json!({
@@ -282,7 +341,7 @@ mod tests {
 
         let request = fetch(&input, &texts, &definition_texts).expect("a well-offered turn builds");
 
-        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("body is JSON");
+        let body = body_without_key(&request.body);
         assert_eq!(
             body,
             json!({
