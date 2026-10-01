@@ -65,7 +65,10 @@ program is tested without spending money.
    conversation as a flat, ordered list of cited items, and the tool
    definitions it offers, and nothing more. The request always sends
    `store: false`, never a server-side conversation handle, and resends the
-   full `input` array every turn. The recorded closure (the input plus every
+   full `input` array every turn. It also sends `prompt_cache_key`, the hex
+   sha256 of the first `input` item as sent: every turn of a session resends
+   that item unchanged, so every turn shares one key, and the key stays a
+   function of the closure. The recorded closure (the input plus every
    cited text and definition) is therefore the whole request except the
    credential. A fork is a
    different closure that shares its leading text artifacts, which the
@@ -304,7 +307,8 @@ program is tested without spending money.
   does not rate-limit.
 - Prompt-cache hits are the vendor's and are not guaranteed. The program
   records the reported cached input tokens so the effect is visible in the
-  journal, and makes no attempt to steer the cache.
+  journal. The `prompt_cache_key` only routes a session's turns toward the
+  servers that hold its prefix; it guarantees no hit.
 - Endpoint and model are recorded in every turn's input, so the record
   says where a turn went and which model answered; the operator's
   allowlist is the control on where turns may go.
@@ -352,8 +356,12 @@ program is tested without spending money.
 - **A conversation as a chain of parent-result references walked at run
   time.** Rejected: the flat item list already makes a fork a different
   closure, and tree, fork, or compaction policy belongs above the program.
-- **Prompt-cache hints or keys.** Deferred: caching is automatic and uneven
-  on the vendor side, and the program cannot guarantee it.
+- **A cache key field on the turn input or its settings, set at session
+  open.** Rejected: it is a kind change and a migration of every stored
+  input, and the first item already identifies the session.
+- **The session key as the cache key.** Rejected: `muse.turn` never sees
+  it, threading it in is the same kind change, and a fork would lose cache
+  sharing with its parent.
 - **Offer every program the bundle or unit declares by default.**
   Rejected: a turn offers only the tools its caller names (decision 9).
 - **`tools` as program names only, with `muse.turn` rendering the
