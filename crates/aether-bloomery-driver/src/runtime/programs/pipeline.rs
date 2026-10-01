@@ -31,9 +31,8 @@ impl ProgramCore {
     ///
     /// A request that finds the digest below its invocation limit starts from
     /// the digest's current state; otherwise it waits its turn in the FIFO. A
-    /// clock request
-    /// never enters a queue: it is armed on the driver's timer heap and holds
-    /// no slot while it waits (ADR-0245).
+    /// clock request never enters a queue: it is armed on the driver's timer
+    /// heap and holds no slot while it waits (ADR-0245).
     pub(crate) fn enqueue_request(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
         if is_clock(bundle) {
             self.arm_clock(seq, out);
