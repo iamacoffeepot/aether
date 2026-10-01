@@ -1,0 +1,24 @@
+{
+  "id": "resp_0010",
+  "object": "response",
+  "created_at": 1790000120,
+  "status": "incomplete",
+  "error": null,
+  "incomplete_details": { "reason": "max_output_tokens" },
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "rs_0010",
+      "type": "reasoning",
+      "summary": []
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 512,
+    "output_tokens_details": { "reasoning_tokens": 512 },
+    "total_tokens": 1712
+  }
+}

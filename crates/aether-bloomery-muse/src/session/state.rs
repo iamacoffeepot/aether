@@ -59,6 +59,12 @@ impl TurnSettings {
         self.clone().with_items(TurnItems::user(user))
     }
 
+    /// These settings with `max_output_tokens` as the budget.
+    pub(crate) fn with_budget(mut self, max_output_tokens: OutputBudget) -> Self {
+        self.max_output_tokens = max_output_tokens;
+        self
+    }
+
     /// One turn sending `items` with these settings.
     pub(crate) fn with_items(self, items: TurnItems) -> TurnInput {
         TurnInput::new(self.endpoint, self.model, self.tools, items, self.max_output_tokens, self.reasoning)
@@ -312,16 +318,27 @@ impl Session {
         self.tree
     }
 
-    /// The next turn: the settings, the conversation, and one user message
-    /// citing `user`. The one way from a session to its next turn.
+    /// The next turn: the settings, with `max_output_tokens` as the budget
+    /// when given, and the conversation, followed by one user message citing
+    /// `user` when given. With no message the conversation is resent as it
+    /// stands. The one way from a session to its next turn.
     ///
     /// # Errors
     ///
     /// [`TurnItemsError::TooMany`] when the message passes
-    /// [`TurnItems::MAX_ITEMS`].
-    pub fn continue_with(&self, user: Ref<Utf8Text>) -> Result<TurnInput, TurnItemsError> {
-        let items = self.items().iter().cloned().chain([TurnItem::message(Role::User, user)]).collect();
-        Ok(self.settings.clone().with_items(TurnItems::new(items)?))
+    /// [`TurnItems::MAX_ITEMS`], and [`TurnItemsError::LastNotUser`] for no
+    /// message on a conversation that ends on the assistant's reply.
+    pub fn continue_with(
+        &self,
+        user: Option<Ref<Utf8Text>>,
+        max_output_tokens: Option<OutputBudget>,
+    ) -> Result<TurnInput, TurnItemsError> {
+        let items = self.items().iter().cloned().chain(user.map(|user| TurnItem::message(Role::User, user))).collect();
+        let mut settings = self.settings.clone();
+        if let Some(budget) = max_output_tokens {
+            settings = settings.with_budget(budget);
+        }
+        Ok(settings.with_items(TurnItems::new(items)?))
     }
 }
 
@@ -334,7 +351,7 @@ mod tests {
 
     use super::{RestReason, Session, SessionItems, SessionItemsError, TurnLimit, TurnLimitError};
     use crate::input::tests::call;
-    use crate::input::{CallId, OfferedTools, Role, ToolOutput, TurnItem, TurnItemsError};
+    use crate::input::{CallId, OfferedTools, OutputBudget, Role, ToolOutput, TurnItem, TurnItemsError};
     use crate::session::fixture::settings;
     use crate::session::open::OpenInput;
 
@@ -390,8 +407,28 @@ mod tests {
             tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
         };
 
-        let next = session.continue_with(Ref::of_text("more")).expect("next turn");
+        let next = session.continue_with(Some(Ref::of_text("more")), None).expect("next turn");
         assert_eq!(next.settings(), *session.settings());
         assert_eq!(next.items().split_last(), Some((&message(Role::User, "more"), items.as_slice())));
+        assert_eq!(session.continue_with(None, None), Err(TurnItemsError::LastNotUser), "a reply is never resent");
+    }
+
+    #[test]
+    fn a_resent_turn_is_the_session_as_it_stands_with_only_the_budget_replaced() {
+        // Catches a resend that appends anything to the conversation or changes a setting besides the budget, which
+        // would bias the model or break the prompt prefix the failed turn sent.
+        let items = vec![message(Role::User, "hi"), TurnItem::Call(call("a", "muse.echo")), output("a")];
+        let session = Session {
+            settings: settings(OfferedTools::default()),
+            items: SessionItems::new(items.clone()).expect("items"),
+            rested: RestReason::Incomplete,
+            tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
+        };
+        let budget = OutputBudget::new(4096).expect("budget");
+
+        let next = session.continue_with(None, Some(budget)).expect("a resent turn");
+        assert_eq!(next.items(), items.as_slice());
+        assert_eq!(next.max_output_tokens(), budget);
+        assert_eq!(next.settings(), session.settings().clone().with_budget(budget));
     }
 }
