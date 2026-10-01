@@ -2,7 +2,8 @@
 //!
 //! Any reply is a result, because tokens may have been spent: the raw body is
 //! always staged, so a classification bug can be corrected later from the
-//! record. Only [`crate::response`] builds one.
+//! record. A fetch that got no reply for a reason a resend may clear is a
+//! result too, one that reads as transient. Only [`crate::response`] builds one.
 
 use core::borrow::Borrow;
 
@@ -120,7 +121,8 @@ pub enum TurnOutcome {
     Declined { refusal: Ref<Utf8Text>, usage: TurnUsage },
     /// A non-transient non-2xx status, or a vendor status of `failed` or `cancelled`. The vendor's error is in the body.
     Rejected,
-    /// The vendor refused for now (rate limit or overload); nothing was bought, and a new request may succeed.
+    /// The vendor refused for now (rate limit or overload), or the fetch got no reply for a reason a resend may
+    /// clear (a timeout or a connection failure); a new request may succeed.
     ///
     /// `retry_after_secs` is the vendor's `Retry-After` delay in seconds, when it sent one as a number.
     Transient { retry_after_secs: Option<u32> },
@@ -129,36 +131,68 @@ pub enum TurnOutcome {
     Unreadable,
 }
 
-/// One recorded turn: the status, the raw body, and the outcome read from it.
+/// One recorded turn: the vendor's reply, or the reason the fetch got none.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.turn.result")]
 pub struct TurnResult {
-    status: HttpStatus,
-    body: Ref<OpaqueBytes>,
-    outcome: TurnOutcome,
+    reply: Reply,
 }
 
+/// What a turn's fetch got back. Private, so only [`crate::response`] builds a result.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+enum Reply {
+    /// The vendor answered; the status, raw body, and outcome read from it.
+    Received { status: HttpStatus, body: Ref<OpaqueBytes>, outcome: TurnOutcome },
+    /// The fetch got no reply for a reason a resend may clear (a timeout or a connection failure).
+    Unreached { error: Detail },
+}
+
+/// The outcome of a turn that got no reply: transient, with no delay from the vendor.
+const UNREACHED: TurnOutcome = TurnOutcome::Transient { retry_after_secs: None };
+
 impl TurnResult {
-    pub(crate) const fn new(status: HttpStatus, body: Ref<OpaqueBytes>, outcome: TurnOutcome) -> Self {
-        Self { status, body, outcome }
+    pub(crate) const fn received(status: HttpStatus, body: Ref<OpaqueBytes>, outcome: TurnOutcome) -> Self {
+        Self { reply: Reply::Received { status, body, outcome } }
     }
 
-    /// The reply's HTTP status.
+    pub(crate) const fn unreached(error: Detail) -> Self {
+        Self { reply: Reply::Unreached { error } }
+    }
+
+    /// The reply's HTTP status, when the vendor answered.
     #[must_use]
-    pub const fn status(&self) -> HttpStatus {
-        self.status
+    pub const fn status(&self) -> Option<HttpStatus> {
+        match &self.reply {
+            Reply::Received { status, .. } => Some(*status),
+            Reply::Unreached { .. } => None,
+        }
     }
 
-    /// The raw reply body, always kept.
+    /// The raw reply body, always kept when the vendor answered.
     #[must_use]
-    pub const fn body(&self) -> Ref<OpaqueBytes> {
-        self.body
+    pub const fn body(&self) -> Option<Ref<OpaqueBytes>> {
+        match &self.reply {
+            Reply::Received { body, .. } => Some(*body),
+            Reply::Unreached { .. } => None,
+        }
     }
 
-    /// How the vendor answered.
+    /// Why the fetch got no reply, when it got none.
+    #[must_use]
+    pub const fn error(&self) -> Option<&Detail> {
+        match &self.reply {
+            Reply::Received { .. } => None,
+            Reply::Unreached { error } => Some(error),
+        }
+    }
+
+    /// How the vendor answered. A turn that got no reply reads as `Transient` with no `retry_after_secs`.
     #[must_use]
     pub const fn outcome(&self) -> &TurnOutcome {
-        &self.outcome
+        match &self.reply {
+            Reply::Received { outcome, .. } => outcome,
+            Reply::Unreached { .. } => &UNREACHED,
+        }
     }
 }
 

@@ -6,9 +6,9 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, ModelName, MuseTurn, OfferedTool, OfferedTools,
-    OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome,
-    TurnResult,
+    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, ModelName, MuseTurn, OfferedTool,
+    OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
+    TurnOutcome, TurnResult,
 };
 use aether_bloomery_program::{
     AsyncSession, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
@@ -125,7 +125,7 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
     let TurnOutcome::Completed { text, usage } = recorded.outcome() else {
         panic!("expected Completed, got {:?}", recorded.outcome());
     };
-    assert_eq!(recorded.status().get(), 200);
+    assert_eq!(recorded.status().map(HttpStatus::get), Some(200));
     assert_eq!(usage.cached_input_tokens(), 1024);
     assert_eq!(*text, Ref::of_text("A bloomery is a furnace that smelts iron into a bloom."));
     assert_eq!(
@@ -137,7 +137,7 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
         ],
         "the body and the text are staged, and the result cites them"
     );
-    assert_eq!(recorded.body(), Ref::of_bytes(COMPLETED.as_bytes()));
+    assert_eq!(recorded.body(), Some(Ref::of_bytes(COMPLETED.as_bytes())));
     Ok(())
 }
 
@@ -162,8 +162,8 @@ fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box
     let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
     let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
     assert_eq!(*recorded.outcome(), TurnOutcome::Transient { retry_after_secs: Some(7) });
-    assert_eq!(recorded.status().get(), 503);
-    assert_eq!(recorded.body(), Ref::of_bytes(OVERLOADED.as_bytes()));
+    assert_eq!(recorded.status().map(HttpStatus::get), Some(503));
+    assert_eq!(recorded.body(), Some(Ref::of_bytes(OVERLOADED.as_bytes())));
     assert_eq!(
         staged,
         vec![EncodedArtifact::opaque_bytes(OVERLOADED.as_bytes()), EncodedArtifact::new(&recorded)?],
@@ -173,15 +173,36 @@ fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box
 }
 
 #[test]
-fn a_turn_with_no_reply_refuses_with_the_http_error() -> Result<(), Box<dyn Error>> {
-    // Catches a turn that never reached the vendor being recorded as answered.
+fn a_timed_out_fetch_is_recorded_as_a_transient_turn() -> Result<(), Box<dyn Error>> {
+    // Catches a timeout left as a fault, so the session never retries it, and a phantom staged body.
     let (mut session, pending) = start_plain_turn()?;
     let reply = FetchResult::Err { request_id: 1, url: URL.into(), error: HttpError::Timeout };
+    session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+    let (result, staged) = match session.poll() {
+        PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) => (result, staged),
+        other => panic!("expected a timed-out fetch to complete as a recorded turn, got {other:?}"),
+    };
+
+    let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
+    let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
+    assert_eq!(*recorded.outcome(), TurnOutcome::Transient { retry_after_secs: None });
+    assert_eq!(recorded.status(), None);
+    let error = recorded.error().ok_or("an unreached turn names its error")?;
+    assert!(error.as_str().contains("Timeout"), "{}", error.as_str());
+    assert_eq!(staged, vec![EncodedArtifact::new(&recorded)?], "only the result is staged");
+    Ok(())
+}
+
+#[test]
+fn a_policy_refused_fetch_still_refuses() -> Result<(), Box<dyn Error>> {
+    // Catches a policy refusal no resend can clear swallowed into the session's retry loop.
+    let (mut session, pending) = start_plain_turn()?;
+    let reply = FetchResult::Err { request_id: 1, url: URL.into(), error: HttpError::AllowlistDenied };
     session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
 
     match session.poll() {
         PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { reason } }) => {
-            assert!(reason.as_str().contains("Timeout"), "{}", reason.as_str());
+            assert!(reason.as_str().contains("AllowlistDenied"), "{}", reason.as_str());
             Ok(())
         }
         other => panic!("expected Refused naming the HTTP error, got {other:?}"),

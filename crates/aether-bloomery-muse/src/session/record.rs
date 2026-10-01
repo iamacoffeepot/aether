@@ -240,7 +240,7 @@ mod tests {
     }
 
     fn result(outcome: TurnOutcome) -> TurnResult {
-        TurnResult::new(HttpStatus::new(200).expect("status"), Ref::of_bytes(b"{}"), outcome)
+        TurnResult::received(HttpStatus::new(200).expect("status"), Ref::of_bytes(b"{}"), outcome)
     }
 
     fn calls() -> ToolCalls {

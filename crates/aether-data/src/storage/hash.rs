@@ -562,12 +562,18 @@ pub const fn assert_unique_storage_leaves(schema: &SchemaType, aliases: &[(&str,
         a += 1;
     }
     let total = live + extra;
+    let mut cache = [0; LEAF_HASH_CACHE];
+    let mut c = 0;
+    while c < total && c < LEAF_HASH_CACHE {
+        cache[c] = hash_at(schema, aliases, live, c);
+        c += 1;
+    }
     let mut i = 0;
     while i < total {
-        let left = hash_at(schema, aliases, live, i);
+        let left = cached_hash_at(&cache, schema, aliases, live, i);
         let mut j = i + 1;
         while j < total {
-            let right = hash_at(schema, aliases, live, j);
+            let right = cached_hash_at(&cache, schema, aliases, live, j);
             if left == right {
                 assert!(
                     !(i < live && j < live),
@@ -578,6 +584,27 @@ pub const fn assert_unique_storage_leaves(schema: &SchemaType, aliases: &[(&str,
             j += 1;
         }
         i += 1;
+    }
+}
+
+/// How many leaf hashes [`assert_unique_storage_leaves`] computes once and keeps for its pairwise check.
+///
+/// Finding one leaf walks the schema, so recomputing both sides of every pair costs cubic time in the leaf count, and
+/// a kind that nests a large enum one level deeper runs past rustc's const-eval budget. A kind with more leaves than
+/// this hashes the rest on demand.
+const LEAF_HASH_CACHE: usize = 512;
+
+const fn cached_hash_at(
+    cache: &[u64; LEAF_HASH_CACHE],
+    schema: &SchemaType,
+    aliases: &[(&str, &SchemaType)],
+    live: usize,
+    index: usize,
+) -> u64 {
+    if index < LEAF_HASH_CACHE {
+        cache[index]
+    } else {
+        hash_at(schema, aliases, live, index)
     }
 }
 

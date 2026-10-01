@@ -18,7 +18,9 @@ pub struct MuseTurn;
 /// definition and input schema. Sends exactly one `Fetch`, and records the
 /// reply, decoding each call's arguments against its tool's input schema.
 /// It never retries and never runs a call: a retry is a new request the
-/// graph decides on, and a call is its caller's to run.
+/// graph decides on, and a call is its caller's to run. A fetch that timed out
+/// or failed at the connection still records a result, one that reads as
+/// transient, so the caller may resend the turn.
 #[program]
 impl Program for MuseTurn {
     const NAME: &'static str = "muse.turn";
