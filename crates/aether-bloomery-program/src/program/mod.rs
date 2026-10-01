@@ -25,9 +25,9 @@
 //! [`tool_definition`] renders a declared program as a responses-API function
 //! tool: its `///` doc, and the JSON Schema of its arguments with every
 //! field's doc. A tool's input is [`Tooled<A, B>`](Tooled): the tree the call
-//! works on, bound by the loop that runs it, the arguments `A` the model
-//! writes, and the bound `B` the loop binds. A tool that changes the tree returns [`Edited`]. [`ToolSchema`]
-//! stores a tool's arguments' or result's schema as data, for a reader that
+//! works on and the value `B`, both bound by the loop that runs it, and the
+//! arguments `A` the model writes. A tool that changes the tree returns
+//! [`Edited`]. [`ToolSchema`] stores a tool's arguments' or result's schema as data, for a reader that
 //! links neither type.
 //!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.

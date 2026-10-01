@@ -5,10 +5,9 @@
 //! `aether_bloomery_program::tool_definition`, so the recorded input holds
 //! exactly what was sent; nothing defaults to every declared program. The
 //! caller also cites the program's input and result schemas
-//! ([`ToolSchema::of`]), so `muse.turn` links no tool's types. The caller
-//! cites the bound value the loop binds for the program and the schema of
-//! that bound, so the loop looks both up without linking the tool's types;
-//! the model never sees the bound.
+//! ([`ToolSchema::of`]), so `muse.turn` links no tool's types. The offer also
+//! cites the bound value the loop binds into every call, which the model
+//! never sees; its kind is the one the tool decodes it as.
 //!
 //! A call cites its arguments exactly as the model wrote them, to replay
 //! them unchanged, and records what `muse.turn` made of the call: a call to
@@ -22,8 +21,8 @@ use std::collections::BTreeSet;
 use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Utf8Text};
 use aether_bloomery_program::{ToolDefinitionError, ToolSchema, function_name};
 
-/// One program offered to the model, with the definition sent for it and
-/// the schemas of its input, bound, and result.
+/// One program offered to the model, with the definition sent for it, the
+/// schemas of its input and result, and the bound value the loop binds.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct OfferedTool {
     /// The program the model may ask to run.
@@ -34,11 +33,9 @@ pub struct OfferedTool {
     /// The cited schema of the program's input, which a call's arguments
     /// decode against.
     input: Ref<ToolSchema>,
-    /// The bound value the loop binds for the program, unseen by the model.
+    /// The value the loop binds into every call's input, unseen by the
+    /// model; its kind is the bound kind the program takes.
     bound: ErasedRef,
-    /// The cited schema of the program's bound, which the loop checks the
-    /// bound value against only through [`ToolSchema::of`].
-    bound_schema: Ref<ToolSchema>,
     /// The cited schema of the program's result, which the call's output
     /// renders with.
     result: Ref<ToolSchema>,
@@ -46,18 +43,27 @@ pub struct OfferedTool {
 
 impl OfferedTool {
     /// Offer `program`, sending the cited `definition` for it, with the cited
-    /// schemas of its `input` and `result` and the bound value `bound` with
-    /// the cited schema of that bound.
+    /// schemas of its `input` and `result`, binding `bound` into every call.
     #[must_use]
     pub const fn new(
         program: ProgramName,
         definition: Ref<Utf8Text>,
         input: Ref<ToolSchema>,
         bound: ErasedRef,
-        bound_schema: Ref<ToolSchema>,
         result: Ref<ToolSchema>,
     ) -> Self {
-        Self { program, definition, input, bound, bound_schema, result }
+        Self { program, definition, input, bound, result }
+    }
+
+    /// Whether `other` offers the same tool: the same program, definition,
+    /// and schemas, and a bound of the same kind, whatever its value.
+    #[must_use]
+    pub fn same_tool(&self, other: &Self) -> bool {
+        self.program == other.program
+            && self.definition == other.definition
+            && self.input == other.input
+            && self.result == other.result
+            && self.bound.kind() == other.bound.kind()
     }
 
     /// The program the model may ask to run.
@@ -82,12 +88,6 @@ impl OfferedTool {
     #[must_use]
     pub const fn bound(&self) -> ErasedRef {
         self.bound
-    }
-
-    /// The cited schema of the program's bound.
-    #[must_use]
-    pub const fn bound_schema(&self) -> Ref<ToolSchema> {
-        self.bound_schema
     }
 
     /// The cited schema of the program's result.
@@ -139,6 +139,13 @@ impl OfferedTools {
     #[must_use]
     pub fn as_slice(&self) -> &[OfferedTool] {
         &self.0
+    }
+
+    /// Whether `tool` is one of these offers, whatever bound value it
+    /// carries.
+    #[must_use]
+    pub fn offers(&self, tool: &OfferedTool) -> bool {
+        self.0.iter().any(|offer| offer.same_tool(tool))
     }
 
     fn check(tools: &[OfferedTool]) -> Result<(), OfferedToolsError> {

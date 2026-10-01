@@ -13,9 +13,9 @@
 //! [`ToolSchema`] is the same type's schema as a stored value, so a program
 //! that links none of a tool's types can still decode its arguments and
 //! render its result: the caller, which links them, stores one for the
-//! tool's arguments and one for its result and cites both. The bound value and
-//! its schema travel with the offer, so the loop can bind them without
-//! linking the tool's types.
+//! tool's arguments and one for its result and cites both. The bound value
+//! needs no schema: the loop passes it on as cited, and the tool decodes it
+//! as its `B`.
 
 mod edited;
 mod tooled;
@@ -81,9 +81,9 @@ impl From<JsonSchemaError> for ToolDefinitionError {
 /// leave `Option` fields out of `required`, which strict mode refuses; the
 /// codec's decode stays the authority on what the program accepts.
 ///
-/// The parameters are the arguments `A` of `P`'s [`Tooled<A, B>`] input, never
-/// the envelope: the model does not write the tree or the bound. Arguments with an
-/// undocumented field or variant do not compile here, the same check
+/// The parameters are the arguments `A` of `P`'s [`Tooled<A, B>`] input,
+/// never the envelope: the model writes neither the tree nor the bound.
+/// Arguments with an undocumented field or variant do not compile here, the same check
 /// `#[program]` runs on an input, so a hand-written `impl Program` is refused
 /// too.
 ///

@@ -144,13 +144,12 @@ pub mod tests {
     pub fn offered_tool(program: ProgramName) -> OfferedTool {
         let schema = |schema: ToolSchema| Ref::of_encoded(&schema).expect("a schema encodes");
         let definition = Ref::of_text(program.as_str());
-        let bound = Ref::of_encoded(&NoBound).expect("a bound encodes");
+        let bound = Ref::of_encoded(&NoBound).expect("a bound encodes").erase();
         OfferedTool::new(
             program,
             definition,
             schema(ToolSchema::of::<TurnInput>()),
-            bound.erase(),
-            schema(ToolSchema::of::<NoBound>()),
+            bound,
             schema(ToolSchema::of::<TurnResult>()),
         )
     }

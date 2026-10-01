@@ -1,15 +1,13 @@
 //! The programs a session binds as tools.
 //!
-//! Every tool's input is `Tooled<A, B>`: the session's current tree, which the
-//! loop binds, the arguments `A` the model writes, and the bound `B` the loop
-//! binds from the offer. [`offered`] is the
+//! Every tool's input is `Tooled<A, B>`: the session's current tree and the
+//! bound value `B` its offer carries, which the loop binds, and the arguments
+//! `A` the model writes. Every tool here binds `NoBound`. [`offered`] is the
 //! set `muse.session.open` accepts: `tree.edit` and `tree.write`, which read
 //! only the tree nodes and blobs they touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
-//! marked; and `muse.echo`, a value-only fixture. The model sees only the
-//! arguments: the definition is rendered from the arguments schema alone, and
-//! the bound travels only in the cited offer.
+//! marked; and `muse.echo`, a value-only fixture.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -47,8 +45,8 @@ use crate::session::program_name;
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
 
 /// Every bound tool offered as a session turn offers it, and the artifacts
-/// those offers cite: each definition and each arguments, bound, and result schema,
-/// for a caller that opens a session to stage.
+/// those offers cite: each definition, each arguments and result schema, and
+/// the bound value, for a caller that opens a session to stage.
 ///
 /// # Panics
 ///
@@ -77,23 +75,18 @@ where
     P::Result: Schema,
 {
     let definition = tool_definition::<P>().expect("a bound tool renders as a tool").to_string();
-    let schemas = [
-        ToolSchema::of::<<P::Input as ToolArguments>::Arguments>(),
-        ToolSchema::of::<<P::Input as ToolArguments>::Bound>(),
-        ToolSchema::of::<P::Result>(),
-    ]
-    .map(|schema| EncodedArtifact::new(&schema).expect("a tool schema encodes"));
-    let [input, bound_schema, result] = schemas.each_ref().map(|schema| Ref::from_digest(schema.digest()));
-    let bound = Ref::of_encoded(&NoBound).expect("the canonical bound encodes");
-    let tool =
-        OfferedTool::new(program_name::<P>(), Ref::of_text(&definition), input, bound.erase(), bound_schema, result);
-    (
-        tool,
-        iter::once(EncodedArtifact::text(&definition))
-            .chain(schemas)
-            .chain([EncodedArtifact::new(&NoBound).expect("the canonical bound encodes")])
-            .collect(),
-    )
+    let schemas = [ToolSchema::of::<<P::Input as ToolArguments>::Arguments>(), ToolSchema::of::<P::Result>()]
+        .map(|schema| EncodedArtifact::new(&schema).expect("a tool schema encodes"));
+    let [input, result] = schemas.each_ref().map(|schema| Ref::from_digest(schema.digest()));
+    let bound = EncodedArtifact::new(&NoBound).expect("the bound encodes");
+    let tool = OfferedTool::new(
+        program_name::<P>(),
+        Ref::of_text(&definition),
+        input,
+        Ref::<NoBound>::from_digest(bound.digest()).erase(),
+        result,
+    );
+    (tool, iter::once(EncodedArtifact::text(&definition)).chain(schemas).chain([bound]).collect())
 }
 
 /// A tool's arguments, or the sentence, without its closing stop, on why
