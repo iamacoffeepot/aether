@@ -164,7 +164,7 @@ fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> 
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{ProgramName, Ref, Refusal, Tree};
-    use aether_bloomery_program::Program;
+    use aether_bloomery_program::{Program, ToolSchema};
     use aether_bloomery_workspace::TreePath;
 
     use super::{OpenInput, SessionOpen};
@@ -205,7 +205,7 @@ mod tests {
             echo.definition(),
             echo.input(),
             echo.bound(),
-            bound.as_slice()[1].bound_schema(),
+            Ref::of_encoded(&ToolSchema::of::<Tree>()).expect("a schema encodes"),
             echo.result(),
         );
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
