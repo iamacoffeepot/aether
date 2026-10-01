@@ -31,7 +31,10 @@
 //!   stopped early with no output adds nothing, so the session ends on what
 //!   that turn sent. `call` and `resume` record one the same way when the
 //!   activation has made as many turns as its limit allows, resting it with
-//!   [`RestReason::TurnLimit`].
+//!   [`RestReason::TurnLimit`], or when a called turn reached the session's
+//!   input limit, resting it with [`RestReason::ContextFull`]. `ContextFull`
+//!   takes precedence over `TurnLimit` when both hold; a called turn still
+//!   runs its calls to completion before resting.
 //! - `rest` moves the session's head to that record, compare-and-swap from the
 //!   record before it.
 //! - `call` also waits on the driver's clock after a turn the vendor refused

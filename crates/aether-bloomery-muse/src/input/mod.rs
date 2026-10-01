@@ -12,7 +12,8 @@ use crate::session::TurnSettings;
 
 pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order};
 pub use limits::{
-    Endpoint, EndpointError, ModelName, ModelNameError, OutputBudget, OutputBudgetError, ReasoningEffort,
+    Endpoint, EndpointError, InputLimit, InputLimitError, ModelName, ModelNameError, OutputBudget, OutputBudgetError,
+    ReasoningEffort,
 };
 pub use tools::{
     CallId, CallIdError, FunctionName, FunctionNameError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall,
@@ -20,8 +21,8 @@ pub use tools::{
 };
 
 /// One stateless turn: where it goes, which model answers, the programs it
-/// offers as tools, the whole conversation, the output budget, and the
-/// reasoning effort.
+/// offers as tools, the whole conversation, the output budget, the reasoning
+/// effort, and the input limit.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.turn.input")]
 pub struct TurnInput {
@@ -41,6 +42,10 @@ pub struct TurnInput {
     max_output_tokens: OutputBudget,
     /// How much the model reasons before it answers.
     reasoning: ReasoningEffort,
+    /// The most input tokens the turn may have been billed for before its
+    /// session rests with [`crate::session::RestReason::ContextFull`]. Never
+    /// zero.
+    input_limit: InputLimit,
 }
 
 impl TurnInput {
@@ -53,8 +58,9 @@ impl TurnInput {
         items: TurnItems,
         max_output_tokens: OutputBudget,
         reasoning: ReasoningEffort,
+        input_limit: InputLimit,
     ) -> Self {
-        Self { endpoint, model, tools, items, max_output_tokens, reasoning }
+        Self { endpoint, model, tools, items, max_output_tokens, reasoning, input_limit }
     }
 
     /// The URL the turn posts to.
@@ -93,6 +99,13 @@ impl TurnInput {
         self.reasoning
     }
 
+    /// The most input tokens the turn may have been billed for before its
+    /// session rests.
+    #[must_use]
+    pub const fn input_limit(&self) -> InputLimit {
+        self.input_limit
+    }
+
     /// Every field but the conversation: what a session keeps from turn to turn.
     #[must_use]
     pub fn settings(&self) -> TurnSettings {
@@ -102,6 +115,7 @@ impl TurnInput {
             self.tools.clone(),
             self.max_output_tokens,
             self.reasoning,
+            self.input_limit,
         )
     }
 
@@ -120,9 +134,9 @@ pub mod tests {
     use aether_bloomery_program::{ToolSchema, function_name};
 
     use super::{
-        CallId, Endpoint, EndpointError, FunctionName, ModelName, ModelNameError, OfferedTool, OfferedTools,
-        OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
-        TurnItemsError,
+        CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName, ModelNameError,
+        OfferedTool, OfferedTools, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolOutput,
+        TurnInput, TurnItem, TurnItems, TurnItemsError,
     };
     use crate::result::TurnResult;
 
@@ -162,6 +176,7 @@ pub mod tests {
             TurnItems::new(vec![user.clone()]).expect("items"),
             OutputBudget::new(64).expect("budget"),
             ReasoningEffort::Low,
+            InputLimit::new(u64::MAX).expect("limit"),
         );
         let output = |id: &str| TurnItem::CallOutput {
             call_id: CallId::new(id).expect("call id"),
@@ -212,6 +227,13 @@ pub mod tests {
 
         assert_eq!(OutputBudget::new(0), Err(OutputBudgetError::Zero));
         assert_eq!(OutputBudget::new(1).map(OutputBudget::get), Ok(1));
+
+        assert_eq!(InputLimit::new(0), Err(InputLimitError::Zero));
+        assert_eq!(InputLimit::new(u64::MAX).map(InputLimit::get), Ok(u64::MAX));
+        let limit = InputLimit::new(900).expect("limit");
+        assert!(!limit.reached(899), "one token below the limit has not reached it");
+        assert!(limit.reached(900), "the limit itself has reached it");
+        assert!(limit.reached(901), "past the limit has reached it");
 
         let call = |id: &str| call(id, "muse.turn");
         let item = |role| TurnItem::message(role, Ref::of_text("text"));

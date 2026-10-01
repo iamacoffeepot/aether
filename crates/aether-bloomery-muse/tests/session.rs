@@ -13,8 +13,8 @@ use aether_bloomery_kinds::{
     decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
-    Answered, ContinueInput, Echo, EchoResult, Endpoint, Failure, ModelName, MuseSession, MuseTurn, OfferedTools,
-    OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session,
+    Answered, ContinueInput, Echo, EchoResult, Endpoint, Failure, InputLimit, ModelName, MuseSession, MuseTurn,
+    OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session,
     SessionContinue, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep,
     TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings,
     Viewed, offered,
@@ -34,6 +34,7 @@ const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_r
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
+const CONTEXT_FULL: &str = include_str!("../fixtures/context_full.json");
 const INCOMPLETE_BUDGET: &str = include_str!("../fixtures/incomplete_budget.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
@@ -374,7 +375,8 @@ fn settings(driver: &mut Driver) -> Result<TurnSettings, Box<dyn Error>> {
     let (tools, artifacts) = offered();
     driver.stage(artifacts);
     let (endpoint, model, budget) = (Endpoint::new(URL)?, ModelName::new("muse-spark-1.3")?, OutputBudget::new(512)?);
-    Ok(TurnSettings::new(endpoint, model, tools, budget, ReasoningEffort::Low))
+    let limit = InputLimit::new(u64::MAX).expect("limit");
+    Ok(TurnSettings::new(endpoint, model, tools, budget, ReasoningEffort::Low, limit))
 }
 
 /// The text of `src/lib.rs` in the tree a session opens on.
@@ -415,6 +417,25 @@ fn file(driver: &Driver, tree: Ref<Tree>, path: &str) -> Vec<u8> {
 /// Open a session on the small tree that makes at most `max_turns` turns; the open run's seq and the tree.
 fn open(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     open_seeded(driver, max_turns, Vec::new())
+}
+
+/// Open a session on the small tree like [`open`], but resting `ContextFull`
+/// once a turn is billed `tokens` input tokens; the open run's seq and the tree.
+fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
+    let (tools, artifacts) = offered();
+    driver.stage(artifacts);
+    let settings = TurnSettings::new(
+        Endpoint::new(URL)?,
+        ModelName::new("muse-spark-1.3")?,
+        tools,
+        OutputBudget::new(512)?,
+        ReasoningEffort::Low,
+        InputLimit::new(tokens)?,
+    );
+    let tree = small_tree(driver);
+    driver.stage([EncodedArtifact::text(QUESTION)]);
+    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree, Vec::new());
+    Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
 /// Open a session on the small tree that reads `seeds` before its first turn and makes at most `max_turns` turns;
@@ -535,6 +556,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
         TurnItems::new(items)?,
         first.max_output_tokens(),
         first.reasoning(),
+        first.input_limit(),
     );
     let next_call = asked(&driver, trigger);
     assert_eq!(next_call.name.as_str(), MuseTurn::NAME);
@@ -775,6 +797,7 @@ fn a_bare_turn_is_never_a_session() -> TestResult {
         TurnItems::new(vec![TurnItem::message(Role::User, Ref::of_text(QUESTION))])?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
+        settings.input_limit(),
     );
 
     let turn = driver.call_native::<MuseTurn>(&input);
@@ -845,6 +868,61 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
     assert_eq!(completed.items().last(), Some(&answer));
     assert_eq!(completed.items()[..session.items().len()], *session.items(), "the resumed session extends its rest");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_session_rests_full_when_a_turn_reaches_its_input_limit_and_a_continue_resumes_it() -> TestResult {
+    // Catches a loop that sends one more vendor turn past fullness, a rest that drops the calls' outputs, a
+    // `ContextFull` session no continue can pick up, and, in the second run, a diversion firing early and stalling
+    // a healthy session.
+    let mut driver = Driver::new(&[CONTEXT_FULL, COMPLETED]);
+    let (opened, tree) = open_limited(&mut driver, 4, 900)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [call_a, call_b] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+    let mut trigger = first_turn;
+    for call in [call_a, call_b] {
+        let asked = asked(&driver, trigger);
+        assert_eq!(asked.name.as_str(), Echo::NAME);
+        assert_eq!(asked.input, bound(tree, call), "the echo runs over the opened tree");
+        trigger = driver.follow(trigger);
+    }
+    assert_eq!(asked(&driver, trigger).name.as_str(), SessionRecord::NAME, "the full turn records instead of turning");
+    let recorded = driver.follow(trigger);
+    let session: Session = driver.result(recorded);
+    assert_eq!(*session.rested(), RestReason::ContextFull);
+    let Some(TurnItem::CallOutput { call_id, .. }) = session.items().last() else {
+        panic!("expected the session to end on the echo's output, got {:?}", session.items().last());
+    };
+    assert_eq!(call_id.as_str(), "call_b");
+    let key = SessionKey::new(opened);
+    let (moved, heads) = driver.move_heads(recorded);
+    let to = Ref::from_digest(driver.transition(recorded).result);
+    assert_eq!(heads.changes(), [HeadChange::new(&key.head(), None, to)], "moved from unbound");
+    assert!(driver.intents(moved).is_empty(), "the loop rests");
+
+    let full = driver.head(key);
+    let resumed = continue_from(&mut driver, key, full, "Now answer.", 2);
+    driver.settle(resumed);
+    let completed: Session = driver.value(driver.head(key));
+    assert_eq!(*completed.rested(), RestReason::Completed);
+    let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
+    assert_eq!(completed.items().last(), Some(&answer));
+    assert_eq!(completed.items()[..session.items().len()], *session.items(), "the resumed session extends its rest");
+
+    assert_warm_and_live_agree(&driver);
+
+    let mut driver = Driver::new(&[CONTEXT_FULL, COMPLETED]);
+    let (opened, _) = open(&mut driver, 2)?;
+    driver.settle(opened);
+    let completed: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*completed.rested(), RestReason::Completed, "under a large limit the same replies complete");
 
     assert_warm_and_live_agree(&driver);
     Ok(())
@@ -1071,7 +1149,14 @@ fn a_turn_out_of_budget_rests_on_what_it_sent_and_a_continue_resends_it_with_a_l
     let completed: Session = driver.value(driver.head(key));
     assert_eq!(*completed.rested(), RestReason::Completed);
     let tools = OfferedTools::new(first.tools().to_vec())?;
-    let kept = TurnSettings::new(first.endpoint().clone(), first.model().clone(), tools, budget, first.reasoning());
+    let kept = TurnSettings::new(
+        first.endpoint().clone(),
+        first.model().clone(),
+        tools,
+        budget,
+        first.reasoning(),
+        first.input_limit(),
+    );
     assert_eq!(*completed.settings(), kept, "later continues keep the new budget");
 
     assert_warm_and_live_agree(&driver);

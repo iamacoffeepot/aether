@@ -15,7 +15,7 @@ use aether_codec::encode_storage_schema;
 use aether_data::{Cites, Schema, Storage};
 use serde_json::Value;
 
-use crate::input::{Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort};
+use crate::input::{Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort};
 use crate::session::state::TurnSettings;
 
 /// `value` as the closure member that stores it.
@@ -32,6 +32,7 @@ pub fn settings(tools: OfferedTools) -> TurnSettings {
         tools,
         OutputBudget::new(64).expect("budget"),
         ReasoningEffort::Low,
+        InputLimit::new(u64::MAX).expect("limit"),
     )
 }
 

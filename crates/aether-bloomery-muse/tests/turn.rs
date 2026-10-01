@@ -6,9 +6,9 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, ModelName, MuseTurn, OfferedTool,
-    OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
-    TurnOutcome, TurnResult,
+    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, ModelName, MuseTurn,
+    OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput,
+    TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
 use aether_bloomery_program::{
     AsyncSession, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
@@ -81,6 +81,7 @@ fn start_turn(
         TurnItems::new(items)?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
+        InputLimit::new(u64::MAX).expect("limit"),
     );
     let input_artifact = stored(&input)?;
     closure.push(input_artifact.clone());

@@ -29,7 +29,7 @@ mod tests;
 
 use aether_bloomery_kinds::{Call, CallOutcome, NativeOrigin, ProgramName, Ref, UnitKey};
 use aether_bloomery_muse::{
-    Endpoint, MUSE, ModelName, OfferedTools, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
+    Endpoint, InputLimit, MUSE, ModelName, OfferedTools, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
 };
 use aether_bloomery_program::Program;
 use anyhow::{Context, Result, anyhow, bail};
@@ -116,6 +116,10 @@ struct SettingsArgs {
     /// The most output tokens, reasoning included, one turn may produce.
     #[arg(long)]
     max_output_tokens: u32,
+    /// The most input tokens a turn may be billed for before the session
+    /// rests `ContextFull`.
+    #[arg(long)]
+    input_limit: u64,
 }
 
 impl SettingsArgs {
@@ -127,6 +131,7 @@ impl SettingsArgs {
             tools,
             budget(self.max_output_tokens)?,
             self.effort.into(),
+            input_limit(self.input_limit)?,
         ))
     }
 }
@@ -152,6 +157,11 @@ impl From<Effort> for ReasoningEffort {
 /// `--max-output-tokens` as a budget.
 fn budget(tokens: u32) -> Result<OutputBudget> {
     OutputBudget::new(tokens).map_err(|error| anyhow!("--max-output-tokens: {error}"))
+}
+
+/// `--input-limit` as a limit: a value of 0 is refused.
+fn input_limit(tokens: u64) -> Result<InputLimit> {
+    InputLimit::new(tokens).map_err(|error| anyhow!("--input-limit: {error}"))
 }
 
 /// `--max-turns` as a limit.

@@ -424,7 +424,9 @@ mod tests {
         ToolCallsError,
     };
     use crate::input::tests::{call, offered_tool};
-    use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems};
+    use crate::input::{
+        Endpoint, InputLimit, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems,
+    };
 
     #[test]
     fn each_tool_rule_refuses_and_accepts_its_neighbour() {
@@ -488,6 +490,7 @@ mod tests {
             items: TurnItems::new(vec![TurnItem::message(Role::User, Ref::of_text("hello"))]).expect("items"),
             max_output_tokens: OutputBudget::new(64).expect("budget"),
             reasoning: ReasoningEffort::Low,
+            input_limit: InputLimit::new(u64::MAX).expect("limit"),
         };
 
         let stored = TurnInput::encode_storage(&StorageData::from_value(input)).expect("encode");

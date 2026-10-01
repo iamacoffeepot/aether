@@ -59,7 +59,7 @@ every member the bound set already holds. A rebind of the same bundle prints
 cargo xtask muse open --rpc-port <port> --unit primary \
   --commit <revision> --brief brief.md --seeds seeds.txt \
   --endpoint https://api.muse.example/v1/responses --model <model> \
-  --effort medium --max-output-tokens 16000 --max-turns 40
+  --effort medium --max-output-tokens 16000 --max-turns 40 --input-limit 184220
 ```
 
 ```text
@@ -78,6 +78,8 @@ after=<seq>
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
 - The settings have no defaults. `--effort` is `low`, `medium`, or `high`.
+  `--input-limit` is the most input tokens a turn may be billed for before the
+  session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
   `tree.edit`, `tree.write`, and `muse.echo`.
 
@@ -104,8 +106,8 @@ entries: an entry belongs to the session when its cause chain reaches the
 session's open run, or a continue run that names the session, so twenty
 sessions on one engine are each followed by their own `wait`.
 
-- `rested` is `completed`, `declined`, `incomplete`, `turn-limit`, or
-  `failed: <why>`. The final message follows only for `completed`.
+- `rested` is `completed`, `declined`, `incomplete`, `turn-limit`,
+  `context-full`, or `failed: <why>`. The final message follows only for `completed`.
 - `turns` counts the session's `muse.turn` runs read, and `usage` sums the
   token counts they reported.
 - `from` is the tree the activation started on (the open's tree, or the tree

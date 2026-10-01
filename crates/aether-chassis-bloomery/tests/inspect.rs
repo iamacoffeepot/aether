@@ -16,7 +16,8 @@ use aether_bloomery_kinds::{
     ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree, Utf8Text,
 };
 use aether_bloomery_muse::{
-    Endpoint, MUSE, ModelName, OfferedTools, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
+    Endpoint, InputLimit, MUSE, ModelName, OfferedTools, OpenInput, OutputBudget, ReasoningEffort, TurnLimit,
+    TurnSettings,
 };
 use aether_chassis_bloomery::inspect::{
     InspectArtifact, InspectArtifactResult, InspectEvents, InspectEventsResult, InspectedEvent, MAX_ARTIFACTS,
@@ -163,6 +164,7 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
         OfferedTools::default(),
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
+        InputLimit::new(u64::MAX).expect("limit"),
     );
     let user = batch.stage_text(QUESTION);
     let tree = batch.stage_encoded(&Tree::empty())?;

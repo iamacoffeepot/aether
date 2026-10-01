@@ -185,7 +185,7 @@ mod tests {
     use super::{Role, ToolOutput, TurnItem, TurnItems};
     use crate::input::tests::offered_tool;
     use crate::input::tools::{CallId, OfferedTools};
-    use crate::input::{Endpoint, ModelName, OutputBudget, ReasoningEffort, TurnInput};
+    use crate::input::{Endpoint, InputLimit, ModelName, OutputBudget, ReasoningEffort, TurnInput};
 
     #[test]
     fn a_stored_input_that_breaks_a_rule_refuses_on_decode() {
@@ -197,6 +197,7 @@ mod tests {
             items,
             max_output_tokens: OutputBudget::new(64).expect("budget"),
             reasoning: ReasoningEffort::Low,
+            input_limit: InputLimit::new(u64::MAX).expect("limit"),
         };
         let stored = |input: TurnInput| TurnInput::encode_storage(&StorageData::from_value(input)).expect("encode");
         let decoded = |bytes: &[u8]| TurnInput::decode_storage(bytes).map(|data| data.value);

@@ -61,8 +61,8 @@ impl Answered {
 /// How the turn a session is recorded after ended the activation.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum TurnEnd {
-    /// The turn rested the session; at the turn limit, with every call's
-    /// output.
+    /// The turn rested the session: at the turn limit, or past the input
+    /// limit, with every call's output.
     Rested(Answered),
     /// The session failed after the turn was sent. `answered` is that turn's
     /// result and the calls answered before the failure, when the turn asked
@@ -121,7 +121,8 @@ pub struct SessionRecord;
 /// early with no text, which adds nothing: the session then ends on what that
 /// turn sent, so a continue can resend it as it stands. A turn that asked for
 /// calls adds its text when not empty, every call, and the outputs, which must
-/// answer the calls exactly and in order, and rests at the turn limit.
+/// answer the calls exactly and in order, and rests at the turn limit, or with
+/// `ContextFull` when it reached the session's input limit.
 ///
 /// A failed session records the last turn's conversation, followed, when that
 /// turn asked for calls, by its text, the calls answered before the failure,
@@ -142,7 +143,7 @@ impl Program for SessionRecord {
         let (items, rested) = match input.end {
             TurnEnd::Rested(answered) => {
                 let result = env.injected(answered.result)?;
-                let (reply, rested) = rest(result.outcome(), &answered.outputs)?;
+                let (reply, rested) = rest(&turn, result.outcome(), &answered.outputs)?;
                 (session_items(turn.items().iter().cloned().chain(reply).collect())?, rested)
             }
             TurnEnd::Failed { failure, answered } => {
@@ -172,8 +173,14 @@ fn session_items(items: Vec<TurnItem>) -> Result<SessionItems, Refusal> {
     SessionItems::new(items).map_err(|error| refused(&format!("the session's items: {error}")))
 }
 
-/// What `outcome` adds to the conversation and why it rests the session.
-fn rest(outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<(Vec<TurnItem>, RestReason), Refusal> {
+/// What `outcome` adds to the conversation and why it rests the session: a
+/// called turn that reached the cited turn's input limit rests `ContextFull`
+/// instead of `TurnLimit`.
+fn rest(
+    turn: &TurnInput,
+    outcome: &TurnOutcome,
+    outputs: &[CallAnswer],
+) -> Result<(Vec<TurnItem>, RestReason), Refusal> {
     let said = |text: &Ref<Utf8Text>| vec![TurnItem::message(Role::Assistant, *text)];
     match (outcome, outputs.is_empty()) {
         (TurnOutcome::Completed { text, .. }, true) => Ok((said(text), RestReason::Completed)),
@@ -182,8 +189,14 @@ fn rest(outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<(Vec<TurnItem>,
         }
         (TurnOutcome::Incomplete { text, .. }, true) => Ok((said(text), RestReason::Incomplete)),
         (TurnOutcome::Declined { refusal, .. }, true) => Ok((said(refusal), RestReason::Declined)),
-        (TurnOutcome::Called { calls, text, .. }, _) if answers(calls.as_slice(), outputs) => {
-            Ok((replay(*text, calls.as_slice(), outputs), RestReason::TurnLimit))
+        (TurnOutcome::Called { calls, text, usage, .. }, _) if answers(calls.as_slice(), outputs) => {
+            let reply = replay(*text, calls.as_slice(), outputs);
+            let rested = if turn.input_limit().reached(usage.input_tokens()) {
+                RestReason::ContextFull
+            } else {
+                RestReason::TurnLimit
+            };
+            Ok((reply, rested))
         }
         (TurnOutcome::Called { .. }, _) => Err(refused("the outputs do not answer the turn's calls in order")),
         _ => Err(refused("the turn's outcome does not rest a session with these outputs")),
@@ -304,6 +317,53 @@ mod tests {
         for outputs in [vec![answer("a")], vec![answer("b"), answer("a")]] {
             assert!(matches!(rested(called(), outputs), Err(Refusal::Refused { .. })), "outputs must answer in order");
         }
+    }
+
+    #[test]
+    fn a_called_turn_at_the_input_limit_rests_full_with_every_call_and_its_output() {
+        // Catches the recorder disagreeing with the loop's diversion: the loop rests `Rest` past the input limit, so
+        // the record must label it `ContextFull` with the same items the next turn would have sent, one token below
+        // it must stay `TurnLimit`, and a terminal rest past the limit must keep its own reason.
+        let turn = turn(vec![user()]);
+        let limit = turn.input_limit().get();
+        assert!(limit > 0, "the fixture limit is non-zero");
+        let rested = |outcome, outputs| {
+            let result = result(outcome);
+            let input = RecordInput::rested(
+                Ref::of_encoded(&turn).expect("turn"),
+                Ref::of_encoded(&result).expect("result"),
+                outputs,
+                tree(),
+            );
+            record(&turn, &result, &input)
+        };
+        let usage = |input_tokens| TurnUsage::new(input_tokens, 0, 0, 0);
+        let called_at = |input_tokens| TurnOutcome::Called {
+            calls: calls(),
+            text: Ref::of_text("Checking."),
+            usage: usage(input_tokens),
+        };
+
+        let full = rested(called_at(limit), vec![answer("a"), answer("b")]).expect("a full turn records");
+        assert_eq!(
+            full.items(),
+            [
+                user(),
+                TurnItem::message(Role::Assistant, Ref::of_text("Checking.")),
+                TurnItem::Call(calls().as_slice()[0].clone()),
+                TurnItem::Call(calls().as_slice()[1].clone()),
+                answer("a").item(),
+                answer("b").item(),
+            ]
+        );
+        assert_eq!(*full.rested(), RestReason::ContextFull);
+
+        let below = rested(called_at(limit - 1), vec![answer("a"), answer("b")]).expect("a turn below records");
+        assert_eq!(*below.rested(), RestReason::TurnLimit);
+
+        let completed = rested(TurnOutcome::Completed { text: Ref::of_text("done"), usage: usage(limit) }, Vec::new())
+            .expect("a completed turn records");
+        assert_eq!(*completed.rested(), RestReason::Completed);
     }
 
     #[test]

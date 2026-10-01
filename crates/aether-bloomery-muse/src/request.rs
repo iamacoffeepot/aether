@@ -187,8 +187,8 @@ mod tests {
     use super::fetch;
     use crate::input::tests::offered_tool;
     use crate::input::{
-        CallId, Endpoint, FunctionName, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall,
-        ToolOutput, TurnInput, TurnItem, TurnItems,
+        CallId, Endpoint, FunctionName, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role,
+        ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
     };
 
     fn input(tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
@@ -203,6 +203,7 @@ mod tests {
             TurnItems::new(items).expect("items"),
             OutputBudget::new(512).expect("budget"),
             reasoning,
+            InputLimit::new(u64::MAX).expect("limit"),
         )
     }
 

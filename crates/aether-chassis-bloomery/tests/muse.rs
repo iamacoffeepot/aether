@@ -14,8 +14,8 @@ use aether_bloomery_kinds::{
     RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, artifact_digest,
 };
 use aether_bloomery_muse::{
-    Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput, TurnItem, TurnItems,
-    TurnOutcome, TurnResult,
+    Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput, TurnItem,
+    TurnItems, TurnOutcome, TurnResult,
 };
 use aether_chassis_bloomery::BloomeryCli;
 use aether_data::{Kind, Schema, SchemaType, wire};
@@ -61,6 +61,7 @@ fn seed(endpoint: &str) -> Result<Option<MuseSeed>, Box<dyn Error>> {
         TurnItems::new(items)?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
+        InputLimit::new(u64::MAX).expect("limit"),
     );
     let input = batch.stage_encoded(&input)?.digest();
     Ok(Some(MuseSeed { batch, bundle, input }))

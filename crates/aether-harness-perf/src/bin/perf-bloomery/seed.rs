@@ -17,7 +17,7 @@ use aether_bloomery_kinds::{
     Call, Name, NativeOrigin, Node, Path, ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree,
 };
 use aether_bloomery_muse::{
-    Endpoint, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings, offered,
+    Endpoint, InputLimit, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings, offered,
 };
 
 use crate::knobs::{Knobs, TreeSpec};
@@ -90,6 +90,7 @@ impl Seed {
             tools,
             OutputBudget::new(512)?,
             ReasoningEffort::Low,
+            InputLimit::new(u64::MAX).expect("limit"),
         );
         let limit = TurnLimit::new(knobs.turns)?;
         let name = ProgramName::new("muse.session.open")?;
