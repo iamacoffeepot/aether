@@ -19,6 +19,8 @@ const CALLS: &str = "AETHER_PERF_BLOOMERY_CALLS";
 const TOOLS: &str = "AETHER_PERF_BLOOMERY_TOOLS";
 /// The tree each session opens on.
 const TREE: &str = "AETHER_PERF_BLOOMERY_TREE";
+/// How long the stub vendor holds each reply, in millis.
+const VENDOR_DELAY_MILLIS: &str = "AETHER_PERF_BLOOMERY_VENDOR_DELAY_MILLIS";
 
 /// A tool the stub vendor asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,7 @@ pub struct Knobs {
     pub calls: usize,
     pub tools: Vec<Tool>,
     pub tree: TreeSpec,
+    pub vendor_delay_millis: u64,
 }
 
 impl Knobs {
@@ -102,6 +105,7 @@ impl Knobs {
         let tools = read(TOOLS)?.map_or_else(|| Ok(vec![Tool::Write]), |value| tools(&value))?;
         let tree =
             read(TREE)?.map_or_else(|| Ok(TreeSpec::Synthetic { files: 64, bytes: 4096 }), |value| tree(&value))?;
+        let vendor_delay_millis = number(VENDOR_DELAY_MILLIS, 0)?;
 
         at_least_one(SESSIONS, sessions)?;
         at_least_one(TURNS, turns)?;
@@ -116,10 +120,12 @@ impl Knobs {
             );
             return Err(refuse(TURNS, turns, bound));
         }
-        Ok(Self { sessions, turns, calls, tools, tree })
+        Ok(Self { sessions, turns, calls, tools, tree, vendor_delay_millis })
     }
 
-    /// The workload shape a report cell names: `t{turns}-c{calls}-{tools}-{tree}`.
+    /// The workload shape a report cell names:
+    /// `t{turns}-c{calls}-{tools}-{tree}`, plus `-delay{millis}millis` when the
+    /// stub vendor holds each reply.
     pub fn shape(&self) -> String {
         let tools = self.tools.iter().map(|tool| tool.label()).collect::<Vec<_>>().join("+");
         let tree = match &self.tree {
@@ -128,7 +134,12 @@ impl Knobs {
                 format!("dir-{}", path.file_name().map_or_else(|| "root".into(), |name| name.to_string_lossy()))
             }
         };
-        format!("t{}-c{}-{tools}-{tree}", self.turns, self.calls)
+        let base = format!("t{}-c{}-{tools}-{tree}", self.turns, self.calls);
+        if self.vendor_delay_millis == 0 {
+            base
+        } else {
+            format!("{base}-delay{}millis", self.vendor_delay_millis)
+        }
     }
 }
 

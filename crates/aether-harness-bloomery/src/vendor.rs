@@ -6,7 +6,7 @@ use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread::{Builder, Scope, ScopedJoinHandle};
+use std::thread::{self, Builder, Scope, ScopedJoinHandle};
 use std::time::Duration;
 
 /// How long the stub waits on one connection's request bytes, so a client
@@ -29,10 +29,12 @@ pub struct StubRequest {
 ///
 /// It accepts on a named thread of the caller's [`Scope`], blocking in
 /// `accept`, so it adds no poll latency to what a benchmark measures. It
-/// serves one request per connection (`Connection: close`), in arrival
-/// order, and records a request before it writes the reply, so a caller
-/// that has its answer finds the request in [`StubVendor::served`]. Dropping
-/// it stops the accept thread and joins it.
+/// serves each accepted connection on its own thread of a nested scope, so
+/// replies run concurrently and one slow reply never holds back another. It
+/// serves one request per connection (`Connection: close`) and records a
+/// request before it writes the reply, so a caller that has its answer finds
+/// the request in [`StubVendor::served`]. Dropping it stops the accept thread
+/// and joins it, waiting for in-flight replies.
 pub struct StubVendor<'scope> {
     addr: SocketAddr,
     served: Arc<Mutex<Vec<StubRequest>>>,
@@ -44,12 +46,15 @@ impl<'scope> StubVendor<'scope> {
     /// Bind an ephemeral loopback port and serve it on a thread of `scope`,
     /// answering each request with the body `reply` returns for it.
     ///
+    /// Each accepted connection gets its own thread of a nested scope, so
+    /// replies run concurrently and the accept loop never waits on a reply.
+    ///
     /// # Errors
     ///
     /// Fails when the port cannot be bound or the OS refuses the thread.
     pub fn start<'env>(
         scope: &'scope Scope<'scope, 'env>,
-        reply: impl Fn(&StubRequest) -> Vec<u8> + Send + 'scope,
+        reply: impl Fn(&StubRequest) -> Vec<u8> + Send + Sync + 'scope,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
@@ -60,15 +65,24 @@ impl<'scope> StubVendor<'scope> {
             let served = Arc::clone(&served);
             let stop = Arc::clone(&stop);
             Builder::new().name("stub-vendor".to_owned()).spawn_scoped(scope, move || {
-                for stream in listener.incoming() {
-                    if stop.load(Ordering::Acquire) {
-                        break;
+                thread::scope(|connections| {
+                    for stream in listener.incoming() {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let Ok(stream) = stream else {
+                            continue;
+                        };
+                        let served = Arc::clone(&served);
+                        let reply = &reply;
+                        connections.spawn(move || {
+                            // A connection that fails before its reply is written
+                            // leaves its client without an answer, which the client
+                            // reports; the stub serves the next one.
+                            let _ = serve(&stream, reply, &served);
+                        });
                     }
-                    // A connection that fails before its reply is written
-                    // leaves its client without an answer, which the client
-                    // reports; the stub serves the next one.
-                    let _ = stream.and_then(|stream| serve(&stream, &reply, &served));
-                }
+                });
             })?
         };
         Ok(Self { addr, served, stop, accept: Some(accept) })
