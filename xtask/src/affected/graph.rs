@@ -31,17 +31,14 @@ impl Workspace {
             cargo_metadata::MetadataCommand::new().no_deps().exec().context("run cargo metadata for inventory")?;
         let wasm_sources: BTreeSet<String> =
             discover_components(&metadata).into_iter().map(|component| component.package).collect();
-        // A dist consumer needs the `cargo xtask dist` pre-build for either
-        // artifact class it packages: component wasm (a dep on a wasm source
-        // — the tests execute that crate's wasm), or the chassis binaries (a
-        // dep on aether-harness-fleet, whose harness forks the dist-resolved
-        // `aether-headless`; issue #3766).
+        // A dist consumer needs the `cargo xtask dist` pre-build because its
+        // tests resolve a dist artifact by path through one of the
+        // dist-resolving harnesses: component wasm the substrate harnesses
+        // locate, or the chassis binary aether-harness-fleet forks (#3766).
         let wasm_consumers: BTreeSet<String> = metadata
             .packages
             .iter()
-            .filter(|package| {
-                is_dist_consumer(package.dependencies.iter().map(|dependency| dependency.name.as_str()), &wasm_sources)
-            })
+            .filter(|package| is_dist_consumer(package.dependencies.iter().map(|dependency| dependency.name.as_str())))
             .map(|package| package.name.to_string())
             .collect();
 
@@ -127,8 +124,7 @@ impl Workspace {
     /// Whether `package`'s tests need the `cargo xtask dist` pre-build.
     ///
     /// True when the crate compiles to component wasm, or when its tests
-    /// consume a dist artifact (a dep on a wasm source or a dist-resolving
-    /// harness). A crate with neither relationship must not force that
+    /// consume a dist artifact (a dep on a dist-resolving harness). A crate with neither relationship must not force that
     /// cross-build.
     pub fn needs_dist_prepare(&self, package: &str) -> bool {
         self.wasm_sources.contains(package) || self.wasm_consumers.contains(package)
