@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
-    ApiCall, ApiCallResult, CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
-    ExecutorFault, FaultReason, Invoked, OpaqueBytes, ProgramApi, ReadEventsResult, Ref, Refusal, Utf8Text,
-    artifact_digest,
+    ApiCall, ApiCallResult, AppendRecords, CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord,
+    EncodedArtifact, ExecutorFault, FaultReason, Invoked, OpaqueBytes, ProgramApi, ReadEventsResult, Ref, Refusal,
+    Utf8Text, artifact_digest,
 };
 use aether_data::Kind;
 use program_world::{call, fault, requested, transition};
@@ -93,7 +93,7 @@ fn recorded_transitions(world: &World) -> Vec<(u64, Digest)> {
     world
         .committed
         .iter()
-        .flat_map(|append| append.records())
+        .flat_map(AppendRecords::records)
         .filter_map(|record| match record {
             DriverRecord::Transition { cause, record } => Some((*cause, record.input)),
             _ => None,
