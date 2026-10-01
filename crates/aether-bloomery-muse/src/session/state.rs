@@ -9,8 +9,8 @@ use aether_bloomery_kinds::{Detail, FaultReason, Head, ProgramName, Ref, Tree, U
 use aether_data::Invariant;
 
 use crate::input::{
-    Endpoint, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem,
-    TurnItems, TurnItemsError, check_order,
+    Endpoint, InputLimit, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput,
+    TurnItem, TurnItems, TurnItemsError, check_order,
 };
 use crate::result::TurnResult;
 
@@ -31,6 +31,9 @@ pub struct TurnSettings {
     max_output_tokens: OutputBudget,
     /// How much the model reasons before it answers.
     reasoning: ReasoningEffort,
+    /// The most input tokens one turn may have been billed for before the
+    /// session rests with [`RestReason::ContextFull`]. Never zero.
+    input_limit: InputLimit,
 }
 
 impl TurnSettings {
@@ -42,14 +45,22 @@ impl TurnSettings {
         tools: OfferedTools,
         max_output_tokens: OutputBudget,
         reasoning: ReasoningEffort,
+        input_limit: InputLimit,
     ) -> Self {
-        Self { endpoint, model, tools, max_output_tokens, reasoning }
+        Self { endpoint, model, tools, max_output_tokens, reasoning, input_limit }
     }
 
     /// The programs offered as tools, in the order sent.
     #[must_use]
     pub fn tools(&self) -> &[OfferedTool] {
         self.tools.as_slice()
+    }
+
+    /// The most input tokens one turn may have been billed for before the
+    /// session rests.
+    #[must_use]
+    pub const fn input_limit(&self) -> InputLimit {
+        self.input_limit
     }
 
     /// The first turn of a session: these settings and one user message
@@ -67,7 +78,15 @@ impl TurnSettings {
 
     /// One turn sending `items` with these settings.
     pub(crate) fn with_items(self, items: TurnItems) -> TurnInput {
-        TurnInput::new(self.endpoint, self.model, self.tools, items, self.max_output_tokens, self.reasoning)
+        TurnInput::new(
+            self.endpoint,
+            self.model,
+            self.tools,
+            items,
+            self.max_output_tokens,
+            self.reasoning,
+            self.input_limit,
+        )
     }
 }
 
@@ -198,6 +217,9 @@ pub enum RestReason {
     /// The activation made as many turns as its limit allowed, and every call
     /// the last one asked for has its output.
     TurnLimit,
+    /// A turn that would go on reached the session's input limit, and every
+    /// call it asked for has its output.
+    ContextFull,
     /// The activation stopped without a turn resting it.
     Failed(Failure),
 }

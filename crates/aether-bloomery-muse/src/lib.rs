@@ -62,7 +62,9 @@
 //! the text they read as [`Viewed`] and leave the tree as it was; and the
 //! fixture [`Echo`] (`muse.echo`). Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
-//! [`RestReason::TurnLimit`].
+//! [`RestReason::TurnLimit`]. Each turn carries an [`InputLimit`]; a called
+//! turn that reached it rests with [`RestReason::ContextFull`] instead of
+//! sending its next turn, once its calls ran.
 //! A turn the vendor refuses as transient is sent again, byte-identical,
 //! after a wait on the driver's clock (ADR-0245), a few times at most.
 //! A session that fails (a faulted run, a failed rule, a turn the vendor
@@ -101,9 +103,10 @@ mod session;
 mod tools;
 
 pub use input::{
-    CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, ModelName, ModelNameError,
-    OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall,
-    ToolCalls, ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
+    CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, InputLimit, InputLimitError,
+    ModelName, ModelNameError, OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError,
+    ReasoningEffort, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
+    TurnItemsError,
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};

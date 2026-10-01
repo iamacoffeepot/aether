@@ -86,6 +86,10 @@ struct Waiting {
     text: Ref<Utf8Text>,
     calls: ToolCalls,
     outputs: Vec<CallAnswer>,
+    /// Whether the turn that asked for the calls reached its input limit, so
+    /// the session rests once every call has its output. `false` for seeds,
+    /// which no turn asked for.
+    full: bool,
 }
 
 /// What the loop runs after the entry linked to a session.
@@ -144,6 +148,9 @@ impl Conversation {
             }
         }
         self.next = Some(match waiting.result {
+            Some(result) if waiting.full => {
+                Next::Rest(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
+            }
             Some(result) if self.turns >= self.limit.get() => {
                 Next::Limit(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
@@ -283,7 +290,8 @@ impl View for Conversations {
             None => self.keep(key, conversation, at.seq),
             Some(seeds) => {
                 let (calls, text, first) = (seeds.clone(), Ref::of_text(""), input.first_turn());
-                let waiting = Waiting { input: first, turn, result: None, text, calls, outputs: Vec::new() };
+                let waiting =
+                    Waiting { input: first, turn, result: None, text, calls, outputs: Vec::new(), full: false };
                 conversation.waiting = Some(waiting);
                 self.advance(key, conversation, at.seq);
             }
@@ -319,11 +327,12 @@ impl View for Conversations {
                 conversation.next = Some(Next::Wait { turn: run.input(), until });
                 self.keep(key, conversation, at.seq);
             }
-            TurnOutcome::Called { calls, text, .. } => {
+            TurnOutcome::Called { calls, text, usage } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
                 let (turn, result) = (run.input(), Some(run.result()));
-                conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new() });
+                let full = input.input_limit().reached(usage.input_tokens());
+                conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new(), full });
                 self.advance(key, conversation, at.seq);
             }
             TurnOutcome::Completed { .. } | TurnOutcome::Declined { .. } | TurnOutcome::Incomplete { .. } => {

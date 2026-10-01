@@ -197,6 +197,64 @@ impl OutputBudget {
     }
 }
 
+/// The most input tokens one turn may have been billed for before its session
+/// rests with [`crate::session::RestReason::ContextFull`]. Never zero.
+///
+/// The caller sets the limit itself, leaving whatever margin it wants below
+/// the vendor's context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct InputLimit(u64);
+
+impl InputLimit {
+    /// Accept a non-zero limit.
+    ///
+    /// # Errors
+    ///
+    /// [`InputLimitError::Zero`] for zero.
+    pub fn new(tokens: u64) -> Result<Self, InputLimitError> {
+        Self::check(tokens)?;
+        Ok(Self(tokens))
+    }
+
+    /// The limit in tokens.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Whether `input_tokens` reached the limit.
+    #[must_use]
+    pub const fn reached(self, input_tokens: u64) -> bool {
+        input_tokens >= self.0
+    }
+
+    // `#[storage(validate)]` calls `check(&inner)`; `Borrow` takes that
+    // reference and `new`'s owned value alike.
+    fn check(tokens: impl Borrow<u64>) -> Result<(), InputLimitError> {
+        if *tokens.borrow() == 0 {
+            Err(InputLimitError::Zero)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Why [`InputLimit::new`] or decode refused a token limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputLimitError {
+    /// A limit of zero input tokens.
+    Zero,
+}
+
+impl InputLimitError {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+        }
+    }
+}
+
 /// How much reasoning the model spends before it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
 pub enum ReasoningEffort {
@@ -208,4 +266,4 @@ pub enum ReasoningEffort {
     High,
 }
 
-invariant_errors!(EndpointError, ModelNameError, OutputBudgetError);
+invariant_errors!(EndpointError, ModelNameError, OutputBudgetError, InputLimitError);
