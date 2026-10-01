@@ -15,10 +15,13 @@
 //!
 //! [`encode_storage_schema`] and [`decode_storage_schema`] are the same pair
 //! for stored artifacts: JSON to and from the ADR-0059 storage encoding
-//! (TLV records with content-hashed field tags), byte-identical to what a
-//! derived `Storage` impl writes, from the schema alone. The decode is strict
-//! and bounded like [`decode_schema_strict`], and refuses any record the
-//! schema does not bind.
+//! (TLV records with content-hashed field tags), from the schema alone. The
+//! decode reads what a derived `Storage` impl writes, taking a container's
+//! element form from its record tag; the encode writes a non-`repr(C)` struct
+//! or enum container element in the tagged form, which a positional
+//! `#[derive(Schema)]` element does not match. The decode is strict and
+//! bounded like [`decode_schema_strict`], and refuses any record the schema
+//! does not bind.
 //!
 //! [`inline_blobs`] rewrites an in-process payload's tag-1 `Blob` fields
 //! (a hash naming an attached store entry) to tag-0 inline bytes, the form

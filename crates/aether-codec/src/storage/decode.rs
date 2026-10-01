@@ -1,6 +1,7 @@
 //! Storage records to JSON: the schema-side `StorageLeaves::assemble` and
 //! `StorageElement::assemble_element`, strict about what the schema does
-//! not bind.
+//! not bind. A container's element form, tagged or positional, comes from
+//! the tag its record sits under.
 
 use aether_data::storage::{
     RecordReader, U64_SCHEMA, VARIANT_LEAF, field_path_root, fold_index_segment, fold_path_segment,
