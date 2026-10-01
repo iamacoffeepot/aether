@@ -7,6 +7,9 @@
 //! `Completed` within its turn limit. Each session's conversation is its own,
 //! so the replies need no state to serve several sessions at once.
 
+use std::thread;
+use std::time::Duration;
+
 use aether_harness_bloomery::StubRequest;
 use serde_json::{Value, json};
 
@@ -19,16 +22,27 @@ pub struct Script {
     calls: usize,
     tools: Vec<Tool>,
     probe: Probe,
+    vendor_delay_millis: u64,
 }
 
 impl Script {
     pub fn new(knobs: &Knobs, probe: Probe) -> Self {
         let turns = usize::try_from(knobs.turns).unwrap_or(usize::MAX);
-        Self { turns, calls: knobs.calls, tools: knobs.tools.clone(), probe }
+        Self {
+            turns,
+            calls: knobs.calls,
+            tools: knobs.tools.clone(),
+            probe,
+            vendor_delay_millis: knobs.vendor_delay_millis,
+        }
     }
 
-    /// The responses-API body answering `request`.
+    /// The responses-API body answering `request`, after holding the reply
+    /// for the configured vendor delay.
     pub fn reply(&self, request: &StubRequest) -> Vec<u8> {
+        if self.vendor_delay_millis > 0 {
+            thread::sleep(Duration::from_millis(self.vendor_delay_millis));
+        }
         let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         let replayed = body["input"]
             .as_array()

@@ -7,8 +7,9 @@
 //!
 //! # What is measured
 //!
-//! The stub answers each turn instantly from a stateless reply function, so
-//! the numbers are engine overhead alone. Each session makes T turns: every
+//! The stub answers each turn from a stateless reply function, holding each
+//! reply for the configured vendor delay, so with the default delay the
+//! numbers are engine overhead alone. Each session makes T turns: every
 //! turn but the last asks for N tool calls rotating over the configured
 //! tools, and the last completes, so each session rests `Completed`.
 //!
@@ -43,6 +44,8 @@
 //! - `AETHER_PERF_BLOOMERY_TREE` — `<files>x<bytes>` generated files, 16 to a
 //!   directory, or `dir:<path>` to stage a host directory without its `.git`
 //!   and `target`. Default `64x4096`.
+//! - `AETHER_PERF_BLOOMERY_VENDOR_DELAY_MILLIS` — how long the stub vendor
+//!   holds each reply, in millis, serving replies concurrently. Default `0`.
 //! - `AETHER_PERF_GIT_SHA` — stamped into the report; falls back to
 //!   `git rev-parse HEAD`.
 //!
