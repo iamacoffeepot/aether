@@ -117,9 +117,11 @@ pub struct SessionRecord;
 /// conversation followed by its reply, or by its calls and their outputs.
 ///
 /// A turn that rested the session and answered, stopped early, or refused adds
-/// one assistant message with its text or refusal. A turn that asked for calls
-/// adds its text when not empty, every call, and the outputs, which must answer
-/// the calls exactly and in order, and rests at the turn limit.
+/// one assistant message with its text or refusal, except a turn that stopped
+/// early with no text, which adds nothing: the session then ends on what that
+/// turn sent, so a continue can resend it as it stands. A turn that asked for
+/// calls adds its text when not empty, every call, and the outputs, which must
+/// answer the calls exactly and in order, and rests at the turn limit.
 ///
 /// A failed session records the last turn's conversation, followed, when that
 /// turn asked for calls, by its text, the calls answered before the failure,
@@ -175,6 +177,9 @@ fn rest(outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<(Vec<TurnItem>,
     let said = |text: &Ref<Utf8Text>| vec![TurnItem::message(Role::Assistant, *text)];
     match (outcome, outputs.is_empty()) {
         (TurnOutcome::Completed { text, .. }, true) => Ok((said(text), RestReason::Completed)),
+        (TurnOutcome::Incomplete { text, .. }, true) if *text == Ref::of_text("") => {
+            Ok((Vec::new(), RestReason::Incomplete))
+        }
         (TurnOutcome::Incomplete { text, .. }, true) => Ok((said(text), RestReason::Incomplete)),
         (TurnOutcome::Declined { refusal, .. }, true) => Ok((said(refusal), RestReason::Declined)),
         (TurnOutcome::Called { calls, text, .. }, _) if answers(calls.as_slice(), outputs) => {
@@ -299,6 +304,33 @@ mod tests {
         for outputs in [vec![answer("a")], vec![answer("b"), answer("a")]] {
             assert!(matches!(rested(called(), outputs), Err(Refusal::Refused { .. })), "outputs must answer in order");
         }
+    }
+
+    #[test]
+    fn an_incomplete_turn_with_no_text_records_only_what_it_sent() {
+        // Catches an empty assistant message recorded after a turn that spent its budget before any output, which
+        // would leave a session a continue cannot resend as the turn sent it, and a partial reply dropped with it.
+        let turn = turn(vec![user()]);
+        let rested = |text: &str| {
+            let result = result(TurnOutcome::Incomplete {
+                text: Ref::of_text(text),
+                reason: Detail::new("max_output_tokens"),
+                usage: USAGE,
+            });
+            let input = RecordInput::rested(
+                Ref::of_encoded(&turn).expect("turn"),
+                Ref::of_encoded(&result).expect("result"),
+                Vec::new(),
+                tree(),
+            );
+            record(&turn, &result, &input).expect("an incomplete turn records")
+        };
+
+        let empty = rested("");
+        assert_eq!(empty.items(), turn.items());
+        assert_eq!(*empty.rested(), RestReason::Incomplete);
+        let partial = rested("Half");
+        assert_eq!(partial.items(), [user(), TurnItem::message(Role::Assistant, Ref::of_text("Half"))]);
     }
 
     #[test]

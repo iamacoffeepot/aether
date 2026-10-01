@@ -24,7 +24,7 @@ use aether_bloomery_program::{
 };
 use aether_bloomery_workspace::TreePath;
 use aether_data::{Cites, Kind, Storage, StorageData};
-use aether_http::{FetchResult, HttpError, HttpHeader};
+use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
@@ -33,6 +33,7 @@ const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_r
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
+const INCOMPLETE_BUDGET: &str = include_str!("../fixtures/incomplete_budget.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
 const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
@@ -95,6 +96,8 @@ struct Driver {
     store: BTreeMap<Digest, EncodedArtifact>,
     heads: BTreeMap<RecordedHead, Digest>,
     replies: VecDeque<Reply>,
+    /// The body of every request a turn sent, in order.
+    sent: Vec<serde_json::Value>,
     native_keys: u64,
     /// The journal time the next entry is recorded at.
     now_millis: u64,
@@ -115,6 +118,7 @@ impl Driver {
             store: BTreeMap::new(),
             heads: BTreeMap::new(),
             replies,
+            sent: Vec::new(),
             native_keys: 0,
             now_millis: 0,
         }
@@ -300,6 +304,8 @@ impl Driver {
         else {
             panic!("expected the turn to send its one fetch");
         };
+        let fetch = Fetch::decode_from_bytes(&pending.api_call(1).payload).expect("the pending call is a fetch");
+        self.sent.push(serde_json::from_slice(&fetch.body).expect("the request body is JSON"));
         session.fulfill_send(&pending, FetchResult::ID, fetched.encode_into_bytes());
         match session.poll() {
             PollResult::Finished(invoked) => invoked,
@@ -416,7 +422,8 @@ fn continue_from(driver: &mut Driver, session: SessionKey, from: Digest, text: &
     driver.call_native::<SessionContinue>(&ContinueInput::new(
         session,
         Ref::from_digest(from),
-        Ref::of_text(text),
+        Some(Ref::of_text(text)),
+        None,
         limit,
     ))
 }
@@ -1019,6 +1026,41 @@ fn a_turn_refused_past_the_retry_cap_rests_the_session_failed_and_a_continue_ret
     driver.settle(resumed);
     let completed: Session = driver.value(driver.head(key));
     assert_eq!(*completed.rested(), RestReason::Completed);
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_turn_out_of_budget_rests_on_what_it_sent_and_a_continue_resends_it_with_a_larger_budget() -> TestResult {
+    // Catches an empty assistant message recorded after a turn that spent its budget on reasoning, a resend that
+    // appends anything to the conversation the failed turn sent or changes its cache key, and a budget the
+    // continue does not send.
+    let mut driver = Driver::new(&[INCOMPLETE_BUDGET, COMPLETED]);
+    let (opened, _) = open(&mut driver, 2)?;
+    driver.settle(opened);
+    let key = SessionKey::new(opened);
+    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let incomplete: Session = driver.value(driver.head(key));
+    assert_eq!(*incomplete.rested(), RestReason::Incomplete);
+    assert_eq!(incomplete.items(), first.items(), "the session ends on the opening user message");
+
+    let budget = OutputBudget::new(4096)?;
+    let input = ContinueInput::new(key, Ref::from_digest(driver.head(key)), None, Some(budget), TurnLimit::new(2)?);
+    let resumed = driver.call_native::<SessionContinue>(&input);
+    driver.settle(resumed);
+    let [first_sent, resent] = driver.sent.as_slice() else {
+        panic!("expected two requests, got {}", driver.sent.len());
+    };
+    assert_eq!(resent["input"], first_sent["input"], "the resend adds nothing to the conversation");
+    assert_eq!(resent["prompt_cache_key"], first_sent["prompt_cache_key"]);
+    assert_eq!(first_sent["max_output_tokens"], 512);
+    assert_eq!(resent["max_output_tokens"], 4096);
+    let completed: Session = driver.value(driver.head(key));
+    assert_eq!(*completed.rested(), RestReason::Completed);
+    let tools = OfferedTools::new(first.tools().to_vec())?;
+    let kept = TurnSettings::new(first.endpoint().clone(), first.model().clone(), tools, budget, first.reasoning());
+    assert_eq!(*completed.settings(), kept, "later continues keep the new budget");
 
     assert_warm_and_live_agree(&driver);
     Ok(())

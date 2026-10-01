@@ -20,9 +20,11 @@
 //!   outputs, so each turn's conversation begins with exactly what the
 //!   previous one sent.
 //! - `record` records a session a turn rested (completed, declined, or
-//!   incomplete) as a [`Session`] through `muse.session.record`. `call` and
-//!   `resume` record one the same way when the activation has made as many
-//!   turns as its limit allows, resting it with [`RestReason::TurnLimit`].
+//!   incomplete) as a [`Session`] through `muse.session.record`. A turn that
+//!   stopped early with no output adds nothing, so the session ends on what
+//!   that turn sent. `call` and `resume` record one the same way when the
+//!   activation has made as many turns as its limit allows, resting it with
+//!   [`RestReason::TurnLimit`].
 //! - `rest` moves the session's head to that record, compare-and-swap from the
 //!   record before it.
 //! - `call` also waits on the driver's clock after a turn the vendor refused
@@ -47,7 +49,14 @@
 //! The record keeps the conversation the last turn sent, followed by that
 //! turn's text, the calls answered before the failure, and their outputs, and
 //! the session's latest tree. A continue from it works like one from any other
-//! rest, so retrying a failed turn is a continue with a user message.
+//! rest.
+//!
+//! The loop never retries a turn by itself. A continue with no user message
+//! resends the conversation as it stands, optionally with a new output budget
+//! that the session keeps from that turn on. Only a session that ends on what
+//! its last turn sent can be resent: one that rested failed, or incomplete
+//! with no output. Retrying a failed turn, or one that ran out of budget, is
+//! the caller's continue.
 //!
 //! One case cannot record itself: a failure of the failed rest's own record
 //! (its `muse.session.record` run faults, or the rule emitting it fails), or a
