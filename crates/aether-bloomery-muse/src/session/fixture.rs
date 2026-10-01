@@ -37,12 +37,25 @@ pub fn settings(tools: OfferedTools) -> TurnSettings {
 
 /// Run `P` over `input` with `closure` injected beside it, as the driver
 /// invokes it, and decode the result it stages.
-pub fn run<P: SyncProgram>(input: &P::Input, mut closure: Vec<ClosureArtifact>) -> Result<P::Result, Refusal> {
+pub fn run<P: SyncProgram>(input: &P::Input, closure: Vec<ClosureArtifact>) -> Result<P::Result, Refusal> {
+    run_with::<P>(input, closure).map(|(result, _)| result)
+}
+
+/// Run `P` over `input` alone, as [`run`] does, and decode the result it
+/// stages beside every artifact it staged.
+pub fn run_stored<P: SyncProgram>(input: &P::Input) -> Result<(P::Result, Store), Refusal> {
+    run_with::<P>(input, Vec::new())
+}
+
+fn run_with<P: SyncProgram>(
+    input: &P::Input,
+    mut closure: Vec<ClosureArtifact>,
+) -> Result<(P::Result, Store), Refusal> {
     let input = stored(input);
     let digest = input.claimed().unverified();
     closure.push(input);
     let name = ProgramName::new(P::NAME).expect("program name");
-    finish::<P::Result>(invoke::<P>(Invoke::new(1, name, digest, closure)), Store::default()).map(|(result, _)| result)
+    finish::<P::Result>(invoke::<P>(Invoke::new(1, name, digest, closure)), Store::default())
 }
 
 /// Every artifact a test run could read or staged.

@@ -33,7 +33,7 @@ pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
 pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
-pub use read::{ReadArgs, TreeRead};
+pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
 pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 

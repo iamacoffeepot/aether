@@ -166,7 +166,7 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     );
     let user = batch.stage_text(QUESTION);
     let tree = batch.stage_encoded(&Tree::empty())?;
-    let open = batch.stage_encoded(&OpenInput::new(settings, user, TurnLimit::new(4)?, tree))?;
+    let open = batch.stage_encoded(&OpenInput::new(settings, user, TurnLimit::new(4)?, tree, Vec::new()))?;
     let call = Call {
         program: MUSE,
         name: ProgramName::new("muse.session.open")?,

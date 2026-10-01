@@ -385,7 +385,8 @@ mod tests {
 
         assert_eq!(TurnLimit::new(0), Err(TurnLimitError::Zero));
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
-        let zero = OpenInput::new(settings(OfferedTools::default()), Ref::of_text("hi"), TurnLimit(0), tree);
+        let zero =
+            OpenInput::new(settings(OfferedTools::default()), Ref::of_text("hi"), TurnLimit(0), tree, Vec::new());
         let bytes = OpenInput::encode_storage(&StorageData::from_value(zero)).expect("encode");
         assert!(OpenInput::decode_storage(&bytes).is_err(), "a zero limit refuses on decode");
     }

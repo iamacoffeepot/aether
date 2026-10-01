@@ -14,9 +14,10 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_muse::{
     Answered, ContinueInput, Echo, EchoResult, Endpoint, Failure, ModelName, MuseSession, MuseTurn, OfferedTools,
-    OpenInput, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session, SessionContinue,
-    SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead,
-    TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
+    OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session,
+    SessionContinue, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep,
+    TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings,
+    Viewed, offered,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -189,6 +190,11 @@ impl Driver {
     /// The result of the run recorded at `seq`.
     fn result<K: Storage>(&self, seq: u64) -> K {
         self.value(self.transition(seq).result)
+    }
+
+    /// The digest of the first turn the open run at `seq` staged.
+    fn first_turn(&self, seq: u64) -> Digest {
+        self.result::<Opened>(seq).turn().digest()
     }
 
     /// Ask for a native run of `P` over `input`, and run it; the run's seq.
@@ -408,10 +414,16 @@ fn file(driver: &Driver, tree: Ref<Tree>, path: &str) -> Vec<u8> {
 
 /// Open a session on the small tree that makes at most `max_turns` turns; the open run's seq and the tree.
 fn open(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
+    open_seeded(driver, max_turns, Vec::new())
+}
+
+/// Open a session on the small tree that reads `seeds` before its first turn and makes at most `max_turns` turns;
+/// the open run's seq and the tree.
+fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     let settings = settings(driver)?;
     let tree = small_tree(driver);
     driver.stage([EncodedArtifact::text(QUESTION)]);
-    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree);
+    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree, seeds);
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
@@ -488,7 +500,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     // between warm-up and live delivery.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
     let (opened, tree) = open(&mut driver, 2)?;
-    let first_input = driver.transition(opened).result;
+    let first_input = driver.first_turn(opened);
     let opening = asked(&driver, opened);
     assert_eq!(opening.name.as_str(), MuseTurn::NAME);
     assert_eq!(opening.input, CallInput::Stored(first_input), "the opened turn runs over the open's result");
@@ -616,7 +628,7 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_co
         panic!("expected the next turn as a value");
     };
     let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
-    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let first: TurnInput = driver.value(driver.first_turn(opened));
     let answered = [
         TurnItem::message(Role::Assistant, text),
         TurnItem::Call(call_a.clone()),
@@ -671,7 +683,7 @@ fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -
     let (text, calls) = called(&driver.result(first_turn));
     let result = ErasedRef::new(EchoResult::ID, driver.transition(echoed).result);
     let output = ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result };
-    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let first: TurnInput = driver.value(driver.first_turn(opened));
     let answered = [
         TurnItem::message(Role::Assistant, text),
         TurnItem::Call(calls[0].clone()),
@@ -706,7 +718,7 @@ fn a_failed_rule_rests_the_session_and_a_fault_of_that_rest_ends_it_without_loop
     assert_eq!(driver.intent(failed).rule().as_str(), "rest_failed");
     let failure = Failure::Reaction { reason: Detail::new("program head unbound") };
     let answered = Answered::new(Ref::from_digest(driver.transition(first_turn).result), Vec::new());
-    let turn = Ref::from_digest(driver.transition(opened).result);
+    let turn = Ref::from_digest(driver.first_turn(opened));
     let record = RecordInput::failed(turn, failure, Some(answered), tree);
     assert_eq!(asked(&driver, failed).input, CallInput::Value(encoded(&record)), "the turn's text, no calls");
 
@@ -914,7 +926,7 @@ fn a_transient_turn_waits_out_retry_after_then_resends_the_same_turn() -> TestRe
     let mut driver = Driver::replying(replies.into());
     driver.now_millis = 1_000;
     let (opened, _) = open(&mut driver, 2)?;
-    let first_input = driver.transition(opened).result;
+    let first_input = driver.first_turn(opened);
 
     let asked_turn = driver.request(opened);
     driver.now_millis = 5_000;
@@ -945,7 +957,7 @@ fn a_timed_out_turn_backs_off_then_resends_the_same_turn() -> TestResult {
     // resent turn rebuilt instead of naming the stored input.
     let mut driver = Driver::replying([Reply::failed(HttpError::Timeout), Reply::ok(COMPLETED)].into());
     let (opened, _) = open(&mut driver, 2)?;
-    let first_input = driver.transition(opened).result;
+    let first_input = driver.first_turn(opened);
 
     let timed_out = driver.follow(opened);
     let outcome = driver.result::<TurnResult>(timed_out).outcome().clone();
@@ -1013,7 +1025,7 @@ fn a_turn_refused_past_the_retry_cap_rests_the_session_failed_and_a_continue_ret
     let session: Session = driver.result(recorded);
     let result = Ref::from_digest(driver.transition(turn).result);
     assert_eq!(*session.rested(), RestReason::Failed(Failure::Turn { result }));
-    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let first: TurnInput = driver.value(driver.first_turn(opened));
     assert_eq!(session.items(), first.items(), "the refused turn's conversation");
     driver.move_heads(recorded);
 
@@ -1040,7 +1052,7 @@ fn a_turn_out_of_budget_rests_on_what_it_sent_and_a_continue_resends_it_with_a_l
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
-    let first: TurnInput = driver.value(driver.transition(opened).result);
+    let first: TurnInput = driver.value(driver.first_turn(opened));
     let incomplete: Session = driver.value(driver.head(key));
     assert_eq!(*incomplete.rested(), RestReason::Incomplete);
     assert_eq!(incomplete.items(), first.items(), "the session ends on the opening user message");
@@ -1167,5 +1179,66 @@ fn a_read_with_a_non_numeric_string_is_refused_with_how_to_fix_it_and_the_turn_c
             if call_id == calls[1].call_id() && *at == Ref::of_text(text))
     });
     assert!(answered, "the next turn carries the correction as the read's output");
+    Ok(())
+}
+
+#[test]
+fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_them() -> TestResult {
+    // Catches seeds rendered without running `tree.read`, run over another tree or path, sent before the user
+    // message or with outputs other than their runs' results, counted as a turn, or dropped from later turns and the
+    // record, and seed folds that diverge between warm-up and live delivery.
+    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
+    let seeds = vec![TreePath::new("src/lib.rs")?, TreePath::new("README")?];
+    let (opened, tree) = open_seeded(&mut driver, 2, seeds)?;
+    let calls = driver.result::<Opened>(opened).seeds().expect("seeded reads").as_slice().to_vec();
+    assert_eq!(driver.intent(opened).rule().as_str(), "seed", "the seeds run before the first turn");
+
+    let mut trigger = opened;
+    let mut outputs = Vec::new();
+    for (call, text) in calls.iter().zip(["1\tpub fn smelt() {}", "1\t# Bloomery"]) {
+        let asked = asked(&driver, trigger);
+        assert_eq!(asked.name.as_str(), TreeRead::NAME);
+        assert_eq!(asked.input, bound(tree, call), "{:?} reads over the opened tree", call.call_id());
+        trigger = driver.follow(trigger);
+        let viewed: Viewed = driver.result(trigger);
+        assert_eq!(viewed.text(), text);
+        outputs.push(serde_json::json!({ "text": viewed.text() }));
+    }
+    let first_turn = asked(&driver, trigger);
+    assert_eq!(first_turn.name.as_str(), MuseTurn::NAME, "the first turn follows the last seed");
+    let rested = driver.settle(trigger);
+    assert!(driver.intents(rested).is_empty(), "the loop rests");
+
+    let [first_sent, second_sent] = driver.sent.as_slice() else {
+        panic!("expected two requests, got {}", driver.sent.len());
+    };
+    let sent = first_sent["input"].as_array().expect("items are sent");
+    let [user, call_0, call_1, output_0, output_1] = sent.as_slice() else {
+        panic!("expected the user message, two calls, and two outputs, got {sent:?}");
+    };
+    assert_eq!(user["role"], "user");
+    assert_eq!(user["content"][0]["text"], QUESTION);
+    for (call, (id, path)) in [call_0, call_1].into_iter().zip([("seed-0", "src/lib.rs"), ("seed-1", "README")]) {
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["call_id"], id);
+        assert_eq!(call["arguments"], format!(r#"{{"path":"{path}","lines":2000}}"#));
+    }
+    for (output, (id, viewed)) in [output_0, output_1].into_iter().zip(["seed-0", "seed-1"].into_iter().zip(&outputs)) {
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["call_id"], id);
+        let rendered: serde_json::Value = serde_json::from_str(output["output"].as_str().expect("a rendered output"))?;
+        assert_eq!(&rendered, viewed, "{id} sends what its read returned");
+    }
+    let replayed = second_sent["input"].as_array().expect("items are sent");
+    assert_eq!(replayed.get(..sent.len()), Some(sent.as_slice()), "a later turn replays the seeds unchanged");
+
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed, "the seeds spent none of the two turns");
+    let first: TurnInput = driver.value(driver.first_turn(opened));
+    let seeded: Vec<_> = calls.iter().cloned().map(TurnItem::Call).collect();
+    assert_eq!(session.items().first(), first.items().first());
+    assert_eq!(session.items().get(1..3), Some(seeded.as_slice()), "the record holds the seeded calls");
+
+    assert_warm_and_live_agree(&driver);
     Ok(())
 }

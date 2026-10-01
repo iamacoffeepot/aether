@@ -75,11 +75,14 @@ struct Conversation {
     next: Option<Next>,
 }
 
-/// A turn that asked for calls, and the outputs of the calls answered so far.
+/// A turn that asked for calls, or an open's first turn with the seeded reads
+/// that run before it, and the outputs of the calls answered so far.
 struct Waiting {
     input: TurnInput,
     turn: Ref<TurnInput>,
-    result: Ref<TurnResult>,
+    /// The result of the turn that asked for the calls; `None` for seeds,
+    /// which no turn asked for.
+    result: Option<Ref<TurnResult>>,
     text: Ref<Utf8Text>,
     calls: ToolCalls,
     outputs: Vec<CallAnswer>,
@@ -112,12 +115,13 @@ impl Conversation {
 
     /// The record of this session failing with `failure`: the last turn it
     /// sent, with that turn's calls answered so far when it asked for any.
+    /// A session failing in its seeded reads cites the first turn alone.
     fn failure(&self, failure: Failure) -> RecordInput {
         let answered = self
             .waiting
             .as_ref()
             .filter(|waiting| waiting.turn == self.turn)
-            .map(|waiting| Answered::new(waiting.result, waiting.outputs.clone()));
+            .and_then(|waiting| waiting.result.map(|result| Answered::new(result, waiting.outputs.clone())));
         RecordInput::failed(self.turn, failure, answered, self.tree)
     }
 
@@ -139,16 +143,19 @@ impl Conversation {
                 }
             }
         }
-        self.next = Some(if self.turns < self.limit.get() {
-            let replayed = replay(waiting.text, waiting.calls.as_slice(), &waiting.outputs);
-            Next::Turn(
-                waiting
-                    .input
-                    .append(replayed)
-                    .map_err(|error| Detail::new(format!("the next turn's items: {error}")))?,
-            )
-        } else {
-            Next::Limit(RecordInput::rested(waiting.turn, waiting.result, waiting.outputs.clone(), self.tree))
+        self.next = Some(match waiting.result {
+            Some(result) if self.turns >= self.limit.get() => {
+                Next::Limit(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
+            }
+            _ => {
+                let replayed = replay(waiting.text, waiting.calls.as_slice(), &waiting.outputs);
+                Next::Turn(
+                    waiting
+                        .input
+                        .append(replayed)
+                        .map_err(|error| Detail::new(format!("the next turn's items: {error}")))?,
+                )
+            }
         });
         Ok(())
     }
@@ -210,9 +217,11 @@ impl Conversations {
         }
     }
 
-    /// Whether the entry at `at` opened or continued a session.
-    pub fn starts(&self, at: At) -> bool {
-        self.links.get(&at.seq).is_some_and(|key| self.sessions.get(key).is_some_and(|session| session.next.is_none()))
+    /// The first turn of the session the entry at `at` opened or continued,
+    /// when that turn runs next: an open with seeded reads runs them first.
+    pub fn starts(&self, at: At) -> Option<Ref<TurnInput>> {
+        let session = self.sessions.get(self.links.get(&at.seq)?)?;
+        session.next.is_none().then_some(session.turn)
     }
 
     /// The move of the session head the record at `at` belongs to, from the
@@ -261,11 +270,24 @@ impl Conversations {
 
 #[view(cursor = cursor)]
 impl View for Conversations {
+    /// An open: the session starts on its first turn, or, with seeded
+    /// reads, waits on them as calls with no turn result and empty text, so
+    /// the first turn sends the user message, the calls, then their outputs.
+    /// Seeds are not a turn.
     #[fold]
     fn opened(&mut self, run: Ran<SessionOpen>, cited: &Cited, at: At) -> Result<(), CitedError> {
-        let input = cited.get(run.input())?;
-        let conversation = Conversation::new(input.max_turns(), run.result(), input.tree());
-        self.keep(SessionKey::new(at.seq.0), conversation, at.seq);
+        let (input, opened) = (cited.get(run.input())?, cited.get(run.result())?);
+        let (key, turn) = (SessionKey::new(at.seq.0), opened.turn());
+        let mut conversation = Conversation::new(input.max_turns(), turn, input.tree());
+        match opened.seeds() {
+            None => self.keep(key, conversation, at.seq),
+            Some(seeds) => {
+                let (calls, text, first) = (seeds.clone(), Ref::of_text(""), input.first_turn());
+                let waiting = Waiting { input: first, turn, result: None, text, calls, outputs: Vec::new() };
+                conversation.waiting = Some(waiting);
+                self.advance(key, conversation, at.seq);
+            }
+        }
         Ok(())
     }
 
@@ -300,7 +322,7 @@ impl View for Conversations {
             TurnOutcome::Called { calls, text, .. } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
-                let (turn, result) = (run.input(), run.result());
+                let (turn, result) = (run.input(), Some(run.result()));
                 conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new() });
                 self.advance(key, conversation, at.seq);
             }

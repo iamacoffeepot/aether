@@ -49,9 +49,10 @@
 //!
 //! A session loops over turns and the calls they ask for as a bloomery
 //! reactor, `MuseSession`, exported from this same bundle. `muse.session.open`
-//! opens one on a tree and `muse.session.continue` resumes one; the loop runs
-//! each decoded call through a bound tool one at a time, over the session's
-//! current tree, sends the next turn with the calls and their outputs
+//! opens one on a tree, optionally with seeded `tree.read` calls the loop
+//! runs before the first turn, and `muse.session.continue` resumes one; the
+//! loop runs each decoded call through a bound tool one at a time, over the
+//! session's current tree, sends the next turn with the calls and their outputs
 //! appended, and at each rest writes the conversation and the latest tree
 //! down as a [`Session`] (`muse.session`) through `muse.session.record`,
 //! moving the session's head to it. The bound tools are [`TreeEdit`]
@@ -107,9 +108,9 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    Answered, CallAnswer, ContinueInput, Failure, MUSE, MuseSession, OpenInput, RecordInput, RestReason, Session,
-    SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit,
-    TurnLimitError, TurnSettings,
+    Answered, CallAnswer, ContinueInput, Failure, MUSE, MuseSession, OpenInput, Opened, RecordInput, RestReason,
+    Session, SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd,
+    TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, GrepArgs, ListArgs, MAX_TEXT_BYTES, ReadArgs, TreeEdit, TreeGrep, TreeList,

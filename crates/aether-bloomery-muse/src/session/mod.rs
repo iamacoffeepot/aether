@@ -6,8 +6,15 @@
 //! decide everything, and the loop's rules only pass references: every new
 //! artifact comes out of a program.
 //!
-//! - `open_turn` and `continue_turn` run `muse.turn` over the open's or the
-//!   continue's result.
+//! - `open_turn` and `continue_turn` run `muse.turn` over the open's first
+//!   turn or the continue's result.
+//! - `seed` runs the first of an open's seeded reads instead, when it has
+//!   any: each seed is a `tree.read` call `muse.session.open` built from a
+//!   path, and the loop runs the seeds through the same path as a turn's
+//!   calls (`resume` runs the next, then sends the first turn with the user
+//!   message, every seed's call, and every seed's output). Seeds are not a
+//!   turn and count against no limit; a seed that faults fails the session,
+//!   whose record holds the user message alone.
 //! - `call` runs the first call a turn asked for over the session's current
 //!   tree and the arguments `muse.turn` decoded for it. A call whose
 //!   arguments did not decode is answered with the stored refusal and
@@ -75,12 +82,12 @@ mod retry;
 mod state;
 mod tools;
 
-use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, SetHeads, Transition};
+use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, Ref, SetHeads, Transition};
 use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;
-pub use open::{OpenInput, SessionOpen};
+pub use open::{OpenInput, Opened, SessionOpen};
 pub use record::{Answered, CallAnswer, RecordInput, SessionRecord, TurnEnd};
 pub use state::{
     Failure, RestReason, Session, SessionItems, SessionItemsError, SessionKey, TurnLimit, TurnLimitError, TurnSettings,
@@ -88,12 +95,21 @@ pub use state::{
 pub use tools::MUSE;
 pub use tools::program_name;
 
+use crate::input::TurnInput;
 use crate::program::MuseTurn;
 use tools::call;
 
 /// The loop's next call after a turn or a call that keeps the session going,
 /// or the record of a session that failed.
 struct Step(CallProgram);
+
+impl Guard<Ran<SessionOpen>> for Step {
+    type Views = Conversations;
+
+    fn resolve(_run: &Ran<SessionOpen>, at: At, conversations: &Conversations) -> Option<Self> {
+        conversations.step(at).map(Self)
+    }
+}
 
 impl Guard<Ran<MuseTurn>> for Step {
     type Views = Conversations;
@@ -146,16 +162,17 @@ impl Guard<Ran<MuseTurn>> for Rest {
     }
 }
 
-/// The triggering run opened a session, or continued one from its latest
-/// record while no activation was in progress.
+/// The triggering run opened a session with no seeded reads, or continued
+/// one from its latest record while no activation was in progress: the turn
+/// it starts on.
 #[derive(Clone, Copy)]
-struct Started;
+struct Started(Ref<TurnInput>);
 
 impl Guard<Ran<SessionOpen>> for Started {
     type Views = Conversations;
 
     fn resolve(_run: &Ran<SessionOpen>, at: At, conversations: &Conversations) -> Option<Self> {
-        conversations.starts(at).then_some(Self)
+        conversations.starts(at).map(Self)
     }
 }
 
@@ -163,7 +180,7 @@ impl Guard<Ran<SessionContinue>> for Started {
     type Views = Conversations;
 
     fn resolve(_run: &Ran<SessionContinue>, at: At, conversations: &Conversations) -> Option<Self> {
-        conversations.starts(at).then_some(Self)
+        conversations.starts(at).map(Self)
     }
 }
 
@@ -186,13 +203,18 @@ impl Reactor for MuseSession {
     const NAMESPACE: &'static str = "muse.session";
 
     #[rule]
-    fn open_turn(&self, run: Ran<SessionOpen>, _started: Started) -> CallProgram {
-        call::<MuseTurn>(CallInput::Stored(run.result().digest()))
+    fn open_turn(&self, _run: Ran<SessionOpen>, started: Started) -> CallProgram {
+        call::<MuseTurn>(CallInput::Stored(started.0.digest()))
     }
 
     #[rule]
-    fn continue_turn(&self, run: Ran<SessionContinue>, _started: Started) -> CallProgram {
-        call::<MuseTurn>(CallInput::Stored(run.result().digest()))
+    fn seed(&self, _run: Ran<SessionOpen>, step: Step) -> CallProgram {
+        step.0
+    }
+
+    #[rule]
+    fn continue_turn(&self, _run: Ran<SessionContinue>, started: Started) -> CallProgram {
+        call::<MuseTurn>(CallInput::Stored(started.0.digest()))
     }
 
     #[rule]
