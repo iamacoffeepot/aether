@@ -261,6 +261,7 @@ fn reason(rested: &RestReason) -> String {
         RestReason::Declined => "declined".to_owned(),
         RestReason::Incomplete => "incomplete".to_owned(),
         RestReason::TurnLimit => "turn-limit".to_owned(),
+        RestReason::ContextFull => "context-full".to_owned(),
         RestReason::Failed(Failure::Faulted { program, reason }) => {
             format!("failed: {} faulted: {reason:?}", program.as_str())
         }

@@ -15,8 +15,8 @@ use aether_bloomery_kinds::{
     RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_muse::{
-    ContinueInput, Endpoint, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget, ReasoningEffort, Session,
-    SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult, TurnSettings,
+    ContinueInput, Endpoint, InputLimit, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget, ReasoningEffort,
+    Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult, TurnSettings,
 };
 use aether_bloomery_program::Program;
 use aether_codec::encode_storage_schema;
@@ -270,6 +270,7 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
         OfferedTools::default(),
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
+        InputLimit::new(u64::MAX)?,
     );
     let user = batch.stage_text("hi");
     let open_a = batch.stage_encoded(&OpenInput::new(settings.clone(), user, TurnLimit::new(4)?, a0, Vec::new()))?;
