@@ -107,14 +107,15 @@ fn a_muse_turn_records_the_reply_a_loopback_server_sends() -> Result<(), Box<dyn
         let result = JournalReader::open(harness.journal_path())?
             .get::<TurnResult>(&transition.result)?
             .expect("the transition cites a stored turn result");
-        assert_eq!(result.status().get(), 200);
+        assert_eq!(result.status().expect("a received turn").get(), 200);
         let TurnOutcome::Completed { text, .. } = result.outcome() else {
             panic!("expected a Completed turn, got {:?}", result.outcome());
         };
         assert_eq!(*text, Ref::of_text("A bloomery is a furnace that smelts iron into a bloom."));
         assert!(harness.stores(&text.digest()), "the answer text is stored");
-        assert_eq!(result.body().digest(), artifact_digest(OpaqueBytes::ID, COMPLETED), "the raw reply body is kept");
-        assert!(harness.stores(&result.body().digest()), "the raw reply body is stored");
+        let body = result.body().expect("a received turn");
+        assert_eq!(body.digest(), artifact_digest(OpaqueBytes::ID, COMPLETED), "the raw reply body is kept");
+        assert!(harness.stores(&body.digest()), "the raw reply body is stored");
 
         let served = vendor.served();
         let [served] = served.as_slice() else {

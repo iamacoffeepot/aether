@@ -118,11 +118,25 @@ program is tested without spending money.
      `CallOutput` names the `call_id` of an earlier `Call`; and no two
      `Call`s share a `call_id`.
    - `max_output_tokens: OutputBudget`: never zero.
-   - `reasoning: ReasoningEffort`: `Low`, `Medium`, or `High`.
+   - `reasoning: ReasoningEffort`: `Low`, `Medium`, or `High`. It also
+     sets the `Fetch`'s timeout: 180 s at `Low` and `Medium`, and 600 s at
+     `High`, since high reasoning over a long context can legitimately run
+     past the shorter wait. The timeout is chosen from the input alone, so
+     the request stays a function of the input. The HTTP capability
+     imposes no ceiling on a fetch's own timeout; each in-flight turn holds
+     one of its per-sender egress slots for the whole wait.
 
 4. **Result kind `muse.turn.result`: the raw body always kept, usage
-   recorded verbatim.** `TurnResult` has private fields and is built only
-   by the program's response mapping.
+   recorded verbatim.** `TurnResult` has one private field, a private
+   `Reply`, and is built only by the program's response mapping. A
+   `Reply` is either `Received { status, body, outcome }`, when the vendor
+   answered, or `Unreached { error }`, when the fetch got no reply for a
+   reason a resend may clear (decision 5). `error` is a `Detail` naming the
+   `HttpError`, and an unreached result's outcome reads as
+   `Transient { retry_after_secs: None }`, so a caller retries it exactly
+   as it retries an overload with no `Retry-After`. Because the arms are
+   private, no stored result pairs a status with no body, or a `Completed`
+   outcome with no reply. A received reply holds:
    - `status: HttpStatus`, a validated code in `100..=599`.
    - `body: Ref<OpaqueBytes>`, the raw response body, always staged, so a
      classification bug can be corrected later from the record.
@@ -167,16 +181,27 @@ program is tested without spending money.
    outcome keeps any message text the reply also carried. Every staged
    artifact is cited by the result, so the SDK's orphan check passes.
 
-5. **Failure recording: a fault only when there is no reply.** A turn that
-   got any vendor reply completes with a recorded result, because tokens
-   may have been spent and a fault would drop the body and usage. A
-   `FetchResult::Err` (allowlist denial, disabled egress, timeout,
-   connection error, body too large) means no reply at all: the program
-   returns `Refusal::Refused` naming the `HttpError`, which the driver
-   records as `Fault { Refused }`. A status outside `100..=599` is not an
-   HTTP reply and refuses the same way. A transient refusal is a reply,
-   so it is a result too: its status and body stay on the record, and its
-   classification can be corrected later.
+5. **Failure recording: a fault only for a failure with no reply that a
+   resend cannot clear.** A turn that got any vendor reply completes with a
+   recorded result, because tokens may have been spent and a fault would
+   drop the body and usage. A `FetchResult::Err` means no reply at all, and
+   its `HttpError` is sorted by whether a resend may clear it:
+   - `Timeout`, and `AdapterError`, which the HTTP adapter uses for every
+     other transport failure (a refused connection, a reset, DNS, TLS, a
+     body that broke mid-read), complete with an unreached result
+     (decision 4) that stages nothing and reads as transient, so the caller
+     may resend the turn. `AdapterError` carries only free text, so a
+     misconfiguration it hides costs at most the caller's retry cap.
+   - `AllowlistDenied`, `Disabled`, `InvalidUrl` (which also covers a
+     bound secret refused over cleartext, ADR-0235), `BodyTooLarge`, and
+     `Closed` are configuration, policy, or shutdown states no resend
+     clears: the program returns `Refusal::Refused` naming the
+     `HttpError`, which the driver records as `Fault { Refused }`.
+
+   A status outside `100..=599` is not an HTTP reply and refuses the same
+   way. A transient refusal is a reply, so it is a result too: its status
+   and body stay on the record, and its classification can be corrected
+   later.
 
 6. **The key comes from the engine credential mechanism (#6593).** A
    program cannot hold a secret safely: its input and cited texts are
@@ -289,11 +314,14 @@ program is tested without spending money.
   policy. A caller waits out `Retry-After` with the driver's
   `clock.until` timer ([ADR-0245](0245-a-timer-is-a-driver-native-program.md)).
 - Adding `Transient`, then tools, then decoded call inputs and cited call
-  results, changed the shapes of
+  results, then the unreached result, changed the shapes of
   `muse.turn.input` and `muse.turn.result`. Their storage kind ids hash the
   name only (`storage_kind_id_from_name`), so a value recorded in an older
   shape keeps the same kind id and no longer decodes. This is accepted
   before 1.0, and nothing outside tests records them yet.
+- A retried timeout may be billed twice: the vendor may have processed a
+  request whose reply the adapter abandoned. Only a recorded reply counts,
+  and the caller's retry cap bounds the cost.
 - A 5xx other than 503 or 529 stays `Rejected`: a gateway error (500, 502,
   504) can arrive after the vendor started generating, so the program
   cannot claim nothing was bought. The caller may still retry a

@@ -8,8 +8,12 @@
 //! offered tool definitions, and the full conversation, and records the reply
 //! as a [`TurnResult`] (`muse.turn.result`): the HTTP status, the raw body
 //! (always kept), and a [`TurnOutcome`] with every usage count the vendor
-//! reported. Any reply is a recorded result; only no reply at all refuses,
-//! which the driver records as a fault.
+//! reported. Any reply is a recorded result. A fetch that timed out or failed
+//! at the connection is a recorded result with no reply whose outcome reads as
+//! `Transient`, so the session resends the turn; only a failure with no reply
+//! that a resend cannot clear (an allowlist denial, disabled egress, an invalid
+//! URL, a body too large, a closed capability) refuses, which the driver
+//! records as a fault. The fetch waits 180 s, or 600 s at High reasoning.
 //!
 //! A tool is a program to run. The caller renders each offered program with
 //! `aether_bloomery_program::tool_definition` and cites the definition in an

@@ -1,12 +1,15 @@
 //! Reading the vendor's reply into a recorded [`TurnResult`].
 //!
 //! A reply of any kind is a result, never a fault: tokens may have been
-//! spent, and a fault carries no blobs. Only no reply at all refuses, and the
-//! driver records that refusal as a fault. [`classify`] holds every rule.
+//! spent, and a fault carries no blobs. A fetch that timed out or failed at the
+//! connection is a result too, one with no reply that reads as transient, so the
+//! caller may resend the turn. Only a failure with no reply that a resend cannot
+//! clear refuses, and the driver records that refusal as a fault. [`classify`]
+//! holds every rule for a reply.
 
 use aether_bloomery_kinds::{Detail, Refusal};
 use aether_bloomery_program::{Async, Env, ToolSchema, function_name};
-use aether_http::{FetchResult, HttpHeader};
+use aether_http::{FetchResult, HttpError, HttpHeader};
 use serde::Deserialize;
 
 use crate::arguments;
@@ -27,7 +30,7 @@ pub fn record(
 ) -> Result<TurnResult, Refusal> {
     let (status, headers, body) = match reply {
         FetchResult::Ok { status, headers, body, .. } => (status, headers, body),
-        FetchResult::Err { error, .. } => return Err(Refusal::Refused { reason: Detail::new(format!("{error:?}")) }),
+        FetchResult::Err { error, .. } => return unreached(&error),
     };
     let code = HttpStatus::new(status).map_err(|_| Refusal::Refused {
         reason: Detail::new(format!("reply status {status} is not an HTTP status")),
@@ -66,7 +69,25 @@ pub fn record(
         Classified::Transient { retry_after_secs } => TurnOutcome::Transient { retry_after_secs },
         Classified::Unreadable => TurnOutcome::Unreadable,
     };
-    Ok(TurnResult::new(code, staged_body, outcome))
+    Ok(TurnResult::received(code, staged_body, outcome))
+}
+
+/// Sort a fetch that got no reply.
+///
+/// A timeout, and every transport failure the adapter folds into `AdapterError` (a refused connection, a reset, DNS,
+/// TLS, a body that broke mid-read), is an unreached result: a resend may clear it. An allowlist denial, disabled
+/// egress, an invalid URL (which covers a secret refused over cleartext), a body too large, and a closed capability
+/// refuse: each is a configuration, policy, or shutdown state no resend clears.
+fn unreached(error: &HttpError) -> Result<TurnResult, Refusal> {
+    let detail = Detail::new(format!("{error:?}"));
+    match error {
+        HttpError::Timeout | HttpError::AdapterError(_) => Ok(TurnResult::unreached(detail)),
+        HttpError::AllowlistDenied
+        | HttpError::Disabled
+        | HttpError::InvalidUrl(_)
+        | HttpError::BodyTooLarge
+        | HttpError::Closed => Err(Refusal::Refused { reason: detail }),
+    }
 }
 
 /// The vendor's own verdict on a refusal: `x-should-retry` of exactly `true` or `false`.

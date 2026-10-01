@@ -24,7 +24,7 @@ use aether_bloomery_program::{
 };
 use aether_bloomery_workspace::TreePath;
 use aether_data::{Cites, Kind, Storage, StorageData};
-use aether_http::{FetchResult, HttpHeader};
+use aether_http::{FetchResult, HttpError, HttpHeader};
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");
 const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json");
@@ -55,17 +55,15 @@ struct Asked {
     input: Digest,
 }
 
-/// One recorded reply to a turn.
+/// One recorded answer to a turn's fetch.
 struct Reply {
-    status: u16,
-    headers: Vec<HttpHeader>,
-    body: String,
+    fetched: FetchResult,
 }
 
 impl Reply {
     /// A 200 carrying `body`, with no headers.
     fn ok(body: &str) -> Self {
-        Self { status: 200, headers: Vec::new(), body: body.to_owned() }
+        Self::replied(200, Vec::new(), body)
     }
 
     /// A `status` refusal carrying `body`, with a `Retry-After` of `retry_after_secs` when given.
@@ -74,7 +72,17 @@ impl Reply {
             .map(|secs| HttpHeader { name: "Retry-After".to_owned(), value: secs.to_string() })
             .into_iter()
             .collect();
-        Self { status, headers, body: body.to_owned() }
+        Self::replied(status, headers, body)
+    }
+
+    /// A fetch that got no reply, failing with `error`.
+    fn failed(error: HttpError) -> Self {
+        Self { fetched: FetchResult::Err { request_id: 1, url: URL.into(), error } }
+    }
+
+    fn replied(status: u16, headers: Vec<HttpHeader>, body: &str) -> Self {
+        let body = body.as_bytes().to_vec();
+        Self { fetched: FetchResult::Ok { request_id: 1, url: URL.into(), status, headers, body } }
     }
 }
 
@@ -287,13 +295,12 @@ impl Driver {
 
     /// One turn, answered by the next recorded reply.
     fn turn(&mut self, invoke: Invoke) -> Invoked {
-        let Reply { status, headers, body } = self.replies.pop_front().expect("a reply for every turn");
+        let Reply { fetched } = self.replies.pop_front().expect("a reply for every turn");
         let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<MuseTurn>(invoke)
         else {
             panic!("expected the turn to send its one fetch");
         };
-        let reply = FetchResult::Ok { request_id: 1, url: URL.into(), status, headers, body: body.into_bytes() };
-        session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+        session.fulfill_send(&pending, FetchResult::ID, fetched.encode_into_bytes());
         match session.poll() {
             PollResult::Finished(invoked) => invoked,
             other => panic!("expected the turn to finish after its fetch, got {other:?}"),
@@ -922,6 +929,56 @@ fn a_transient_turn_waits_out_retry_after_then_resends_the_same_turn() -> TestRe
     assert_eq!(*session.rested(), RestReason::Completed, "the retry spent none of the two turns");
 
     assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_timed_out_turn_backs_off_then_resends_the_same_turn() -> TestResult {
+    // Catches a timed-out fetch that ends the session instead of retrying, a retry that waits no backoff, and a
+    // resent turn rebuilt instead of naming the stored input.
+    let mut driver = Driver::replying([Reply::failed(HttpError::Timeout), Reply::ok(COMPLETED)].into());
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_input = driver.transition(opened).result;
+
+    let timed_out = driver.follow(opened);
+    let outcome = driver.result::<TurnResult>(timed_out).outcome().clone();
+    assert_eq!(outcome, TurnOutcome::Transient { retry_after_secs: None });
+    let waited = waits_for(&driver, timed_out);
+    assert!((1_000..2_000).contains(&waited), "the first backoff, waited {waited}");
+
+    let wait = driver.request(timed_out);
+    let fired = driver.fire(&wait);
+    let retry = asked(&driver, fired);
+    assert_eq!(driver.intent(fired).rule().as_str(), "retry");
+    assert_eq!(retry.input, CallInput::Stored(first_input), "the retry resends the stored input");
+
+    driver.settle(fired);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_policy_refused_turn_faults_and_rests_the_session_failed() -> TestResult {
+    // Catches a refusal no resend can clear retried instead of faulting, and a turn fault that leaves the session
+    // unrecorded.
+    let mut driver = Driver::replying([Reply::failed(HttpError::AllowlistDenied)].into());
+    let (opened, _) = open(&mut driver, 2)?;
+
+    let faulted = driver.follow(opened);
+    assert_eq!(driver.entries[index(faulted)].0.kind, Fault::ID, "the turn faults");
+    assert_eq!(asked_at(&driver, faulted), SessionRecord::NAME, "the fault is recorded as the session's rest");
+    let recorded = driver.follow(faulted);
+
+    let session: Session = driver.result(recorded);
+    let RestReason::Failed(Failure::Faulted { program, reason: FaultReason::Refused { reason } }) = session.rested()
+    else {
+        panic!("expected the session to rest failed on the turn's refusal, got {:?}", session.rested());
+    };
+    assert_eq!(program.as_str(), MuseTurn::NAME);
+    assert!(reason.as_str().contains("AllowlistDenied"), "{}", reason.as_str());
     Ok(())
 }
 

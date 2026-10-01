@@ -15,8 +15,16 @@ use serde_json::Value;
 
 use crate::input::{OfferedTool, ReasoningEffort, Role, TurnInput, TurnItem};
 
-/// How long the HTTP capability waits for the vendor before it answers `Timeout`.
-const TURN_TIMEOUT_MILLIS: u32 = 180_000;
+/// How long the HTTP capability waits for the vendor before it answers `Timeout`, by the turn's reasoning effort.
+///
+/// High reasoning over a long context can legitimately run past the shorter wait. The HTTP capability imposes no
+/// ceiling on a fetch's own timeout, so the longer wait is capped by nothing below it.
+const fn timeout_millis(reasoning: ReasoningEffort) -> u32 {
+    match reasoning {
+        ReasoningEffort::Low | ReasoningEffort::Medium => 180_000,
+        ReasoningEffort::High => 600_000,
+    }
+}
 
 #[derive(Serialize)]
 struct Body<'a> {
@@ -152,7 +160,7 @@ pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Res
         method: HttpMethod::Post,
         headers: vec![HttpHeader { name: "Content-Type".into(), value: "application/json".into() }],
         body: serde_json::to_vec(&body).expect("a body of strings, integers, and parsed JSON always serializes"),
-        timeout_ms: Some(TURN_TIMEOUT_MILLIS),
+        timeout_ms: Some(timeout_millis(input.reasoning())),
     })
 }
 
@@ -163,7 +171,7 @@ mod tests {
     use aether_http::{HttpHeader, HttpMethod};
     use serde_json::json;
 
-    use super::{TURN_TIMEOUT_MILLIS, fetch};
+    use super::fetch;
     use crate::input::tests::offered_tool;
     use crate::input::{
         CallId, Endpoint, FunctionName, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall,
@@ -171,13 +179,17 @@ mod tests {
     };
 
     fn input(tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
+        input_at(ReasoningEffort::Medium, tools, items)
+    }
+
+    fn input_at(reasoning: ReasoningEffort, tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
         TurnInput::new(
             Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
             ModelName::new("muse-spark-1.3").expect("model"),
             tools,
             TurnItems::new(items).expect("items"),
             OutputBudget::new(512).expect("budget"),
-            ReasoningEffort::Medium,
+            reasoning,
         )
     }
 
@@ -192,17 +204,21 @@ mod tests {
     #[test]
     fn request_resends_every_item_in_order_with_store_off() {
         // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, a
-        // conversation handle, an extra header, and the wrong method, URL, or timeout.
+        // conversation handle, an extra header, the wrong method, URL, or timeout, and a reasoning effort not threaded
+        // into the timeout.
         let texts = ["Be brief.", "What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
         let roles = [Role::Developer, Role::User, Role::Assistant, Role::User];
         let items = roles.iter().zip(&texts).map(|(&role, text)| TurnItem::message(role, Ref::of_text(text))).collect();
         let input = input(OfferedTools::default(), items);
+        let high = input_at(ReasoningEffort::High, OfferedTools::default(), input.items().to_vec());
 
         let request = fetch(&input, &texts, &[]).expect("a plain turn builds");
+        let high = fetch(&high, &texts, &[]).expect("a high-effort turn builds");
 
         assert_eq!(request.url, "https://example.test/v1/responses");
         assert_eq!(request.method, HttpMethod::Post);
-        assert_eq!(request.timeout_ms, Some(TURN_TIMEOUT_MILLIS));
+        assert_eq!(request.timeout_ms, Some(180_000));
+        assert_eq!(high.timeout_ms, Some(600_000));
         assert_eq!(
             request.headers,
             vec![HttpHeader { name: "Content-Type".into(), value: "application/json".into() }],
