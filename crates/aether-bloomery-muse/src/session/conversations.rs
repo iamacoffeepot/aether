@@ -35,7 +35,7 @@ use crate::session::replay::replay;
 use crate::session::retry::{MAX_RETRIES, retry_wait, wait_call};
 use crate::session::state::{Failure, Session, SessionKey, TurnLimit};
 use crate::session::tools::{MUSE, call};
-use crate::tools::{NUDGE_TEXT, end_result};
+use crate::tools::{NUDGE_TEXT, ends_run};
 
 /// Every live session and the journal entries linked to them.
 #[derive(Default)]
@@ -157,12 +157,11 @@ impl Conversation {
                 }
             }
         }
+        let ended = ends_run(waiting.calls.as_slice(), &waiting.outputs);
+        let spent = self.turns >= self.limit.get();
+        let settles = ended || waiting.full || spent;
         self.next = Some(match waiting.result {
-            Some(result)
-                if end_result(waiting.calls.as_slice(), &waiting.outputs).is_some()
-                    || waiting.full
-                    || self.turns >= self.limit.get() =>
-            {
+            Some(result) if settles => {
                 Next::Settled(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
             _ => {
@@ -352,11 +351,11 @@ impl View for Conversations {
             TurnOutcome::Completed { text, usage } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
-                let limited =
-                    conversation.turns >= conversation.limit.get() || input.input_limit().reached(usage.input_tokens());
+                let spent = conversation.turns >= conversation.limit.get();
+                let full = input.input_limit().reached(usage.input_tokens());
                 let nudged =
                     [TurnItem::message(Role::Assistant, text), TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT))];
-                conversation.next = Some(if limited {
+                conversation.next = Some(if spent || full {
                     Next::Rest(RecordInput::rested(run.input(), run.result(), Vec::new(), conversation.tree))
                 } else {
                     match input.append(nudged) {

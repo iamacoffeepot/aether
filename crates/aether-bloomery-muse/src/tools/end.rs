@@ -1,6 +1,6 @@
 //! `muse.end`: end the session's run as done, blocked, or asking a question.
 
-use aether_bloomery_kinds::{ErasedRef, Mode, Refusal};
+use aether_bloomery_kinds::{Mode, Refusal};
 use aether_bloomery_program::{Env, Program, Sync, Tooled, program};
 use aether_data::Kind;
 
@@ -99,15 +99,13 @@ pub fn end_position(calls: &[ToolCall]) -> Option<usize> {
         .position(|call| matches!(call.input(), ToolInput::Decoded { program, .. } if program.as_str() == End::NAME))
 }
 
-/// The cited `Ending` answering the first decoded `muse.end` call, when one
-/// of `calls` is decoded and the output answering it is a stored result of
-/// the ending's kind.
-pub fn end_result(calls: &[ToolCall], outputs: &[CallAnswer]) -> Option<ErasedRef> {
-    let output = outputs.get(end_position(calls)?)?.output();
-    match output {
-        ToolOutput::Result { result, .. } if result.kind() == Ending::ID => Some(*result),
-        ToolOutput::Result { .. } | ToolOutput::Refused(_) => None,
-    }
+/// Whether the turn ended its run: the first decoded `muse.end` call in
+/// `calls` is answered in `outputs` by an ending.
+pub fn ends_run(calls: &[ToolCall], outputs: &[CallAnswer]) -> bool {
+    let Some(answer) = end_position(calls).and_then(|position| outputs.get(position)) else {
+        return false;
+    };
+    matches!(answer.output(), ToolOutput::Result { result, .. } if result.kind() == Ending::ID)
 }
 
 #[cfg(test)]

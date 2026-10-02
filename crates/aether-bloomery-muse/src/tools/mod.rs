@@ -34,7 +34,7 @@ use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
-pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, end_result};
+pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, ends_run};
 pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
 pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
