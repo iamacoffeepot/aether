@@ -11,8 +11,7 @@
 //! files it rewrote, then the proof's cargo step. The workspace stops after
 //! the first step that exits other than 0.
 //!
-//! Both programs share one body ([`prove`]), differing only in the
-//! [`Proof`] description: the cargo step's argv, whether the step takes the
+//! Both programs share one body, differing only in a private description: the cargo step's argv, whether the step takes the
 //! bound's test env, the summary name, and the function that turns the
 //! failed step's stdout and stderr into diagnostics.
 //!
