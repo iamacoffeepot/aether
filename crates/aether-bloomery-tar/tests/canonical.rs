@@ -1,12 +1,16 @@
-//! The canonical encoding: pinned bytes, the round trip, the depth cap, and
-//! the encoder's handling of its blob readers and its output.
+//! The canonical encoding: pinned bytes, the round trip, the depth cap, the
+//! encoder's handling of its blob readers and its output, and the stamped
+//! encoding's comparison with its base.
 
 mod common;
 
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, ErrorKind, Read, Write};
 
 use aether_bloomery_kinds::{Node, OpaqueBytes, Path, Ref, Tree, hash_bytes};
-use aether_bloomery_tar::{EncodeError, MAX_DEPTH, SourceBlob, TreeSource, encode};
+use aether_bloomery_tar::{
+    CANONICAL_MTIME_SECS, EncodeError, MAX_DEPTH, SourceBlob, Stamp, TreeSource, encode, encode_stamped,
+};
 use common::MemoryStore;
 
 /// The canonical tar stream of `root`.
@@ -194,4 +198,107 @@ fn a_failed_flush_of_the_output_is_an_error() {
     let result = encode(&root, &mut store, FailingFlush(Vec::new()));
 
     assert!(matches!(&result, Err(EncodeError::Write(error)) if error.to_string() == "flush failed"), "got {result:?}");
+}
+
+/// A [`MemoryStore`] that counts how often each tree is loaded.
+struct CountingLoads<'a> {
+    store: &'a mut MemoryStore,
+    loads: HashMap<Ref<Tree>, usize>,
+}
+
+impl TreeSource for CountingLoads<'_> {
+    type Error = String;
+    type Blob<'a>
+        = &'a [u8]
+    where
+        Self: 'a;
+
+    fn tree(&mut self, tree: &Ref<Tree>) -> Result<Tree, String> {
+        *self.loads.entry(*tree).or_default() += 1;
+        TreeSource::tree(self.store, tree)
+    }
+
+    fn blob(&mut self, blob: &Ref<OpaqueBytes>) -> Result<SourceBlob<&[u8]>, String> {
+        self.store.blob(blob)
+    }
+}
+
+/// Each entry's path and mtime, read straight from the ustar fields of a
+/// stream whose paths all fit the name field, so it has no PAX headers.
+fn mtimes(bytes: &[u8]) -> BTreeMap<String, u64> {
+    let text = |field: &[u8]| {
+        let end = field.iter().position(|&byte| byte == 0).unwrap_or(field.len());
+        String::from_utf8(field[..end].to_vec()).expect("an ASCII field")
+    };
+    let octal = |field: &[u8]| u64::from_str_radix(&text(field), 8).expect("an octal field");
+    let mut found = BTreeMap::new();
+    let mut blocks = bytes.chunks_exact(512);
+    while let Some(header) = blocks.next() {
+        let ended = header.iter().all(|&byte| byte == 0);
+        if ended {
+            break;
+        }
+        found.insert(text(&header[..100]), octal(&header[136..148]));
+        for _ in 0..octal(&header[124..136]).div_ceil(512) {
+            blocks.next();
+        }
+    }
+    found
+}
+
+#[test]
+fn a_stamped_stream_stamps_exactly_the_files_that_differ_from_its_base() {
+    // Catches a comparison that stamps too little (an edited or added file
+    // keeps 1980, and cargo keeps a build of the old source), one that stamps
+    // too much (an unchanged file or an equal subtree is stamped, and cargo
+    // rebuilds what the warm layer already holds), one that loads an equal
+    // subtree a second time to compare it, and a stamped walk whose bytes
+    // drift from the canonical stream when nothing differs.
+    let mut store = MemoryStore::default();
+    let stamp_secs = 1_800_000_000;
+    let readme = Node::File(store.add_blob(b"readme\n"));
+    let kept = Node::File(store.add_blob(b"kept\n"));
+    let guide = Node::File(store.add_blob(b"guide\n"));
+    let docs = store.add_dir(vec![("guide.md", guide)]);
+    let gone = Node::File(store.add_blob(b"gone\n"));
+    let before = Node::File(store.add_blob(b"before\n"));
+    let base_src = Node::Directory(store.add_dir(vec![("edit.rs", before), ("kept.rs", kept.clone())]));
+    let base = store.add_dir(vec![
+        ("docs", Node::Directory(docs)),
+        ("gone.txt", gone),
+        ("readme", readme.clone()),
+        ("src", base_src),
+    ]);
+    let after = Node::File(store.add_blob(b"after\n"));
+    let src = Node::Directory(store.add_dir(vec![("edit.rs", after), ("kept.rs", kept)]));
+    let new = Node::File(store.add_blob(b"new\n"));
+    let added = Node::Directory(store.add_dir(vec![("new.rs", new)]));
+    let root = store.add_dir(vec![("added", added), ("docs", Node::Directory(docs)), ("readme", readme), ("src", src)]);
+
+    let mut source = CountingLoads { store: &mut store, loads: HashMap::new() };
+    let mut stamped = Vec::new();
+    encode_stamped(&root, &Stamp { base: Some(base), mtime_secs: stamp_secs }, &mut source, &mut stamped)
+        .expect("the tree encodes");
+
+    let canonical = CANONICAL_MTIME_SECS;
+    let expected = BTreeMap::from([
+        ("added/", canonical),
+        ("added/new.rs", stamp_secs),
+        ("docs/", canonical),
+        ("docs/guide.md", canonical),
+        ("readme", canonical),
+        ("src/", canonical),
+        ("src/edit.rs", stamp_secs),
+        ("src/kept.rs", canonical),
+    ])
+    .into_iter()
+    .map(|(path, mtime)| (path.to_owned(), mtime))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(mtimes(&stamped), expected);
+    assert_eq!(source.loads.get(&docs), Some(&1), "the equal subtree is loaded only for its own entries");
+
+    let mut unchanged = Vec::new();
+    encode_stamped(&root, &Stamp { base: Some(root), mtime_secs: stamp_secs }, &mut store, &mut unchanged)
+        .expect("the tree encodes");
+    assert_eq!(unchanged, canonical_bytes(&mut store, &root));
 }

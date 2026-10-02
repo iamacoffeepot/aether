@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use crate::{CANONICAL_MTIME_SECS, Refusal};
+use crate::Refusal;
 
 /// Every tar record is a whole number of these.
 pub const BLOCK_BYTES: usize = 512;
@@ -52,10 +52,13 @@ pub struct Header<'a> {
     pub size: u64,
     /// At most [`NAME_FIELD_BYTES`]; the caller cuts a longer target.
     pub linkname: &'a [u8],
+    /// [`crate::CANONICAL_MTIME_SECS`] for every canonical entry; a stamped
+    /// file's stamp otherwise.
+    pub mtime: u64,
 }
 
 impl Header<'_> {
-    /// The canonical block: numeric owners 0, [`CANONICAL_MTIME_SECS`], POSIX
+    /// The canonical block: numeric owners 0, the header's mtime, POSIX
     /// magic, an empty prefix, and the checksum.
     pub fn to_block(&self) -> [u8; BLOCK_BYTES] {
         let mut block = [0; BLOCK_BYTES];
@@ -64,7 +67,7 @@ impl Header<'_> {
         put_octal(&mut block[UID], 0);
         put_octal(&mut block[GID], 0);
         put_octal(&mut block[SIZE], self.size);
-        put_octal(&mut block[MTIME], CANONICAL_MTIME_SECS);
+        put_octal(&mut block[MTIME], self.mtime);
         block[TYPEFLAG] = self.typeflag;
         put_bytes(&mut block[LINKNAME], self.linkname);
         block[MAGIC].copy_from_slice(POSIX_MAGIC);

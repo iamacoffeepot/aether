@@ -1,4 +1,5 @@
-//! Tree → canonical tar stream.
+//! Tree → canonical tar stream, or the same stream with the files that
+//! differ from a base tree stamped.
 
 use std::collections::btree_map;
 use std::error::Error;
@@ -9,7 +10,7 @@ use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
 
 use crate::block::{BLOCK_BYTES, Header, NAME_FIELD_BYTES, chunk_len, padding_len, typeflag};
 use crate::store::{SourceBlob, TreeSource};
-use crate::{MAX_DEPTH, pax};
+use crate::{CANONICAL_MTIME_SECS, MAX_DEPTH, pax};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -21,8 +22,8 @@ const EXECUTABLE_MODE: u32 = 0o755;
 const DIRECTORY_MODE: u32 = 0o755;
 const SYMLINK_MODE: u32 = 0o777;
 
-/// Why [`encode()`] stopped. Bytes already written to the output are not a
-/// valid archive.
+/// Why [`encode()`] or [`encode_stamped()`] stopped. Bytes already written
+/// to the output are not a valid archive.
 #[derive(Debug)]
 pub enum EncodeError<E> {
     /// The [`TreeSource`] failed to load a tree or open a blob.
@@ -73,9 +74,59 @@ impl<E: Error + 'static> Error for EncodeError<E> {
 ///
 /// [`EncodeError`] names the failing store call, write, blob, or depth.
 pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W) -> Result<(), EncodeError<S::Error>> {
+    walk(root, Against::Unchanged, CANONICAL_MTIME_SECS, source, out)
+}
+
+/// What a stamped stream marks: the files that differ from `base` get
+/// `mtime_secs`, and everything else the canonical mtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    /// The tree to compare against. `None` stamps every file.
+    pub base: Option<Ref<Tree>>,
+    /// The mtime a file that differs from `base` carries.
+    pub mtime_secs: u64,
+}
+
+/// Write the tar stream of `root` to `out` with the canonical encoding,
+/// except that every File, Executable, or Symlink that `stamp.base` lacks at
+/// the same path, or holds as another node, carries `stamp.mtime_secs`.
+///
+/// The comparison is part of the walk: each open directory carries the base
+/// directory at its path, and a subdirectory whose digest equals the base's
+/// is written without loading any more of the base. Directory entries always
+/// carry the canonical mtime. A stamped stream is never hashed: a file's
+/// mtime is not part of its tree.
+///
+/// # Errors
+///
+/// [`EncodeError`] names the failing store call, write, blob, or depth. A
+/// base listing the source cannot load is [`EncodeError::Source`].
+pub fn encode_stamped<S: TreeSource, W: Write>(
+    root: &Ref<Tree>,
+    stamp: &Stamp,
+    source: &mut S,
+    out: W,
+) -> Result<(), EncodeError<S::Error>> {
+    let against = match stamp.base {
+        Some(base) if base == *root => Against::Unchanged,
+        Some(base) => Against::Base(load(source, &base)?),
+        None => Against::Added,
+    };
+    walk(root, against, stamp.mtime_secs, source, out)
+}
+
+/// The walk both encodings share: depth-first pre-order from `root`, each
+/// file's mtime chosen by what its directory is compared `against`.
+fn walk<S: TreeSource, W: Write>(
+    root: &Ref<Tree>,
+    against: Against,
+    mtime_secs: u64,
+    source: &mut S,
+    out: W,
+) -> Result<(), EncodeError<S::Error>> {
     let mut writer = Writer { out, buffer: vec![0; COPY_BUFFER_BYTES] };
     let mut path = String::new();
-    let mut stack = vec![Frame { base_len: 0, depth: 0, entries: listing(source, root)? }];
+    let mut stack = vec![Frame { base_len: 0, depth: 0, entries: listing(source, root)?, against }];
 
     while let Some(frame) = stack.last_mut() {
         let Some((name, node)) = frame.entries.next() else {
@@ -88,10 +139,11 @@ pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W)
         }
         path.truncate(frame.base_len);
         path.push_str(name.as_str());
+        let mtime = frame.against.mtime(&name, &node, mtime_secs);
 
         match node {
-            Node::File(blob) => writer.file(&path, FILE_MODE, source, &blob)?,
-            Node::Executable(blob) => writer.file(&path, EXECUTABLE_MODE, source, &blob)?,
+            Node::File(blob) => writer.file(&path, FILE_MODE, mtime, source, &blob)?,
+            Node::Executable(blob) => writer.file(&path, EXECUTABLE_MODE, mtime, source, &blob)?,
             Node::Symlink(target) => {
                 writer.entry(Entry {
                     path: &path,
@@ -99,6 +151,7 @@ pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W)
                     mode: SYMLINK_MODE,
                     size: 0,
                     link: target.as_str(),
+                    mtime,
                 })?;
             }
             Node::Directory(tree) => {
@@ -109,9 +162,11 @@ pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W)
                     mode: DIRECTORY_MODE,
                     size: 0,
                     link: "",
+                    mtime: CANONICAL_MTIME_SECS,
                 })?;
+                let against = frame.against.child(&name, &tree, source)?;
                 let entries = listing(source, &tree)?;
-                stack.push(Frame { base_len: path.len(), depth, entries });
+                stack.push(Frame { base_len: path.len(), depth, entries, against });
             }
         }
     }
@@ -121,18 +176,73 @@ pub fn encode<S: TreeSource, W: Write>(root: &Ref<Tree>, source: &mut S, out: W)
 }
 
 /// One open directory: where its children's paths start in the shared path
-/// buffer, its depth, and the entries not yet written.
+/// buffer, its depth, the entries not yet written, and what its files are
+/// compared against.
 struct Frame {
     base_len: usize,
     depth: usize,
     entries: btree_map::IntoIter<Name, Node>,
+    against: Against,
+}
+
+/// What an open directory's entries are compared against.
+enum Against {
+    /// Nothing differs: the canonical encoding, or a directory equal to the
+    /// base's at its path. Every entry keeps the canonical mtime.
+    Unchanged,
+    /// The base's directory at the same path: an entry it holds as the same
+    /// node keeps the canonical mtime, and any other file is stamped.
+    Base(Tree),
+    /// The base has no directory here: every file is stamped.
+    Added,
+}
+
+impl Against {
+    /// The mtime of the non-directory entry `name`, holding `node`.
+    fn mtime(&self, name: &Name, node: &Node, mtime_secs: u64) -> u64 {
+        match self {
+            Self::Unchanged => CANONICAL_MTIME_SECS,
+            Self::Base(base) => {
+                let same = base.entries().get(name) == Some(node);
+                if same {
+                    CANONICAL_MTIME_SECS
+                } else {
+                    mtime_secs
+                }
+            }
+            Self::Added => mtime_secs,
+        }
+    }
+
+    /// What the subdirectory `name`, holding `tree`, is compared against: an
+    /// equal base subtree is not loaded.
+    fn child<S: TreeSource>(
+        &self,
+        name: &Name,
+        tree: &Ref<Tree>,
+        source: &mut S,
+    ) -> Result<Self, EncodeError<S::Error>> {
+        match self {
+            Self::Unchanged => Ok(Self::Unchanged),
+            Self::Added => Ok(Self::Added),
+            Self::Base(base) => match base.entries().get(name) {
+                Some(Node::Directory(based)) if based == tree => Ok(Self::Unchanged),
+                Some(Node::Directory(based)) => Ok(Self::Base(load(source, based)?)),
+                _ => Ok(Self::Added),
+            },
+        }
+    }
 }
 
 fn listing<S: TreeSource>(
     source: &mut S,
     tree: &Ref<Tree>,
 ) -> Result<btree_map::IntoIter<Name, Node>, EncodeError<S::Error>> {
-    Ok(source.tree(tree).map_err(EncodeError::Source)?.entries().clone().into_iter())
+    Ok(load(source, tree)?.entries().clone().into_iter())
+}
+
+fn load<S: TreeSource>(source: &mut S, tree: &Ref<Tree>) -> Result<Tree, EncodeError<S::Error>> {
+    source.tree(tree).map_err(EncodeError::Source)
 }
 
 /// The fields of one entry that vary.
@@ -143,6 +253,7 @@ struct Entry<'a> {
     mode: u32,
     size: u64,
     link: &'a str,
+    mtime: u64,
 }
 
 struct Writer<W> {
@@ -157,11 +268,12 @@ impl<W: Write> Writer<W> {
         &mut self,
         path: &str,
         mode: u32,
+        mtime: u64,
         source: &mut S,
         blob: &Ref<OpaqueBytes>,
     ) -> Result<(), EncodeError<S::Error>> {
         let SourceBlob { len, mut reader } = source.blob(blob).map_err(EncodeError::Source)?;
-        self.entry(Entry { path, typeflag: typeflag::REGULAR, mode, size: len, link: "" })?;
+        self.entry(Entry { path, typeflag: typeflag::REGULAR, mode, size: len, link: "", mtime })?;
         self.copy(&mut reader, blob, len)?;
         self.pad(len)
     }
@@ -203,8 +315,14 @@ impl<W: Write> Writer<W> {
                 pax::write_record(&mut records, "size", entry.size.to_string().as_bytes());
             }
             let len = records.len() as u64;
-            let header =
-                Header { name: pax::HEADER_NAME, typeflag: typeflag::PAX, mode: FILE_MODE, size: len, linkname: b"" };
+            let header = Header {
+                name: pax::HEADER_NAME,
+                typeflag: typeflag::PAX,
+                mode: FILE_MODE,
+                size: len,
+                linkname: b"",
+                mtime: CANONICAL_MTIME_SECS,
+            };
             self.write(&header.to_block())?;
             self.write(&records)?;
             self.pad(len)?;
@@ -219,6 +337,7 @@ impl<W: Write> Writer<W> {
                 entry.size
             },
             linkname: field_prefix(entry.link).as_bytes(),
+            mtime: entry.mtime,
         };
         self.write(&header.to_block())
     }
@@ -262,12 +381,19 @@ fn field_prefix(text: &str) -> &str {
 mod tests {
     use super::{Entry, FILE_MODE, PAX_SIZE_BYTES, Writer};
     use crate::block::{self, BLOCK_BYTES, typeflag};
-    use crate::pax;
+    use crate::{CANONICAL_MTIME_SECS, pax};
 
     /// The header records `Writer::entry` writes for a file of `size` bytes.
     fn headers(size: u64) -> Vec<u8> {
         let mut writer = Writer { out: Vec::new(), buffer: Vec::new() };
-        let entry = Entry { path: "f", typeflag: typeflag::REGULAR, mode: FILE_MODE, size, link: "" };
+        let entry = Entry {
+            path: "f",
+            typeflag: typeflag::REGULAR,
+            mode: FILE_MODE,
+            size,
+            link: "",
+            mtime: CANONICAL_MTIME_SECS,
+        };
         writer.entry::<()>(entry).expect("a Vec takes every write");
         writer.out
     }

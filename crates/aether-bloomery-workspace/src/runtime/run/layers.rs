@@ -17,13 +17,18 @@
 //! - **Miss.** No pointer: a fresh data volume is mounted writable at the
 //!   target directory, so the first run builds straight into it. Once its
 //!   steps ran to their exits, whatever they exited with, the pointer is
-//!   created and the data volume stays. A run that ends any other way, or
-//!   loses the pointer race, leaves it registered for per-run removal.
+//!   created, recording the tree the run built over, and the data volume
+//!   stays. A run that ends any other way, or loses the pointer race, leaves
+//!   it registered for per-run removal.
 //! - **Hit.** The pointer and the data volume it names both carry the
 //!   layer's hex, and the data volume's `Mountpoint` is the `lowerdir` of an
 //!   `overlay` volume of the run's own, over an upper and a work volume
 //!   created for the run. All three are removed with the run, so no run sees
-//!   another's writes, and the bottom layer is never written again.
+//!   another's writes, and the bottom layer is never written again. The
+//!   run's tree is uploaded with every file that differs from the layer's
+//!   recorded tree stamped with the run's start, so cargo rebuilds exactly
+//!   what changed since the layer was built; a pointer that records no tree
+//!   stamps every file.
 //!
 //! Every layer byte is written and removed by the daemon: the steps write as
 //! uid 0, and the actor may not share the daemon's host. A layer that does
@@ -34,7 +39,8 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{Digest, hash_bytes};
+use aether_bloomery_kinds::{Digest, Ref, Tree, hash_bytes};
+use aether_bloomery_tar::Stamp;
 
 use super::cleanup::Cleanup;
 use super::volumes::{RUN_LABEL, Volumes};
@@ -53,6 +59,13 @@ pub const LOCK_LABEL: &str = "aether.workspace.layer.lock";
 
 /// The label a layer's pointer carries with its data volume's name.
 pub const DATA_LABEL: &str = "aether.workspace.layer.data";
+
+/// The label a layer's pointer carries with the hex digest of the tree its
+/// data volume was built over.
+pub const TREE_LABEL: &str = "aether.workspace.layer.tree";
+
+/// The length of a digest in hex.
+const DIGEST_HEX_LEN: usize = 64;
 
 /// The prefix of a layer pointer volume's deterministic name.
 pub const POINTER_PREFIX: &str = "aether-workspace-layer-";
@@ -137,8 +150,9 @@ pub enum Layer {
     /// A fresh bottom layer the run builds into, marked complete by
     /// [`complete`] once its steps ran.
     Writing { wanted: Wanted, pointer: VolumeName, data: VolumeName },
-    /// The run's own overlay over a complete bottom layer.
-    Over { wanted: Wanted, overlay: VolumeName },
+    /// The run's own overlay over a complete bottom layer, and the tree that
+    /// layer was built over, when its pointer records one.
+    Over { wanted: Wanted, overlay: VolumeName, base: Option<Ref<Tree>> },
 }
 
 impl Layer {
@@ -154,6 +168,16 @@ impl Layer {
         match self {
             Self::Writing { data, .. } => data,
             Self::Over { overlay, .. } => overlay,
+        }
+    }
+
+    /// How the run's tree is uploaded over this layer: canonical over a fresh
+    /// layer, which holds no build output a stale mtime could fool, and
+    /// stamped with `mtime_secs` against the layer's base over a complete one.
+    pub fn stamp(&self, mtime_secs: u64) -> Option<Stamp> {
+        match self {
+            Self::Writing { .. } => None,
+            Self::Over { base, .. } => Some(Stamp { base: *base, mtime_secs }),
         }
     }
 }
@@ -180,7 +204,32 @@ pub fn prepare(engine: &Engine, cleanup: &mut Cleanup<'_>, wanted: Wanted) -> Re
             return Ok(None);
         }
     };
-    overlay(engine, cleanup, wanted, &bottom).map(Some)
+    let base = base_of(&pointing);
+    overlay(engine, cleanup, wanted, &bottom, base).map(Some)
+}
+
+/// The tree a complete layer's pointer records it was built over: exactly
+/// [`DIGEST_HEX_LEN`] lowercase hex digits under [`TREE_LABEL`], or `None`
+/// for a pointer written before the label existed or one that is malformed.
+fn base_of(pointing: &Volume) -> Option<Ref<Tree>> {
+    let hex = pointing.labels.get(TREE_LABEL)?.as_bytes();
+    if hex.len() != DIGEST_HEX_LEN {
+        return None;
+    }
+    let mut bytes = [0; DIGEST_HEX_LEN / 2];
+    for (byte, pair) in bytes.iter_mut().zip(hex.chunks_exact(2)) {
+        *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(Ref::from_digest(Digest::from_bytes(bytes)))
+}
+
+/// The value of one lowercase hex digit.
+fn nibble(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// The volume `name`, or `None` when the daemon holds none.
@@ -215,7 +264,13 @@ fn carried(mountpoint: &str) -> bool {
 
 /// Create the run's upper and work volumes and its overlay over `bottom`,
 /// each registered for per-run removal.
-fn overlay(engine: &Engine, cleanup: &mut Cleanup<'_>, wanted: Wanted, bottom: &str) -> Result<Layer, Stop> {
+fn overlay(
+    engine: &Engine,
+    cleanup: &mut Cleanup<'_>,
+    wanted: Wanted,
+    bottom: &str,
+    base: Option<Ref<Tree>>,
+) -> Result<Layer, Stop> {
     let upper = scratch_volume(engine, cleanup, &wanted, "upper")?;
     let work = scratch_volume(engine, cleanup, &wanted, "work")?;
     let options = format!("lowerdir={bottom},upperdir={upper},workdir={work}");
@@ -228,7 +283,7 @@ fn overlay(engine: &Engine, cleanup: &mut Cleanup<'_>, wanted: Wanted, bottom: &
         .map_err(engine_failed(format!("creating the {} overlay volume", wanted.at)))?
         .name;
     cleanup.volume(overlay.clone());
-    Ok(Layer::Over { wanted, overlay })
+    Ok(Layer::Over { wanted, overlay, base })
 }
 
 /// Create one of the overlay's own directories as a run volume and answer
@@ -244,17 +299,20 @@ fn scratch_volume(engine: &Engine, cleanup: &mut Cleanup<'_>, wanted: &Wanted, r
 }
 
 /// Mark a bottom layer the run wrote complete, once its steps ran to their
-/// exits: create its pointer and keep its data volume. A lost race or a
-/// failed create leaves the data volume registered for removal; the run's
-/// answer never depends on it.
-pub fn complete(engine: &Engine, cleanup: &mut Cleanup<'_>, layer: &Layer) {
+/// exits: create its pointer, recording `tree` as the tree the layer was
+/// built over, and keep its data volume. A lost race or a failed create
+/// leaves the data volume registered for removal; the run's answer never
+/// depends on it.
+pub fn complete(engine: &Engine, cleanup: &mut Cleanup<'_>, layer: &Layer, tree: &Ref<Tree>) {
     let Layer::Writing { wanted, pointer, data } = layer else {
         return;
     };
+    let tree = tree.digest().to_string();
     let labels = BTreeMap::from([
         (LAYER_LABEL, wanted.hex.as_str()),
         (LOCK_LABEL, wanted.lock.as_str()),
         (DATA_LABEL, data.as_str()),
+        (TREE_LABEL, tree.as_str()),
     ]);
     match engine.create_volume(Some(pointer), &labels, &BTreeMap::new()) {
         Ok(_) => cleanup.release(data),
@@ -269,11 +327,13 @@ pub fn complete(engine: &Engine, cleanup: &mut Cleanup<'_>, layer: &Layer) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::error::Error;
 
-    use aether_bloomery_kinds::{Digest, Ref, Tree};
+    use aether_bloomery_kinds::{Digest, Ref, Tree, hash_bytes};
 
-    use super::wanted;
+    use super::{TREE_LABEL, base_of, wanted};
+    use crate::runtime::engine::{Volume, VolumeName};
     use crate::runtime::provision::RunKey;
     use crate::{EnvVar, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
 
@@ -343,6 +403,26 @@ mod tests {
         assert_eq!(hex("a", 3), hex("a", 3));
         assert_ne!(hex("a", 3), hex("a", 4));
         assert_ne!(hex("a", 3), hex("b", 3));
+        Ok(())
+    }
+
+    #[test]
+    fn a_pointer_reads_back_the_tree_it_recorded_and_no_other() -> TestResult {
+        // Catches a pointer with no tree label, from before the label existed, or a malformed one, misread as a base:
+        // the upload would compare against a tree the layer was not built over and leave changed files at the
+        // canonical mtime. And a recorded tree that does not read back would stamp every file, losing the warmth.
+        let tree = Ref::<Tree>::from_digest(hash_bytes(b"the tree the layer was built over"));
+        let hex = tree.digest().to_string();
+        let pointer = |label: Option<String>| -> Result<Volume, Box<dyn Error>> {
+            let labels = label.map(|label| (TREE_LABEL.to_owned(), label)).into_iter().collect::<BTreeMap<_, _>>();
+            Ok(Volume { name: VolumeName::new("aether-workspace-layer-0")?, labels, mountpoint: None })
+        };
+
+        assert_eq!(base_of(&pointer(Some(hex.clone()))?), Some(tree));
+        let malformed = [None, Some(hex.to_uppercase()), Some(hex[1..].to_owned()), Some(format!("{}g", &hex[1..]))];
+        for label in malformed {
+            assert_eq!(base_of(&pointer(label.clone())?), None, "{label:?}");
+        }
         Ok(())
     }
 }

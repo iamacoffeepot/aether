@@ -94,13 +94,14 @@ fn layered_at_target(spec: &serde_json::Value, source: &str) -> bool {
 #[test]
 fn a_first_warm_run_builds_into_a_fresh_layer_and_marks_it_complete_only_after_its_step() -> TestResult {
     // Catches a layer marked complete before its write (the pointer would be created before the step ran, and a
-    // crash mid-build would leave a pointer to a partial layer), a pointer that does not record the data volume and
-    // the lock, a layer left on a tmpfs, and the output read from the step's container, whose archive would carry
-    // the whole layer into the output decoder.
+    // crash mid-build would leave a pointer to a partial layer), a pointer that does not record the data volume, the
+    // lock, and the tree the layer was built over, a layer left on a tmpfs, and the output read from the step's
+    // container, whose archive would carry the whole layer into the output decoder.
     let inputs = locked()?;
     let (environment, request) = (inputs.hex(), inputs.request("tool", "target")?);
     let output = built_work();
     let miss = LayerScript::Miss { data_volume: DATA, completes: true };
+    let tree = request.tree.digest().to_string();
 
     let (answer, requests, _) =
         run_against(inputs, request, script(&environment, &output).layer_replies(&miss), &warm_flags())?;
@@ -125,6 +126,7 @@ fn a_first_warm_run_builds_into_a_fresh_layer_and_marks_it_complete_only_after_i
                 "aether.workspace.layer": hex,
                 "aether.workspace.layer.lock": lock,
                 "aether.workspace.layer.data": DATA,
+                "aether.workspace.layer.tree": tree,
             },
         })
     );

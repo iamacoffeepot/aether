@@ -123,7 +123,7 @@ fn write_misses(
     let helper = engine.create(&helper_spec(image, &misses)).map_err(engine_failed("creating the mount helper"))?;
     cleanup.container(helper.clone());
     for mount in inspected.iter().filter(|mount| matches!(mount.found, Found::Miss { .. })) {
-        write_tree(engine, session, &helper, &mount.path, &mount.mount.tree)?;
+        write_tree(engine, session, &helper, &mount.path, &mount.mount.tree, None)?;
     }
     Ok(())
 }
