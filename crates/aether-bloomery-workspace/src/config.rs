@@ -10,9 +10,8 @@
 //! The actor chooses each run's cores, memory, and deadline itself (decision
 //! 9): each run gets 8 to 16 of the `cpuset` cores, or all of them on a
 //! smaller list, and no knob sets that. The budget knobs state what it may
-//! hand out, and whatever the host
-//! keeps back is the cores left out of `cpuset` and the memory left out of
-//! `budget_memory_bytes`.
+//! hand out, and whatever the host keeps back is the cores left out of
+//! `cpuset` and the memory left out of `budget_memory_bytes`.
 
 use alloc::string::String;
 
