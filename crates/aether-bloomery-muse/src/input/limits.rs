@@ -264,6 +264,10 @@ pub enum ReasoningEffort {
     Medium,
     /// Reason at length before answering.
     High,
+    /// Reason past High, before answering.
+    XHigh,
+    /// Reason as much as the model offers.
+    Max,
 }
 
 invariant_errors!(EndpointError, ModelNameError, OutputBudgetError, InputLimitError);

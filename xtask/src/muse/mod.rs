@@ -143,6 +143,9 @@ enum Effort {
     Low,
     Medium,
     High,
+    #[value(name = "xhigh")]
+    XHigh,
+    Max,
 }
 
 impl From<Effort> for ReasoningEffort {
@@ -151,6 +154,8 @@ impl From<Effort> for ReasoningEffort {
             Effort::Low => Self::Low,
             Effort::Medium => Self::Medium,
             Effort::High => Self::High,
+            Effort::XHigh => Self::XHigh,
+            Effort::Max => Self::Max,
         }
     }
 }

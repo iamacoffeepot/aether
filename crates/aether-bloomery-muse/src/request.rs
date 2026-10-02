@@ -20,12 +20,15 @@ use crate::input::{OfferedTool, ReasoningEffort, Role, TurnInput, TurnItem};
 
 /// How long the HTTP capability waits for the vendor before it answers `Timeout`, by the turn's reasoning effort.
 ///
-/// High reasoning over a long context can legitimately run past the shorter wait. The HTTP capability imposes no
-/// ceiling on a fetch's own timeout, so the longer wait is capped by nothing below it.
+/// High reasoning over a long context can legitimately run past the shorter wait. Output generates at about 13 ms per
+/// token, so a full 32,768-token reasoning turn takes about 435 s; the longest wait leaves room for long-context
+/// prefill and a larger output budget. The HTTP capability imposes no ceiling on a fetch's own timeout, so the longer
+/// waits are capped by nothing below them.
 const fn timeout_millis(reasoning: ReasoningEffort) -> u32 {
     match reasoning {
         ReasoningEffort::Low | ReasoningEffort::Medium => 180_000,
         ReasoningEffort::High => 600_000,
+        ReasoningEffort::XHigh | ReasoningEffort::Max => 1_200_000,
     }
 }
 
@@ -107,6 +110,8 @@ const fn effort(reasoning: ReasoningEffort) -> &'static str {
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::Max => "max",
     }
 }
 
@@ -265,20 +270,29 @@ mod tests {
     fn request_resends_every_item_in_order_with_store_off() {
         // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, a
         // conversation handle, an extra header, the wrong method, URL, or timeout, and a reasoning effort not threaded
-        // into the timeout.
+        // into the timeout, a misspelled wire value for `xhigh` or `max` (the endpoint refuses `x-high`), and a new effort left
+        // on a shorter wait.
         let texts = ["Be brief.", "What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
         let roles = [Role::Developer, Role::User, Role::Assistant, Role::User];
         let items = roles.iter().zip(&texts).map(|(&role, text)| TurnItem::message(role, Ref::of_text(text))).collect();
         let input = input(OfferedTools::default(), items);
         let high = input_at(ReasoningEffort::High, OfferedTools::default(), input.items().to_vec());
+        let xhigh = input_at(ReasoningEffort::XHigh, OfferedTools::default(), input.items().to_vec());
+        let max = input_at(ReasoningEffort::Max, OfferedTools::default(), input.items().to_vec());
 
         let request = fetch(&input, &texts, &[]).expect("a plain turn builds");
         let high = fetch(&high, &texts, &[]).expect("a high-effort turn builds");
+        let xhigh = fetch(&xhigh, &texts, &[]).expect("an xhigh-effort turn builds");
+        let max = fetch(&max, &texts, &[]).expect("a max-effort turn builds");
 
         assert_eq!(request.url, "https://example.test/v1/responses");
         assert_eq!(request.method, HttpMethod::Post);
         assert_eq!(request.timeout_ms, Some(180_000));
         assert_eq!(high.timeout_ms, Some(600_000));
+        assert_eq!(xhigh.timeout_ms, Some(1_200_000));
+        assert_eq!(max.timeout_ms, Some(1_200_000));
+        assert_eq!(body_without_key(&xhigh.body)["reasoning"], json!({ "effort": "xhigh" }));
+        assert_eq!(body_without_key(&max.body)["reasoning"], json!({ "effort": "max" }));
         assert_eq!(
             request.headers,
             vec![HttpHeader { name: "Content-Type".into(), value: "application/json".into() }],
