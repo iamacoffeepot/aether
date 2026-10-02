@@ -40,6 +40,7 @@ mod kinds;
 pub use kinds::*;
 
 use aether_actor::{ActorInitError, Erased, Held, Pending, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_data::{Blob, BlobReader};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_lifecycle::LifecycleCapability;
@@ -216,7 +217,7 @@ impl WasmActor for MeshViewer {
     #[handler::response]
     fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased>, r: ReadResult, context: MeshLoadContext) {
         let outcome = match r {
-            ReadResult::Ok { bytes, .. } => self.load_bytes(&context.path, &bytes),
+            ReadResult::Ok { bytes, .. } => self.load_bytes(&context.path, &read_file(&bytes)),
             ReadResult::Err { error, .. } => {
                 tracing::warn!(
                     target: "aether_kit",
@@ -230,6 +231,26 @@ impl WasmActor for MeshViewer {
         };
         self.reply_load_result(ctx, context.held, context.namespace, context.path, outcome);
     }
+}
+
+/// Every byte of `blob`, streamed window by window: a guest's hold is never
+/// contiguous, so the mesh parsers get their slice from `BlobReader`.
+fn read_file(blob: &Blob) -> Vec<u8> {
+    let reader = BlobReader::open(blob);
+    let len = usize::try_from(reader.len()).unwrap_or(0);
+    let mut bytes = vec![0; len];
+    let mut filled = 0;
+
+    while filled < len {
+        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
+        if copied == 0 {
+            break;
+        }
+        filled += copied;
+    }
+    bytes.truncate(filled);
+
+    bytes
 }
 
 /// The result of a single load attempt, decoupled from where the bytes
@@ -436,6 +457,20 @@ fn draw_obj(bytes: &[u8]) -> Result<Vec<DrawTriangle>, aether_mesh::ObjImportErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::MAX_READ_BYTES;
+
+    /// Bug caught: a read loop that stops after the first window would
+    /// truncate any mesh over one window, which the small-file scenario
+    /// cannot see.
+    #[test]
+    fn read_file_returns_a_blob_larger_than_one_window_whole() {
+        let expected: Vec<u8> =
+            (0..=MAX_READ_BYTES).map(|index| u8::try_from(index % 251).expect("remainder fits u8")).collect();
+
+        let bytes = read_file(&Blob::from(expected.clone()));
+
+        assert_eq!(bytes, expected);
+    }
 
     #[test]
     fn parses_simple_box_obj() {

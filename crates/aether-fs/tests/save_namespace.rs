@@ -42,7 +42,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
                     &fs,
                     &Write {
                         addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
-                        bytes: payload.clone(),
+                        bytes: payload.clone().into(),
                     },
                 ),
             ),
@@ -67,7 +67,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
         ReadResult::Ok { addr, bytes } => {
             assert_eq!(addr.namespace, FS_NAMESPACE_SAVE);
             assert_eq!(addr.path, path);
-            assert_eq!(bytes, payload);
+            assert_eq!(bytes.contiguous(), Some(payload.as_slice()));
         }
         ReadResult::Err { error, .. } => panic!("read failed: {error:?}"),
     }
@@ -92,7 +92,7 @@ fn fs_delete_removes_written_file() {
                     &fs,
                     &Write {
                         addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
-                        bytes: vec![1, 2, 3],
+                        bytes: vec![1, 2, 3].into(),
                     },
                 ),
             ),
@@ -139,7 +139,10 @@ fn fs_list_returns_written_path() {
                 "write",
                 HarnessOp::send_and_await_reply(
                     &fs,
-                    &Write { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()), bytes: vec![0] },
+                    &Write {
+                        addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
+                        bytes: vec![0].into(),
+                    },
                 ),
             ),
             (

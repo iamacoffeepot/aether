@@ -49,12 +49,12 @@ Each request kind pairs with a reply kind that names the same operation:
 
 | Request | Fields | Reply | `Ok` adds |
 |---|---|---|---|
-| `aether.fs.read` | `addr` | `aether.fs.read_result` | `bytes` |
-| `aether.fs.write` | `addr`, `bytes` | `aether.fs.write_result` | — (ack) |
+| `aether.fs.read` | `addr` | `aether.fs.read_result` | `bytes` (a blob) |
+| `aether.fs.write` | `addr`, `bytes` (a blob) | `aether.fs.write_result` | — (ack) |
 | `aether.fs.delete` | `addr` | `aether.fs.delete_result` | — (ack) |
 | `aether.fs.list` | `addr` | `aether.fs.list_result` | `entries` |
 | `aether.fs.copy` | `from`, `to` | `aether.fs.copy_result` | — (ack) |
-| `aether.fs.fetch` | `addr`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` |
+| `aether.fs.fetch` | `addr`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` (a blob) |
 
 **One addressing type.** `addr` is a `NamespaceAddr { namespace, path }` — the
 same shape everywhere, including `copy`'s destination `to`. `list` addresses a
@@ -151,7 +151,7 @@ unaddressed name.
 **From a component.** Declare `depends(FsCapability)` and send the request kind:
 
 ```rust
-ctx.send::<FsCapability>(&Write { addr: NamespaceAddr::new("save", "slot1.bin"), bytes });
+ctx.send::<FsCapability>(&Write { addr: NamespaceAddr::new("save", "slot1.bin"), bytes: bytes.into() });
 ctx.send::<FsCapability>(&Read { addr: NamespaceAddr::new("save", "slot1.bin") });
 ```
 
@@ -162,11 +162,19 @@ receive like any other kind:
 #[handler::response]
 fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
     match result {
-        ReadResult::Ok { addr, bytes } => { /* addr supplies readable domain context */ }
+        ReadResult::Ok { addr, bytes } => {
+            // A native consumer reads `bytes.contiguous()`; a guest streams
+            // the blob with `BlobReader`.
+        }
         ReadResult::Err { addr, error } => { /* addr supplies readable domain context */ }
     }
 }
 ```
+
+The bytes in `ReadResult`, `FsFetchResult`, and `Write` are an `aether_data::Blob`.
+An in-process read shares the entry the cap checked into the engine blob store
+instead of copying it, while MCP and wire callers still see plain bytes (the
+`$text` example below stays valid).
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares

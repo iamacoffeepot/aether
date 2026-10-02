@@ -3,7 +3,7 @@ use std::str::from_utf8;
 
 use aether_actor::{DependsOn, ErasedActorRef};
 
-use super::decode::decode_wav_to_mono;
+use super::decode::{DecodeError, decode_wav_to_mono};
 use super::sample::{
     BankAssembly, BankAssemblyOutput, SampleSlot, assemble_bank, bank_name_from_path, join_fs, sfz_dir,
 };
@@ -11,6 +11,7 @@ use super::sfz::parse_sfz;
 use super::track::DecodeOutput;
 use super::{AudioCapabilityState, FsCapability, Held, NativeCtx, Read};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
+use aether_data::Blob;
 use aether_fs::NamespaceAddr;
 
 /// Context stored under each `aether.fs.read` request correlation while an
@@ -65,7 +66,7 @@ impl AudioCapabilityState {
     /// decode's completion answers the original `play_track` caller. Split
     /// out of `on_read_result` so the one handler can route three fetch
     /// paths.
-    pub fn start_track_decode<A>(&mut self, ctx: &mut NativeCtx<'_, A>, load_id: u64, bytes: Vec<u8>) {
+    pub fn start_track_decode<A>(&mut self, ctx: &mut NativeCtx<'_, A>, load_id: u64, bytes: Blob) {
         let Some(device_rate) = self.sample_rate else {
             let Some(TrackLoad { held, lane, namespace, path, .. }) = self.track_loads.remove(&load_id) else {
                 return;
@@ -86,8 +87,13 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_rate = device_rate as u32;
 
-        ctx.stage_blocking_with::<DecodeOutput, TrackDecodeKey>(TrackDecodeKey { load_id })
-            .start(ctx, move || decode_wav_to_mono(&bytes, target_rate));
+        ctx.stage_blocking_with::<DecodeOutput, TrackDecodeKey>(TrackDecodeKey { load_id }).start(ctx, move || {
+            let Some(wav) = bytes.contiguous() else {
+                return Err(DecodeError::NotResident);
+            };
+
+            decode_wav_to_mono(wav, target_rate)
+        });
     }
 
     /// The `.sfz` bytes landed: parse the SFZ subset and fan out one
@@ -178,7 +184,7 @@ impl AudioCapabilityState {
     /// `assemblies` with its held reply until the assembly's completion
     /// answers it. A late / orphan reply (its assembly already failed, or
     /// already assembling) is dropped.
-    pub fn on_sample_loaded<A>(&mut self, ctx: &mut NativeCtx<'_, A>, assembly_id: u64, slot: u64, bytes: Vec<u8>) {
+    pub fn on_sample_loaded<A>(&mut self, ctx: &mut NativeCtx<'_, A>, assembly_id: u64, slot: u64, bytes: Blob) {
         let Ok(slot) = usize::try_from(slot) else {
             return;
         };
@@ -213,8 +219,10 @@ impl AudioCapabilityState {
         let assembly = self.assemblies.get_mut(&assembly_id).expect("assembly present — checked above");
         let name = assembly.name.clone();
         let regions = mem::take(&mut assembly.regions);
-        let sample_bytes: Vec<(String, Vec<u8>)> =
-            mem::take(&mut assembly.samples).into_iter().map(|s| (s.sample_rel, s.bytes.unwrap_or_default())).collect();
+        let sample_bytes: Vec<(String, Blob)> = mem::take(&mut assembly.samples)
+            .into_iter()
+            .map(|s| (s.sample_rel, s.bytes.unwrap_or_else(|| Blob::from(Vec::new()))))
+            .collect();
         ctx.stage_blocking_with::<BankAssemblyOutput, BankAssemblyKey>(BankAssemblyKey { assembly_id })
             .start(ctx, move || assemble_bank(name, &regions, &sample_bytes, target_rate));
     }

@@ -38,6 +38,9 @@ pub enum DecodeError {
     /// The asset decoded to no samples (empty file, zero channels, or a
     /// zero sample rate) — nothing to play.
     Empty,
+    /// The file's bytes were not resident in this process, so they cannot
+    /// be read as one slice.
+    NotResident,
 }
 
 impl fmt::Display for DecodeError {
@@ -48,6 +51,7 @@ impl fmt::Display for DecodeError {
                 write!(f, "unsupported WAV sample format: {detail}")
             }
             Self::Empty => write!(f, "asset decoded to no samples"),
+            Self::NotResident => write!(f, "the file's bytes are not resident in this process"),
         }
     }
 }
