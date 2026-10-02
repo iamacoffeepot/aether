@@ -8,7 +8,8 @@ use aether_bloomery_kinds::{
     ReadArtifactResult, Ref, Refusal, Tree,
 };
 use aether_bloomery_program::{
-    AsyncProgram, ErasedTooled, NoBound, Pending, PollResult, Started, SyncProgram, invoke, start_async, tooled,
+    AsyncProgram, ErasedTooled, NoBound, NoDetail, Pending, PollResult, Started, SyncProgram, invoke, start_async,
+    tooled,
 };
 use aether_bloomery_workspace::TreePath;
 use aether_codec::encode_storage_schema;
@@ -134,6 +135,11 @@ fn finish<R: Storage>(invoked: Invoked, mut store: Store) -> Result<(R, Store), 
         Invoked::Refused { refusal, .. } => Err(refusal),
         other => panic!("expected a program to complete or refuse, got {other:?}"),
     }
+}
+
+/// The detail every tree tool's `Edited` cites.
+pub fn no_detail() -> Ref<NoDetail> {
+    Ref::of_encoded(&NoDetail).expect("the detail encodes")
 }
 
 /// `name` as a tree entry name.

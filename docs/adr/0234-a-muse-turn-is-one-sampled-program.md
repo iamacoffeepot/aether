@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-23
-- **Amended:** 2026-10-01 — decision 10: the session loop retries a tool run that ran out of time or memory up to twice, then answers the call with what happened instead of failing the session; an offered tool names its bundle, so a session can call proof programs from `aether-bloomery-workspace-programs`, bound to the environment and vendor tree the session opens with.
+- **Amended:** 2026-10-01 — decision 10: the session loop retries a tool run that ran out of time or memory up to twice, then answers the call with what happened instead of failing the session; an offered tool names its bundle, so a session can call proof programs from `aether-bloomery-workspace-programs`, bound through the offer to the environment and vendor tree the session opens with; a tree-changing tool's `Edited` carries a typed detail, so a proof's verdict rides the result that moves the tree.
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (its
 Consequences leave Muse and HTTP out of scope: "Muse / HTTP is not this
@@ -321,11 +321,22 @@ program is tested without spending money.
       `aether-bloomery-workspace-programs`.
     - **Bound inputs.** A proof tool takes `Tooled<A, B>`
       (`crates/aether-bloomery-program/src/program/tool/tooled.rs`), and its
-      bound value `B` carries the environment and vendor tree. Today
-      `OpenInput` (`session/open.rs`) carries neither; `muse.session.open`
-      gains both and binds them into the proof tools it offers. A proof
-      result's tree becomes the session's current tree, as an `Edited`
-      result's does today (ADR-0237 decision 12).
+      bound value `B`, a `ProofBound` (`proof.bound`, in
+      `aether-bloomery-workspace-programs`), carries the environment and
+      vendor tree. The offer carries the bound, as every offer does
+      (`OfferedTool::bound`), so `OpenInput` gains no field: the caller that
+      builds the offers binds the session's environment and vendor tree, and
+      `muse.session.open` accepts a proof offer over any `ProofBound` and
+      refuses one bound to another kind.
+    - **A proof moves the tree.** A tree-changing tool returns
+      `Edited<D = NoDetail>` (`bloomery.program.edited`): the tree, a summary
+      the model reads, and a typed detail `D`. One stored kind has an erased
+      view, `ErasedEdited`, whose detail's kind is a value, as `Tooled` has
+      `ErasedTooled`; the loop reads every result of that kind as
+      `ErasedEdited` and takes its tree, so a proof's `Edited<ProofVerdict>`
+      moves the session's current tree as `tree.edit`'s `Edited` does
+      (ADR-0237 decision 12), and a later gate reads the verdict without the
+      loop linking a proof type.
 
 ## Consequences
 

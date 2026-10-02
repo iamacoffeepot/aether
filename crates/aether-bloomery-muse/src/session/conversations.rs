@@ -22,7 +22,9 @@ use aether_bloomery_kinds::{
     CallInput, CallProgram, Detail, EncodedArtifact, ErasedRef, Fault, Head, HeadChange, HeadMoved, OpaqueBytes,
     ProgramName, ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until, Utf8Text,
 };
-use aether_bloomery_program::{At, Cited, CitedError, ClockUntil, Edited, Ran, Reactor, ViewCursor, tooled, view};
+use aether_bloomery_program::{
+    At, Cited, CitedError, ClockUntil, ErasedEdited, Ran, Reactor, ViewCursor, tooled, view,
+};
 
 use crate::input::{Role, ToolCalls, ToolInput, ToolOutput, TurnInput, TurnItem};
 use crate::program::MuseTurn;
@@ -67,7 +69,7 @@ struct Conversation {
     /// turn the vendor did not refuse as transient.
     retries: u32,
     /// The tree every call works on: the one the activation started from, or
-    /// the one the last `Edited` result left.
+    /// the one the last `Edited` result left, whatever its detail.
     tree: Ref<Tree>,
     /// The turn whose calls are running, if one asked for calls.
     waiting: Option<Waiting>,
@@ -434,7 +436,9 @@ impl View for Conversations {
 
     /// Any program's run: the output of a tool call when the run answers the
     /// `Requested` the loop recorded for the call it runs next. A result that
-    /// is an [`Edited`] moves the session to its tree before the next call.
+    /// is an `Edited`, of any detail, moves the session to its tree before the
+    /// next call: the loop reads it as [`ErasedEdited`], so it links no tool's
+    /// detail kind.
     /// Every other run, `muse.turn` and the session programs included, is
     /// left to its own fold.
     #[fold]
@@ -444,7 +448,7 @@ impl View for Conversations {
             return Ok(());
         }
         let result = ErasedRef::new(cited.kind(run.result)?, run.result);
-        let edited = result.cast::<Edited>().map(|edited| cited.get(edited)).transpose()?;
+        let edited = result.cast::<ErasedEdited>().map(|edited| cited.get(edited)).transpose()?;
         if let Some((key, mut conversation)) = self.take(at.cause) {
             if conversation.answer(result, at.seq).is_some() {
                 conversation.tree = edited.map_or(conversation.tree, |edited| edited.tree());

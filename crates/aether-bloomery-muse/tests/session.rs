@@ -17,13 +17,16 @@ use aether_bloomery_muse::{
     MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput,
     RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen, SessionRecord, ToolCall,
     ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
-    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
+    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered, offered_with_proofs,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
-    AsyncProgram, ClockUntil, Edited, Nil, Pending, PollResult, Program, Reactor, Started, invoke, start_async, tooled,
+    AsyncProgram, AsyncSession, ClockUntil, Edited, ErasedTooled, Nil, Pending, PollResult, Program, Reactor, Started,
+    invoke, start_async, tooled,
 };
-use aether_bloomery_workspace::TreePath;
+use aether_bloomery_workspace::{Outcome, RunResult, StepOutcome, ToolName, ToolRecord, TreePath};
+use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
+use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, ProofVerdict};
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
@@ -33,6 +36,7 @@ const CALLED_EDIT_WRITE: &str = include_str!("../fixtures/called_edit_write.json
 const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_read_edit_grep.json");
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
+const CALLED_PROOF: &str = include_str!("../fixtures/called_proof.json");
 const ENDED: &str = include_str!("../fixtures/ended.json");
 const CONTEXT_FULL: &str = include_str!("../fixtures/context_full.json");
 const INCOMPLETE_BUDGET: &str = include_str!("../fixtures/incomplete_budget.json");
@@ -100,6 +104,8 @@ struct Driver {
     store: BTreeMap<Digest, EncodedArtifact>,
     heads: BTreeMap<RecordedHead, Digest>,
     replies: VecDeque<Reply>,
+    /// The workspace's answer to every proof run.
+    proof: Option<RunResult>,
     /// The body of every request a turn sent, in order.
     sent: Vec<serde_json::Value>,
     native_keys: u64,
@@ -122,6 +128,7 @@ impl Driver {
             store: BTreeMap::new(),
             heads: BTreeMap::new(),
             replies,
+            proof: None,
             sent: Vec::new(),
             native_keys: 0,
             now_millis: 0,
@@ -264,6 +271,7 @@ impl Driver {
             name if name == TreeList::NAME => self.run_async::<TreeList>(invocation),
             name if name == TreeRead::NAME => self.run_async::<TreeRead>(invocation),
             name if name == TreeGrep::NAME => self.run_async::<TreeGrep>(invocation),
+            name if name == ClippyProof::NAME => self.prove(invocation),
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
@@ -286,10 +294,31 @@ impl Driver {
 
     /// One run of a pure async program, answering every read it fetches from the store.
     fn run_async<P: AsyncProgram>(&self, invocation: Invoke) -> Invoked {
-        let (mut session, mut waiting) = match start_async::<P>(invocation) {
-            Started::Finished(invoked) => return invoked,
-            Started::Live { session, waiting } => (session, waiting),
+        match start_async::<P>(invocation) {
+            Started::Finished(invoked) => invoked,
+            Started::Live { session, waiting } => self.answer_reads(session, waiting),
+        }
+    }
+
+    /// One proof run: its workspace run answered with the canned [`Self::proof`], then every read it fetches
+    /// answered from the store.
+    fn prove(&self, invocation: Invoke) -> Invoked {
+        let outcome = self.proof.as_ref().expect("a canned answer to every proof run");
+        let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } =
+            start_async::<ClippyProof>(invocation)
+        else {
+            panic!("expected the proof to ask for its workspace run first");
         };
+        session.fulfill_send(&pending, RunResult::ID, outcome.encode_into_bytes());
+        match session.poll() {
+            PollResult::Finished(invoked) => invoked,
+            PollResult::NeedArtifact(pending) => self.answer_reads(session, Some(Pending::Artifact(pending))),
+            other => panic!("expected the proof to finish or read, got {other:?}"),
+        }
+    }
+
+    /// Drive a live run to its end, answering every read it fetches from the store.
+    fn answer_reads(&self, mut session: AsyncSession, mut waiting: Option<Pending>) -> Invoked {
         loop {
             let Some(Pending::Artifact(pending)) = waiting else {
                 panic!("expected a pure program to wait only on reads, got {waiting:?}");
@@ -464,6 +493,70 @@ fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Res
         seeds,
     );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
+}
+
+/// The environment and vendor tree every proof in these sessions binds.
+fn proofs() -> ProofBound {
+    ProofBound::new(Ref::from_digest(Digest::from_bytes([2; 32])), Ref::from_digest(Digest::from_bytes([3; 32])))
+}
+
+/// Open a session on the small tree that offers every bound tool and the proofs bound to [`proofs`], and makes at
+/// most `max_turns` turns; the open run's seq and the tree.
+fn open_proving(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
+    let (tools, artifacts) = offered_with_proofs(&proofs());
+    driver.stage(artifacts);
+    let settings = TurnSettings::new(
+        Endpoint::new(URL)?,
+        ModelName::new("muse-spark-1.3")?,
+        tools,
+        OutputBudget::new(512)?,
+        ReasoningEffort::Low,
+        InputLimit::new(u64::MAX)?,
+    );
+    let tree = small_tree(driver);
+    driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
+    let input = OpenInput::new(
+        settings,
+        Ref::of_text(INSTRUCTIONS),
+        Ref::of_text(QUESTION),
+        TurnLimit::new(max_turns)?,
+        tree,
+        Vec::new(),
+    );
+    Ok((driver.call_native::<SessionOpen>(&input), tree))
+}
+
+/// Stage the tree `cargo fmt` leaves of the small tree, with `src/lib.rs` rewritten, and a proof outcome over it:
+/// fmt naming that file, then clippy passing.
+fn formatted(driver: &mut Driver) -> Result<(Ref<Tree>, RunResult), Box<dyn Error>> {
+    const FORMATTED: &[u8] = b"pub fn smelt() {}\n\npub fn bloom() {}\n";
+    let name = |name: &str| Name::new(name).expect("name");
+    let src = Tree::new([(name("lib.rs"), Node::File(Ref::of_bytes(FORMATTED)))].into());
+    let root = Tree::new(
+        [
+            (name("README"), Node::File(Ref::of_bytes(b"# Bloomery\n"))),
+            (name("src"), Node::Directory(Ref::of_encoded(&src)?)),
+        ]
+        .into(),
+    );
+    driver.stage([EncodedArtifact::opaque_bytes(FORMATTED), encoded(&src), encoded(&root)]);
+
+    let step = |stdout: &[u8]| -> Result<StepOutcome, Box<dyn Error>> {
+        Ok(StepOutcome {
+            exit_code: Some(0),
+            stdout: Ref::of_bytes(stdout),
+            stderr: Ref::of_bytes(b""),
+            tool: ToolRecord {
+                name: ToolName::new("cargo")?,
+                path: TreePath::new("usr/local/cargo/bin/cargo")?,
+                file: Ref::of_bytes(b"cargo"),
+            },
+        })
+    };
+    let listed = b"/work/src/lib.rs\n";
+    driver.stage([EncodedArtifact::opaque_bytes(listed), EncodedArtifact::opaque_bytes(b"")]);
+    let steps = vec![step(listed)?, step(b"")?];
+    Ok((Ref::of_encoded(&root)?, RunResult::Ok(Outcome { steps, tree: Ref::of_encoded(&root)? })))
 }
 
 /// Continue `session` from the record `from` with the user message `text`; the continue run's seq.
@@ -1144,6 +1237,40 @@ fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> 
     driver.settle(resumed_turn);
     let continued: Session = driver.value(driver.head(key));
     assert_eq!(file(&driver, continued.tree(), "docs/notes.md"), b"Iron blooms.\nSlag floats.\n");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_proof_runs_in_its_bundle_over_the_bound_environment_and_its_tree_becomes_the_sessions() -> TestResult {
+    // Catches a proof called in the muse bundle instead of the one holding it, a proof run over a tree other than
+    // the session's or without the environment and vendor tree the session bound, a proof result whose tree the
+    // loop drops because its detail is not an edit's, and folds that diverge between warm-up and live delivery.
+    let mut driver = Driver::new(&[CALLED_PROOF, ENDED]);
+    let (opened, opened_tree) = open_proving(&mut driver, 4)?;
+    let (formatted_tree, outcome) = formatted(&mut driver)?;
+    driver.proof = Some(outcome);
+    let first_turn = driver.follow(opened);
+
+    let proving = asked(&driver, first_turn);
+    assert_eq!((&proving.program, proving.name.as_str()), (&WORKSPACE_PROGRAMS, ClippyProof::NAME));
+    let CallInput::Value(input) = &proving.input else {
+        panic!("expected the proof's input as a value");
+    };
+    let input = ErasedTooled::decode_storage(&payload(input))?.value;
+    assert_eq!(input.tree(), opened_tree, "the proof runs over the session's tree");
+    assert_eq!(input.bound(), Ref::of_encoded(&proofs())?.erase(), "the proof binds the session's proofs");
+
+    let proved_run = driver.follow(first_turn);
+    let proved: Edited<ProofVerdict> = driver.result(proved_run);
+    assert_eq!(proved.tree(), formatted_tree);
+    assert!(proved.summary().starts_with("`cargo clippy` passed"), "{}", proved.summary());
+
+    driver.settle(proved_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, formatted_tree));
+    assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt() {}\n\npub fn bloom() {}\n");
 
     assert_warm_and_live_agree(&driver);
     Ok(())

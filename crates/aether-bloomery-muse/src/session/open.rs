@@ -5,10 +5,12 @@ use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_workspace::TreePath;
 use serde_json::Value;
 
-use crate::input::{CallId, ToolCall, ToolCalls, TurnInput};
+use aether_bloomery_workspace_programs::proof::ProofBound;
+
+use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls, TurnInput};
 use crate::session::state::{TurnLimit, TurnSettings};
 use crate::session::tools::program_name;
-use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered};
+use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered, proof_offers};
 
 /// A session to open: what every turn sends, the session instructions, the
 /// first user message, how many turns it may make before it rests, the tree
@@ -118,8 +120,9 @@ pub struct SessionOpen;
 /// runs before that turn.
 ///
 /// Refuses settings that offer a tool the session does not bind, or offer a
-/// bound tool with a definition, schema, or bound kind other than its own;
-/// seeds when `tree.read` is not
+/// bound tool with a definition, schema, bundle head, or bound kind other than
+/// its own; the proof tools bind a `ProofBound`, the session's environment and
+/// vendor tree, whatever its value. Refuses seeds when `tree.read` is not
 /// offered, since a seed's output renders with the offered tool's result
 /// schema; and more than [`ToolCalls::MAX_CALLS`] seeds.
 #[program]
@@ -131,8 +134,9 @@ impl Program for SessionOpen {
     type Result = Opened;
 
     fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
-        let (bound, _) = offered();
-        if let Some(tool) = input.settings.tools().iter().find(|tool| !bound.offers(tool)) {
+        let (own, _) = offered();
+        let unbound = input.settings.tools().iter().find(|tool| !binds(&own, tool));
+        if let Some(tool) = unbound {
             let reason = format!("{} is not offered as a tool the session binds", tool.program().as_str());
             return Err(Refusal::Refused { reason: Detail::new(reason) });
         }
@@ -143,6 +147,15 @@ impl Program for SessionOpen {
         };
         Ok(Opened { turn: env.stage_encoded(&input.first_turn())?, seeds })
     }
+}
+
+/// Whether the session binds `tool`: one of `own`, or a proof tool offered
+/// over a `ProofBound`, whatever its value.
+fn binds(own: &OfferedTools, tool: &OfferedTool) -> bool {
+    let proof = tool.bound().cast::<ProofBound>().map(proof_offers).unwrap_or_default();
+    let is_own = own.offers(tool);
+    let is_proof = proof.iter().any(|(offer, _)| offer.same_tool(tool));
+    is_own || is_proof
 }
 
 /// Each seed of `input` as a decoded `tree.read` call `seed-<i>`, its
@@ -169,9 +182,11 @@ fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> 
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ErasedRef, Head, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Digest, ErasedRef, Head, ProgramName, Ref, Refusal, Tree};
     use aether_bloomery_program::Program;
     use aether_bloomery_workspace::TreePath;
+    use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
+    use aether_bloomery_workspace_programs::proof::ProofBound;
     use aether_data::Kind;
 
     use super::{OpenInput, SessionOpen};
@@ -180,7 +195,7 @@ mod tests {
     use crate::session::MUSE;
     use crate::session::fixture::{path, run_stored, settings};
     use crate::session::state::TurnLimit;
-    use crate::tools::{ReadArgs, TreeRead, offered};
+    use crate::tools::{ReadArgs, TreeRead, offered, offered_with_proofs};
 
     fn open(tools: OfferedTools, seeds: Vec<TreePath>) -> OpenInput {
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
@@ -228,6 +243,40 @@ mod tests {
         let rehomed = offer(Head::new("proofs"), echo.definition(), echo.bound());
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
         for tool in [redefined, rebound, rehomed, unbound] {
+            let tools = OfferedTools::new(vec![tool]).expect("tools");
+            let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
+            assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
+        }
+    }
+
+    #[test]
+    fn a_proof_offer_opens_over_any_proof_bound_from_its_own_bundle_only() {
+        // Catches an open that refuses the proof tools a lane offers, or admits one whose bound the proof cannot
+        // decode or that the loop would call in a bundle that does not hold it.
+        let digest = |byte| Digest::from_bytes([byte; 32]);
+        let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)));
+        let (tools, _) = offered_with_proofs(&proofs);
+        run_stored::<SessionOpen>(&open(tools.clone(), Vec::new())).expect("bound proof tools open");
+
+        let clippy = tools.as_slice().last().expect("the proof is offered last");
+        let offer = |head, bound| {
+            OfferedTool::new(
+                clippy.program().clone(),
+                head,
+                clippy.definition(),
+                clippy.input(),
+                bound,
+                clippy.result(),
+            )
+        };
+        let other = ProofBound::new(Ref::from_digest(digest(3)), Ref::from_digest(digest(4)));
+        let rebound = offer(WORKSPACE_PROGRAMS, Ref::of_encoded(&other).expect("bound").erase());
+        run_stored::<SessionOpen>(&open(OfferedTools::new(vec![rebound]).expect("tools"), Vec::new()))
+            .expect("a proof opens over any proof bound");
+
+        let foreign = offer(WORKSPACE_PROGRAMS, ErasedRef::new(Tree::ID, clippy.bound().digest()));
+        let rehomed = offer(MUSE, clippy.bound());
+        for tool in [foreign, rehomed] {
             let tools = OfferedTools::new(vec![tool]).expect("tools");
             let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
             assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());

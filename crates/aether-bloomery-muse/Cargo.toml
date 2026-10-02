@@ -17,6 +17,10 @@ aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
+# The proof tools a session offers from the `workspace-programs` bundle: their
+# programs render and check the offer, and `ProofBound` is what it binds.
+# `library` strips that bundle's `export!`, so this bundle exports no proof.
+aether-bloomery-workspace-programs = { path = "../aether-bloomery-workspace-programs", features = ["library"] }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-http = { path = "../aether-http", default-features = false }

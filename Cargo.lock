@@ -181,6 +181,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-workspace",
+ "aether-bloomery-workspace-programs",
  "aether-codec",
  "aether-data",
  "aether-http",
@@ -249,6 +250,7 @@ dependencies = [
  "aether-bloomery-program",
  "aether-bloomery-workspace",
  "aether-data",
+ "serde_json",
 ]
 
 [[package]]
@@ -7882,6 +7884,7 @@ dependencies = [
  "aether-bloomery-muse",
  "aether-bloomery-program",
  "aether-bloomery-workspace",
+ "aether-bloomery-workspace-programs",
  "aether-chassis",
  "aether-codec",
  "aether-data",

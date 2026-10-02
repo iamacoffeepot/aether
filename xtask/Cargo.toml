@@ -25,6 +25,9 @@ aether-bloomery-program = { path = "../crates/aether-bloomery-program" }
 # `muse open` builds its seeded reads as `TreePath`s, the type `OpenInput`
 # takes; the identity half only, with no workspace runtime.
 aether-bloomery-workspace = { path = "../crates/aether-bloomery-workspace", default-features = false }
+# `muse open` binds the proof tools it offers to a `ProofBound`; `library`
+# strips that bundle's wasm entry surface.
+aether-bloomery-workspace-programs = { path = "../crates/aether-bloomery-workspace-programs", features = ["library"] }
 # `import-commit` installs the frame cap the engine and `aether-mcp` share, so
 # its batch budget matches what the engine will read.
 aether-codec = { path = "../crates/aether-codec" }
