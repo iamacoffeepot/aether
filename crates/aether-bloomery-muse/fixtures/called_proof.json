@@ -1,0 +1,31 @@
+{
+  "id": "resp_0040",
+  "object": "response",
+  "created_at": 1790000600,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "fc_00400",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_proof",
+      "name": "proof-clippy",
+      "arguments": "{}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 80,
+    "output_tokens_details": {
+      "reasoning_tokens": 20
+    },
+    "total_tokens": 1280
+  }
+}

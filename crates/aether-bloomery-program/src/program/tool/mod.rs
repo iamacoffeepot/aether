@@ -8,7 +8,8 @@
 //! `aether-codec` accepts for `A`, with each field's and variant's `///` doc
 //! attached. Rendering needs the program's crate linked: the arguments'
 //! schema is read from their type, not from the declaration record. A tool
-//! that changes the tree returns [`Edited`].
+//! that changes the tree returns [`Edited<D>`], whose detail `D` is what else
+//! it found ([`NoDetail`] when nothing).
 //!
 //! [`ToolSchema`] is the same type's schema as a stored value, so a program
 //! that links none of a tool's types can still decode its arguments and
@@ -33,7 +34,7 @@ use serde_json::{Value, json};
 use crate::Program;
 use crate::kinds::ProgramName;
 
-pub use edited::Edited;
+pub use edited::{Edited, ErasedEdited, NoDetail};
 pub use tooled::{ErasedTooled, NoBound, ToolArguments, Tooled, tooled};
 
 /// The arguments of tool `P`: what the model writes for a call.
@@ -82,10 +83,12 @@ impl From<JsonSchemaError> for ToolDefinitionError {
 /// codec's decode stays the authority on what the program accepts.
 ///
 /// The parameters are the arguments `A` of `P`'s [`Tooled<A, B>`] input,
-/// never the envelope: the model writes neither the tree nor the bound.
+/// never the envelope: the model writes neither the tree nor the bound. A
+/// unit struct `A` takes no arguments, offered as an empty object, which the
+/// codec decodes it from.
 /// Arguments with an undocumented field or variant do not compile here, the same check
 /// `#[program]` runs on an input, so a hand-written `impl Program` is refused
-/// too.
+/// too; a unit struct has none to document.
 ///
 /// # Errors
 ///
@@ -96,14 +99,20 @@ where
     P::Input: ToolArguments,
 {
     const {
-        require_documented(
-            StaticSchema::<Arguments<P>>::SCHEMA,
-            StaticSchema::<Arguments<P>>::DOC_NODE,
-            "a tool's arguments must be a struct whose fields and variants all carry a `///` doc",
-        );
+        let takes_none = matches!(StaticSchema::<Arguments<P>>::SCHEMA, SchemaType::Unit);
+        if !takes_none {
+            require_documented(
+                StaticSchema::<Arguments<P>>::SCHEMA,
+                StaticSchema::<Arguments<P>>::DOC_NODE,
+                "a tool's arguments must be a unit struct, or a struct whose fields and variants all carry a `///` doc",
+            );
+        }
     }
     let program = ProgramName::new(P::NAME).map_err(|_| ToolDefinitionError::InvalidName)?;
-    let parameters = json_schema(&<Arguments<P> as Schema>::SCHEMA, &<Arguments<P> as Schema>::DOC_NODE)?;
+    let parameters = match <Arguments<P> as Schema>::SCHEMA {
+        SchemaType::Unit => json!({ "type": "object", "properties": {} }),
+        schema => json_schema(&schema, &<Arguments<P> as Schema>::DOC_NODE)?,
+    };
     Ok(json!({
         "type": "function",
         "name": function_name(&program)?,
@@ -253,6 +262,30 @@ mod tests {
         let definition = tool_definition::<Look>().expect("renders");
         let properties = definition["parameters"]["properties"].as_object().expect("an object schema");
         assert_eq!(properties.keys().collect::<Vec<_>>(), ["path"]);
+    }
+
+    /// A tool that takes no arguments.
+    struct Check;
+
+    /// The arguments of [`Check`]: none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
+    #[kind(name = "test.program.check.args")]
+    struct CheckArgs;
+
+    impl Program for Check {
+        const NAME: &'static str = "test.check";
+        const MODE: Mode = Mode::Pure;
+        const INTENT: &'static str = "Check the tree.";
+        const DOC: &'static str = "Checks the tree.";
+        type Input = Tooled<CheckArgs>;
+        type Result = Edited;
+    }
+
+    #[test]
+    fn a_tool_without_arguments_offers_an_empty_object() {
+        // Catches a unit struct rendered as the bare `{}` schema, which offers the model no object to write.
+        let definition = tool_definition::<Check>().expect("renders");
+        assert_eq!(definition["parameters"], serde_json::json!({ "type": "object", "properties": {} }));
     }
 
     #[test]

@@ -63,7 +63,11 @@
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
 //! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
 //! (`muse.end`), which ends the run as done, blocked, or asking a question;
-//! and the fixture [`Echo`] (`muse.echo`). Only a `muse.end` call ends a run:
+//! and the fixture [`Echo`] (`muse.echo`). A session opened with
+//! [`offered_with_proofs`] also offers `proof.clippy` from the
+//! `workspace-programs` bundle, bound to its environment and vendor tree,
+//! which formats the tree and checks it with clippy and whose `Edited` tree
+//! the loop carries on like an edit's. Only a `muse.end` call ends a run:
 //! a reply without a call is nudged back for another turn. Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`]. Each turn carries an [`InputLimit`]; a called
@@ -124,6 +128,7 @@ pub use session::{
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
     ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
+    offered_with_proofs,
 };
 
 aether_actor::export!(

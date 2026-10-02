@@ -1,7 +1,7 @@
 //! `tree.write`: create a file or replace its whole text.
 
 use aether_bloomery_kinds::{Mode, Node, Ref, Refusal};
-use aether_bloomery_program::{Async, Edited, Env, Program, Tooled, program};
+use aether_bloomery_program::{Async, Edited, Env, NoDetail, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
 
 use crate::tools::spine::{Blocked, leaf, place};
@@ -44,8 +44,8 @@ impl Program for TreeWrite {
     type Result = Edited;
 
     async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
-        let tree = input.tree();
-        let unchanged = |summary: String| Ok(Edited::new(tree, summary));
+        let (tree, detail) = (input.tree(), env.stage_encoded(&NoDetail)?);
+        let unchanged = |summary: String| Ok(Edited::new(tree, summary, detail));
         let args = match read_args(&mut env, input.args()).await? {
             Ok(args) => args,
             Err(invalid) => return unchanged(format!("{invalid}, so nothing changed.")),
@@ -68,7 +68,7 @@ impl Program for TreeWrite {
             Err(blocked) => return unchanged(blocked.summary()),
         };
         env.stage_bytes(args.text.as_bytes());
-        Ok(Edited::new(root, format!("Wrote {path}.")))
+        Ok(Edited::new(root, format!("Wrote {path}."), detail))
     }
 }
 
@@ -78,7 +78,7 @@ mod tests {
     use aether_bloomery_program::Edited;
 
     use super::{TreeWrite, WriteArgs};
-    use crate::session::fixture::{SmallTree, name, path, run_async};
+    use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
 
     #[test]
     fn a_write_overwrites_a_file_and_keeps_its_executable_bit() {
@@ -107,7 +107,7 @@ mod tests {
         ] {
             let (input, closure) = small.call(&args);
             let edited = run_async::<TreeWrite>(&input, closure).map(|(edited, _)| edited);
-            assert_eq!(edited, Ok(Edited::new(small.tree(), summary)));
+            assert_eq!(edited, Ok(Edited::new(small.tree(), summary, no_detail())));
         }
     }
 }

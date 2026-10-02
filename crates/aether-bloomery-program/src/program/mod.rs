@@ -52,8 +52,8 @@ pub use ran::Ran;
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{Declaration, DeclarationsError, ProgramKind, declarations};
 pub use tool::{
-    Edited, ErasedTooled, MAX_FUNCTION_NAME_BYTES, NoBound, ToolArguments, ToolDefinitionError, ToolSchema, Tooled,
-    function_name, program_name, tool_definition, tooled,
+    Edited, ErasedEdited, ErasedTooled, MAX_FUNCTION_NAME_BYTES, NoBound, NoDetail, ToolArguments, ToolDefinitionError,
+    ToolSchema, Tooled, function_name, program_name, tool_definition, tooled,
 };
 
 #[doc(hidden)]

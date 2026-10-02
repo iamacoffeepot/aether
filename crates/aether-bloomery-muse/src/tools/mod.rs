@@ -3,13 +3,17 @@
 //! Every tool's input is `Tooled<A, B>`: the session's current tree and the
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
-//! to and binds `NoBound`. [`offered`] is the set `muse.session.open` accepts:
+//! to and binds `NoBound`. [`offered`] is the set every session offers:
 //! `tree.edit` and `tree.write`, which read only the tree nodes and blobs they
 //! touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
 //! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
-//! run as done, blocked, or asking a question.
+//! run as done, blocked, or asking a question. [`offered_with_proofs`] adds
+//! the proofs from the bundle `WORKSPACE_PROGRAMS` resolves to, today
+//! `proof.clippy`, which formats the tree and checks it with clippy and
+//! returns the formatted tree as an `Edited`; each binds the session's
+//! `ProofBound`, its environment and vendor tree.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -31,6 +35,8 @@ use std::iter;
 
 use aether_bloomery_kinds::{EncodedArtifact, Head, OpaqueBytes, Ref, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
+use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
+use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound};
 use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
@@ -58,44 +64,63 @@ pub const MAX_TEXT_BYTES: usize = 1 << 20;
 /// which holds or fails the same way on every call.
 #[must_use]
 pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
+    let no_bound = EncodedArtifact::new(&NoBound).expect("the bound encodes");
+    let none = Ref::<NoBound>::from_digest(no_bound.digest());
     let (tools, artifacts): (Vec<_>, Vec<_>) = [
-        bound::<Echo>(MUSE),
-        bound::<TreeEdit>(MUSE),
-        bound::<TreeWrite>(MUSE),
-        bound::<TreeList>(MUSE),
-        bound::<TreeRead>(MUSE),
-        bound::<TreeGrep>(MUSE),
-        bound::<End>(MUSE),
+        bound::<Echo>(MUSE, none),
+        bound::<TreeEdit>(MUSE, none),
+        bound::<TreeWrite>(MUSE, none),
+        bound::<TreeList>(MUSE, none),
+        bound::<TreeRead>(MUSE, none),
+        bound::<TreeGrep>(MUSE, none),
+        bound::<End>(MUSE, none),
     ]
     .into_iter()
     .unzip();
     let mut artifacts = artifacts.concat();
-    artifacts.push(EncodedArtifact::text(NUDGE_TEXT));
+    artifacts.extend([no_bound, EncodedArtifact::text(NUDGE_TEXT)]);
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
 
-/// `P` as a bound tool from the bundle `head` resolves to, and the artifacts
-/// its offer cites. Every tool bound here binds nothing beyond the tree, so its
-/// offer carries the `NoBound` value.
-fn bound<P: Program>(head: Head<OpaqueBytes>) -> (OfferedTool, Vec<EncodedArtifact>)
+/// Every tool [`offered`] offers, then every proof tool bound to `proofs`,
+/// and the artifacts those offers cite, `proofs` among them.
+///
+/// # Panics
+///
+/// As [`offered`] does.
+#[must_use]
+pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArtifact>) {
+    let (tools, mut artifacts) = offered();
+    let bound = EncodedArtifact::new(proofs).expect("the proof bound encodes");
+    let (proofs, cited): (Vec<_>, Vec<_>) = proof_offers(Ref::from_digest(bound.digest())).into_iter().unzip();
+    artifacts.extend(cited.into_iter().flatten().chain([bound]));
+    let tools = tools.as_slice().iter().cloned().chain(proofs).collect();
+    (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
+}
+
+/// Every proof tool from the bundle [`WORKSPACE_PROGRAMS`] resolves to,
+/// binding `proofs` into every call, and the artifacts each offer cites
+/// besides `proofs`.
+pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<(OfferedTool, Vec<EncodedArtifact>)> {
+    vec![bound::<ClippyProof>(WORKSPACE_PROGRAMS, proofs)]
+}
+
+/// `P` as a bound tool from the bundle `head` resolves to, binding the cited
+/// `value` into every call, and the artifacts its offer cites besides `value`.
+fn bound<P: Program>(
+    head: Head<OpaqueBytes>,
+    value: Ref<<P::Input as ToolArguments>::Bound>,
+) -> (OfferedTool, Vec<EncodedArtifact>)
 where
-    P::Input: ToolArguments<Bound = NoBound>,
+    P::Input: ToolArguments,
     P::Result: Schema,
 {
     let definition = tool_definition::<P>().expect("a bound tool renders as a tool").to_string();
     let schemas = [ToolSchema::of::<<P::Input as ToolArguments>::Arguments>(), ToolSchema::of::<P::Result>()]
         .map(|schema| EncodedArtifact::new(&schema).expect("a tool schema encodes"));
     let [input, result] = schemas.each_ref().map(|schema| Ref::from_digest(schema.digest()));
-    let bound = EncodedArtifact::new(&NoBound).expect("the bound encodes");
-    let tool = OfferedTool::new(
-        program_name::<P>(),
-        head,
-        Ref::of_text(&definition),
-        input,
-        Ref::<NoBound>::from_digest(bound.digest()).erase(),
-        result,
-    );
-    (tool, iter::once(EncodedArtifact::text(&definition)).chain(schemas).chain([bound]).collect())
+    let tool = OfferedTool::new(program_name::<P>(), head, Ref::of_text(&definition), input, value.erase(), result);
+    (tool, iter::once(EncodedArtifact::text(&definition)).chain(schemas).collect())
 }
 
 /// A tool's arguments, or the sentence, without its closing stop, on why

@@ -76,8 +76,10 @@ after=<seq>
 - `--brief` is a file holding the first user message.
 - `--instructions` is required: a file holding the session instructions, sent
   as the leading developer message ahead of the brief with a short preface
-  saying the session works only through the tree tools and ends its run only
-  by calling `muse-end`.
+  saying the session works only through the offered tools, makes every
+  independent call in the same turn, and ends its run only by calling
+  `muse-end`; with proofs offered, it also tells the model to run
+  `proof-clippy` until it passes before ending `Done`.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -89,6 +91,20 @@ after=<seq>
   tool call does not end the session: the loop nudges the model back for
   another turn. The first turn sends the instructions as the developer
   message ahead of the brief.
+- `--environment <digest>` and `--vendor <digest>`, given together, also offer
+  `proof.clippy` from the `workspace-programs` bundle, bound to that
+  environment and vendor tree (see
+  [The clippy proof](../systems/workspace.md#the-clippy-proof)). It formats
+  the session's tree with `cargo fmt`, checks it with workspace-wide
+  `cargo clippy`, and returns the formatted tree, which becomes the session's
+  tree as an edit's does. The engine must run the workspace (a Docker daemon
+  at `--workspace-endpoint`; `--workspace-warm-layers` builds over warm
+  layers), have the `aether_bloomery_workspace_programs` bundle bound at the
+  head `workspace-programs`, and hold both digests: the environment the head
+  `(aether.workspace.environment, <platform>)` names, and the `Vendored.tree`
+  of a `vendor.cargo` run over a source with the session tree's `Cargo.lock`.
+  A proof that runs out of time or memory is retried twice, then answered
+  with what happened; any other proof fault fails the session.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of

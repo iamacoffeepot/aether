@@ -160,7 +160,7 @@ mod tests {
     use aether_bloomery_kinds::{Node, OpaqueBytes, Ref, Tree};
     use aether_bloomery_program::Edited;
 
-    use crate::session::fixture::{SmallTree, name, path, run_async};
+    use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
     use crate::tools::edit::{EditArgs, TreeEdit};
     use crate::tools::write::{TreeWrite, WriteArgs};
 
@@ -198,7 +198,7 @@ mod tests {
         ] {
             let (input, closure) = small.call(&EditArgs::new(path(at), "a", "b"));
             let (edited, _) = run_async::<TreeEdit>(&input, closure).expect("a result");
-            assert_eq!(edited, Edited::new(small.tree(), summary), "{at}");
+            assert_eq!(edited, Edited::new(small.tree(), summary, no_detail()), "{at}");
         }
     }
 }

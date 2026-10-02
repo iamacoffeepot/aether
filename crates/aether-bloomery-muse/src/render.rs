@@ -167,7 +167,7 @@ mod tests {
     use core::array;
 
     use aether_bloomery_kinds::{Digest, Ref};
-    use aether_bloomery_program::{Edited, ToolSchema};
+    use aether_bloomery_program::{Edited, NoDetail, ToolSchema};
     use aether_data::{Storage, StorageData};
 
     use super::json;
@@ -243,16 +243,17 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_tree_digest_renders_as_hex() {
-        // Catches a tree digest rendered as 32 numbers, which spends tokens on every edit and tells the model
-        // nothing.
-        let bytes: [u8; 32] = array::from_fn(|index| u8::try_from(index).expect("32 fits a byte"));
-        let digest = Digest::from_bytes(bytes);
-        let edited = Edited::new(Ref::from_digest(digest), "Edited path.");
+    fn an_edit_tree_and_detail_digest_render_as_hex() {
+        // Catches a tree or detail digest rendered as 32 numbers, which spends tokens on every edit and tells the
+        // model nothing.
+        let (tree, detail) = (digest(0), Ref::<NoDetail>::of_encoded(&NoDetail).expect("detail"));
+        let edited = Edited::new(Ref::from_digest(tree), "Edited path.", detail);
         let payload = Edited::encode_storage(&StorageData::from_value(edited)).expect("an edit encodes");
 
         let rendered = json(&ToolSchema::of::<Edited>(), &payload).expect("an edit renders");
+        let rendered: serde_json::Value = serde_json::from_str(&rendered).expect("a render is JSON");
 
-        assert_eq!(rendered, format!("{{\"summary\":\"Edited path.\",\"tree\":\"{digest}\"}}"));
+        assert_eq!((&rendered["summary"], &rendered["tree"]), (&"Edited path.".into(), &tree.to_string().into()));
+        assert_eq!(rendered["detail"]["digest"], serde_json::json!(detail.digest().to_string()));
     }
 }

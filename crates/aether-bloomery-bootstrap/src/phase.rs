@@ -5,15 +5,13 @@ use aether_actor::{ActorInitError, ActorRef};
 use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{
-    Call, ClosureArtifact, Digest, EncodedArtifact, Head, HeadNameError, NativeOrigin, OpaqueBytes, ProgramName,
-    Publish, RecordedHead, RecordedHeadMove, Ref, Tree,
+    Call, ClosureArtifact, Digest, EncodedArtifact, HeadNameError, NativeOrigin, ProgramName, Publish, RecordedHead,
+    RecordedHeadMove, Ref, Tree,
 };
 use aether_bloomery_workspace::Environment;
+use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_bloomery_workspace_programs::environment::MergeInput;
 use aether_data::{Kind, Storage, StorageError};
-
-/// The head the operator binds to the workspace programs bundle.
-const WORKSPACE_PROGRAMS: Head<OpaqueBytes> = Head::new("workspace-programs");
 
 /// The program that builds the environment.
 const MERGE: &str = "environment.merge";

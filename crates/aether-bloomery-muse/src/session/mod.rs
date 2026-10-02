@@ -23,11 +23,11 @@
 //!   skipped.
 //! - `resume`, on any program's run that answers the call the loop ran,
 //!   records its result as the call's output, takes the tree of a result
-//!   that is an `Edited` as the session's current tree, and runs the next
-//!   call, or, when every call has its output, sends `muse.turn` again with
-//!   the previous input's items plus the turn's text, its calls, and their
-//!   outputs, so each turn's conversation begins with exactly what the
-//!   previous one sent.
+//!   that is an `Edited`, of any detail, as the session's current tree, and
+//!   runs the next call, or, when every call has its output, sends
+//!   `muse.turn` again with the previous input's items plus the turn's text,
+//!   its calls, and their outputs, so each turn's conversation begins with
+//!   exactly what the previous one sent.
 //! - `record` records a session a turn rested as a [`Session`] through
 //!   `muse.session.record`. A run ends only through a `muse.end` call, which
 //!   rests it with [`RestReason::Completed`], [`RestReason::Blocked`], or
