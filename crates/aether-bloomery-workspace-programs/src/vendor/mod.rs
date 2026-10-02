@@ -9,7 +9,7 @@
 //! vendor directory, and the result cites it with no reshaping.
 //!
 //! **Pairing.** [`VendorResult::Vendored`]'s tree is what
-//! [`crate::proof::ClippyInput::vendor`] takes when the proof's `source` has
+//! [`crate::proof::ProofBound::vendor`] names when the tree under proof has
 //! the same `Cargo.lock` as this transition's `source`. The proof replaces
 //! only `crates-io`, so the pairing covers registry sources only.
 //!
