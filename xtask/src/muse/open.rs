@@ -15,7 +15,7 @@ use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
 
 /// What every session is told ahead of the instructions file.
-const PREFACE: &str = "You work only through the offered tree tools: list, read, grep, edit, and write. You cannot build, run, or test anything. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
+const PREFACE: &str = "You work only through the offered tree tools, and end your run only by calling `muse-end`: `Done` with a summary once every briefed change is in the tree, `Blocked` with what stopped you when the work cannot be finished, or `Asked` with the one question you cannot go on without. A reply without a tool call does not end the session. A plan's open questions still go in its Questions section; `Asked` is for work that cannot go on without an answer. You cannot build, run, or test anything. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
 
 /// Arguments for `cargo xtask muse open`.
 #[derive(Args, Debug)]

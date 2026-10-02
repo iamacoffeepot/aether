@@ -3,9 +3,9 @@
 //! A turn's index is the count of `function_call` items its conversation
 //! replays divided by the calls each turn asks for. Before the last turn the
 //! reply asks for that many calls, rotating over the configured tools; the
-//! last turn's reply is a plain completed message, so every session rests
-//! `Completed` within its turn limit. Each session's conversation is its own,
-//! so the replies need no state to serve several sessions at once.
+//! last turn asks one `muse-end` call with `Done` arguments, so every session
+//! rests `Completed` within its turn limit. Each session's conversation is its
+//! own, so the replies need no state to serve several sessions at once.
 
 use std::thread;
 use std::time::Duration;
@@ -52,13 +52,7 @@ impl Script {
         let output = if turn + 1 < self.turns {
             (0..self.calls).map(|call| self.call(turn, call)).collect()
         } else {
-            vec![json!({
-                "id": format!("msg_{turn}"),
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "Done.", "annotations": [] }],
-            })]
+            vec![Self::end(turn)]
         };
         let reply = json!({
             "id": format!("resp_{turn}"),
@@ -79,6 +73,18 @@ impl Script {
             },
         });
         serde_json::to_vec(&reply).unwrap_or_default()
+    }
+
+    /// The last turn's `muse-end` call, ending the run done.
+    fn end(turn: usize) -> Value {
+        json!({
+            "id": format!("fc_{turn}_end"),
+            "type": "function_call",
+            "status": "completed",
+            "call_id": format!("call_t{turn}_end"),
+            "name": "muse-end",
+            "arguments": r#"{"ending": {"Done": {"summary": "Done."}}}"#,
+        })
     }
 
     /// Call `call` of turn `turn`, naming the tool its position rotates to.

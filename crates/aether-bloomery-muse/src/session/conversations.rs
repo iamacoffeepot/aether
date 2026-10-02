@@ -24,7 +24,7 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_program::{At, Cited, CitedError, ClockUntil, Edited, Ran, Reactor, ViewCursor, tooled, view};
 
-use crate::input::{ToolCalls, ToolInput, ToolOutput, TurnInput};
+use crate::input::{Role, ToolCalls, ToolInput, ToolOutput, TurnInput, TurnItem};
 use crate::program::MuseTurn;
 use crate::result::{TurnOutcome, TurnResult};
 use crate::session::MuseSession;
@@ -35,6 +35,7 @@ use crate::session::replay::replay;
 use crate::session::retry::{MAX_RETRIES, retry_wait, wait_call};
 use crate::session::state::{Failure, Session, SessionKey, TurnLimit};
 use crate::session::tools::{MUSE, call};
+use crate::tools::{NUDGE_TEXT, end_result};
 
 /// Every live session and the journal entries linked to them.
 #[derive(Default)]
@@ -97,12 +98,14 @@ enum Next {
     /// A called program, over the session's tree and the arguments its call
     /// decoded to.
     Call { program: ProgramName, input: EncodedArtifact },
-    /// The next turn, once every call has its output.
+    /// The next turn, once every call has its output, or after a reply
+    /// without calls with the reply text and the nudge appended.
     Turn(TurnInput),
-    /// The record of a session resting after its last call's output: at its
-    /// turn limit, or past its input limit.
-    Limit(RecordInput),
-    /// The record of a session whose turn rested it.
+    /// The record of a session resting once its last call has its output: on
+    /// an end call, at its turn limit, or past its input limit.
+    Settled(RecordInput),
+    /// The record of a session whose turn rested it: a refused reply, a
+    /// truncated reply, or a reply without calls at a limit.
     Rest(RecordInput),
     /// The record of a session that failed.
     Fail(RecordInput),
@@ -155,8 +158,12 @@ impl Conversation {
             }
         }
         self.next = Some(match waiting.result {
-            Some(result) if waiting.full || self.turns >= self.limit.get() => {
-                Next::Limit(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
+            Some(result)
+                if end_result(waiting.calls.as_slice(), &waiting.outputs).is_some()
+                    || waiting.full
+                    || self.turns >= self.limit.get() =>
+            {
+                Next::Settled(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
             _ => {
                 let replayed = replay(waiting.text, waiting.calls.as_slice(), &waiting.outputs);
@@ -202,7 +209,7 @@ impl Conversations {
                 Some(CallProgram { program: MUSE, name: program.clone(), input: CallInput::Value(input.clone()) })
             }
             Next::Turn(turn) => Some(call::<MuseTurn>(CallInput::Value(EncodedArtifact::new(turn).ok()?))),
-            Next::Limit(record) | Next::Fail(record) => {
+            Next::Settled(record) | Next::Fail(record) => {
                 Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?)))
             }
             Next::Wait { until, .. } => wait_call(*until),
@@ -222,9 +229,12 @@ impl Conversations {
     pub fn rest(&self, at: At) -> Option<CallProgram> {
         match self.next(at)? {
             Next::Rest(record) => Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?))),
-            Next::Call { .. } | Next::Turn(_) | Next::Limit(_) | Next::Fail(_) | Next::Wait { .. } | Next::Retry(_) => {
-                None
-            }
+            Next::Call { .. }
+            | Next::Turn(_)
+            | Next::Settled(_)
+            | Next::Fail(_)
+            | Next::Wait { .. }
+            | Next::Retry(_) => None,
         }
     }
 
@@ -339,7 +349,27 @@ impl View for Conversations {
                 conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new(), full });
                 self.advance(key, conversation, at.seq);
             }
-            TurnOutcome::Completed { .. } | TurnOutcome::Declined { .. } | TurnOutcome::Incomplete { .. } => {
+            TurnOutcome::Completed { text, usage } => {
+                conversation.turns += 1;
+                conversation.retries = 0;
+                let limited =
+                    conversation.turns >= conversation.limit.get() || input.input_limit().reached(usage.input_tokens());
+                let nudged =
+                    [TurnItem::message(Role::Assistant, text), TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT))];
+                conversation.next = Some(if limited {
+                    Next::Rest(RecordInput::rested(run.input(), run.result(), Vec::new(), conversation.tree))
+                } else {
+                    match input.append(nudged) {
+                        Ok(turn) => Next::Turn(turn),
+                        Err(error) => {
+                            let reason = Detail::new(format!("the next turn's items: {error}"));
+                            Next::Fail(conversation.failure(Failure::Unbuilt { reason }))
+                        }
+                    }
+                });
+                self.keep(key, conversation, at.seq);
+            }
+            TurnOutcome::Declined { .. } | TurnOutcome::Incomplete { .. } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
                 let record = RecordInput::rested(run.input(), run.result(), Vec::new(), conversation.tree);

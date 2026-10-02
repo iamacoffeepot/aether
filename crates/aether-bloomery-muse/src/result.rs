@@ -110,7 +110,8 @@ impl TurnUsage {
 /// How the vendor answered.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum TurnOutcome {
-    /// The model finished its answer.
+    /// The model finished its answer with a reply without calls, which the
+    /// loop nudges back for another turn.
     Completed { text: Ref<Utf8Text>, usage: TurnUsage },
     /// The model finished by asking for one or more calls, each to a program the turn offered. Any message text
     /// the reply also carried is kept.

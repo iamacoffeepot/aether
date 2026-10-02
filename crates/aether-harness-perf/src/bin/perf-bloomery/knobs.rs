@@ -115,7 +115,7 @@ impl Knobs {
         let items = rested_items(turns, calls);
         if items.is_none_or(|items| items > TurnItems::MAX_ITEMS) {
             let bound = format!(
-                "a session at rest holds 2 + (turns - 1) * 2 * calls items, at most {} (turns {turns}, calls {calls})",
+                "a session at rest holds 2 + (turns - 1) * 2 * calls + 3 items, at most {} (turns {turns}, calls {calls})",
                 TurnItems::MAX_ITEMS
             );
             return Err(refuse(TURNS, turns, bound));
@@ -143,11 +143,14 @@ impl Knobs {
     }
 }
 
-/// The items a completed session holds at rest: the user message, each called
-/// turn's calls and outputs, and the final answer.
+/// The items a completed session holds at rest: the two opening messages,
+/// each work turn's calls and their outputs, and the last turn's end call,
+/// its output, and the summary. The stub's replies carry no message text, so
+/// a work turn adds nothing but its calls and outputs: 2 + (turns - 1) * 2 *
+/// calls + 3 items.
 fn rested_items(turns: u32, calls: usize) -> Option<usize> {
     let called = usize::try_from(turns - 1).ok()?;
-    called.checked_mul(calls)?.checked_mul(2)?.checked_add(2)
+    called.checked_mul(calls)?.checked_mul(2)?.checked_add(5)
 }
 
 // Dev/perf tooling: this benchmark takes its run parameters from env, as

@@ -27,15 +27,24 @@
 //!   the previous input's items plus the turn's text, its calls, and their
 //!   outputs, so each turn's conversation begins with exactly what the
 //!   previous one sent.
-//! - `record` records a session a turn rested (completed, declined, or
-//!   incomplete) as a [`Session`] through `muse.session.record`. A turn that
-//!   stopped early with no output adds nothing, so the session ends on what
-//!   that turn sent. `call` and `resume` record one the same way when the
-//!   activation has made as many turns as its limit allows, resting it with
-//!   [`RestReason::TurnLimit`], or when a called turn reached the session's
-//!   input limit, resting it with [`RestReason::ContextFull`]. `ContextFull`
-//!   takes precedence over `TurnLimit` when both hold; a called turn still
-//!   runs its calls to completion before resting.
+//! - `record` records a session a turn rested as a [`Session`] through
+//!   `muse.session.record`. A run ends only through a `muse.end` call, which
+//!   rests it with [`RestReason::Completed`], [`RestReason::Blocked`], or
+//!   [`RestReason::Asked`] by the end call's variant, appending the summary,
+//!   reason, or question as the final assistant message. A reply without
+//!   calls never rests the session below a limit: the loop sends another turn
+//!   with the reply text and a nudge, which counts against the turn limit. A
+//!   reply without calls at the turn limit, or past the input limit, is
+//!   recorded like a called turn there and rests with [`RestReason::TurnLimit`]
+//!   or [`RestReason::ContextFull`]. A turn that stopped early with no output
+//!   adds nothing, so the session ends on what that turn sent. `call` and
+//!   `resume` record one the same way when the activation has made as many
+//!   turns as its limit allows, resting it with [`RestReason::TurnLimit`], or
+//!   when a called turn reached the session's input limit, resting it with
+//!   [`RestReason::ContextFull`]. `ContextFull` takes precedence over
+//!   `TurnLimit` when both hold; a called turn still runs its calls to
+//!   completion before resting. A refused or truncated reply rests with
+//!   [`RestReason::Declined`] or [`RestReason::Incomplete`].
 //! - `rest` moves the session's head to that record, compare-and-swap from the
 //!   record before it.
 //! - `call` also waits on the driver's clock after a turn the vendor refused
@@ -66,8 +75,9 @@
 //! resends the conversation as it stands, optionally with a new output budget
 //! that the session keeps from that turn on. Only a session that ends on what
 //! its last turn sent can be resent: one that rested failed, or incomplete
-//! with no output. Retrying a failed turn, or one that ran out of budget, is
-//! the caller's continue.
+//! with no output. An asked session resumes with its context once answered: a
+//! continue carries the answer as its user message. Retrying a failed turn, or
+//! one that ran out of budget, is the caller's continue.
 //!
 //! One case cannot record itself: a failure of the failed rest's own record
 //! (its `muse.session.record` run faults, or the rule emitting it fails), or a

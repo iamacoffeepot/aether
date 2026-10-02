@@ -56,16 +56,20 @@
 //! and the bound value its offer carries, sends the next turn with the calls
 //! and their outputs appended, and at each rest writes the conversation and
 //! the latest tree down as a [`Session`] (`muse.session`) through
-//! `muse.session.record`, moving the session's head to it. The bound tools are [`TreeEdit`]
-//! (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
+//! `muse.session.record`, moving the session's head to it. The bound tools are
+//! [`TreeEdit`] (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
-//! the text they read as [`Viewed`] and leave the tree as it was; and the
-//! fixture [`Echo`] (`muse.echo`). Each open and
+//! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
+//! (`muse.end`), which ends the run as done, blocked, or asking a question;
+//! and the fixture [`Echo`] (`muse.echo`). Only a `muse.end` call ends a run:
+//! a reply without a call is nudged back for another turn. Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`]. Each turn carries an [`InputLimit`]; a called
 //! turn that reached it rests with [`RestReason::ContextFull`] instead of
-//! sending its next turn, once its calls ran.
+//! sending its next turn, once its calls ran, and a reply without a call past
+//! the input limit rests with [`RestReason::ContextFull`], or with
+//! [`RestReason::TurnLimit`] at the turn limit.
 //! A turn the vendor refuses as transient is sent again, byte-identical,
 //! after a wait on the driver's clock (ADR-0245), a few times at most.
 //! A session that fails (a faulted run, a failed rule, a turn the vendor
@@ -117,8 +121,8 @@ pub use session::{
     TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
-    Echo, EchoArgs, EchoResult, EditArgs, GrepArgs, ListArgs, MAX_TEXT_BYTES, ReadArgs, TreeEdit, TreeGrep, TreeList,
-    TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
+    Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
+    ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
 };
 
 aether_actor::export!(
@@ -128,6 +132,7 @@ aether_actor::export!(
         SessionContinue,
         SessionRecord,
         Echo,
+        End,
         TreeEdit,
         TreeWrite,
         TreeList,

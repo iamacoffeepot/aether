@@ -7,7 +7,8 @@
 //! only the tree nodes and blobs they touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
-//! marked; and `muse.echo`, a value-only fixture.
+//! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
+//! run as done, blocked, or asking a question.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -17,6 +18,7 @@
 
 mod echo;
 mod edit;
+mod end;
 mod grep;
 mod list;
 mod read;
@@ -32,6 +34,7 @@ use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
+pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, end_result};
 pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
 pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
@@ -61,10 +64,13 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
         bound::<TreeList>(),
         bound::<TreeRead>(),
         bound::<TreeGrep>(),
+        bound::<End>(),
     ]
     .into_iter()
     .unzip();
-    (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts.concat())
+    let mut artifacts = artifacts.concat();
+    artifacts.push(EncodedArtifact::text(NUDGE_TEXT));
+    (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
 
 /// `P` as a bound tool, and the artifacts its offer cites. Every tool bound

@@ -90,8 +90,8 @@ pub fn sessions(harness: &mut BloomeryHarness, calls: &[Call]) -> Result<Window,
 }
 
 /// Require every recorded session to have rested `Completed`, as the stub's
-/// last reply rests it: any other rest means the loop did not run the workload
-/// the knobs describe.
+/// `muse-end` call rests it: any other rest means the loop did not run the
+/// workload the knobs describe.
 pub fn completed(harness: &BloomeryHarness, records: &[Digest]) -> Result<(), Failure> {
     let reader = JournalReader::open(harness.journal_path())
         .map_err(|error| Failure::unmeasured(format!("open the journal for reading: {error}")))?;

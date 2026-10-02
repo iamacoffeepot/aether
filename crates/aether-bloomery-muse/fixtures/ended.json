@@ -1,0 +1,54 @@
+{
+  "id": "resp_0030",
+  "object": "response",
+  "created_at": 1790000400,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "rs_0030",
+      "type": "reasoning",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Every briefed change is in; end the run."
+        }
+      ]
+    },
+    {
+      "id": "msg_0030",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Ending the run.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "fc_0030",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_end",
+      "name": "muse-end",
+      "arguments": "{\"ending\": {\"Done\": {\"summary\": \"Every briefed change is in the tree.\"}}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 900,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 60,
+    "output_tokens_details": {
+      "reasoning_tokens": 20
+    },
+    "total_tokens": 960
+  }
+}

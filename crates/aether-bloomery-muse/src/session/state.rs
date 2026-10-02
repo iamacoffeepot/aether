@@ -208,8 +208,12 @@ impl TurnLimit {
 /// Why a session rests.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum RestReason {
-    /// The model finished its answer.
+    /// The model ended its run done, its summary last.
     Completed,
+    /// The model ended its run blocked, its reason last.
+    Blocked,
+    /// The model ended its run asking a question, its question last.
+    Asked,
     /// The model refused.
     Declined,
     /// The model stopped early, for example on the output budget.
