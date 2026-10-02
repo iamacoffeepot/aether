@@ -141,7 +141,13 @@ impl Conversation {
                     waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(*refusal)));
                 }
                 ToolInput::Decoded { program, input } => {
-                    let input = EncodedArtifact::new(&tooled(self.tree, *input))
+                    let tool = waiting
+                        .input
+                        .tools()
+                        .iter()
+                        .find(|tool| tool.program() == program)
+                        .ok_or_else(|| Detail::new(format!("{} is not an offered tool", program.as_str())))?;
+                    let input = EncodedArtifact::new(&tooled(self.tree, *input, tool.bound()))
                         .map_err(|error| Detail::new(format!("a call's input did not encode: {error}")))?;
                     self.next = Some(Next::Call { program: program.clone(), input });
                     return Ok(());

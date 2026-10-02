@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, ErasedRef, Invoke, Invoked, Name, Node, Path, ProgramName,
-    ReadArtifactResult, Ref, Refusal, Tree, artifact_digest,
+    ReadArtifactResult, Ref, Refusal, Tree,
 };
 use aether_bloomery_program::{
-    AsyncProgram, ErasedTooled, Pending, PollResult, Started, SyncProgram, invoke, start_async, tooled,
+    AsyncProgram, ErasedTooled, NoBound, Pending, PollResult, Started, SyncProgram, invoke, start_async, tooled,
 };
 use aether_bloomery_workspace::TreePath;
 use aether_codec::encode_storage_schema;
@@ -188,9 +188,7 @@ impl SmallTree {
     /// A call over this tree with `args`, as the loop builds it, and the
     /// artifacts it could read.
     pub fn call<A: Storage + Clone + Cites>(&self, args: &A) -> (ErasedTooled, Vec<ClosureArtifact>) {
-        let args = stored(args);
-        let cited = ErasedRef::new(args.kind(), args.claimed().unverified());
-        (tooled(self.tree(), cited), self.artifacts.iter().cloned().chain([args]).collect())
+        self.called(stored(args))
     }
 
     /// A call over this tree with the arguments `json` encodes as `A` by
@@ -198,9 +196,16 @@ impl SmallTree {
     /// `#[storage(validate)]` rule is checked.
     pub fn call_json<A: Storage + Schema>(&self, json: &Value) -> (ErasedTooled, Vec<ClosureArtifact>) {
         let payload = encode_storage_schema(json, &A::SCHEMA).expect("the arguments match the schema");
-        let cited = ErasedRef::new(A::ID, artifact_digest(A::ID, &payload));
-        let args = ClosureArtifact::new(A::ID, payload);
-        (tooled(self.tree(), cited), self.artifacts.iter().cloned().chain([args]).collect())
+        self.called(ClosureArtifact::new(A::ID, payload))
+    }
+
+    /// A call over this tree with the stored `args`, binding `NoBound` as
+    /// every session tool does, and the artifacts it could read.
+    fn called(&self, args: ClosureArtifact) -> (ErasedTooled, Vec<ClosureArtifact>) {
+        let bound = stored(&NoBound);
+        let cited = |artifact: &ClosureArtifact| ErasedRef::new(artifact.kind(), artifact.claimed().unverified());
+        let input = tooled(self.tree(), cited(&args), cited(&bound));
+        (input, self.artifacts.iter().cloned().chain([args, bound]).collect())
     }
 }
 

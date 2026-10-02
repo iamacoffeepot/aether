@@ -18,9 +18,9 @@
 //! A tool is a program to run. The caller renders each offered program with
 //! `aether_bloomery_program::tool_definition` and cites the definition in an
 //! [`OfferedTool`], beside the schemas of the program's arguments (the `A` of
-//! its `Tooled<A>` input) and of its result (`ToolSchema::of`); nothing
-//! defaults to every declared program. A reply
-//! that asks for calls is [`TurnOutcome::Called`], each [`ToolCall`] citing
+//! its `Tooled<A, B>` input) and of its result (`ToolSchema::of`), and the
+//! bound value `B` the loop binds into every call, which the model never
+//! sees; nothing defaults to every declared program. A reply that asks for calls is [`TurnOutcome::Called`], each [`ToolCall`] citing
 //! its arguments verbatim and holding a [`ToolInput`]: a call whose name is an
 //! offered program's function name and whose arguments decode against the
 //! offered arguments schema carries the program and the arguments stored
@@ -52,8 +52,8 @@
 //! opens one on a tree, optionally with seeded `tree.read` calls the loop
 //! runs before the first turn, and `muse.session.continue` resumes one; the
 //! loop runs each decoded call through a bound tool one at a time, over the
-//! session's current tree, sends the next turn with the calls and their outputs
-//! appended, and at each rest writes the conversation and the latest tree
+//! session's current tree and the bound value its offer carries, sends the
+//! next turn with the calls and their outputs appended, and at each rest writes the conversation and the latest tree
 //! down as a [`Session`] (`muse.session`) through `muse.session.record`,
 //! moving the session's head to it. The bound tools are [`TreeEdit`]
 //! (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`

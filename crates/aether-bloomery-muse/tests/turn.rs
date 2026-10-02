@@ -11,7 +11,7 @@ use aether_bloomery_muse::{
     TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
 use aether_bloomery_program::{
-    AsyncSession, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
+    AsyncSession, NoBound, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
 };
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
@@ -29,7 +29,8 @@ struct ReadInput {
     path: String,
 }
 
-/// One offered tool: the program, the definition sent for it, and its input and result schemas.
+/// One offered tool: the program, the definition sent for it, and its input and result schemas. Every tool binds
+/// `NoBound`.
 struct Tool {
     program: &'static str,
     definition: String,
@@ -68,12 +69,20 @@ fn start_turn(
     items: Vec<TurnItem>,
     mut closure: Vec<ClosureArtifact>,
 ) -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
+    let bound = Ref::of_encoded(&NoBound)?.erase();
     let mut offered = Vec::with_capacity(tools.len());
     for tool in tools {
         let (input, result) = (Ref::of_encoded(&tool.input)?, Ref::of_encoded(&tool.result)?);
-        offered.push(OfferedTool::new(ProgramName::new(tool.program)?, Ref::of_text(&tool.definition), input, result));
+        offered.push(OfferedTool::new(
+            ProgramName::new(tool.program)?,
+            Ref::of_text(&tool.definition),
+            input,
+            bound,
+            result,
+        ));
         closure.extend([text(&tool.definition), stored(&tool.input)?, stored(&tool.result)?]);
     }
+    closure.push(stored(&NoBound)?);
     let input = TurnInput::new(
         Endpoint::new(URL)?,
         ModelName::new("muse-spark-1.3")?,
