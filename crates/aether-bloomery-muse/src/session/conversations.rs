@@ -226,7 +226,7 @@ impl Conversation {
     /// staged answer to its attempts at the cap. `None` for any other fault.
     fn exhausted(&mut self, fault: &Fault) -> Option<Next> {
         let resource = Exhaustion::of(&fault.reason)?;
-        let Some(Next::Call { program, input }) = &self.next else {
+        let Some(Next::Call { head, program, input }) = &self.next else {
             return None;
         };
         let same_program = program == fault.program.name();
@@ -237,7 +237,7 @@ impl Conversation {
         }
         self.exhaustions += 1;
         if self.exhaustions <= MAX_TOOL_RETRIES {
-            return Some(Next::Call { program: program.clone(), input: input.clone() });
+            return Some(Next::Call { head: head.clone(), program: program.clone(), input: input.clone() });
         }
         Some(Next::Exhausted(ExhaustedInput::new(program.clone(), resource, self.exhaustions)))
     }
