@@ -90,7 +90,7 @@ program is tested without spending money.
      input, result }`, no program twice. `program` is a `ProgramName`;
      `definition` is a `Ref<Utf8Text>` citing the function definition sent
      for it; `input` and `result` are `Ref<ToolSchema>`s citing the schemas
-     of the program's arguments (the `A` of its `Tooled<A>` input) and of
+     of the program's arguments (the `A` of its `Tooled<A, B>` input) and of
      its result. An empty list offers nothing and the
      request sends no `tools` field (decision 9).
    - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
@@ -234,10 +234,11 @@ program is tested without spending money.
    the model asks for.** A tool is a program to run. The caller chooses
    the programs offered: nothing defaults to every program a bundle or unit
    declares.
-   - A tool is a program whose input is `Tooled<A> { tree, args }`
-     (`bloomery.program.tooled`): the tree the call works on, which the loop
-     that runs the call binds, and the arguments `A`, which the model
-     writes. The model sees only `A`.
+   - A tool is a program whose input is `Tooled<A, B> { tree, args, bound }`
+     (`bloomery.program.tooled`): the tree the call works on and the
+     session-bound value `B` its offer carries (`NoBound` when it carries
+     none), which the loop that runs the call binds, and the arguments `A`,
+     which the model writes. The model sees only `A`.
    - `muse.turn` cannot read another bundle's declarations or link a
      program's types, so the caller renders each offered program with
      `aether_bloomery_program::tool_definition` (a responses-API function
@@ -245,7 +246,7 @@ program is tested without spending money.
      its dots mapped to dashes, and whose parameters are the schema of the
      arguments `A`, never the envelope), stages the JSON as a `Utf8Text`,
      and cites it in `tools`. The caller also stages `ToolSchema::of` the
-     program's arguments, the `A` of its `Tooled<A>` input, and of its
+     program's arguments, the `A` of its `Tooled<A, B>` input, and of its
      result (`bloomery.program.tool_schema`: the storage
      kind's name and its `SchemaType` as data) and cites both. The closure
      walk injects each definition and schema like any cited artifact, so
@@ -274,7 +275,7 @@ program is tested without spending money.
      arguments' kind or a refusal text: a fixed sentence naming the kind
      plus the parser's or codec's message. The recorded `ToolCall` cites
      which. A loop above the program runs decoded arguments as a
-     `Tooled<A>` over its current tree, and replays a refusal as the call's
+     `Tooled<A, B>` over its current tree and the offer's bound value, and replays a refusal as the call's
      `ToolOutput::Refused`.
    - When it builds the request, `muse.turn` renders each cited
      `ToolOutput::Result` with `decode_storage_schema` under a fixed value
@@ -337,8 +338,10 @@ program is tested without spending money.
 - A crash mid-turn loses that one paid reply: the driver records the open
   request `Interrupted` and never re-runs it. This is accepted in exchange
   for never buying a turn twice silently.
-- The driver runs one invocation per bundle root at a time, which bounds
-  the request rate far below the vendor's per-minute request limit. Long
+- The driver runs at most 16 invocations per bundle at once
+  (`InvocationLimit::DEFAULT`), and a session's own calls run one at a
+  time, which bounds the request rate far below the vendor's per-minute
+  request limit. Long
   stateless conversations press on tokens per minute instead; the program
   does not rate-limit.
 - Prompt-cache hits are the vendor's and are not guaranteed. The program
