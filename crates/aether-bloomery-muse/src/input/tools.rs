@@ -1,7 +1,8 @@
 //! The programs a turn offers as tools, and the calls a model asks for.
 //!
-//! A tool is a program to run. The caller names every offered program and
-//! cites the definition it rendered with
+//! A tool is a program to run. The caller names every offered program, the
+//! head of the bundle it lives in, which the loop calls it through, and cites
+//! the definition it rendered with
 //! `aether_bloomery_program::tool_definition`, so the recorded input holds
 //! exactly what was sent; nothing defaults to every declared program. The
 //! caller also cites the program's input and result schemas
@@ -18,15 +19,19 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Utf8Text};
+use aether_bloomery_kinds::{ErasedRef, Head, OpaqueBytes, ProgramName, Ref, Utf8Text};
 use aether_bloomery_program::{ToolDefinitionError, ToolSchema, function_name};
 
-/// One program offered to the model, with the definition sent for it, the
-/// schemas of its input and result, and the bound value the loop binds.
+/// One program offered to the model, with the head of the bundle it lives in,
+/// the definition sent for it, the schemas of its input and result, and the
+/// bound value the loop binds.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct OfferedTool {
     /// The program the model may ask to run.
     program: ProgramName,
+    /// The head of the bundle the program lives in, which the loop calls it
+    /// through. Never sent to the model.
+    head: Head<OpaqueBytes>,
     /// The cited responses-API function definition sent for the program: a
     /// JSON object whose `name` is the program's function name.
     definition: Ref<Utf8Text>,
@@ -42,24 +47,28 @@ pub struct OfferedTool {
 }
 
 impl OfferedTool {
-    /// Offer `program`, sending the cited `definition` for it, with the cited
-    /// schemas of its `input` and `result`, binding `bound` into every call.
+    /// Offer `program` from the bundle `head` resolves to, sending the cited
+    /// `definition` for it, with the cited schemas of its `input` and
+    /// `result`, binding `bound` into every call.
     #[must_use]
     pub const fn new(
         program: ProgramName,
+        head: Head<OpaqueBytes>,
         definition: Ref<Utf8Text>,
         input: Ref<ToolSchema>,
         bound: ErasedRef,
         result: Ref<ToolSchema>,
     ) -> Self {
-        Self { program, definition, input, bound, result }
+        Self { program, head, definition, input, bound, result }
     }
 
-    /// Whether `other` offers the same tool: the same program, definition,
-    /// and schemas, and a bound of the same kind, whatever its value.
+    /// Whether `other` offers the same tool: the same program from the same
+    /// bundle head, definition, and schemas, and a bound of the same kind,
+    /// whatever its value.
     #[must_use]
     pub fn same_tool(&self, other: &Self) -> bool {
         self.program == other.program
+            && self.head == other.head
             && self.definition == other.definition
             && self.input == other.input
             && self.result == other.result
@@ -70,6 +79,12 @@ impl OfferedTool {
     #[must_use]
     pub const fn program(&self) -> &ProgramName {
         &self.program
+    }
+
+    /// The head of the bundle the program lives in.
+    #[must_use]
+    pub const fn head(&self) -> &Head<OpaqueBytes> {
+        &self.head
     }
 
     /// The cited definition sent for the program.

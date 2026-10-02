@@ -139,6 +139,7 @@ pub mod tests {
         TurnInput, TurnItem, TurnItems, TurnItemsError,
     };
     use crate::result::TurnResult;
+    use crate::session::MUSE;
 
     /// `program` offered with a definition citing its own name and real schemas, bound to nothing.
     pub fn offered_tool(program: ProgramName) -> OfferedTool {
@@ -147,6 +148,7 @@ pub mod tests {
         let bound = Ref::of_encoded(&NoBound).expect("a bound encodes").erase();
         OfferedTool::new(
             program,
+            MUSE,
             definition,
             schema(ToolSchema::of::<TurnInput>()),
             bound,
