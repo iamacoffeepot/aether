@@ -151,6 +151,9 @@ CPU-side, so a `create_geometry` reply arrives without a booted GPU; the wgpu
 vertex and index buffers are realized lazily at the first draw pass that uses
 the geometry.
 
+The `vertices` and `indices` fields arrive as `Blob`s and are staged as received,
+with JSON callers sending the same byte arrays as before.
+
 `update_geometry` replaces both byte arrays wholesale against the layout fixed
 at create — the lengths may change, so a mesh may grow or shrink. It is
 fire-and-forget: an unknown id, or a replacement that fails the create-time

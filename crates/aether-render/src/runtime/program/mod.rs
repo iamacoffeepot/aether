@@ -397,6 +397,7 @@ fn blend_for(format: TextureFormat) -> Option<wgpu::BlendState> {
 mod rebuild_tests {
     use std::slice;
 
+    use aether_data::Blob;
     use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
     use aether_substrate::render::create_program_transient;
 
@@ -452,7 +453,7 @@ fn fs_solid() -> @location(0) vec4<f32> {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         }) else {
             panic!("writable texture create accepted");
         };

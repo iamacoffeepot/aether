@@ -11,6 +11,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
@@ -57,7 +58,7 @@ fn sampled_texture(pixels: Vec<u8>) -> CreateTexture {
         format: TextureFormat::Rgba8,
         sampling: TextureSampling::Nearest,
         usage: TextureUsage::Sampled,
-        pixels,
+        pixels: Blob::from(pixels),
     }
 }
 
@@ -68,7 +69,7 @@ fn writable_texture() -> CreateTexture {
         format: TextureFormat::Rgba8,
         sampling: TextureSampling::Linear,
         usage: TextureUsage::Writable,
-        pixels: Vec::new(),
+        pixels: Blob::from(Vec::new()),
     }
 }
 
@@ -92,8 +93,8 @@ fn triangle_geometry() -> CreateGeometry {
     let positions = [[-0.8f32, -0.8, 0.0], [0.8, -0.8, 0.0], [0.0, 0.8, 0.0]];
     CreateGeometry {
         layout: position_layout(),
-        vertices: positions.iter().flatten().flat_map(|value| value.to_le_bytes()).collect(),
-        indices: [0u32, 1, 2].iter().flat_map(|index| index.to_le_bytes()).collect(),
+        vertices: Blob::from(positions.iter().flatten().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>()),
+        indices: Blob::from([0u32, 1, 2].iter().flat_map(|index| index.to_le_bytes()).collect::<Vec<u8>>()),
     }
 }
 

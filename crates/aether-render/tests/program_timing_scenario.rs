@@ -27,6 +27,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
@@ -125,7 +126,7 @@ fn texture(harness: &mut SubstrateHarness, label: &'static str, usage: TextureUs
         format: TextureFormat::Rgba8,
         sampling: TextureSampling::Nearest,
         usage,
-        pixels,
+        pixels: Blob::from(pixels),
     };
     let created = harness
         .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail))])

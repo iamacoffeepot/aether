@@ -20,6 +20,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at};
@@ -141,7 +142,7 @@ fn oversized_texture_create_rejects_and_the_renderer_survives() {
             format: TextureFormat::R8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![255u8; 16_384],
+            pixels: Blob::from(vec![255u8; 16_384]),
         },
     );
     assert!(matches!(sampled, CreateTextureResult::Err { .. }), "an oversized sampled create must reject: {sampled:?}");
@@ -155,7 +156,7 @@ fn oversized_texture_create_rejects_and_the_renderer_survives() {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Nearest,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         },
     );
     assert!(
@@ -172,7 +173,7 @@ fn oversized_texture_create_rejects_and_the_renderer_survives() {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![255u8; 16],
+            pixels: Blob::from(vec![255u8; 16]),
         },
     );
     assert!(
@@ -283,7 +284,7 @@ fn destroyed_texture_ids_drop_cleanly_and_are_never_reissued() {
         format: TextureFormat::Rgba8,
         sampling: TextureSampling::Linear,
         usage: TextureUsage::Sampled,
-        pixels: vec![255u8; 16],
+        pixels: Blob::from(vec![255u8; 16]),
     };
     let CreateTextureResult::Ok { texture_id: first } = create_reply(&mut harness, "first", &opaque) else {
         panic!("the first create must be accepted");

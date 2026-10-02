@@ -8,6 +8,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
@@ -101,7 +102,7 @@ fn create_output(harness: &mut SubstrateHarness) -> u32 {
         format: TextureFormat::Rgba8,
         sampling: TextureSampling::Linear,
         usage: TextureUsage::Writable,
-        pixels: Vec::new(),
+        pixels: Blob::from(Vec::new()),
     };
     match harness
         .execute(vec![(
@@ -240,12 +241,15 @@ fn compute_derives_indirect_geometry_refreshes_after_update_and_recovers_after_d
 
     let mut harness =
         SubstrateHarness::builder().size(64, 48).with_render_pass_timings().build().expect("boot render harness");
-    let source =
-        CreateGeometry { layout: position_layout(), vertices: vertex_bytes(&CENTERED), indices: index_bytes(&INDICES) };
+    let source = CreateGeometry {
+        layout: position_layout(),
+        vertices: Blob::from(vertex_bytes(&CENTERED)),
+        indices: Blob::from(index_bytes(&INDICES)),
+    };
     let derived = CreateGeometry {
         layout: position_layout(),
-        vertices: vertex_bytes(&[[0.0; 3]; 3]),
-        indices: index_bytes(&[0, 0, 0]),
+        vertices: Blob::from(vertex_bytes(&[[0.0; 3]; 3])),
+        indices: Blob::from(index_bytes(&[0, 0, 0])),
     };
     let source_id = create_geometry(&mut harness, "source", &source);
     let derived_id = create_geometry(&mut harness, "derived", &derived);
@@ -271,8 +275,8 @@ fn compute_derives_indirect_geometry_refreshes_after_update_and_recovers_after_d
                 "aether.render",
                 &UpdateGeometry {
                     geometry_id: source_id,
-                    vertices: vertex_bytes(&SHIFTED_RIGHT),
-                    indices: index_bytes(&INDICES),
+                    vertices: Blob::from(vertex_bytes(&SHIFTED_RIGHT)),
+                    indices: Blob::from(index_bytes(&INDICES)),
                 },
             ),
             envelope("aether.render", &dispatch(program_id, output_id, source_id, derived_id)),

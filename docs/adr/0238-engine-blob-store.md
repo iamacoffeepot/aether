@@ -384,15 +384,22 @@ impl<'a> BlobReader<'a> {
     pub fn read_range(&self, offset: u64, buf: &mut [u8]) -> usize;   // does not move the cursor
 }
 
+// aether-data: the whole bytes as one slice, for an in-process consumer
+impl Blob {
+    pub fn contiguous(&self) -> Option<&[u8]>;   // None for a guest's FFI-backed hold
+}
+
 // host imports (crates/aether-substrate/src/actor/wasm/host_fns.rs); hash_ptr points at the 32-byte hash
 // "aether"."blob_hold_p32"(hash_ptr: u32) -> i64         // takes one hold; returns the length
 // "aether"."blob_read_p32"(hash_ptr: u32, offset: u64, dst_ptr: u32, dst_len: u32) -> i64
 // "aether"."blob_drop_p32"(hash_ptr: u32)                 // gives one hold back: GuestHold::drop
 ```
 
-- A `Blob` has no whole-bytes accessor. Reading streams everywhere, through
-  `BlobBacking::read_at`: the slice for `Owned`, the entry for native
-  `Shared`, the imports for guest `Shared`.
+- Reading streams everywhere, through `BlobBacking::read_at`: the slice for
+  `Owned`, the entry for native `Shared`, the imports for guest `Shared`.
+  `BlobReader` stays the only streaming reader. `Blob::contiguous` is the one
+  whole-bytes accessor: `Some` for owned bytes and engine store entries (an
+  owned buffer or a slab range), `None` for a guest's FFI-backed hold.
 - The caller supplies the buffer. The host copies at most `MAX_READ_BYTES` per
   call and returns the length (negative for a hash the guest does not hold).
   `blob_drop_p32` on a hash the guest does not hold logs a warning and does
@@ -402,8 +409,9 @@ impl<'a> BlobReader<'a> {
 - Streaming is the paradigm on both sides: a caller has to ask why it would
   load something large into memory. A caller can still loop the reader into a
   `Vec`; nothing makes it the easy path, and the loop is visible in review.
-- There is no zero-copy view yet. One arrives as its own API when a consumer
-  needs contiguous bytes, such as the render cap uploading textures.
+- Render texture and geometry staging is the consumer of `contiguous`: the
+  render cap stages the received `Blob` and uploads straight from its slice,
+  refusing at the mail door a blob that is not contiguous in this process.
 - `blob_hold_p32` refuses a hash the table neither pins nor holds.
   `blob_hold_p32` and `blob_drop_p32` are a matched pair: a guest `Blob`'s
   construction and its `GuestHold`'s `Drop`. `blob_read_p32` has a named
@@ -478,7 +486,7 @@ meaning.
   needs its own issue and a named in-engine consumer.
 - **Other consumers.** Process stdout, captures, HTTP bodies, and future
   mostly-static graphics data (meshes, textures) held as blobs and uploaded by
-  the render cap, the likely first consumer of a zero-copy view.
+  the render cap, which already stages received blobs through `Blob::contiguous`.
 - **Naming.** `actor/native/blob/` meant ADR-0087's unit of dispatch when this
   ADR was written; that unit is now the burst (`actor/native/burst/`, #6781).
   The store's module is `store/`, with the internal types `BlobStore` /
@@ -494,7 +502,6 @@ meaning.
     instance ends.
 - **Follow-on.**
   - Chunked wire transfer, when a consumer sends large values off-process.
-  - A zero-copy view, when a consumer needs contiguous bytes.
   - Guest-side creation needs no new mechanism: a guest builds an `Owned`
     value with `Blob::from`, and its first in-process send copies it to the
     host once.

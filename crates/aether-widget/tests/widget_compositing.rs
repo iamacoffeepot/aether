@@ -39,7 +39,7 @@ use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt
 use aether_render::RenderCapability;
 use std::fs;
 
-use aether_data::Kind;
+use aether_data::{Blob, Kind};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{
     envelope, init_save_sandbox, require_runtime, test_namespace_roots,
@@ -157,7 +157,7 @@ fn create_four_color_texture(harness: &mut SubstrateHarness) -> u32 {
                     format: TextureFormat::Rgba8,
                     sampling: TextureSampling::Linear,
                     usage: TextureUsage::Sampled,
-                    pixels: four_color_texture_pixels(size),
+                    pixels: Blob::from(four_color_texture_pixels(size)),
                 },
             ),
         )])

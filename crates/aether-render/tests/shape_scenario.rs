@@ -10,6 +10,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, coverage, decode_png};
 use aether_harness_substrate_capture::{
@@ -268,7 +269,7 @@ fn a_textured_shape_samples_the_image_inside_its_rounded_coverage() {
                     format: TextureFormat::Rgba8,
                     sampling: TextureSampling::Linear,
                     usage: TextureUsage::Sampled,
-                    pixels: vec![255, 0, 0, 255, 0, 0, 255, 255],
+                    pixels: Blob::from(vec![255, 0, 0, 255, 0, 0, 255, 255]),
                 },
             ),
         )])

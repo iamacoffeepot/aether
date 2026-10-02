@@ -18,6 +18,7 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_substrate::session_ids::SessionIds;
 
 use crate::MEMORY_FONT_NAMESPACE;
+use aether_data::Blob;
 use aether_fs::FsError;
 #[allow(unused_imports)]
 pub use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
@@ -202,7 +203,7 @@ impl TextCapabilityState {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: self.atlas.pixels().to_vec(),
+            pixels: Blob::from(self.atlas.pixels().to_vec()),
         };
         // Address the render cap through the lineage-correct resolver
         // (ADR-0099); `send` propagates this handler's chain by default
