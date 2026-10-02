@@ -270,8 +270,8 @@ mod tests {
     fn request_resends_every_item_in_order_with_store_off() {
         // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, a
         // conversation handle, an extra header, the wrong method, URL, or timeout, and a reasoning effort not threaded
-        // into the timeout, a misspelled wire value for `xhigh` or `max` (the endpoint refuses `x-high`), and a new effort left
-        // on a shorter wait.
+        // into the timeout, a misspelled wire value for `xhigh` or `max` (the endpoint refuses `x-high`), and a new
+        // effort left on a shorter wait.
         let texts = ["Be brief.", "What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
         let roles = [Role::Developer, Role::User, Role::Assistant, Role::User];
         let items = roles.iter().zip(&texts).map(|(&role, text)| TurnItem::message(role, Ref::of_text(text))).collect();
