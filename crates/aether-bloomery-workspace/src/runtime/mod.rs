@@ -119,6 +119,7 @@ impl NativeActor for WorkspaceCapability {
             output_max_entries = config.output_max_entries,
             output_max_bytes = config.output_max_bytes,
             prefetch_bytes = config.prefetch_bytes,
+            warm_layers = config.warm_layers,
             "workspace actor configured",
         );
         let engine = Engine::new(endpoint);
@@ -126,7 +127,7 @@ impl NativeActor for WorkspaceCapability {
             importer: Importer { engine: engine.clone(), rules: Rules::userland(import_limits) },
             imports: TaskQueue::new(config.max_in_flight),
             runs: RunQueue::new(
-                Runner { engine, pids, output },
+                Runner { engine, pids, output, warm_layers: config.warm_layers },
                 Budget::new(&cpuset, budget_memory_bytes),
                 Estimates::new(defaults, headroom, ceiling),
             ),
@@ -186,16 +187,18 @@ impl NativeActor for WorkspaceCapability {
     /// `Err(Exhausted(Time | Memory))` when a step outran the allotment, after
     /// which a retry is given twice as much of it, up to the budget; or
     /// `Err(Failed { detail })` when the executor failed. No container and no
-    /// `/work` volume is left behind; the environment image and the mount
-    /// volumes stay as rebuildable derivatives. Every input is read from `source` and every output
+    /// `/work` volume is left behind; the environment image, the mount
+    /// volumes, and with warm layers on the bottom layer a run builds over
+    /// stay as rebuildable derivatives. Every input is read from `source` and every output
     /// staged to it; an `Ok` answers only once every stage is answered, and
     /// what a run that ends any other way staged is cited by nothing. The
     /// reply lands when the whole run is done.
     #[handler::request]
     fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
         let Run { source, request } = mail;
+        let unit = source.to_string();
         match ctx.resolve(&source) {
-            Ok(source) => state.runs.submit(ctx, &mut state.desk, source, request),
+            Ok(source) => state.runs.submit(ctx, &mut state.desk, source, unit, request),
             Err(error) => {
                 tracing::info!(target: "aether_bloomery_workspace", %error, "run refused: its source is not live");
                 let (pending, held) = ctx.hold::<RunResult>();

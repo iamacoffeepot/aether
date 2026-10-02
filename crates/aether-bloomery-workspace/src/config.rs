@@ -1,10 +1,11 @@
 //! Resolved configuration for the `aether.bloomery.workspace` actor (ADR-0237
-//! decisions 8 and 9, ADR-0090). The Engine API endpoint and its TLS files,
-//! the import bounds, the host budget runs are provisioned from, the default
-//! allotment a run key never seen gets, the fixed per-container limits, and
-//! the read budget one run reads ahead under are configuration resolved at
-//! chassis boot (argv > env > file > default) and handed to `init`; the actor
-//! reads no environment variable of its own, and never `DOCKER_HOST`.
+//! decisions 8, 9, and 11, ADR-0090). The Engine API endpoint and its TLS
+//! files, the import bounds, the host budget runs are provisioned from, the
+//! default allotment a run key never seen gets, the fixed per-container
+//! limits, the read budget one run reads ahead under, and whether runs build
+//! over warm layers are configuration resolved at chassis boot (argv > env >
+//! file > default) and handed to `init`; the actor reads no environment
+//! variable of its own, and never `DOCKER_HOST`.
 //!
 //! The actor chooses each run's cores, memory, and deadline itself (decision
 //! 9): the budget knobs state what it may hand out, and whatever the host
@@ -114,6 +115,15 @@ pub struct WorkspaceConfig {
     /// written. Default 256 MiB. Below 8 or above 4 GiB refuses boot.
     #[cfg_attr(feature = "runtime", config(default = 268_435_456u64))]
     pub prefetch_bytes: u64,
+    /// Whether runs build over warm layers (`AETHER_WORKSPACE_WARM_LAYERS`,
+    /// ADR-0237 decision 11). When on, a run whose tree holds a root
+    /// `Cargo.lock` and whose cargo target directory is a scratch path builds
+    /// there over a read-only bottom layer kept per unit, run key, and lock,
+    /// under a copy-on-write overlay of its own. Layers are daemon volumes,
+    /// rebuildable and never in a result. Default `false`: every run builds
+    /// cold.
+    #[cfg_attr(feature = "runtime", config(default = false))]
+    pub warm_layers: bool,
 }
 
 impl Default for WorkspaceConfig {
@@ -139,6 +149,7 @@ impl Default for WorkspaceConfig {
             output_max_entries: 1_000_000,
             output_max_bytes: 8 << 30,
             prefetch_bytes: 256 << 20,
+            warm_layers: false,
         }
     }
 }

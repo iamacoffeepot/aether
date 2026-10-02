@@ -3,11 +3,13 @@
 //! Each container and the `/work` volume is registered the moment the daemon
 //! answers its create, and [`Cleanup::finish`] removes them all: every
 //! container first (a volume a container still names cannot go), then every
-//! volume. A failed removal does not stop the others. The environment image
-//! and the mount data and pointer volumes stay; they are rebuildable
-//! derivatives of the journal, named by digest and checked before every use.
-//! A freshly written mount data volume stays registered until its pointer is
-//! created, so a lost pointer race or a failed write still removes it.
+//! volume. A failed removal does not stop the others. The environment image,
+//! the mount data and pointer volumes, and complete layer data and pointer
+//! volumes stay; they are rebuildable derivatives, named by digest and
+//! checked before every use. A freshly written mount or layer data volume
+//! stays registered until its pointer is created, so a lost pointer race or a
+//! failed write still removes it. A warm run's overlay and its upper and work
+//! volumes are the run's own and always removed.
 
 use std::error::Error;
 use std::fmt;
@@ -32,15 +34,16 @@ impl<'engine> Cleanup<'engine> {
     }
 
     /// Remove `volume` when the run ends, after every container. Only the
-    /// `/work` volume and a mount data volume still being written are ever
-    /// registered; mount data and pointer volumes that outlive the run are
+    /// run's own volumes (`/work`, a warm run's overlay and its upper and work
+    /// volumes) and a mount or layer data volume still being written are ever
+    /// registered; data and pointer volumes that outlive the run are
     /// rebuildable derivatives and stay.
     pub fn volume(&mut self, volume: VolumeName) {
         self.volumes.push(volume);
     }
 
-    /// Stop removing `volume` when the run ends, once its mount pointer
-    /// proves it complete.
+    /// Stop removing `volume` when the run ends, once its mount or layer
+    /// pointer proves it complete.
     pub fn release(&mut self, volume: &VolumeName) {
         self.volumes.retain(|held| held != volume);
     }

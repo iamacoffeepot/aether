@@ -85,13 +85,15 @@ fn inspect<'mounts>(
     let pointer = VolumeName::new(&format!("{POINTER_PREFIX}{hex}"))
         .map_err(|error| RunError::Shape(format!("a mount pointer name for {hex} is not a volume name: {error}")))?;
 
-    let labels = engine.volume_labels(&pointer).map_err(engine_failed(format!("inspecting mount volume {pointer}")))?;
-    let found = if let Some(labels) = labels {
-        Found::Hit(pointed(&labels, &hex)?)
+    let inspected =
+        engine.inspect_volume(&pointer).map_err(engine_failed(format!("inspecting mount volume {pointer}")))?;
+    let found = if let Some(pointing) = inspected {
+        Found::Hit(pointed(&pointing.labels, &hex)?)
     } else {
         let data = engine
-            .create_volume(None, &BTreeMap::from([(MOUNT_LABEL, hex.as_str())]))
-            .map_err(engine_failed(format!("creating the {path} volume")))?;
+            .create_volume(None, &BTreeMap::from([(MOUNT_LABEL, hex.as_str())]), &BTreeMap::new())
+            .map_err(engine_failed(format!("creating the {path} volume")))?
+            .name;
         cleanup.volume(data.clone());
         Found::Miss { pointer, data }
     };
@@ -149,15 +151,15 @@ fn point(
     data: VolumeName,
 ) -> Result<VolumeName, Stop> {
     let labels = BTreeMap::from([(MOUNT_LABEL, hex), (DATA_LABEL, data.as_str())]);
-    match engine.create_volume(Some(pointer), &labels) {
+    match engine.create_volume(Some(pointer), &labels, &BTreeMap::new()) {
         Ok(_) => {
             cleanup.release(&data);
             Ok(data)
         }
         Err(EngineError::Status { status: 409, .. }) => engine
-            .volume_labels(pointer)
+            .inspect_volume(pointer)
             .map_err(engine_failed(format!("inspecting mount volume {pointer}")))?
-            .map_or_else(|| Err(Stop::refused(Refusal::MountUnavailable)), |labels| pointed(&labels, hex)),
+            .map_or_else(|| Err(Stop::refused(Refusal::MountUnavailable)), |pointing| pointed(&pointing.labels, hex)),
         Err(error) => Err(engine_failed(format!("creating mount volume {pointer}"))(error).into()),
     }
 }

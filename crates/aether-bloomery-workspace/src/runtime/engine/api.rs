@@ -77,6 +77,36 @@ impl fmt::Display for VolumeName {
     }
 }
 
+/// What the daemon answers about a volume, on create and on inspect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Volume {
+    pub name: VolumeName,
+    pub labels: BTreeMap<String, String>,
+    /// `Mountpoint`: where the volume's driver keeps it on the daemon's host,
+    /// when the daemon reports one.
+    pub mountpoint: Option<String>,
+}
+
+impl Volume {
+    /// Read a `Volume` object, as `POST /volumes/create` and
+    /// `GET /volumes/{name}` both answer it.
+    fn from_answer(answer: &Value) -> Result<Self, EngineError> {
+        let name = answer
+            .get("Name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::Protocol("a volume answer without a Name".to_owned()))?;
+        let labels = answer
+            .get("Labels")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+            .collect();
+        let mountpoint = answer.get("Mountpoint").and_then(Value::as_str).map(str::to_owned);
+        Ok(Self { name: VolumeName::new(name)?, labels, mountpoint })
+    }
+}
+
 /// What `GET /info` says the daemon runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonPlatform {
@@ -219,44 +249,39 @@ impl Engine {
         progress::drain(body).map_err(UploadError::Engine)
     }
 
-    /// The labels of the volume `name`, or `None` when the daemon holds
-    /// no such volume.
-    pub fn volume_labels(&self, name: &VolumeName) -> Result<Option<BTreeMap<String, String>>, EngineError> {
+    /// The volume `name`, or `None` when the daemon holds no such volume.
+    pub fn inspect_volume(&self, name: &VolumeName) -> Result<Option<Volume>, EngineError> {
         let target = format!("/{API_VERSION}/volumes/{name}");
         let response = self.call(Method::Get, &target, RequestBody::Empty)?;
         if response.status == 404 {
             return Ok(None);
         }
-        let inspect = read_json(response.success()?)?;
-        let labels = inspect
-            .get("Labels")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
-            .collect();
-        Ok(Some(labels))
+        Volume::from_answer(&read_json(response.success()?)?).map(Some)
     }
 
     /// Create a volume carrying `labels`, named by the daemon when `name` is
-    /// `None` and named `name` otherwise.
+    /// `None` and named `name` otherwise. Non-empty `options` are the `local`
+    /// driver's `DriverOpts`, the mount it performs when a container first
+    /// uses the volume.
     pub fn create_volume(
         &self,
         name: Option<&VolumeName>,
         labels: &BTreeMap<&str, &str>,
-    ) -> Result<VolumeName, EngineError> {
+        options: &BTreeMap<&str, &str>,
+    ) -> Result<Volume, EngineError> {
         let mut body = json!({ "Labels": labels });
         if let Some(name) = name {
             body["Name"] = name.as_str().into();
         }
+        if !options.is_empty() {
+            body["Driver"] = "local".into();
+            body["DriverOpts"] = json!(options);
+        }
         let body = body.to_string();
         let target = format!("/{API_VERSION}/volumes/create");
-        let created = read_json(self.call(Method::Post, &target, RequestBody::Json(body.as_bytes()))?.success()?)?;
-        let name = created
-            .get("Name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::Protocol("a volume create answer without a Name".to_owned()))?;
-        VolumeName::new(name)
+        Volume::from_answer(&read_json(
+            self.call(Method::Post, &target, RequestBody::Json(body.as_bytes()))?.success()?,
+        )?)
     }
 
     /// Remove the volume, even if a container still names it.

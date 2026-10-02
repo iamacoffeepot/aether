@@ -30,7 +30,7 @@ use std::path::PathBuf;
 
 use rustls::pki_types::ServerName;
 
-pub use api::{ContainerId, VolumeName, Waited};
+pub use api::{ContainerId, Volume, VolumeName, Waited};
 pub use tls::TlsEndpoint;
 pub use transport::Transport;
 

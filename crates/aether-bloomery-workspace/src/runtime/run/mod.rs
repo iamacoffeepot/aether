@@ -13,19 +13,24 @@
 //!    importing the root as a filesystem tar when it does not.
 //! 3. [`volumes`] creates the `/work` volume and [`mounts`] makes sure the
 //!    daemon holds each mount's tree, writing a missed one through a helper
-//!    container that never starts.
+//!    container that never starts. With warm layers on, [`layers`] makes the
+//!    volume a warm run builds in at cargo's target directory: its own
+//!    overlay over a complete bottom layer, or a fresh bottom layer to write.
 //! 4. [`step`] runs each step in its own container over the shared `/work`
 //!    volume, under the sandbox pins and the run's [`Allotment`], which the
 //!    actor's provisioning chose; the run tree is written into the first
 //!    step's container before it starts. Each step's peak memory is sampled
-//!    while it runs. The steps stop after the first non-zero exit.
+//!    while it runs. The steps stop after the first non-zero exit. A bottom
+//!    layer the run wrote is marked complete once its steps ran.
 //! 5. [`output`] decodes the last container's `/work` into a tree, minus
-//!    `scratch`.
+//!    `scratch`. A warm run reads it from a collector container holding only
+//!    the `/work` volume and never started, since an archive of a step's
+//!    container would carry the layer nested under `/work`.
 //! 6. [`cleanup`] removes every container and the `/work` volume on every
 //!    path; then, for an `Ok`, the last stage is answered before the reply.
-//!    The environment image and the mount volumes stay: they are rebuildable
-//!    derivatives of the journal, named by digest and checked before every
-//!    use.
+//!    The environment image, the mount volumes, and complete bottom layers
+//!    stay: they are rebuildable derivatives, named by digest and checked
+//!    before every use.
 //!
 //! Every read and stage goes through the run's [`StorageSession`]: outputs
 //! are staged as they are produced, and a run that ends any other way than
@@ -42,6 +47,7 @@
 
 mod cleanup;
 mod environment;
+mod layers;
 mod mounts;
 mod output;
 mod resolve;
@@ -60,7 +66,7 @@ use aether_bloomery_kinds::{Detail, Ref, Tree};
 use aether_bloomery_tar::{DecodeError, EncodeError, Limits, encode};
 
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
-use super::provision::CpuSet;
+use super::provision::{CpuSet, RunKey};
 use super::storage::{StorageError, StorageSession};
 // The reply's error enum, named apart from this module's own `RunError`,
 // the executor fault it carries the cause of.
@@ -97,6 +103,8 @@ pub struct Runner {
     pub pids: u32,
     /// The bounds the output `/work` decodes under.
     pub output: Limits,
+    /// Whether runs build over warm layers (ADR-0237 decision 11).
+    pub warm_layers: bool,
 }
 
 /// A run's answer and what was observed of it.
@@ -120,9 +128,18 @@ pub struct Observed {
 
 impl Runner {
     /// Run the sequence under `allotment`, reading and staging through
-    /// `session`, and answer it.
-    pub fn answer(&self, run: &RunRequest, allotment: &Allotment, mut session: StorageSession) -> Ran {
-        match self.sequence(run, allotment, &mut session) {
+    /// `session`, and answer it. `unit` and `key` name the warm layer the
+    /// run builds over.
+    pub fn answer(
+        &self,
+        run: &RunRequest,
+        unit: &str,
+        key: RunKey,
+        allotment: &Allotment,
+        mut session: StorageSession,
+    ) -> Ran {
+        let warm = Warm { unit, key };
+        match self.sequence(run, warm, allotment, &mut session) {
             Ok((outcome, observed)) => Ran { result: answer(Ok(outcome)), observed },
             Err(stop) => Ran { result: answer(Err(stop)), observed: Observed::default() },
         }
@@ -132,6 +149,7 @@ impl Runner {
     fn sequence(
         &self,
         run: &RunRequest,
+        warm: Warm<'_>,
         allotment: &Allotment,
         session: &mut StorageSession,
     ) -> Result<(Outcome, Observed), Stop> {
@@ -139,7 +157,7 @@ impl Runner {
         resolve::platform(&self.engine, &resolved.environment.platform)?;
 
         let mut cleanup = Cleanup::new(&self.engine);
-        let ran = self.in_daemon(session, run, &resolved, allotment, &mut cleanup);
+        let ran = self.in_daemon(session, run, warm, &resolved, allotment, &mut cleanup);
         let finished = settle(ran, cleanup.finish())?;
         session.finish().map_err(|error| RunError::storage("staging the run's outputs", error))?;
         Ok(finished)
@@ -152,16 +170,25 @@ impl Runner {
         &self,
         session: &mut StorageSession,
         run: &RunRequest,
+        warm: Warm<'_>,
         resolved: &Resolved,
         allotment: &Allotment,
         cleanup: &mut Cleanup<'_>,
     ) -> Result<(Outcome, Observed), Stop> {
         let image = environment::ensure(&self.engine, session, &run.environment, &resolved.environment.root)?;
         let volumes = volumes::prepare(&self.engine, cleanup, session, &image, &run.mounts)?;
+        let layer = self
+            .warm_layers
+            .then(|| layers::wanted(warm.unit, warm.key, run, &resolved.environment.env, resolved.lock))
+            .flatten()
+            .map(|wanted| layers::prepare(&self.engine, cleanup, wanted))
+            .transpose()?
+            .flatten();
         let sandbox = step::Sandbox {
             image: &image,
             volumes: &volumes,
             scratch: &run.scratch,
+            layer: layer.as_ref(),
             network: run.network,
             allotment,
             pids: self.pids,
@@ -191,10 +218,36 @@ impl Runner {
         }
         let last = last.ok_or_else(|| RunError::Shape("a run with no steps reached the daemon".to_owned()))?;
         let observed = Observed { peak_memory_bytes, wall: Some(exited.saturating_duration_since(started)) };
+        if let Some(layer) = &layer {
+            layers::complete(&self.engine, cleanup, layer);
+        }
 
-        let tree = output::collect(&self.engine, session, &last, &run.scratch, self.output)?;
+        let archived = match layer {
+            Some(_) => collector(&self.engine, cleanup, &image, &volumes)?,
+            None => last,
+        };
+        let tree = output::collect(&self.engine, session, &archived, &run.scratch, self.output)?;
         Ok((Outcome { steps, tree }, observed))
     }
+}
+
+/// What names the warm layer a run builds over: the unit, its source's path
+/// text, and the run key.
+#[derive(Clone, Copy)]
+struct Warm<'a> {
+    unit: &'a str,
+    key: RunKey,
+}
+
+/// A container holding only the `/work` volume, created and never started,
+/// for the output archive: a step's container would also carry the warm layer
+/// nested under `/work`.
+fn collector(engine: &Engine, cleanup: &mut Cleanup<'_>, image: &str, volumes: &Volumes) -> Result<ContainerId, Stop> {
+    let work = [(Volumes::WORK_PATH.to_owned(), volumes.work.clone())];
+    let container =
+        engine.create(&volumes::helper_spec(image, &work)).map_err(engine_failed("creating the output collector"))?;
+    cleanup.container(container.clone());
+    Ok(container)
 }
 
 /// Map a sequence's end onto the reply. The only place a [`RunError`] becomes
