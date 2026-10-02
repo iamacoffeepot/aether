@@ -305,7 +305,8 @@ the sandbox, or they make the program `Sampled`.
    | Admission | Decision 9. Docker enforces each container's allotment (`CpusetCpus`, `NanoCpus`, `Memory` = `MemorySwap`, `PidsLimit`); it does not admit or queue. |
 
    *(Amended 2026-09-24: no tree touches a host directory. Run: after
-   `containers/create`, the run's tree streams as a canonical tar to
+   `containers/create`, the run's tree streams as a canonical tar (with
+   decision 11's freshness stamps over a complete warm layer) to
    `PUT /containers/{id}/archive?path=/work`, and each `Mount` tree to its
    declared path, before `start`. Output: `GET /containers/{id}/archive?path=/work`
    returns a tar that decodes into the output tree, minus `scratch`; mount
@@ -390,6 +391,7 @@ the sandbox, or they make the program `Sampled`.
    | Bottom layer | One per (unit, run key): the unit of ADR-0240 and the run key of decision 9. The first run for that key writes it; a Muse lane's warm-up proof over the base commit at session open is that run. After that it is read-only. It records the digest of the `Cargo.lock` it was built over, and a run whose tree carries a different `Cargo.lock` writes a new one; a changed environment is a new run key. A layer is trusted only once it is marked complete after its write, as a mount's pointer volume is (`crates/aether-bloomery-workspace/src/runtime/run/mounts.rs`). |
    | Top layer | Every run gets its own copy-on-write overlay over the bottom layer: a Docker `local`-driver volume of type `overlay`, attached at cargo's target directory and removed with the run, so no run sees another's writes. It works unprivileged and adds about one second to a run. |
    | Location | Daemon volumes: the bottom layer is a data volume behind a pointer volume, and the top layer is the overlay volume over an upper and a work volume of the run's own. The overlay options take the volumes' `Mountpoint`s as the Engine API reports them. The daemon writes and removes every layer byte, so no host directory is created, and a remote daemon serves layers as a local one does: a step writes as uid 0, so its copy-ups could not be removed from a host directory by an actor that is not root, and an actor cannot reach a remote daemon's host at all. A workspace `Config` switch turns layers on; with it off, runs build cold as before. |
+   | Freshness | Every file reaches `/work` through the tar codec at the canonical 1980 mtime, and cargo reuses a path crate's build when no source file is newer than it, so an unstamped upload would keep the first build's result for every crate. The pointer records the digest of the tree the bottom layer was built over (`aether.workspace.layer.tree`), and a run over a complete layer uploads its tree with every file, executable, or symlink that differs from that base tree stamped with the run's wall-clock start; everything else, directories included, keeps the canonical mtime. The diff is part of the encode walk, and a subtree equal to the base's is not compared further. Every run compares against the layer's base, never the previous run, because the layer's artifacts match that tree and no other: an edit made after any earlier run is still newer than the layer, and a file reverted to its base content is fresh again. A pointer that records no tree stamps every file. A fresh layer's run uploads the canonical stream, since its layer holds no build output yet. The base tree is not part of the layer's key, so a moving tree does not multiply bottom layers. |
    | Journal | Records nothing about layers. The bytes stay on the executor; removing the layer volumes costs only the next run's warm-up. |
 
    Measured on the build host, workspace clippy took 75 s cold, about 5 s
@@ -453,7 +455,12 @@ Prerequisites (follow-on issues):
    canonical order: sorted entries, fixed ownership, mode, and mtime. It
    serves the run's input and output (decision 8) and the imports, which
    read a distro tarball directly and a toolchain directory tarred once.
-   There is no tree ↔ directory operation, since nothing consumes one.)*
+   The run's input upload over a complete warm layer differs only in file
+   mtimes: each file that differs from the layer's base tree carries the
+   run's start (decision 11's Freshness row). That stream is only ever
+   uploaded, never hashed or decoded, so every tree identity stays the
+   canonical stream's. There is no tree ↔ directory operation, since
+   nothing consumes one.)*
 
    *(Amended 2026-09-25: the imports read the export stream of a container
    created from a digest-pinned image (decision 3), not a distro tarball or

@@ -19,9 +19,11 @@
 //! 4. [`step`] runs each step in its own container over the shared `/work`
 //!    volume, under the sandbox pins and the run's [`Allotment`], which the
 //!    actor's provisioning chose; the run tree is written into the first
-//!    step's container before it starts. Each step's peak memory is sampled
-//!    while it runs. The steps stop after the first non-zero exit. A bottom
-//!    layer the run wrote is marked complete once its steps ran.
+//!    step's container before it starts, with the files that differ from a
+//!    complete layer's base tree stamped with the run's start (decision 11's
+//!    Freshness row). Each step's peak memory is sampled while it runs. The
+//!    steps stop after the first non-zero exit. A bottom layer the run wrote
+//!    is marked complete once its steps ran, recording the run's tree.
 //! 5. [`output`] decodes the last container's `/work` into a tree, minus
 //!    `scratch`. A warm run reads it from a collector container holding only
 //!    the `/work` volume and never started, since an archive of a step's
@@ -60,10 +62,10 @@ mod tests;
 use std::error::Error;
 use std::fmt;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_bloomery_kinds::{Detail, Ref, Tree};
-use aether_bloomery_tar::{DecodeError, EncodeError, Limits, encode};
+use aether_bloomery_tar::{DecodeError, EncodeError, Limits, Stamp, encode, encode_stamped};
 
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
 use super::provision::{CpuSet, RunKey};
@@ -195,6 +197,8 @@ impl Runner {
             base_env: &resolved.environment.env,
         };
 
+        let started_secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        let stamp = layer.as_ref().and_then(|layer| layer.stamp(started_secs));
         let started = Instant::now();
         let deadline = started.checked_add(allotment.deadline).unwrap_or(started + FAR_FUTURE);
         let mut steps = Vec::with_capacity(run.steps.as_slice().len());
@@ -204,7 +208,7 @@ impl Runner {
         for (step, tool) in run.steps.as_slice().iter().zip(&resolved.tools) {
             let container = step::create(&self.engine, cleanup, &sandbox, tool, step)?;
             if last.is_none() {
-                write_tree(&self.engine, session, &container, Volumes::WORK_PATH, &run.tree)?;
+                write_tree(&self.engine, session, &container, Volumes::WORK_PATH, &run.tree, stamp.as_ref())?;
             }
             let ran = step::run(&self.engine, session, &container, step, tool, deadline)?;
             let exited_zero = ran.outcome.exit_code == Some(0);
@@ -219,7 +223,7 @@ impl Runner {
         let last = last.ok_or_else(|| RunError::Shape("a run with no steps reached the daemon".to_owned()))?;
         let observed = Observed { peak_memory_bytes, wall: Some(exited.saturating_duration_since(started)) };
         if let Some(layer) = &layer {
-            layers::complete(&self.engine, cleanup, layer);
+            layers::complete(&self.engine, cleanup, layer, &run.tree);
         }
 
         let archived = match layer {
@@ -285,16 +289,22 @@ fn settle<T>(ran: Result<T, Stop>, removed: Result<(), CleanupError>) -> Result<
     }
 }
 
-/// Stream the stored tree `tree` into the container at the absolute `path`.
+/// Stream the stored tree `tree` into the container at the absolute `path`:
+/// canonical, or under `stamp` when it is a run's tree written over a
+/// complete warm layer.
 fn write_tree(
     engine: &Engine,
     session: &mut StorageSession,
     container: &ContainerId,
     path: &str,
     tree: &Ref<Tree>,
+    stamp: Option<&Stamp>,
 ) -> Result<(), Stop> {
     engine
-        .put_archive(container, path, |out| encode(tree, &mut session.reader(), out))
+        .put_archive(container, path, |out| match stamp {
+            Some(stamp) => encode_stamped(tree, stamp, &mut session.reader(), out),
+            None => encode(tree, &mut session.reader(), out),
+        })
         .map_err(|error| upload_stop(format!("writing {path} into container {container}"), error))
 }
 

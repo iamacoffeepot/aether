@@ -7,10 +7,10 @@ use std::convert::Infallible;
 use aether_bloomery_kinds::{Name, NameError, Node, OpaqueBytes, Path, PathError, Ref, Tree};
 
 use super::{DecodeError, Limits, LimitsError, Refusal, Rules, decode};
-use crate::MAX_DEPTH;
 use crate::block::{BLOCK_BYTES, Header, padding_len, seal, typeflag};
 use crate::pax;
 use crate::store::{BlobWriter, TreeSink};
+use crate::{CANONICAL_MTIME_SECS, MAX_DEPTH};
 
 /// Hashes what it is handed and keeps nothing: these tests compare
 /// references, never read a blob back.
@@ -45,7 +45,8 @@ impl TreeSink for HashingSink {
 }
 
 fn header(name: &[u8], flag: u8, size: u64, link: &str) -> [u8; BLOCK_BYTES] {
-    Header { name, typeflag: flag, mode: 0o644, size, linkname: link.as_bytes() }.to_block()
+    Header { name, typeflag: flag, mode: 0o644, size, linkname: link.as_bytes(), mtime: CANONICAL_MTIME_SECS }
+        .to_block()
 }
 
 /// A header followed by its content and padding.

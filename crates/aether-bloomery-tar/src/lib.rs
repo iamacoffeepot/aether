@@ -25,8 +25,10 @@
 //! | Header | POSIX magic `ustar\0`, version `00`, empty prefix, zero devmajor and devminor, zero-padded NUL-terminated octal numbers, checksum `%06o\0 `. |
 //! | Extended header | One PAX `x` block named `././@PaxHeader` before an entry exactly when its path or link target is non-ASCII or longer than 100 bytes, or its size is at least 8 GiB. It holds only the `linkpath`, `path`, and `size` records, sorted by key. The ustar name and linkname fields then hold the longest prefix that fits in 100 bytes, cut on a char boundary, and the size field holds 0 when `size` is a record. |
 //! | End | Exactly two zero blocks, no padding to a record size. |
+//! | Stamped | [`encode_stamped()`] differs only in file mtimes: a File, Executable, or Symlink its [`Stamp`]'s base lacks at the same path, or holds as another node, carries the stamp's mtime. Never hashed; every tree identity stays the canonical stream's. |
 //!
-//! The mtime is a constant, never read from the environment.
+//! The canonical mtime is a constant, never read from the environment; a
+//! stamp's mtime comes from its caller.
 //!
 //! # Decoding
 //!
@@ -77,7 +79,7 @@ mod pax;
 mod store;
 
 pub use decode::{DecodeError, Limits, LimitsError, Refusal, Rules, decode};
-pub use encode::{EncodeError, encode};
+pub use encode::{EncodeError, Stamp, encode, encode_stamped};
 pub use store::{BlobWriter, SourceBlob, TreeSink, TreeSource};
 
 /// The most path segments an entry may have, on both sides of the codec.
