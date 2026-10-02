@@ -9,12 +9,12 @@
 //! `continue` sent after `wait` returns always finds that record.
 //!
 //! A fault or failed reaction in the session's chain is reported after the
-//! rest it led to, and `wait` exits non-zero naming it. A tool run that ran
-//! out of time or memory is not one: the loop runs it again or answers the
-//! call saying so, and the session goes on. A second one in the
+//! rest it led to, and `wait` exits non-zero naming it. A second one in the
 //! same chain, or a failed head move, means the session cannot record itself
 //! (its failed record failed too), so the follow stops there instead of
-//! waiting for a rest that will not come.
+//! waiting for a rest that will not come. A tool run that ran out of time or
+//! memory is neither: the loop runs it again or answers the call saying so,
+//! and the session goes on.
 
 use std::collections::HashSet;
 
