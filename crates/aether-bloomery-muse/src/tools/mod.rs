@@ -2,9 +2,10 @@
 //!
 //! Every tool's input is `Tooled<A, B>`: the session's current tree and the
 //! bound value `B` its offer carries, which the loop binds, and the arguments
-//! `A` the model writes. Every tool here binds `NoBound`. [`offered`] is the
-//! set `muse.session.open` accepts: `tree.edit` and `tree.write`, which read
-//! only the tree nodes and blobs they touch and return an `Edited` tree;
+//! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
+//! to and binds `NoBound`. [`offered`] is the set `muse.session.open` accepts:
+//! `tree.edit` and `tree.write`, which read only the tree nodes and blobs they
+//! touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
 //! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
@@ -28,7 +29,7 @@ mod write;
 
 use std::iter;
 
-use aether_bloomery_kinds::{EncodedArtifact, Ref, Refusal};
+use aether_bloomery_kinds::{EncodedArtifact, Head, OpaqueBytes, Ref, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_data::{Schema, Storage};
 
@@ -42,7 +43,7 @@ pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 
 use crate::input::{OfferedTool, OfferedTools};
-use crate::session::program_name;
+use crate::session::{MUSE, program_name};
 
 /// The most bytes of text one tool call may write or match: 1 MiB.
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
@@ -58,13 +59,13 @@ pub const MAX_TEXT_BYTES: usize = 1 << 20;
 #[must_use]
 pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
     let (tools, artifacts): (Vec<_>, Vec<_>) = [
-        bound::<Echo>(),
-        bound::<TreeEdit>(),
-        bound::<TreeWrite>(),
-        bound::<TreeList>(),
-        bound::<TreeRead>(),
-        bound::<TreeGrep>(),
-        bound::<End>(),
+        bound::<Echo>(MUSE),
+        bound::<TreeEdit>(MUSE),
+        bound::<TreeWrite>(MUSE),
+        bound::<TreeList>(MUSE),
+        bound::<TreeRead>(MUSE),
+        bound::<TreeGrep>(MUSE),
+        bound::<End>(MUSE),
     ]
     .into_iter()
     .unzip();
@@ -73,9 +74,10 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
 
-/// `P` as a bound tool, and the artifacts its offer cites. Every tool bound
-/// here binds nothing beyond the tree, so its offer carries the `NoBound` value.
-fn bound<P: Program>() -> (OfferedTool, Vec<EncodedArtifact>)
+/// `P` as a bound tool from the bundle `head` resolves to, and the artifacts
+/// its offer cites. Every tool bound here binds nothing beyond the tree, so its
+/// offer carries the `NoBound` value.
+fn bound<P: Program>(head: Head<OpaqueBytes>) -> (OfferedTool, Vec<EncodedArtifact>)
 where
     P::Input: ToolArguments<Bound = NoBound>,
     P::Result: Schema,
@@ -87,6 +89,7 @@ where
     let bound = EncodedArtifact::new(&NoBound).expect("the bound encodes");
     let tool = OfferedTool::new(
         program_name::<P>(),
+        head,
         Ref::of_text(&definition),
         input,
         Ref::<NoBound>::from_digest(bound.digest()).erase(),
