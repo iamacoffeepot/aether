@@ -5,9 +5,10 @@ use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree, Utf8Text};
 use aether_bloomery_program::{Env, Program, Sync, program};
 
 use crate::input::{CallId, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems};
-use crate::result::{TurnOutcome, TurnResult};
+use crate::result::{TurnOutcome, TurnResult, TurnUsage};
 use crate::session::replay::replay;
 use crate::session::state::{Failure, RestReason, Session, SessionItems};
+use crate::tools::{Ending, end_position};
 
 /// One call's output, answering the call with the same id.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -29,6 +30,12 @@ impl CallAnswer {
     #[must_use]
     pub const fn call_id(&self) -> &CallId {
         &self.call_id
+    }
+
+    /// The answer's output.
+    #[must_use]
+    pub const fn output(&self) -> &ToolOutput {
+        &self.output
     }
 
     /// The answer as the conversation item that replays it.
@@ -116,13 +123,21 @@ pub struct SessionRecord;
 /// Records a session at the end of an activation: the last turn's
 /// conversation followed by its reply, or by its calls and their outputs.
 ///
-/// A turn that rested the session and answered, stopped early, or refused adds
-/// one assistant message with its text or refusal, except a turn that stopped
-/// early with no text, which adds nothing: the session then ends on what that
-/// turn sent, so a continue can resend it as it stands. A turn that asked for
-/// calls adds its text when not empty, every call, and the outputs, which must
-/// answer the calls exactly and in order, and rests at the turn limit, or with
-/// `ContextFull` when it reached the session's input limit.
+/// A turn that ended the run through `muse.end` adds its text, every call,
+/// and the outputs, which must answer the calls exactly and in order, and
+/// rests with `Completed`, `Blocked`, or `Asked` by the end call's variant:
+/// `Done`, `Blocked`, or `Asked`. An end call without a readable `Ending`
+/// output refuses rather than resting with a guessed reason. A turn that answered,
+/// stopped early, or refused adds one assistant message with its text or
+/// refusal, except a turn that stopped early with no text, which adds nothing:
+/// the session then ends on what that turn sent, so a continue can resend it
+/// as it stands. A turn that asked for calls and reached a limit adds its
+/// text when not empty, every call, and the outputs, which must answer the
+/// calls exactly and in order, and rests at the turn limit, or with
+/// `ContextFull` when it reached the session's input limit. A reply without
+/// calls only rests at a limit, so its arm rests like the called arm: with
+/// `ContextFull` past the turn's input limit, and with `TurnLimit` at the
+/// turn limit.
 ///
 /// A failed session records the last turn's conversation, followed, when that
 /// turn asked for calls, by its text, the calls answered before the failure,
@@ -143,7 +158,8 @@ impl Program for SessionRecord {
         let (items, rested) = match input.end {
             TurnEnd::Rested(answered) => {
                 let result = env.injected(answered.result)?;
-                let (reply, rested) = rest(&turn, result.outcome(), &answered.outputs)?;
+                let ended = ended(env, result.outcome(), &answered.outputs)?;
+                let (reply, rested) = rest(&turn, result.outcome(), &answered.outputs, ended)?;
                 (session_items(turn.items().iter().cloned().chain(reply).collect())?, rested)
             }
             TurnEnd::Failed { failure, answered } => {
@@ -173,17 +189,42 @@ fn session_items(items: Vec<TurnItem>) -> Result<SessionItems, Refusal> {
     SessionItems::new(items).map_err(|error| refused(&format!("the session's items: {error}")))
 }
 
-/// What `outcome` adds to the conversation and why it rests the session: a
-/// called turn that reached the cited turn's input limit rests `ContextFull`
-/// instead of `TurnLimit`.
+/// The `Ending` of the turn's end call, read from the closure, when the
+/// outcome's calls include a decoded `muse.end` call, with its text staged for
+/// the closing message to cite. An end call without a readable result refuses
+/// rather than resting with a guessed reason.
+fn ended(env: &mut Env<Sync>, outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<Option<Ending>, Refusal> {
+    let TurnOutcome::Called { calls, .. } = outcome else {
+        return Ok(None);
+    };
+    if !answers(calls.as_slice(), outputs) {
+        return Ok(None);
+    }
+    let Some(position) = end_position(calls.as_slice()) else {
+        return Ok(None);
+    };
+    let result = match outputs[position].output() {
+        ToolOutput::Result { result, .. } => result.cast::<Ending>(),
+        ToolOutput::Refused(_) => None,
+    };
+    let Some(result) = result else {
+        return Err(refused("the end call has no readable end result"));
+    };
+    let ending = env.injected(result).map_err(|_| refused("the end call has no readable end result"))?;
+    env.stage_text(ending.text());
+    Ok(Some(ending))
+}
+
+/// What `outcome` adds to the conversation and why it rests the session.
 fn rest(
     turn: &TurnInput,
     outcome: &TurnOutcome,
     outputs: &[CallAnswer],
+    ended: Option<Ending>,
 ) -> Result<(Vec<TurnItem>, RestReason), Refusal> {
     let said = |text: &Ref<Utf8Text>| vec![TurnItem::message(Role::Assistant, *text)];
     match (outcome, outputs.is_empty()) {
-        (TurnOutcome::Completed { text, .. }, true) => Ok((said(text), RestReason::Completed)),
+        (TurnOutcome::Completed { text, usage, .. }, true) => Ok((said(text), limited(turn, usage))),
         (TurnOutcome::Incomplete { text, .. }, true) if *text == Ref::of_text("") => {
             Ok((Vec::new(), RestReason::Incomplete))
         }
@@ -191,15 +232,27 @@ fn rest(
         (TurnOutcome::Declined { refusal, .. }, true) => Ok((said(refusal), RestReason::Declined)),
         (TurnOutcome::Called { calls, text, usage, .. }, _) if answers(calls.as_slice(), outputs) => {
             let reply = replay(*text, calls.as_slice(), outputs);
-            let rested = if turn.input_limit().reached(usage.input_tokens()) {
-                RestReason::ContextFull
-            } else {
-                RestReason::TurnLimit
-            };
-            Ok((reply, rested))
+            match ended {
+                Some(ending) => {
+                    let rested = ending.rest_reason();
+                    let closing = TurnItem::message(Role::Assistant, Ref::of_text(ending.text()));
+                    Ok((reply.into_iter().chain([closing]).collect(), rested))
+                }
+                None => Ok((reply, limited(turn, usage))),
+            }
         }
         (TurnOutcome::Called { .. }, _) => Err(refused("the outputs do not answer the turn's calls in order")),
         _ => Err(refused("the turn's outcome does not rest a session with these outputs")),
+    }
+}
+
+/// Why a turn that goes on but reached a limit rests: with `ContextFull` past
+/// the cited turn's input limit, and with `TurnLimit` at the turn limit.
+fn limited(turn: &TurnInput, usage: &TurnUsage) -> RestReason {
+    if turn.input_limit().reached(usage.input_tokens()) {
+        RestReason::ContextFull
+    } else {
+        RestReason::TurnLimit
     }
 }
 
@@ -234,19 +287,30 @@ fn refused(reason: &str) -> Refusal {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Detail, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Detail, ErasedRef, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_program::{Program, ToolSchema};
+    use aether_data::Kind;
 
     use super::{Answered, CallAnswer, RecordInput, SessionRecord};
     use crate::input::tests::call;
-    use crate::input::{CallId, OfferedTools, Role, ToolCalls, ToolOutput, TurnInput, TurnItem, TurnItems};
+    use crate::input::{CallId, OfferedTools, Role, ToolCall, ToolCalls, ToolOutput, TurnInput, TurnItem, TurnItems};
     use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
     use crate::session::fixture::{run, settings, stored};
     use crate::session::state::{Failure, RestReason, Session};
+    use crate::tools::{End, EndArgs, Ending};
 
     const USAGE: TurnUsage = TurnUsage::new(0, 0, 0, 0);
 
     fn answer(id: &str) -> CallAnswer {
         CallAnswer::new(CallId::new(id).expect("call id"), ToolOutput::Refused(Ref::of_text(id)))
+    }
+
+    /// `id` answered with `ending` as the call's stored output.
+    fn ended_answer(id: &str, ending: &Ending) -> CallAnswer {
+        let schema = ToolSchema::of::<Ending>();
+        let digest = Ref::of_encoded(ending).expect("an ending encodes").digest();
+        let output = ToolOutput::result(Ref::of_encoded(&schema).expect("a schema encodes"), &schema, digest);
+        CallAnswer::new(CallId::new(id).expect("call id"), output)
     }
 
     fn user() -> TurnItem {
@@ -265,6 +329,15 @@ mod tests {
         ToolCalls::new(vec![call("a", "muse.echo"), call("b", "muse.echo")]).expect("calls")
     }
 
+    /// A call list of one decoded `muse.end` call `id` over `ending`.
+    fn end_calls(id: &str, ending: &Ending) -> ToolCalls {
+        let args = Ref::of_encoded(&EndArgs::new(ending.clone())).expect("end arguments encode");
+        let input = ErasedRef::new(EndArgs::ID, args.digest());
+        let program = ProgramName::new(End::NAME).expect("program name");
+        let call = ToolCall::decoded(CallId::new(id).expect("call id"), program, Ref::of_text("{}"), input);
+        ToolCalls::new(vec![call]).expect("calls")
+    }
+
     fn called() -> TurnOutcome {
         TurnOutcome::Called { calls: calls(), text: Ref::of_text("Checking."), usage: USAGE }
     }
@@ -276,6 +349,18 @@ mod tests {
     /// Run `input`'s record over its cited `turn` and `result`.
     fn record(turn: &TurnInput, result: &TurnResult, input: &RecordInput) -> Result<Session, Refusal> {
         run::<SessionRecord>(input, vec![stored(turn), stored(result)])
+    }
+
+    /// Run `input`'s record over its cited `turn`, `result`, and `endings`.
+    fn record_with(
+        turn: &TurnInput,
+        result: &TurnResult,
+        endings: &[Ending],
+        input: &RecordInput,
+    ) -> Result<Session, Refusal> {
+        let mut closure = vec![stored(turn), stored(result)];
+        closure.extend(endings.iter().map(stored));
+        run::<SessionRecord>(input, closure)
     }
 
     #[test]
@@ -297,7 +382,7 @@ mod tests {
         let completed = rested(TurnOutcome::Completed { text: Ref::of_text("done"), usage: USAGE }, Vec::new())
             .expect("a completed turn records");
         assert_eq!(completed.items(), [user(), TurnItem::message(Role::Assistant, Ref::of_text("done"))]);
-        assert_eq!(*completed.rested(), RestReason::Completed);
+        assert_eq!(*completed.rested(), RestReason::TurnLimit);
         assert_eq!(*completed.settings(), turn.settings());
 
         let limited = rested(called(), vec![answer("a"), answer("b")]).expect("an answered turn records");
@@ -317,6 +402,30 @@ mod tests {
         for outputs in [vec![answer("a")], vec![answer("b"), answer("a")]] {
             assert!(matches!(rested(called(), outputs), Err(Refusal::Refused { .. })), "outputs must answer in order");
         }
+    }
+
+    #[test]
+    fn a_text_only_completed_turn_at_or_past_the_input_limit_rests_like_a_called_one() {
+        // Catches a nudged-out session resting `Completed`: the loop only records a reply without calls at a limit, so
+        // the recorder must label it the way the called arm does.
+        let turn = turn(vec![user()]);
+        let limit = turn.input_limit().get();
+        assert!(limit > 0, "the fixture limit is non-zero");
+        let rested = |input_tokens| {
+            let usage = TurnUsage::new(input_tokens, 0, 0, 0);
+            let result = result(TurnOutcome::Completed { text: Ref::of_text("done"), usage });
+            let input = RecordInput::rested(
+                Ref::of_encoded(&turn).expect("turn"),
+                Ref::of_encoded(&result).expect("result"),
+                Vec::new(),
+                tree(),
+            );
+            record(&turn, &result, &input).expect("a completed turn at a limit records")
+        };
+
+        assert_eq!(*rested(limit).rested(), RestReason::ContextFull);
+        assert_eq!(*rested(u64::MAX).rested(), RestReason::ContextFull);
+        assert_eq!(*rested(limit - 1).rested(), RestReason::TurnLimit);
     }
 
     #[test]
@@ -360,10 +469,79 @@ mod tests {
 
         let below = rested(called_at(limit - 1), vec![answer("a"), answer("b")]).expect("a turn below records");
         assert_eq!(*below.rested(), RestReason::TurnLimit);
+    }
 
-        let completed = rested(TurnOutcome::Completed { text: Ref::of_text("done"), usage: usage(limit) }, Vec::new())
-            .expect("a completed turn records");
-        assert_eq!(*completed.rested(), RestReason::Completed);
+    #[test]
+    fn each_end_variant_records_its_calls_outputs_and_text_last_with_its_reason() {
+        // Catches a variant mapped to the wrong reason or a dropped closing text.
+        let turn = turn(vec![user()]);
+        let rested = |ending: Ending| {
+            let outcome = TurnOutcome::Called {
+                calls: end_calls("end", &ending),
+                text: Ref::of_text("Finishing up."),
+                usage: USAGE,
+            };
+            let outcome = result(outcome);
+            let input = RecordInput::rested(
+                Ref::of_encoded(&turn).expect("turn"),
+                Ref::of_encoded(&outcome).expect("result"),
+                vec![ended_answer("end", &ending)],
+                tree(),
+            );
+            record_with(&turn, &outcome, &[ending], &input).expect("an ended turn records")
+        };
+
+        let ending = Ending::Done { summary: "All briefed changes are in the tree.".into() };
+        let done = rested(ending.clone());
+        assert_eq!(
+            done.items(),
+            [
+                user(),
+                TurnItem::message(Role::Assistant, Ref::of_text("Finishing up.")),
+                TurnItem::Call(end_calls("end", &ending).as_slice()[0].clone()),
+                ended_answer("end", &ending).item(),
+                TurnItem::message(Role::Assistant, Ref::of_text("All briefed changes are in the tree.")),
+            ]
+        );
+        assert_eq!(*done.rested(), RestReason::Completed);
+
+        let ending = Ending::Blocked { reason: "The store is unreachable.".into() };
+        let blocked = rested(ending);
+        assert_eq!(*blocked.rested(), RestReason::Blocked);
+        assert_eq!(
+            blocked.items().last(),
+            Some(&TurnItem::message(Role::Assistant, Ref::of_text("The store is unreachable.")))
+        );
+
+        let ending = Ending::Asked { question: "Which file holds the brief?".into() };
+        let asked = rested(ending);
+        assert_eq!(*asked.rested(), RestReason::Asked);
+        assert_eq!(
+            asked.items().last(),
+            Some(&TurnItem::message(Role::Assistant, Ref::of_text("Which file holds the brief?")))
+        );
+    }
+
+    #[test]
+    fn an_end_call_without_a_readable_result_refuses() {
+        // Catches a rest that guesses a reason when the end call's output is missing, refused, or of another kind.
+        let turn = turn(vec![user()]);
+        let ending = Ending::Done { summary: "All briefed changes are in the tree.".into() };
+        let outcome =
+            TurnOutcome::Called { calls: end_calls("end", &ending), text: Ref::of_text("Finishing up."), usage: USAGE };
+        let outcome = result(outcome);
+        let rested = |outputs| {
+            let input = RecordInput::rested(
+                Ref::of_encoded(&turn).expect("turn"),
+                Ref::of_encoded(&outcome).expect("result"),
+                outputs,
+                tree(),
+            );
+            record(&turn, &outcome, &input)
+        };
+
+        assert!(matches!(rested(vec![answer("end")]), Err(Refusal::Refused { .. })), "a refused end output refuses");
+        assert!(matches!(rested(vec![answer("other")]), Err(Refusal::Refused { .. })), "a missing end output refuses");
     }
 
     #[test]

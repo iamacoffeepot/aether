@@ -145,7 +145,8 @@ enum Classified {
 ///    read with no tool, so [`record`] refuses it back to the model. It is `Unreadable` instead when a call id is not
 ///    a valid `CallId` or repeats, a name is not a valid `FunctionName`, or the calls outnumber
 ///    `ToolCalls::MAX_CALLS`.
-/// 10. A vendor status of `incomplete` is `Incomplete`; `completed` is `Completed`; any other is `Unreadable`.
+/// 10. A vendor status of `incomplete` is `Incomplete`; `completed` without a call is `Completed`, which the loop
+///     answers with another turn; any other is `Unreadable`.
 ///
 /// A `Transient` outcome carries `retry_after_secs` as read. The text is every
 /// `output_text` part of every `message` output item, concatenated in order.

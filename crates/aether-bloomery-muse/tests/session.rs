@@ -13,11 +13,11 @@ use aether_bloomery_kinds::{
     decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
-    Answered, ContinueInput, Echo, EchoResult, Endpoint, Failure, InputLimit, ModelName, MuseSession, MuseTurn,
-    OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput, RestReason, Role, Session,
-    SessionContinue, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep,
-    TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings,
-    Viewed, offered,
+    Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
+    MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput,
+    RestReason, Role, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput,
+    ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit,
+    TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -33,12 +33,13 @@ const CALLED_EDIT_WRITE: &str = include_str!("../fixtures/called_edit_write.json
 const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_read_edit_grep.json");
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
-const COMPLETED: &str = include_str!("../fixtures/completed.json");
+const ENDED: &str = include_str!("../fixtures/ended.json");
 const CONTEXT_FULL: &str = include_str!("../fixtures/context_full.json");
 const INCOMPLETE_BUDGET: &str = include_str!("../fixtures/incomplete_budget.json");
 const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
-const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
+/// The summary the `ended.json` fixture's `muse-end` call ends the run with.
+const SUMMARY: &str = "Every briefed change is in the tree.";
 const URL: &str = "https://example.test/v1/responses";
 const QUESTION: &str = "Echo alpha and beta, then say what a bloomery is.";
 const INSTRUCTIONS: &str = "Work through the tree with only the offered tree tools.";
@@ -257,6 +258,7 @@ impl Driver {
         let invoked = match program.name().as_str() {
             name if name == MuseTurn::NAME => self.turn(invocation),
             name if name == Echo::NAME => invoke::<Echo>(invocation),
+            name if name == End::NAME => invoke::<End>(invocation),
             name if name == TreeEdit::NAME => self.run_async::<TreeEdit>(invocation),
             name if name == TreeWrite::NAME => self.run_async::<TreeWrite>(invocation),
             name if name == TreeList::NAME => self.run_async::<TreeList>(invocation),
@@ -531,12 +533,12 @@ fn assert_warm_and_live_agree(driver: &Driver) {
 }
 
 #[test]
-fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() -> TestResult {
+fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestResult {
     // Catches calls run out of order or over the wrong input, a next turn that is not an exact extension of the
     // previous one or that `muse.turn` refuses, instructions lost between the open and the fetch, a limit counting
     // tool calls instead of turns, a rest recorded from the wrong turn, a first head move comparing against anything
     // but an unbound head, and folds that diverge between warm-up and live delivery.
-    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED]);
     let (opened, tree) = open(&mut driver, 2)?;
     let first_input = driver.first_turn(opened);
     let opening = asked(&driver, opened);
@@ -587,17 +589,34 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     assert_eq!(next_call.name.as_str(), MuseTurn::NAME);
     assert_eq!(next_call.input, CallInput::Value(encoded(&next)), "the next turn extends the first exactly");
     let second_turn = driver.follow(trigger);
-    let second_result = driver.transition(second_turn).result;
+    let (_, calls) = called(&driver.result(second_turn));
+    let [end] = calls.as_slice() else {
+        panic!("expected the end call, got {calls:?}");
+    };
+    assert_eq!(end.name().expect("a decoded call names its tool"), "muse-end");
+    let ended_call = asked(&driver, second_turn);
+    assert_eq!(ended_call.name.as_str(), End::NAME);
+    assert_eq!(ended_call.input, bound(tree, end), "the end call runs over the tree and its ending");
+    let ended_run = driver.follow(second_turn);
+    let ended: Ending = driver.result(ended_run);
+    assert_eq!(ended, Ending::Done { summary: SUMMARY.into() });
 
-    let record = RecordInput::rested(Ref::of_encoded(&next)?, Ref::from_digest(second_result), Vec::new(), tree);
-    let record_call = asked(&driver, second_turn);
-    assert_eq!(record_call.name.as_str(), SessionRecord::NAME);
-    assert_eq!(record_call.input, CallInput::Value(encoded(&record)), "the completed turn is recorded");
-    let recorded = driver.follow(second_turn);
+    let next_call = asked(&driver, ended_run);
+    assert_eq!(next_call.name.as_str(), SessionRecord::NAME, "the ended turn is recorded, not turned");
+    let recorded = driver.follow(ended_run);
     let session: Session = driver.result(recorded);
     assert_eq!(*session.rested(), RestReason::Completed);
-    let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
-    assert_eq!(session.items().split_last(), Some((&answer, next.items())));
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    let (last, recorded_items) = session.items().split_last().expect("a recorded session has items");
+    assert_eq!(last, &summary, "the summary closes the session");
+    let ended_turn = &recorded_items[next.items().len()..];
+    assert_eq!(&recorded_items[..next.items().len()], next.items(), "the session extends the second turn");
+    assert!(
+        matches!(ended_turn, [TurnItem::Message { .. }, TurnItem::Call(call), TurnItem::CallOutput { call_id, .. }]
+            if call == end && call_id == end.call_id()),
+        "the ended turn's text, its end call, and the call's output come before the summary, got {ended_turn:?}"
+    );
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, tree));
 
     let (moved, heads) = driver.move_heads(recorded);
     let to = Ref::from_digest(driver.transition(recorded).result);
@@ -624,7 +643,7 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
 fn a_call_whose_arguments_do_not_decode_goes_straight_to_the_next_turn() -> TestResult {
     // Catches a refused decode run as a tool, or answered with anything but the refusal `muse.turn` stored.
     let refusing = CALLED_ECHO.replace(r#"{\"text\": \"alpha\"}"#, "not json").replace(r#"{\"text\": \"beta\"}"#, "[]");
-    let mut driver = Driver::new(&[&refusing, COMPLETED]);
+    let mut driver = Driver::new(&[&refusing, ENDED]);
     let (opened, _) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -659,11 +678,11 @@ fn a_call_whose_arguments_do_not_decode_goes_straight_to_the_next_turn() -> Test
 }
 
 #[test]
-fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_completes() -> TestResult {
+fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_ends() -> TestResult {
     // Catches a session dropped over a call to a tool the turn did not offer, that call run as a tool or answered
     // with anything but its stored refusal, its output out of order with the offered call's result, and a replay
     // under any name but the one the model wrote.
-    let mut driver = Driver::new(&[CALLED_UNOFFERED, COMPLETED]);
+    let mut driver = Driver::new(&[CALLED_UNOFFERED, ENDED]);
     let (opened, tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -703,8 +722,31 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_co
     driver.settle(echoed);
     let session: Session = driver.value(driver.head(SessionKey::new(opened)));
     assert_eq!(*session.rested(), RestReason::Completed);
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(session.items().last(), Some(&summary));
     assert_warm_and_live_agree(&driver);
     Ok(())
+}
+
+/// The `muse-end` arguments the `ended.json` fixture carries, spelled as they
+/// sit in the fixture's escaped string.
+const DONE_ARGUMENTS: &str = r#"{\"ending\": {\"Done\": {\"summary\": \"Every briefed change is in the tree.\"}}}"#;
+
+/// The `ended.json` reply under another call id, for a later turn of a
+/// session that already holds its call: a conversation's call ids are unique.
+fn ended_again() -> String {
+    ENDED.replace(r#""call_end""#, r#""call_end_again""#)
+}
+
+/// The `ended.json` reply with its `muse-end` arguments replaced by `ending`,
+/// escaped as the fixture's arguments string is.
+fn ended_with(ending: &Ending) -> String {
+    let (variant, field, text) = match ending {
+        Ending::Done { summary } => ("Done", "summary", summary),
+        Ending::Blocked { reason } => ("Blocked", "reason", reason),
+        Ending::Asked { question } => ("Asked", "question", question),
+    };
+    ENDED.replace(DONE_ARGUMENTS, &format!(r#"{{\"ending\": {{\"{variant}\": {{\"{field}\": \"{text}\"}}}}}}"#))
 }
 
 /// The payload `artifact` stores.
@@ -796,7 +838,8 @@ fn a_failed_rule_rests_the_session_and_a_fault_of_that_rest_ends_it_without_loop
 fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues() -> TestResult {
     // Catches a refused head move that is recorded again (which could overwrite another mover's head), and a
     // continue refused from the record the head still names because the unmoved record replaced it.
-    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED, COMPLETED, COMPLETED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, &again, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -804,7 +847,8 @@ fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues
 
     let resumed = continue_from(&mut driver, key, first, "And iron?", 2);
     let resumed_turn = driver.follow(resumed);
-    let recorded = driver.follow(resumed_turn);
+    let ended = driver.follow(resumed_turn);
+    let recorded = driver.follow(ended);
     let refused = reaction_failed(&mut driver, recorded, "set_heads compare-and-swap mismatch");
     assert!(driver.intents(refused).is_empty(), "a refused head move records nothing more");
     assert_eq!(driver.head(key), first);
@@ -812,7 +856,8 @@ fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues
     let again = continue_from(&mut driver, key, first, "And steel?", 2);
     assert_eq!(asked_at(&driver, again), MuseTurn::NAME, "the head's record still continues");
     let again_turn = driver.follow(again);
-    let rested = driver.follow(again_turn);
+    let ended = driver.follow(again_turn);
+    let rested = driver.follow(ended);
     let (moved, heads) = driver.move_heads(rested);
     assert_eq!(heads.changes()[0].from(), Some(first), "the rest compares against the head");
     assert!(driver.intents(moved).is_empty());
@@ -847,7 +892,8 @@ fn a_bare_turn_is_never_a_session() -> TestResult {
 fn a_continue_resumes_only_from_the_latest_record_of_a_resting_session() -> TestResult {
     // Catches a continue run over a stale record or into an activation already in progress, and a later rest
     // that does not compare against the session's previous record.
-    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED, COMPLETED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -861,7 +907,8 @@ fn a_continue_resumes_only_from_the_latest_record_of_a_resting_session() -> Test
     assert!(driver.intents(doubled).is_empty(), "a continue into an activation in progress runs nothing");
 
     let resumed_turn = driver.follow(resumed);
-    let recorded = driver.follow(resumed_turn);
+    let ended = driver.follow(resumed_turn);
+    let recorded = driver.follow(ended);
     let (_, heads) = driver.move_heads(recorded);
     let to = Ref::from_digest(driver.transition(recorded).result);
     assert_eq!(heads.changes(), [HeadChange::new(&key.head(), Some(Ref::from_digest(first)), to)]);
@@ -878,7 +925,8 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     // Catches a limit that counts tool calls instead of turns, a count that does not reset on continue, a limit
     // rest that sends another turn or records other items than the next turn would have sent, and a rested
     // session that cannot be continued.
-    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED, CALLED_ECHO_MORE, COMPLETED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, CALLED_ECHO_MORE, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -902,8 +950,8 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     driver.settle(resumed);
     let completed: Session = driver.value(driver.head(key));
     assert_eq!(*completed.rested(), RestReason::Completed);
-    let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
-    assert_eq!(completed.items().last(), Some(&answer));
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(completed.items().last(), Some(&summary));
     assert_eq!(completed.items()[..session.items().len()], *session.items(), "the resumed session extends its rest");
 
     assert_warm_and_live_agree(&driver);
@@ -915,7 +963,7 @@ fn a_session_rests_full_when_a_turn_reaches_its_input_limit_and_a_continue_resum
     // Catches a loop that sends one more vendor turn past fullness, a rest that drops the calls' outputs, a
     // `ContextFull` session no continue can pick up, and, in the second run, a diversion firing early and stalling
     // a healthy session.
-    let mut driver = Driver::new(&[CONTEXT_FULL, COMPLETED]);
+    let mut driver = Driver::new(&[CONTEXT_FULL, ENDED]);
     let (opened, tree) = open_limited(&mut driver, 4, 900)?;
     let first_turn = driver.follow(opened);
 
@@ -949,17 +997,17 @@ fn a_session_rests_full_when_a_turn_reaches_its_input_limit_and_a_continue_resum
     driver.settle(resumed);
     let completed: Session = driver.value(driver.head(key));
     assert_eq!(*completed.rested(), RestReason::Completed);
-    let answer = TurnItem::message(Role::Assistant, Ref::of_text(ANSWER));
-    assert_eq!(completed.items().last(), Some(&answer));
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(completed.items().last(), Some(&summary));
     assert_eq!(completed.items()[..session.items().len()], *session.items(), "the resumed session extends its rest");
 
     assert_warm_and_live_agree(&driver);
 
-    let mut driver = Driver::new(&[CONTEXT_FULL, COMPLETED]);
+    let mut driver = Driver::new(&[CONTEXT_FULL, ENDED]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let completed: Session = driver.value(driver.head(SessionKey::new(opened)));
-    assert_eq!(*completed.rested(), RestReason::Completed, "under a large limit the same replies complete");
+    assert_eq!(*completed.rested(), RestReason::Completed, "under a large limit the same replies end done");
 
     assert_warm_and_live_agree(&driver);
     Ok(())
@@ -970,7 +1018,8 @@ fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> 
     // Catches a call run over a tree other than the latest, an `Edited` result whose tree the loop drops, a rest
     // that records the opened tree instead of the edited one, a continue that forgets the tree its record rested
     // with, and folds that diverge between warm-up and live delivery.
-    let mut driver = Driver::new(&[CALLED_EDIT_WRITE, COMPLETED, CALLED_WRITE, COMPLETED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_EDIT_WRITE, ENDED, CALLED_WRITE, &again]);
     let (opened, opened_tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -1037,7 +1086,7 @@ fn a_transient_turn_waits_out_retry_after_then_resends_the_same_turn() -> TestRe
     // clock, a resent turn that is re-encoded or rebuilt instead of naming the stored input, a retry counted
     // against the turn limit (the next called turn would then rest at the limit), and warm/live divergence in the
     // wait and retry folds.
-    let replies = [Reply::refused(429, RATE_LIMITED, Some(7)), Reply::ok(CALLED_ECHO), Reply::ok(COMPLETED)];
+    let replies = [Reply::refused(429, RATE_LIMITED, Some(7)), Reply::ok(CALLED_ECHO), Reply::ok(ENDED)];
     let mut driver = Driver::replying(replies.into());
     driver.now_millis = 1_000;
     let (opened, _) = open(&mut driver, 2)?;
@@ -1070,7 +1119,7 @@ fn a_transient_turn_waits_out_retry_after_then_resends_the_same_turn() -> TestRe
 fn a_timed_out_turn_backs_off_then_resends_the_same_turn() -> TestResult {
     // Catches a timed-out fetch that ends the session instead of retrying, a retry that waits no backoff, and a
     // resent turn rebuilt instead of naming the stored input.
-    let mut driver = Driver::replying([Reply::failed(HttpError::Timeout), Reply::ok(COMPLETED)].into());
+    let mut driver = Driver::replying([Reply::failed(HttpError::Timeout), Reply::ok(ENDED)].into());
     let (opened, _) = open(&mut driver, 2)?;
     let first_input = driver.first_turn(opened);
 
@@ -1121,7 +1170,7 @@ fn a_turn_refused_past_the_retry_cap_rests_the_session_failed_and_a_continue_ret
     // Catches an unbounded retry loop, a cap off by one, a backoff that does not grow, a retry count lost across
     // waits, a turn failure left unrecorded or citing another turn's result, and a failed rest a continue cannot
     // pick up with the conversation the refused turn sent.
-    let replies = (0..4).map(|_| Reply::refused(503, OVERLOADED, None)).chain([Reply::ok(COMPLETED)]).collect();
+    let replies = (0..4).map(|_| Reply::refused(503, OVERLOADED, None)).chain([Reply::ok(ENDED)]).collect();
     let mut driver = Driver::replying(replies);
     let (opened, _) = open(&mut driver, 2)?;
     let mut turn = driver.follow(opened);
@@ -1163,7 +1212,7 @@ fn a_turn_out_of_budget_rests_on_what_it_sent_and_a_continue_resends_it_with_a_l
     // Catches an empty assistant message recorded after a turn that spent its budget on reasoning, a resend that
     // appends anything to the conversation the failed turn sent or changes its cache key, and a budget the
     // continue does not send.
-    let mut driver = Driver::new(&[INCOMPLETE_BUDGET, COMPLETED]);
+    let mut driver = Driver::new(&[INCOMPLETE_BUDGET, ENDED]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -1204,7 +1253,7 @@ fn a_turn_out_of_budget_rests_on_what_it_sent_and_a_continue_resends_it_with_a_l
 fn a_session_lists_reads_edits_and_greps_its_tree_and_rests_with_the_edit() -> TestResult {
     // Catches a read-only result the loop mistakes for an edit, a read-only tool the loop cannot run, and folds
     // that diverge between warm-up and live delivery.
-    let mut driver = Driver::new(&[CALLED_LIST_READ_EDIT_GREP, COMPLETED]);
+    let mut driver = Driver::new(&[CALLED_LIST_READ_EDIT_GREP, ENDED]);
     let (opened, opened_tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -1253,7 +1302,7 @@ fn reading(arguments: &str) -> String {
 fn a_read_whose_integers_arrive_as_strings_runs_the_requested_window() -> TestResult {
     // Catches string integers refused at the decode, and a coercion that runs the read over any other window.
     let windowed = reading(r#"{\"path\": \"src/lib.rs\", \"from_line\": \"1\", \"lines\": \"1\"}"#);
-    let mut driver = Driver::new(&[&windowed, COMPLETED]);
+    let mut driver = Driver::new(&[&windowed, ENDED]);
     let (opened, opened_tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -1276,7 +1325,7 @@ fn a_read_whose_integers_arrive_as_strings_runs_the_requested_window() -> TestRe
 fn a_read_with_a_non_numeric_string_is_refused_with_how_to_fix_it_and_the_turn_continues() -> TestResult {
     // Catches a mistyped integer that runs, or is answered with the codec's terse refusal instead of the correction.
     let mistyped = reading(r#"{\"path\": \"src/lib.rs\", \"from_line\": \"one\"}"#);
-    let mut driver = Driver::new(&[&mistyped, COMPLETED]);
+    let mut driver = Driver::new(&[&mistyped, ENDED]);
     let (opened, _) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -1310,7 +1359,7 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
     // instructions or the user message or with outputs other than their runs' results, counted as a turn, dropped
     // from later turns and the record, a continue that drops the prefix, or seed folds that diverge between warm-up
     // and live delivery.
-    let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED]);
     let seeds = vec![TreePath::new("src/lib.rs")?, TreePath::new("README")?];
     let (opened, tree) = open_seeded(&mut driver, 2, seeds)?;
     let calls = driver.result::<Opened>(opened).seeds().expect("seeded reads").as_slice().to_vec();
@@ -1363,6 +1412,210 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
     let seeded: Vec<_> = calls.iter().cloned().map(TurnItem::Call).collect();
     assert_eq!(session.items().get(..2), first.items().get(..2), "the record keeps the opening messages");
     assert_eq!(session.items().get(2..4), Some(seeded.as_slice()), "the record holds the seeded calls");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_reply_without_a_call_sends_another_turn_with_the_reply_text_and_the_nudge() -> TestResult {
+    // Catches the old rest-on-reply: a plain completed reply must send another `muse.turn` carrying the previous
+    // items, the reply text, and the nudge, and must record nothing yet.
+    let plain = include_str!("../fixtures/completed.json");
+    let mut driver = Driver::new(&[plain, ENDED]);
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let outcome = driver.result::<TurnResult>(first_turn).outcome().clone();
+    let TurnOutcome::Completed { text, .. } = outcome else {
+        panic!("expected a completed reply, got {outcome:?}");
+    };
+    let next_call = asked(&driver, first_turn);
+    assert_eq!(next_call.name.as_str(), MuseTurn::NAME, "the reply is nudged, not recorded");
+    let CallInput::Value(next) = next_call.input else {
+        panic!("expected the next turn as a value");
+    };
+    let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
+    let first: TurnInput = driver.value(driver.first_turn(opened));
+    let reply = TurnItem::message(Role::Assistant, text);
+    let nudge = TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT));
+    assert_eq!(next.items().split_at(first.items().len()), (first.items(), [reply, nudge].as_slice()));
+
+    let second_turn = driver.follow(first_turn);
+    let (_, ended) = called(&driver.result(second_turn));
+    assert_eq!(ended.len(), 1, "the nudged turn ends the run: {ended:?}");
+    driver.settle(second_turn);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
+    assert_eq!(session.items().get(..next.items().len()), Some(next.items()), "the record keeps the nudged turn");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_reply_without_a_call_at_the_turn_limit_rests_turn_limit() -> TestResult {
+    // Catches a nudge loop that ignores the limit: the turn that answers the reply at the limit records instead of
+    // turning.
+    let plain = include_str!("../fixtures/completed.json");
+    let mut driver = Driver::new(&[plain]);
+    let (opened, _) = open(&mut driver, 1)?;
+    let first_turn = driver.follow(opened);
+
+    assert_eq!(asked(&driver, first_turn).name.as_str(), SessionRecord::NAME, "the limit records instead of turning");
+    let recorded = driver.follow(first_turn);
+    let session: Session = driver.result(recorded);
+    assert_eq!(*session.rested(), RestReason::TurnLimit);
+    let TurnOutcome::Completed { text, .. } = driver.result::<TurnResult>(first_turn).outcome().clone() else {
+        panic!("expected a completed reply");
+    };
+    let answer = TurnItem::message(Role::Assistant, text);
+    assert_eq!(session.items().last(), Some(&answer));
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn an_end_call_beside_an_edit_rests_after_both_outputs_with_the_edited_tree() -> TestResult {
+    // Catches an end rest that drops the sibling call's tree: the natural final turn does its last edit and ends, and
+    // the session rests with the edited tree and the summary last.
+    let mut edit = serde_json::from_str::<serde_json::Value>(CALLED_EDIT_WRITE)?;
+    let arguments = format!(r#"{{"ending": {{"Done": {{"summary": "{SUMMARY}"}}}}}}"#);
+    let end_call = serde_json::json!({
+        "id": "fc_00202",
+        "type": "function_call",
+        "status": "completed",
+        "call_id": "call_end",
+        "name": "muse-end",
+        "arguments": arguments,
+    });
+    edit["output"].as_array_mut().expect("a called body").push(end_call);
+    let reply = edit.to_string();
+    let mut driver = Driver::new(&[&reply, ENDED]);
+    let (opened, opened_tree) = open(&mut driver, 3)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [edit_call, write_call, end_call] = calls.as_slice() else {
+        panic!("expected three calls, got {calls:?}");
+    };
+    assert_eq!(end_call.name().expect("a decoded call names its tool"), "muse-end");
+    let editing = asked(&driver, first_turn);
+    assert_eq!(editing.name.as_str(), TreeEdit::NAME);
+    assert_eq!(editing.input, bound(opened_tree, edit_call), "the edit runs over the opened tree");
+    let edited_run = driver.follow(first_turn);
+    let edited: Edited = driver.result(edited_run);
+
+    let writing = asked(&driver, edited_run);
+    assert_eq!(writing.name.as_str(), TreeWrite::NAME);
+    assert_eq!(writing.input, bound(edited.tree(), write_call), "the write runs over the edited tree");
+    let written_run = driver.follow(edited_run);
+    let written: Edited = driver.result(written_run);
+
+    let ending = asked(&driver, written_run);
+    assert_eq!(ending.name.as_str(), End::NAME);
+    let ended_run = driver.follow(written_run);
+    let ended: Ending = driver.result(ended_run);
+    assert_eq!(ended, Ending::Done { summary: SUMMARY.into() });
+
+    assert_eq!(asked(&driver, ended_run).name.as_str(), SessionRecord::NAME, "the ended turn records");
+    let recorded = driver.follow(ended_run);
+    let session: Session = driver.result(recorded);
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, written.tree()));
+    assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt_iron() {}\n");
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(session.items().last(), Some(&summary));
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_blocked_or_asked_end_call_rests_with_its_reason_and_text_last() -> TestResult {
+    // Catches an end rest that loses the reason or question, or routes blocked and asked to the same reason.
+    for (ending, rested) in [
+        (Ending::Blocked { reason: "The store is unreachable.".into() }, RestReason::Blocked),
+        (Ending::Asked { question: "Which file holds the brief?".into() }, RestReason::Asked),
+    ] {
+        let reply = ended_with(&ending);
+        let mut driver = Driver::new(&[&reply]);
+        let (opened, _) = open(&mut driver, 1)?;
+        let first_turn = driver.follow(opened);
+        driver.settle(first_turn);
+        let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+        assert_eq!(*session.rested(), rested, "{ending:?}");
+        let closing = TurnItem::message(Role::Assistant, Ref::of_text(ending.text()));
+        assert_eq!(session.items().last(), Some(&closing), "{ending:?} is last");
+
+        assert_warm_and_live_agree(&driver);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_asked_session_continues_with_an_answer_and_ends_done() -> TestResult {
+    // Catches an end rest that `continue` cannot resume: the asked session resumes with its context once answered.
+    let reply = ended_with(&Ending::Asked { question: "Which file holds the brief?".into() });
+    let again = ended_again();
+    let mut driver = Driver::new(&[&reply, &again]);
+    let (opened, _) = open(&mut driver, 1)?;
+    driver.settle(opened);
+    let key = SessionKey::new(opened);
+    let asked = driver.head(key);
+    let rested: Session = driver.value(asked);
+    assert_eq!(*rested.rested(), RestReason::Asked);
+
+    let resumed = continue_from(&mut driver, key, asked, "The brief is in brief.md.", 2);
+    let resumed_turn = driver.follow(resumed);
+    let retried: TurnInput = driver.value(driver.transition(resumed).result);
+    let question = TurnItem::message(Role::Assistant, Ref::of_text("Which file holds the brief?"));
+    let answer = TurnItem::message(Role::User, Ref::of_text("The brief is in brief.md."));
+    assert_eq!(retried.items().split_at(rested.items().len()), (rested.items(), [answer].as_slice()));
+    assert!(retried.items().contains(&question), "the resumed turn keeps the question");
+    driver.settle(resumed_turn);
+    let completed: Session = driver.value(driver.head(key));
+    assert_eq!(*completed.rested(), RestReason::Completed);
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(completed.items().last(), Some(&summary));
+    assert_eq!(completed.items()[..rested.items().len()], *rested.items(), "the resumed session extends its rest");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn an_end_call_whose_arguments_do_not_decode_is_refused_and_the_session_goes_on() -> TestResult {
+    // Catches a broken end call that runs as `muse.end` or drops the session: it is answered with its refusal and the
+    // session goes on.
+    let broken = ENDED.replace(DONE_ARGUMENTS, "not json");
+    let again = ended_again();
+    let mut driver = Driver::new(&[&broken, &again]);
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [end] = calls.as_slice() else {
+        panic!("expected the end call, got {calls:?}");
+    };
+    let ToolInput::Refused { refusal, .. } = end.input() else {
+        panic!("expected the broken end call to refuse, got {:?}", end.input());
+    };
+    let next_call = asked(&driver, first_turn);
+    assert_eq!(next_call.name.as_str(), MuseTurn::NAME, "no tool runs");
+    let CallInput::Value(next) = next_call.input else {
+        panic!("expected the next turn as a value");
+    };
+    let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
+    let refused = next.items().iter().any(|item| {
+        matches!(item, TurnItem::CallOutput { call_id, output: ToolOutput::Refused(at) }
+            if call_id == end.call_id() && *at == *refusal)
+    });
+    assert!(refused, "the next turn carries the refusal as the end call's output");
+
+    driver.settle(first_turn);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
 
     assert_warm_and_live_agree(&driver);
     Ok(())

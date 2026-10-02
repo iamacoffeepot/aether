@@ -76,7 +76,8 @@ after=<seq>
 - `--brief` is a file holding the first user message.
 - `--instructions` is required: a file holding the session instructions, sent
   as the leading developer message ahead of the brief with a short preface
-  saying the session works only through the tree tools.
+  saying the session works only through the tree tools and ends its run only
+  by calling `muse-end`.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -84,8 +85,10 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.edit`, `tree.write`, and `muse.echo`. The first turn sends the
-  instructions as the developer message ahead of the brief.
+  `tree.edit`, `tree.write`, `muse.echo`, and `muse.end`. A reply without a
+  tool call does not end the session: the loop nudges the model back for
+  another turn. The first turn sends the instructions as the developer
+  message ahead of the brief.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of
@@ -111,8 +114,12 @@ entries: an entry belongs to the session when its cause chain reaches the
 session's open run, or a continue run that names the session, so twenty
 sessions on one engine are each followed by their own `wait`.
 
-- `rested` is `completed`, `declined`, `incomplete`, `turn-limit`,
-  `context-full`, or `failed: <why>`. The final message follows only for `completed`.
+- `rested` is `completed`, `blocked`, `asked`, `declined`, `incomplete`,
+  `turn-limit`, `context-full`, or `failed: <why>`. `completed` means the run
+  ended `Done` with a summary, `blocked` that it ended `Blocked` with what
+  stopped it, and `asked` that it ended `Asked` with the one question it
+  cannot go on without. The final message follows for all three end reasons:
+  the summary, reason, or question.
 - `turns` counts the session's `muse.turn` runs read, and `usage` sums the
   token counts they reported.
 - `from` is the tree the activation started on (the open's tree, or the tree
@@ -153,10 +160,11 @@ after=<seq>
 
 `continue` finds the session's latest record (its head's last move), stages the
 message, and calls `muse.session.continue`; pass the printed `after=` to the
-next `wait`. Without `--message` the conversation is resent as it stands,
-which recovers a session that rested failed, on a vendor 504 for instance, or
-incomplete with no output. `--max-output-tokens` optionally replaces the
-session's output budget from that turn on.
+next `wait`. An asked session resumes with its context once answered: pass the
+answer as the message text. Without `--message` the conversation is resent as
+it stands, which recovers a session that rested failed, on a vendor 504 for
+instance, or incomplete with no output. `--max-output-tokens` optionally
+replaces the session's output budget from that turn on.
 
 The session keeps working on the tree its record holds, so edits made in the
 checkout between rounds are not visible to it. Feed back compile errors or CI

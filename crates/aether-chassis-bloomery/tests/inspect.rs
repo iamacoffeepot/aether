@@ -16,8 +16,7 @@ use aether_bloomery_kinds::{
     ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree, Utf8Text,
 };
 use aether_bloomery_muse::{
-    Endpoint, InputLimit, MUSE, ModelName, OfferedTools, OpenInput, OutputBudget, ReasoningEffort, TurnLimit,
-    TurnSettings,
+    Endpoint, InputLimit, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings, offered,
 };
 use aether_chassis_bloomery::inspect::{
     InspectArtifact, InspectArtifactResult, InspectEvents, InspectEventsResult, InspectedEvent, MAX_ARTIFACTS,
@@ -29,13 +28,13 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use serde_json::{Value, json};
 
 /// The recorded responses-API reply the stub server sends.
-const COMPLETED: &[u8] = include_bytes!("../../aether-bloomery-muse/fixtures/completed.json");
+const ENDED: &[u8] = include_bytes!("../../aether-bloomery-muse/fixtures/ended.json");
 
 /// The user message the session opens with.
 const QUESTION: &str = "What is a bloomery?";
 
-/// The answer text `completed.json` carries.
-const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
+/// The summary the `ended.json` fixture's `muse-end` call ends the run with.
+const SUMMARY: &str = "Every briefed change is in the tree.";
 
 /// How long the stub waits for the engine to dial.
 const STUB_PATIENCE: Duration = Duration::from_secs(45);
@@ -158,10 +157,14 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     let bundle = batch.stage_bytes(&fs::read(&wasm_path)?).digest();
     batch.push_event(&RecordedHeadMove::new(RecordedHead::from(&MUSE), bundle), None)?;
     let set = batch.stage_encoded(&ReactorSet::new(vec![MUSE])?)?;
+    let (tools, artifacts) = offered();
+    for artifact in artifacts {
+        batch.stage_artifact(artifact);
+    }
     let settings = TurnSettings::new(
         Endpoint::new(endpoint)?,
         ModelName::new("muse-spark-1.3")?,
-        OfferedTools::default(),
+        tools,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
         InputLimit::new(u64::MAX).expect("limit"),
@@ -185,7 +188,7 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     harness.settle(Seq(2));
 
     let record = thread::scope(|scope| {
-        let stub = scope.spawn(|| serve_once(&listener, COMPLETED));
+        let stub = scope.spawn(|| serve_once(&listener, ENDED));
         let outcome = harness.call(&call);
         assert!(matches!(outcome, CallOutcome::Transition { .. }), "the session opens: {outcome:?}");
         let mut record = None;
@@ -221,7 +224,8 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     assert_eq!(session["rested"], json!("Completed"), "{session:#}");
     let texts = resolved_texts(&session);
     assert!(texts.iter().any(|text| text == QUESTION), "the user question reads inline: {session:#}");
-    assert!(texts.iter().any(|text| text == ANSWER), "the model's answer reads inline: {session:#}");
+    assert!(texts.iter().any(|text| text == "Ending the run."), "the end call's text reads inline: {session:#}");
+    assert!(texts.iter().any(|text| text == SUMMARY), "the summary reads inline: {session:#}");
     Ok(())
 }
 

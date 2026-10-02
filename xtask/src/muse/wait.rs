@@ -57,8 +57,10 @@ pub(super) fn run(args: &WaitArgs) -> Result<()> {
         "usage input={} cached={} output={} reasoning={}",
         usage.input, usage.cached, usage.output, usage.reasoning
     );
-    if let (RestReason::Completed, Some(TurnItem::Message { role: Role::Assistant, text })) =
-        (rested.session.rested(), rested.session.items().last())
+    if let (
+        RestReason::Completed | RestReason::Blocked | RestReason::Asked,
+        Some(TurnItem::Message { role: Role::Assistant, text }),
+    ) = (rested.session.rested(), rested.session.items().last())
     {
         println!("{}", text_of(&mut engine, text.digest())?);
     }
@@ -258,6 +260,8 @@ const fn usage(outcome: &TurnOutcome) -> Option<&TurnUsage> {
 fn reason(rested: &RestReason) -> String {
     match rested {
         RestReason::Completed => "completed".to_owned(),
+        RestReason::Blocked => "blocked".to_owned(),
+        RestReason::Asked => "asked".to_owned(),
         RestReason::Declined => "declined".to_owned(),
         RestReason::Incomplete => "incomplete".to_owned(),
         RestReason::TurnLimit => "turn-limit".to_owned(),

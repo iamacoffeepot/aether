@@ -11,7 +11,8 @@
 //! reply for the configured vendor delay, so with the default delay the
 //! numbers are engine overhead alone. Each session makes T turns: every
 //! turn but the last asks for N tool calls rotating over the configured
-//! tools, and the last completes, so each session rests `Completed`.
+//! tools, and the last asks one `muse-end` call with `Done` arguments, so each
+//! session rests `Completed`.
 //!
 //! The window opens after the seed is appended, the chassis is booted, the
 //! bundle is loaded, and the session reactor is warm; it closes when the last
@@ -35,8 +36,8 @@
 //! # Knobs
 //!
 //! - `AETHER_PERF_BLOOMERY_SESSIONS` — concurrent sessions. Default `1`.
-//! - `AETHER_PERF_BLOOMERY_TURNS` — turns per session, the last one
-//!   completing it. Default `8`.
+//! - `AETHER_PERF_BLOOMERY_TURNS` — turns per session, the last one ending it
+//!   with a `muse-end` call. Default `8`.
 //! - `AETHER_PERF_BLOOMERY_CALLS` — tool calls per turn but the last, at most
 //!   `ToolCalls::MAX_CALLS`. Default `4`.
 //! - `AETHER_PERF_BLOOMERY_TOOLS` — a comma list of `write`, `list`, `read`,
@@ -50,7 +51,9 @@
 //!   `git rev-parse HEAD`.
 //!
 //! A session's conversation at rest must fit `TurnItems::MAX_ITEMS`
-//! (2 + (T − 1) × 2 × N items).
+//! (2 + (T − 1) × 2 × N + 3 items: the opening messages, each work turn's
+//! calls and their outputs, and the last turn's end call, its output, and the
+//! summary).
 //!
 //! # Exit codes
 //!
