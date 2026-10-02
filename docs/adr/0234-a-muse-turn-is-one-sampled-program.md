@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-23
+- **Amended:** 2026-10-01 — decision 10: the session loop retries a tool run that ran out of time or memory up to twice, then answers the call with what happened instead of failing the session; an offered tool names its bundle, so a session can call proof programs from `aether-bloomery-workspace-programs`, bound to the environment and vendor tree the session opens with.
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (its
 Consequences leave Muse and HTTP out of scope: "Muse / HTTP is not this
@@ -89,7 +90,7 @@ program is tested without spending money.
      input, result }`, no program twice. `program` is a `ProgramName`;
      `definition` is a `Ref<Utf8Text>` citing the function definition sent
      for it; `input` and `result` are `Ref<ToolSchema>`s citing the schemas
-     of the program's arguments (the `A` of its `Tooled<A>` input) and of
+     of the program's arguments (the `A` of its `Tooled<A, B>` input) and of
      its result. An empty list offers nothing and the
      request sends no `tools` field (decision 9).
    - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
@@ -233,10 +234,11 @@ program is tested without spending money.
    the model asks for.** A tool is a program to run. The caller chooses
    the programs offered: nothing defaults to every program a bundle or unit
    declares.
-   - A tool is a program whose input is `Tooled<A> { tree, args }`
-     (`bloomery.program.tooled`): the tree the call works on, which the loop
-     that runs the call binds, and the arguments `A`, which the model
-     writes. The model sees only `A`.
+   - A tool is a program whose input is `Tooled<A, B> { tree, args, bound }`
+     (`bloomery.program.tooled`): the tree the call works on and the
+     session-bound value `B` its offer carries (`NoBound` when it carries
+     none), which the loop that runs the call binds, and the arguments `A`,
+     which the model writes. The model sees only `A`.
    - `muse.turn` cannot read another bundle's declarations or link a
      program's types, so the caller renders each offered program with
      `aether_bloomery_program::tool_definition` (a responses-API function
@@ -244,7 +246,7 @@ program is tested without spending money.
      its dots mapped to dashes, and whose parameters are the schema of the
      arguments `A`, never the envelope), stages the JSON as a `Utf8Text`,
      and cites it in `tools`. The caller also stages `ToolSchema::of` the
-     program's arguments, the `A` of its `Tooled<A>` input, and of its
+     program's arguments, the `A` of its `Tooled<A, B>` input, and of its
      result (`bloomery.program.tool_schema`: the storage
      kind's name and its `SchemaType` as data) and cites both. The closure
      walk injects each definition and schema like any cited artifact, so
@@ -273,7 +275,7 @@ program is tested without spending money.
      arguments' kind or a refusal text: a fixed sentence naming the kind
      plus the parser's or codec's message. The recorded `ToolCall` cites
      which. A loop above the program runs decoded arguments as a
-     `Tooled<A>` over its current tree, and replays a refusal as the call's
+     `Tooled<A, B>` over its current tree and the offer's bound value, and replays a refusal as the call's
      `ToolOutput::Refused`.
    - When it builds the request, `muse.turn` renders each cited
      `ToolOutput::Result` with `decode_storage_schema` under a fixed value
@@ -290,6 +292,41 @@ program is tested without spending money.
    - `muse.turn` never runs a call. Running the calls, and any loop that
      feeds their outputs into the next turn, live above the program.
 
+10. **The session loop retries an exhausted tool run, and calls tools from
+    other bundles.** *(Added 2026-10-01.)* The loop is the `muse.session`
+    reactor (`crates/aether-bloomery-muse/src/session/`). ADR-0237 decision
+    2 leaves retrying an exhausted run to reactor policy; this is Muse's.
+    - **Retry.** Today every fault of a tool run fails the session: `faulted`
+      in `session/conversations.rs` records `Failure::Faulted` and
+      `rest_faulted` rests it, which is why the session's own tools never
+      refuse over what the model wrote (`tools/mod.rs`). A tool run
+      that faults with `TimedOut` or `ResourceExhausted` is instead requested
+      again over the same input, up to twice. The executor's estimate for
+      that run key grows after each exhaustion (ADR-0237 decision 9), so each
+      attempt gets more time or memory without the session asking. If the
+      third attempt is exhausted too, the loop answers the call with a
+      `ToolOutput::Refused` text naming the tool, the resource, and the
+      attempts (for example "`proof.clippy` ran out of time after 3
+      attempts"), staged by a program like every artifact the loop cites, and
+      the session goes on. The model then fixes its code or ends the run with
+      `muse.end` as blocked. Retries count against no limit.
+    - **Still fatal.** Every other fault still fails the session, including
+      `ExecutorFailed` and a refusal such as a toolchain mismatch: they say
+      the executor or the session's inputs are broken, not the model's code.
+    - **Tools from other bundles.** `OfferedTool`
+      (`crates/aether-bloomery-muse/src/input/tools.rs`) gains the head of the
+      bundle its program lives in, and the loop calls `tool.head()` instead of
+      the bundle `MUSE` it names for every call today
+      (`session/conversations.rs:208`). The proof programs stay in
+      `aether-bloomery-workspace-programs`.
+    - **Bound inputs.** A proof tool takes `Tooled<A, B>`
+      (`crates/aether-bloomery-program/src/program/tool/tooled.rs`), and its
+      bound value `B` carries the environment and vendor tree. Today
+      `OpenInput` (`session/open.rs`) carries neither; `muse.session.open`
+      gains both and binds them into the proof tools it offers. A proof
+      result's tree becomes the session's current tree, as an `Edited`
+      result's does today (ADR-0237 decision 12).
+
 ## Consequences
 
 - The work lands in slices. Slice 1 is this ADR plus the
@@ -301,8 +338,10 @@ program is tested without spending money.
 - A crash mid-turn loses that one paid reply: the driver records the open
   request `Interrupted` and never re-runs it. This is accepted in exchange
   for never buying a turn twice silently.
-- The driver runs one invocation per bundle root at a time, which bounds
-  the request rate far below the vendor's per-minute request limit. Long
+- The driver runs at most 16 invocations per bundle at once
+  (`InvocationLimit::DEFAULT`), and a session's own calls run one at a
+  time, which bounds the request rate far below the vendor's per-minute
+  request limit. Long
   stateless conversations press on tokens per minute instead; the program
   does not rate-limit.
 - Prompt-cache hits are the vendor's and are not guaranteed. The program

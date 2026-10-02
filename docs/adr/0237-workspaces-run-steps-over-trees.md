@@ -9,6 +9,7 @@
 - **Amended:** 2026-09-25 — decision 9: the allotment estimate is keyed on what the run does, not who asked. The key is the digest of the run's environment and its ordered steps (each step's tool, args and env). A `Run` carries no program identity, and the steps describe the work directly, so identical steps share an estimate and different args get their own.
 - **Amended:** 2026-09-25 — decision 3: an image carries only a bare, reusable layer (the base userland or the toolchain), never a snapshot of content that changes between runs. A source tree enters through the operator command `import-commit <commit>`, which reads the commit's tracked files outside the engine and stages them as a tree through the journal's fenced `publish`. The engine never reads Git or a host path, and no image or allowlist carries source.
 - **Amended:** 2026-09-26 — open question 4 is resolved as proposed: the journal records no commit for a source tree.
+- **Amended:** 2026-10-01 — decision 11: proofs build over warm layers, one read-only bottom layer per (unit, run key) under a copy-on-write top layer per run; this supersedes the cold-build consequence and the warm-build-state deferral. Decision 12: a proof runs fmt first, then cargo over the whole workspace with `--offline`, and returns the resulting tree. Decision 9: admission backfills past a waiting front without delaying it, and the executor chooses each run's cores. The session's retry of an exhausted proof is ADR-0234 decision 10.
 
 Amends [ADR-0229](0229-program-cap-apis-are-extra-run-arguments.md) (the
 closed, sealed set of program APIs, `Http` / `Process`, mapped through
@@ -353,10 +354,72 @@ the sandbox, or they make the program `Sampled`.
    No program can ask for resources. The only resource-shaped field a
    program sets is `Run::network`, and that is a capability grant.
 
+   *(Amended 2026-10-01: admission stops blocking at the head of the line.
+   Today a run waits whenever any run waits ahead of it
+   (`Admission::admit_now` and `Admission::next` in
+   `crates/aether-bloomery-workspace/src/runtime/provision/queue.rs`), so a
+   small fmt run waits behind a large test run that does not yet fit. The
+   front run keeps a reservation: the earliest time enough cores and memory
+   free up for it, from the running runs' estimated wall times. A later
+   run starts past it when it fits the free budget and its own estimate ends
+   before that reservation, so a backfilled run never delays the front. A
+   key never seen has the default deadline as its estimate.*
+
+   *Cores become the executor's per-run choice instead of the fixed
+   `run_cores` knob (`crates/aether-bloomery-workspace/src/config.rs`,
+   default 4). Measured on the build host, proof runs over warm layers
+   (decision 11) scale poorly below 8 cores: a leaf-edit clippy took 6.6 s
+   on 32 cores alone, 6.6 s each as 2 runs on 16 cores, 8.9 s each as 4
+   runs on 8, and 15.3 s each as 8 runs on 4. The executor gives a proof run
+   8 to 16 cores and runs several at once rather than serially or in finer
+   slices. A program still never asks for resources.)*
+
 10. **Step 0 is a spike on main's machinery.** Before any workspace code, one
    Sampled program runs a single
    `docker run --rm --network none -v <dir>:/work <image> cargo clippy …`
    through `aether.process`, proving the loop on the build host.
+
+11. **Proofs build over warm layers.** *(Added 2026-10-01.)* Cargo's build
+   output is executor state, like decision 9's estimates: it is scratch, so
+   it never enters an output tree, the journal, or a result, and cargo's own
+   fingerprints decide what it reuses, so a warm run returns what a cold run
+   would.
+
+   | Piece | Mechanism |
+   |---|---|
+   | Bottom layer | One per (unit, run key): the unit of ADR-0240 and the run key of decision 9. The first run for that key writes it; a Muse lane's warm-up proof over the base commit at session open is that run. After that it is read-only. It records the digest of the `Cargo.lock` it was built over, and a run whose tree carries a different `Cargo.lock` writes a new one; a changed environment is a new run key. A layer is trusted only once it is marked complete after its write, as a mount's pointer volume is (`crates/aether-bloomery-workspace/src/runtime/run/mounts.rs`). |
+   | Top layer | Every run gets its own copy-on-write overlay over the bottom layer: a Docker `local`-driver volume of type `overlay`, attached at cargo's target directory and removed with the run, so no run sees another's writes. It works unprivileged and adds about one second to a run. |
+   | Location | Host directories under a cache root named by a workspace `Config` knob, since overlay options take host paths. The actor relies on no Docker volume internals. With no cache root configured, runs build cold as before. |
+   | Journal | Records nothing about layers. The bytes stay on the executor; dropping the cache root costs only the next run's warm-up. |
+
+   Measured on the build host, workspace clippy took 75 s cold, about 5 s
+   warm after a leaf-crate edit, and about 26 s after an edit to a crate the
+   rest depend on.
+
+12. **A proof is fmt, then cargo, over the whole workspace, offline.**
+   *(Added 2026-10-01.)* This governs the proof programs in
+   `aether-bloomery-workspace-programs`; `proof.clippy`
+   (`crates/aether-bloomery-workspace-programs/src/proof/`) is the first.
+   - **fmt first, and it fixes.** Every proof run's first step is
+     `cargo fmt --all` writing its changes, with rustfmt listing the files
+     it rewrote. A proof never fails on formatting alone.
+   - **Workspace-wide.** Cargo steps take `--workspace` and no package
+     argument. Measured warm, one crate's `-p` took 18.9 s against 5.3 s for
+     the workspace, because a narrower selection unifies features
+     differently and rebuilds shared dependencies.
+   - **`--offline`, not `--frozen`.** Today the clippy step passes
+     `--frozen` (`proof/run.rs:49`), which refuses any change to
+     `Cargo.lock`. With `--offline`, a change to a workspace-internal
+     dependency updates `Cargo.lock` inside the run, and the updated lock
+     comes back in the output tree. A crate missing from the session's
+     vendored tree fails with cargo's own error, an ordinary failed outcome
+     the model reads.
+   - **The result carries the tree.** The proof's result cites the run's
+     output tree (fmt's fixes and any lock update) and names the files fmt
+     changed. Today `ClippyResult` cites only the step's stderr
+     (`proof/result.rs`). Diagnostics come from cargo's JSON messages
+     (`--message-format=json`), rendered to text in the result under a size
+     cap, with the cut marked.
 
 ## Consequences
 
@@ -373,6 +436,10 @@ the sandbox, or they make the program `Sampled`.
   each proof; both are noise against a multi-minute build.
 - A build starts cold in every run. Warm build state is deferred (below);
   this ADR trades speed for correctness first.
+
+  *(Amended 2026-10-01: superseded by decision 11. A run builds over its
+  run key's warm bottom layer; only the first run for a key, or for a new
+  `Cargo.lock`, builds cold.)*
 - ADR-0229's closed set grows by one member, with its SDK table entry and
   load-time check.
 
@@ -434,6 +501,10 @@ Deferred:
 - Warm build state (golden target directories keyed by the tree that built
   them, a shared read-only unpacked environment). Allowed later only as
   rebuildable derivatives that never change a result.
+
+  *(Amended 2026-10-01: warm build output is no longer deferred; decision
+  11 keys it by unit and run key rather than by tree. A shared unpacked
+  environment stays deferred.)*
 - Container image export for backends that cannot import a tarball.
 - A Windows executor, and placement across several hosts.
 
