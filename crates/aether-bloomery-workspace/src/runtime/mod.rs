@@ -8,8 +8,9 @@
 //! settlement chain stays held until the `#[handler(task)]` completion answers
 //! the result, and a request that cannot start yet queues rather than being
 //! dropped. Imports are bounded by a cap-level [`TaskQueue`] counting
-//! requests; runs are provisioned (ADR-0237 decision 9) and admitted in FIFO
-//! order against the host budget by [`provision::RunQueue`].
+//! requests; runs are provisioned (ADR-0237 decision 9) and admitted in
+//! arrival order, with backfill past a waiting front that never delays it,
+//! against the host budget by [`provision::RunQueue`].
 //!
 //! Every read and stage a task makes goes through its source as mail the
 //! actor sends for its worker ([`storage`], ADR-0240 D7), so the workspace
@@ -26,7 +27,7 @@ mod storage;
 pub mod testing;
 
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use aether_actor::{PathRefused, runtime};
@@ -75,12 +76,10 @@ impl NativeActor for WorkspaceCapability {
         })?;
         let budget_memory_bytes = non_zero_bytes(config.budget_memory_bytes, "BUDGET_MEMORY_BYTES")?;
         let defaults = Amounts {
-            cores: NonZeroU32::new(config.run_cores).ok_or_else(|| must_be_positive("RUN_CORES"))?,
             memory_bytes: non_zero_bytes(config.default_memory_bytes, "DEFAULT_MEMORY_BYTES")?,
             deadline: Duration::from_millis(at_least_one(config.default_deadline_millis, "DEFAULT_DEADLINE_MILLIS")?),
         };
         let ceiling = Amounts {
-            cores: cpuset.count(),
             memory_bytes: budget_memory_bytes,
             deadline: Duration::from_millis(at_least_one(config.max_deadline_millis, "MAX_DEADLINE_MILLIS")?),
         };
@@ -110,7 +109,6 @@ impl NativeActor for WorkspaceCapability {
             import_max_bytes = config.import_max_bytes,
             %cpuset,
             budget_memory_bytes = config.budget_memory_bytes,
-            run_cores = config.run_cores,
             default_memory_bytes = config.default_memory_bytes,
             default_deadline_millis = config.default_deadline_millis,
             max_deadline_millis = config.max_deadline_millis,

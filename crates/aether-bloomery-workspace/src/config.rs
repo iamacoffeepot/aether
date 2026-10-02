@@ -8,9 +8,10 @@
 //! variable of its own, and never `DOCKER_HOST`.
 //!
 //! The actor chooses each run's cores, memory, and deadline itself (decision
-//! 9): the budget knobs state what it may hand out, and whatever the host
-//! keeps back is the cores left out of `cpuset` and the memory left out of
-//! `budget_memory_bytes`.
+//! 9): each run gets 8 to 16 of the `cpuset` cores, or all of them on a
+//! smaller list, and no knob sets that. The budget knobs state what it may
+//! hand out, and whatever the host keeps back is the cores left out of
+//! `cpuset` and the memory left out of `budget_memory_bytes`.
 
 use alloc::string::String;
 
@@ -69,10 +70,6 @@ pub struct WorkspaceConfig {
     /// allotment's memory is clamped to it. Default 8 GiB. `0` refuses boot.
     #[cfg_attr(feature = "runtime", config(default = 8_589_934_592u64))]
     pub budget_memory_bytes: u64,
-    /// The cores each run is pinned to, clamped to the number of cores in
-    /// `cpuset`. Default 4. `0` refuses boot.
-    #[cfg_attr(feature = "runtime", config(default = 4))]
-    pub run_cores: u32,
     /// The memory, in bytes, each step's container gets, swap included,
     /// in a run whose key the actor has not seen. Clamped to
     /// `budget_memory_bytes`. Default 8 GiB. `0` refuses boot.
@@ -140,7 +137,6 @@ impl Default for WorkspaceConfig {
             import_max_bytes: 8 << 30,
             cpuset: String::from("0"),
             budget_memory_bytes: 8 << 30,
-            run_cores: 4,
             default_memory_bytes: 8 << 30,
             default_deadline_millis: 1_800_000,
             max_deadline_millis: 14_400_000,

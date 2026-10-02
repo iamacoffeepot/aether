@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use super::key::RunKey;
@@ -64,11 +64,11 @@ impl fmt::Display for HeadroomError {
 
 impl Error for HeadroomError {}
 
-/// What a run is given before cores are pinned: how many cores, each step's
-/// memory, and the deadline its steps share.
+/// What a run is given before its cores are chosen and pinned: each step's
+/// memory, and the deadline its steps share. The deadline is also the run's
+/// estimated wall time, which admission plans around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Amounts {
-    pub cores: NonZeroU32,
     pub memory_bytes: NonZeroU64,
     pub deadline: Duration,
 }
@@ -77,7 +77,6 @@ impl Amounts {
     /// Each amount at most `ceiling`'s.
     fn clamped(self, ceiling: &Self) -> Self {
         Self {
-            cores: self.cores.min(ceiling.cores),
             memory_bytes: self.memory_bytes.min(ceiling.memory_bytes),
             deadline: self.deadline.min(ceiling.deadline),
         }
@@ -102,8 +101,7 @@ pub struct Estimates {
     /// A key never seen gets these, already clamped to `ceiling`.
     defaults: Amounts,
     headroom: Headroom,
-    /// No run gets more: the budget's cores and memory, and the longest
-    /// deadline.
+    /// No run gets more: the budget's memory, and the longest deadline.
     ceiling: Amounts,
 }
 
@@ -116,7 +114,8 @@ impl Estimates {
     /// What a run under `key` is given now. An unseen resource takes the
     /// default; a seen one its estimate, floored at [`MIN_MEMORY_BYTES`] and
     /// [`MIN_DEADLINE`]; every amount is then clamped to the ceiling, so it
-    /// always fits the whole budget. Cores are always the default.
+    /// always fits the whole budget. Cores are chosen at admission, from the
+    /// budget, not here.
     pub fn amounts(&self, key: &RunKey) -> Amounts {
         let Some(estimate) = self.table.get(key) else {
             return self.defaults;
@@ -127,7 +126,7 @@ impl Estimates {
         let deadline = estimate
             .wall_nanos
             .map_or(self.defaults.deadline, |nanos| Duration::from_nanos(saturating_u64(nanos)).max(MIN_DEADLINE));
-        Amounts { cores: self.defaults.cores, memory_bytes, deadline }.clamped(&self.ceiling)
+        Amounts { memory_bytes, deadline }.clamped(&self.ceiling)
     }
 
     /// Learn from a finished run given `allotment`.
