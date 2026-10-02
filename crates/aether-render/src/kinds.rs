@@ -12,7 +12,7 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
-use aether_data::{ErasedActorPath, MailId};
+use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::{ClipRect, QuadSpace};
 use aether_math::{Rgb, Rgba};
 use bytemuck::{Pod, Zeroable};
@@ -209,7 +209,8 @@ pub enum TextureUsage {
 /// instrument ids), stages any pixels CPU-side, and replies as soon as
 /// the id is assigned — the wgpu texture is realized lazily at the
 /// next frame record. Reply: `CreateTextureResult`. The headless chassis
-/// composes no render actor.
+/// composes no render actor. `pixels` arrives as a `Blob` and is staged as
+/// received, without a copy.
 #[aether_data::kind(name = "aether.render.create_texture")]
 pub struct CreateTexture {
     pub width: u32,
@@ -217,8 +218,7 @@ pub struct CreateTexture {
     pub format: TextureFormat,
     pub sampling: TextureSampling,
     pub usage: TextureUsage,
-    #[serde(with = "aether_data::bytes")]
-    pub pixels: Vec<u8>,
+    pub pixels: Blob,
 }
 
 /// Reply to `CreateTexture`. `Ok` carries the assigned `texture_id` —
@@ -340,13 +340,13 @@ pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
 /// uploads happen at subject-load cadence — deformation is program
 /// content riding the uniform blob, never per-frame re-creation. Reply:
 /// `CreateGeometryResult`. The headless chassis composes no render actor.
+/// `vertices` and `indices` arrive as `Blob`s and are staged as received,
+/// without a copy.
 #[aether_data::kind(name = "aether.render.create_geometry")]
 pub struct CreateGeometry {
     pub layout: Vec<VertexAttribute>,
-    #[serde(with = "aether_data::bytes")]
-    pub vertices: Vec<u8>,
-    #[serde(with = "aether_data::bytes")]
-    pub indices: Vec<u8>,
+    pub vertices: Blob,
+    pub indices: Blob,
 }
 
 /// Reply to `CreateGeometry`. `Ok` carries the assigned `geometry_id` —
@@ -371,14 +371,13 @@ pub enum CreateGeometryResult {
 /// staged bytes update immediately; the GPU buffers re-realize at the
 /// next GPU use. Per-frame updates are for view-dependent geometry that
 /// is small by nature (the ink ribbons) — a deforming mesh poses
-/// through the uniform blob instead.
+/// through the uniform blob instead. `vertices` and `indices` arrive as
+/// `Blob`s and are staged as received, without a copy.
 #[aether_data::kind(name = "aether.render.update_geometry")]
 pub struct UpdateGeometry {
     pub geometry_id: u32,
-    #[serde(with = "aether_data::bytes")]
-    pub vertices: Vec<u8>,
-    #[serde(with = "aether_data::bytes")]
-    pub indices: Vec<u8>,
+    pub vertices: Blob,
+    pub indices: Blob,
 }
 
 /// `aether.render.destroy_geometry` — release a previously-created

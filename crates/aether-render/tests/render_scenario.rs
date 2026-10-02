@@ -42,7 +42,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use aether_component::ComponentHostCapability;
-use aether_data::ErasedActorPath;
+use aether_data::{Blob, ErasedActorPath};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
@@ -154,7 +154,14 @@ fn require_wgpu_only() -> bool {
 /// A `Sampled` + `Linear` create — the default role every scenario
 /// that stages ordinary color pixels uses.
 fn sampled_linear(width: u32, height: u32, format: TextureFormat, pixels: Vec<u8>) -> CreateTexture {
-    CreateTexture { width, height, format, sampling: TextureSampling::Linear, usage: TextureUsage::Sampled, pixels }
+    CreateTexture {
+        width,
+        height,
+        format,
+        sampling: TextureSampling::Linear,
+        usage: TextureUsage::Sampled,
+        pixels: Blob::from(pixels),
+    }
 }
 
 /// An opaque white rectangle with square corners — the flat fill these
@@ -2015,7 +2022,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
                     format: TextureFormat::Rgba8,
                     sampling: TextureSampling::Linear,
                     usage: TextureUsage::Writable,
-                    pixels: Vec::new(),
+                    pixels: Blob::from(Vec::new()),
                 },
             ),
         )])
@@ -2135,7 +2142,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
                         format: TextureFormat::R32Float,
                         sampling: TextureSampling::Nearest,
                         usage: TextureUsage::Sampled,
-                        pixels: data,
+                        pixels: Blob::from(data),
                     },
                 ),
             ),
@@ -2149,7 +2156,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
                         format: TextureFormat::R32Float,
                         sampling: TextureSampling::Nearest,
                         usage: TextureUsage::Writable,
-                        pixels: Vec::new(),
+                        pixels: Blob::from(Vec::new()),
                     },
                 ),
             ),
@@ -2248,7 +2255,7 @@ fn nearest_sampling_preserves_label_texel_identity() {
         format: TextureFormat::R8,
         sampling,
         usage: TextureUsage::Sampled,
-        pixels: vec![0, 255],
+        pixels: Blob::from(vec![0, 255]),
     };
     let created = harness
         .execute(vec![

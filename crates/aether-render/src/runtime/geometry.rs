@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use aether_data::Blob;
 use aether_substrate::session_ids::SessionIds;
 
 use crate::VertexFormat;
@@ -16,6 +17,8 @@ use crate::kinds::{
 };
 
 pub(super) const INDIRECT_CONTROL_BYTES: usize = 32;
+
+const NOT_RESIDENT: &str = "geometry bytes are not resident in this process";
 
 /// Realized form of one declared attribute format. Variant names match
 /// their `wgpu::VertexFormat` counterparts, so the mapping is a
@@ -71,8 +74,8 @@ pub struct RealizedGeometry {
 /// place.
 pub struct StagedGeometry {
     pub layout: Vec<VertexAttribute>,
-    pub vertices: Vec<u8>,
-    pub indices: Vec<u8>,
+    pub vertices: Blob,
+    pub indices: Blob,
     pub realized: Option<RealizedGeometry>,
     pub dirty: bool,
     /// Changes whenever realization must produce new buffers. Cached
@@ -82,6 +85,25 @@ pub struct StagedGeometry {
 }
 
 impl StagedGeometry {
+    /// The staged vertex bytes. `create` and `update` refuse a blob that is
+    /// not contiguous in this process, so a miss here is a broken invariant.
+    ///
+    /// # Panics
+    /// Panics if the staged blob is not contiguous, fail-fast per ADR-0063.
+    #[must_use]
+    pub fn vertex_bytes(&self) -> &[u8] {
+        self.vertices.contiguous().expect("create_geometry and update_geometry refuse non-contiguous vertex bytes")
+    }
+
+    /// The staged index bytes; same invariant as [`Self::vertex_bytes`].
+    ///
+    /// # Panics
+    /// Panics if the staged blob is not contiguous, fail-fast per ADR-0063.
+    #[must_use]
+    pub fn index_bytes(&self) -> &[u8] {
+        self.indices.contiguous().expect("create_geometry and update_geometry refuse non-contiguous index bytes")
+    }
+
     /// Realize the GPU buffers if they aren't yet, or re-create them if
     /// `update_geometry` dirtied the staging since the last use — an
     /// update replaces the bytes wholesale and may resize them, so a
@@ -101,24 +123,24 @@ impl StagedGeometry {
                 device,
                 queue,
                 "aether geometry vertices",
-                &self.vertices,
+                self.vertex_bytes(),
                 wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
             ),
             index_buffer: staged_buffer(
                 device,
                 queue,
                 "aether geometry indices",
-                &self.indices,
+                self.index_bytes(),
                 wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE,
             ),
             indirect_buffer: staged_buffer(
                 device,
                 queue,
                 "aether geometry indexed indirect control",
-                &indirect_control_bytes(&self.vertices, &self.indices, &self.layout),
+                &indirect_control_bytes(self.vertex_bytes(), self.index_bytes(), &self.layout),
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE,
             ),
-            index_count: u32::try_from(self.indices.len() / size_of::<u32>()).expect("index count fits u32"),
+            index_count: u32::try_from(self.index_bytes().len() / size_of::<u32>()).expect("index count fits u32"),
         });
         self.dirty = false;
     }
@@ -201,7 +223,10 @@ impl GeometryRegistry {
     /// id is consumed. A rejected create leaves the id sequence
     /// untouched, so ids stay dense over accepted geometries.
     pub fn create(&mut self, mail: CreateGeometry) -> CreateGeometryResult {
-        if let Err(error) = validate_geometry(&mail.layout, &mail.vertices, &mail.indices) {
+        let (Some(vertices), Some(indices)) = (mail.vertices.contiguous(), mail.indices.contiguous()) else {
+            return CreateGeometryResult::Err { error: NOT_RESIDENT.to_owned() };
+        };
+        if let Err(error) = validate_geometry(&mail.layout, vertices, indices) {
             return CreateGeometryResult::Err { error };
         }
         let Some(geometry_id) = self.ids.allocate() else {
@@ -238,7 +263,16 @@ impl GeometryRegistry {
             );
             return;
         };
-        if let Err(reason) = validate_geometry(&entry.layout, &mail.vertices, &mail.indices) {
+        let (Some(vertices), Some(indices)) = (mail.vertices.contiguous(), mail.indices.contiguous()) else {
+            tracing::warn!(
+                target: "aether_render",
+                geometry_id = mail.geometry_id,
+                reason = NOT_RESIDENT,
+                "update_geometry replacement is not contiguous; dropping",
+            );
+            return;
+        };
+        if let Err(reason) = validate_geometry(&entry.layout, vertices, indices) {
             tracing::warn!(
                 target: "aether_render",
                 geometry_id = mail.geometry_id,
@@ -319,7 +353,11 @@ mod tests {
     }
 
     fn create(layout: Vec<VertexAttribute>, vertices: Vec<u8>, indices: Vec<u8>) -> CreateGeometry {
-        CreateGeometry { layout, vertices, indices }
+        CreateGeometry { layout, vertices: Blob::from(vertices), indices: Blob::from(indices) }
+    }
+
+    fn update(geometry_id: u32, vertices: Vec<u8>, indices: Vec<u8>) -> UpdateGeometry {
+        UpdateGeometry { geometry_id, vertices: Blob::from(vertices), indices: Blob::from(indices) }
     }
 
     /// The rejection reason for a create mail that must not validate.
@@ -381,22 +419,18 @@ mod tests {
 
         let grown_vertices = vec![7u8; 60];
         let grown_indices = indices_bytes(&[0, 1, 2]);
-        registry.update(UpdateGeometry {
-            geometry_id,
-            vertices: grown_vertices.clone(),
-            indices: grown_indices.clone(),
-        });
+        registry.update(update(geometry_id, grown_vertices.clone(), grown_indices.clone()));
         let entry = registry.entries.get(&geometry_id).expect("entry survives the update");
-        assert_eq!(entry.vertices, grown_vertices, "a valid update replaces the vertex bytes wholesale");
-        assert_eq!(entry.indices, grown_indices, "a valid update replaces the index bytes wholesale");
+        assert_eq!(entry.vertex_bytes(), grown_vertices, "a valid update replaces the vertex bytes wholesale");
+        assert_eq!(entry.index_bytes(), grown_indices, "a valid update replaces the index bytes wholesale");
         assert!(entry.dirty, "a valid update must dirty the entry so realization re-creates the buffers");
         assert_eq!(entry.revision, 1, "a valid update advances the compute bind-group cache key");
 
         registry.entries.get_mut(&geometry_id).expect("entry present").dirty = false;
-        registry.update(UpdateGeometry { geometry_id, vertices: vec![0u8; 20], indices: indices_bytes(&[5]) });
+        registry.update(update(geometry_id, vec![0u8; 20], indices_bytes(&[5])));
         let entry = registry.entries.get(&geometry_id).expect("entry survives the rejected update");
-        assert_eq!(entry.vertices, grown_vertices, "a rejected update must leave the previous vertices staged");
-        assert_eq!(entry.indices, grown_indices, "a rejected update must leave the previous indices staged");
+        assert_eq!(entry.vertex_bytes(), grown_vertices, "a rejected update must leave the previous vertices staged");
+        assert_eq!(entry.index_bytes(), grown_indices, "a rejected update must leave the previous indices staged");
         assert!(!entry.dirty, "a rejected update must not dirty the entry");
         assert_eq!(entry.revision, 1, "a rejected update must not invalidate resident bindings");
     }
@@ -413,7 +447,7 @@ mod tests {
             panic!("create accepted");
         };
 
-        registry.update(UpdateGeometry { geometry_id: 99, vertices: vec![0u8; 20], indices: Vec::new() });
+        registry.update(update(99, vec![0u8; 20], Vec::new()));
         registry.destroy(DestroyGeometry { geometry_id: 99 });
 
         assert_eq!(registry.entries.len(), 1);
@@ -457,8 +491,8 @@ mod tests {
         assert_eq!(registry.entries.len(), 1);
         let entry = &registry.entries[&geometry_id];
         assert_eq!(entry.layout, layout);
-        assert_eq!(entry.vertices, vertices);
-        assert_eq!(entry.indices, indices);
+        assert_eq!(entry.vertex_bytes(), vertices);
+        assert_eq!(entry.index_bytes(), indices);
         assert!(entry.realized.is_none(), "old-device buffers must be released");
         assert!(entry.dirty, "preserved bytes must be upload-ready for the replacement device");
         assert_eq!(entry.revision, 1, "replacement invalidates cached resident-buffer bind groups");

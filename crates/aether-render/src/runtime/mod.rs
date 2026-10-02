@@ -1273,10 +1273,10 @@ impl NativeActor for RenderCapability {
 #[cfg(test)]
 mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
-    use super::texture::StagedTexture;
+    use super::texture::{StagedTexture, TexturePixels};
     use super::*;
     use aether_actor::HandlesKind;
-    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_data::{Blob, Kind, SessionToken, Uuid};
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
     use aether_substrate::chassis::builder::ReplyTarget;
@@ -1297,7 +1297,7 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels,
+            pixels: TexturePixels::Received(Blob::from(pixels)),
             realized: None,
             dirty: true,
         }
@@ -1499,7 +1499,7 @@ mod tests {
         render.read(|state| {
             assert!(state.gpu.is_none(), "terminal state never retries device acquisition");
             assert!(state.pending_capture.is_none(), "a refused capture parks nothing");
-            assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
+            assert_eq!(state.textures.entries[&3].pixels.bytes(), vec![7; 16], "fire-and-forget updates are dropped");
             assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
         });
     }
@@ -1556,7 +1556,10 @@ mod tests {
             pixels: vec![0, 0, 0, 255],
         });
 
-        assert_eq!(render.read(|state| state.textures.entries[&WHITE_TEXTURE_ID].pixels.clone()), vec![255; 16]);
+        assert_eq!(
+            render.read(|state| state.textures.entries[&WHITE_TEXTURE_ID].pixels.bytes().to_vec()),
+            vec![255; 16]
+        );
     }
 
     /// ADR-0213. Catches `draw_shapes` accumulating anywhere but the one

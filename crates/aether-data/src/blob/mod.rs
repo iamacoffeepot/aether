@@ -4,8 +4,9 @@
 //! `Owned` bytes in hand, built by anyone with `Blob::from`, or a `Shared`
 //! engine entry reached through [`BlobBacking`]. The engine alone builds a
 //! `Shared` value, through the hidden `__mint_shared_blob`, which
-//! `scripts/check-reference-mint.py` confines. A `Blob` has no whole-bytes
-//! accessor: every read streams through [`BlobReader`].
+//! `scripts/check-reference-mint.py` confines. Reads stream through
+//! [`BlobReader`]; [`Blob::contiguous`] hands an in-process consumer the whole
+//! bytes as one slice when the backing holds them.
 //!
 //! [`BlobHash`] is a blob's identity and dedup key. Knowing one grants
 //! nothing, and nothing looks a blob up by it.
@@ -41,6 +42,16 @@ impl Blob {
             Repr::Shared(backing) => backing.len(),
         }
     }
+
+    /// The bytes as one slice. `Some` for owned bytes and engine store entries
+    /// (owned or slab range); `None` for a guest's FFI-backed hold.
+    #[must_use]
+    pub fn contiguous(&self) -> Option<&[u8]> {
+        match &self.0 {
+            Repr::Owned(bytes) => Some(&bytes[..]),
+            Repr::Shared(backing) => backing.contiguous(),
+        }
+    }
 }
 
 impl From<Vec<u8>> for Blob {
@@ -74,6 +85,11 @@ pub trait BlobBacking: Any + Send + Sync + 'static {
     /// `buf.len()`, possibly fewer; `0` only at or past the end, so a caller
     /// loops until it sees `0`.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> usize;
+
+    /// The bytes as one slice when the backing holds them in this process.
+    fn contiguous(&self) -> Option<&[u8]> {
+        None
+    }
 
     /// Whether there are no bytes.
     fn is_empty(&self) -> bool {

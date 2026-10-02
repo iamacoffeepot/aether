@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use aether_data::Blob;
 use aether_substrate::render::{
     RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_full,
 };
@@ -29,9 +30,46 @@ pub struct StagedTexture {
     pub format: TextureFormat,
     pub sampling: TextureSampling,
     pub usage: TextureUsage,
-    pub pixels: Vec<u8>,
+    pub pixels: TexturePixels,
     pub realized: Option<RealizedTexture>,
     pub dirty: bool,
+}
+
+/// The staged pixels of a texture. A created texture holds the received
+/// `Blob` and uploads straight from its slice; the first sub-rect edit
+/// copies the bytes out once, and later edits go in place. The received
+/// blob is immutable, so a clone held by the sender or the store never
+/// sees an edit.
+pub enum TexturePixels {
+    Received(Blob),
+    Edited(Vec<u8>),
+}
+
+impl TexturePixels {
+    /// The staged bytes. `create` refuses a blob that is not contiguous in
+    /// this process, so a miss here is a broken invariant.
+    ///
+    /// # Panics
+    /// Panics if a received blob is not contiguous, fail-fast per ADR-0063.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Received(blob) => blob.contiguous().expect("create_texture refuses non-contiguous pixel bytes"),
+            Self::Edited(bytes) => bytes,
+        }
+    }
+
+    /// The editable buffer: a `Received` blob is copied into `Edited` once,
+    /// and the copy is edited in place from then on.
+    pub fn edit(&mut self) -> &mut Vec<u8> {
+        if let Self::Received(_) = self {
+            *self = Self::Edited(self.bytes().to_vec());
+        }
+        match self {
+            Self::Edited(bytes) => bytes,
+            Self::Received(_) => unreachable!("a received blob was replaced by an edited copy above"),
+        }
+    }
 }
 
 impl StagedTexture {
@@ -51,13 +89,14 @@ impl StagedTexture {
             return false;
         }
         let bytes_per_pixel = self.format.bytes_per_pixel();
+        let staged = self.pixels.edit();
         let row_bytes = width as usize * bytes_per_pixel;
         let dst_stride = self.width as usize * bytes_per_pixel;
         for row in 0..height as usize {
             let src_start = row * row_bytes;
             let dst_row = y as usize + row;
             let dst_start = dst_row * dst_stride + x as usize * bytes_per_pixel;
-            self.pixels[dst_start..dst_start + row_bytes].copy_from_slice(&pixels[src_start..src_start + row_bytes]);
+            staged[dst_start..dst_start + row_bytes].copy_from_slice(&pixels[src_start..src_start + row_bytes]);
         }
         self.dirty = true;
         true
@@ -74,7 +113,7 @@ impl StagedTexture {
             // Already on the GPU; re-upload only if `update_texture`
             // dirtied the staging buffer since the last record.
             if self.dirty {
-                upload_texture_full(queue, realized, &self.pixels);
+                upload_texture_full(queue, realized, self.pixels.bytes());
             }
         } else {
             let spec = TextureSpec {
@@ -84,7 +123,7 @@ impl StagedTexture {
                 nearest: self.sampling == TextureSampling::Nearest,
             };
             self.realized = Some(match self.usage {
-                TextureUsage::Sampled => realize_texture(device, queue, texture_bindings, spec, &self.pixels),
+                TextureUsage::Sampled => realize_texture(device, queue, texture_bindings, spec, self.pixels.bytes()),
                 TextureUsage::Writable => realize_writable_texture(device, queue, texture_bindings, spec),
             });
         }
@@ -145,6 +184,9 @@ impl TextureRegistry {
     /// leaves the id sequence untouched, so ids stay dense over accepted
     /// textures.
     pub fn create(&mut self, mail: CreateTexture) -> CreateTextureResult {
+        let Some(pixels) = mail.pixels.contiguous() else {
+            return CreateTextureResult::Err { error: "pixel bytes are not resident in this process".to_owned() };
+        };
         let Some(expected) = expected_pixel_bytes(mail.width, mail.height, mail.format) else {
             return CreateTextureResult::Err {
                 error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
@@ -165,22 +207,22 @@ impl TextureRegistry {
             };
         }
         match mail.usage {
-            TextureUsage::Sampled if mail.pixels.len() != expected => {
+            TextureUsage::Sampled if pixels.len() != expected => {
                 return CreateTextureResult::Err {
                     error: format!(
                         "pixels length {} does not match {}x{} {:?} = {expected}",
-                        mail.pixels.len(),
+                        pixels.len(),
                         mail.width,
                         mail.height,
                         mail.format
                     ),
                 };
             }
-            TextureUsage::Writable if !mail.pixels.is_empty() => {
+            TextureUsage::Writable if !pixels.is_empty() => {
                 return CreateTextureResult::Err {
                     error: format!(
                         "writable textures are created without staged pixels, but {} bytes were supplied",
-                        mail.pixels.len()
+                        pixels.len()
                     ),
                 };
             }
@@ -200,7 +242,7 @@ impl TextureRegistry {
                 format: mail.format,
                 sampling: mail.sampling,
                 usage: mail.usage,
-                pixels: mail.pixels,
+                pixels: TexturePixels::Received(mail.pixels),
                 realized: None,
                 dirty: mail.usage == TextureUsage::Sampled,
             },
@@ -277,7 +319,7 @@ impl TextureRegistry {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![255, 255, 255, 255],
+            pixels: TexturePixels::Received(Blob::from(vec![255, 255, 255, 255])),
             realized: None,
             dirty: true,
         });
@@ -332,7 +374,7 @@ mod tests {
             format: TextureFormat::Rgba16Float,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![0u8; 16],
+            pixels: Blob::from(vec![0u8; 16]),
         });
         assert!(matches!(created, CreateTextureResult::Ok { .. }), "linear-sampled Rgba16Float must be accepted");
     }
@@ -349,16 +391,16 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![0u8; 16],
+            pixels: TexturePixels::Received(Blob::from(vec![0u8; 16])),
             realized: None,
             dirty: false,
         };
         // Overwrite the bottom-right pixel (1, 1) with 0xAA bytes.
         assert!(texture.apply_subrect(1, 1, 1, 1, &[0xAA, 0xAA, 0xAA, 0xAA]));
         assert!(texture.dirty);
-        assert_eq!(&texture.pixels[12..16], &[0xAA, 0xAA, 0xAA, 0xAA]);
+        assert_eq!(&texture.pixels.bytes()[12..16], &[0xAA, 0xAA, 0xAA, 0xAA]);
         // The other three pixels are untouched.
-        assert_eq!(&texture.pixels[0..12], &[0u8; 12]);
+        assert_eq!(&texture.pixels.bytes()[0..12], &[0u8; 12]);
 
         // Out of bounds (rect extends past the right edge).
         texture.dirty = false;
@@ -378,13 +420,13 @@ mod tests {
             format: TextureFormat::R8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![0u8; 8],
+            pixels: TexturePixels::Received(Blob::from(vec![0u8; 8])),
             realized: None,
             dirty: false,
         };
 
         assert!(texture.apply_subrect(1, 0, 2, 2, &[10, 20, 30, 40]));
-        assert_eq!(&texture.pixels, &[0, 10, 20, 0, 0, 30, 40, 0]);
+        assert_eq!(texture.pixels.bytes(), &[0, 10, 20, 0, 0, 30, 40, 0]);
         assert!(texture.dirty);
 
         texture.dirty = false;
@@ -405,7 +447,7 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: vec![0u8; 16],
+            pixels: Blob::from(vec![0u8; 16]),
         });
         assert!(matches!(rejected, CreateTextureResult::Err { .. }), "staged pixels on a writable create must reject");
         assert_eq!(registry.ids.peek(), Some(0), "a rejected create must not consume an id");
@@ -416,7 +458,7 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         });
         let CreateTextureResult::Ok { texture_id } = accepted else {
             panic!("an empty-pixels writable create must be accepted");
@@ -437,7 +479,7 @@ mod tests {
             format: TextureFormat::R32Float,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![0u8; 8],
+            pixels: Blob::from(vec![0u8; 8]),
         });
         assert!(matches!(rejected, CreateTextureResult::Err { .. }), "linear sampling over R32Float must reject");
 
@@ -447,7 +489,7 @@ mod tests {
             format: TextureFormat::R32Float,
             sampling: TextureSampling::Nearest,
             usage: TextureUsage::Sampled,
-            pixels: vec![0u8; 8],
+            pixels: Blob::from(vec![0u8; 8]),
         });
         assert!(matches!(accepted, CreateTextureResult::Ok { .. }), "nearest-sampled R32Float must be accepted");
     }
@@ -465,7 +507,7 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         });
         let CreateTextureResult::Ok { texture_id } = created else {
             panic!("writable create accepted");
@@ -474,7 +516,7 @@ mod tests {
         registry.update(UpdateTexture { texture_id, x: 0, y: 0, width: 1, height: 1, pixels: vec![1, 2, 3, 4] });
 
         let entry = registry.entries.get(&texture_id).expect("entry survives the dropped update");
-        assert!(entry.pixels.is_empty(), "a writable texture must never gain staged pixels");
+        assert!(entry.pixels.bytes().is_empty(), "a writable texture must never gain staged pixels");
         assert!(!entry.dirty, "a dropped update must not dirty a writable texture");
     }
 
@@ -493,7 +535,7 @@ mod tests {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Nearest,
             usage: TextureUsage::Sampled,
-            pixels: sampled_pixels.clone(),
+            pixels: Blob::from(sampled_pixels.clone()),
         }) else {
             panic!("sampled create accepted");
         };
@@ -503,7 +545,7 @@ mod tests {
             format: TextureFormat::R16Float,
             sampling: TextureSampling::Nearest,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         }) else {
             panic!("writable create accepted");
         };
@@ -522,7 +564,7 @@ mod tests {
         assert_eq!(sampled.height, 1);
         assert_eq!(sampled.format, TextureFormat::Rgba8);
         assert_eq!(sampled.sampling, TextureSampling::Nearest);
-        assert_eq!(sampled.pixels, sampled_pixels);
+        assert_eq!(sampled.pixels.bytes(), sampled_pixels);
         assert!(sampled.realized.is_none(), "the old-device texture must be released");
         assert!(sampled.dirty, "sampled pixels must be upload-ready for the replacement device");
 
@@ -530,12 +572,12 @@ mod tests {
         assert_eq!(writable.width, 3);
         assert_eq!(writable.height, 2);
         assert_eq!(writable.format, TextureFormat::R16Float);
-        assert!(writable.pixels.is_empty(), "writable textures remain deliberately unstaged");
+        assert!(writable.pixels.bytes().is_empty(), "writable textures remain deliberately unstaged");
         assert!(writable.realized.is_none(), "the old-device writable texture must be released");
         assert!(!writable.dirty, "a writable texture must recreate cleared rather than attempt an upload");
 
         let white = &registry.entries[&WHITE_TEXTURE_ID];
-        assert_eq!(white.pixels, vec![255, 255, 255, 255]);
+        assert_eq!(white.pixels.bytes(), vec![255, 255, 255, 255]);
         assert!(white.realized.is_none());
         assert!(white.dirty, "the internal sampled texture must rebuild with the rest of the registry");
     }

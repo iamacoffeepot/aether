@@ -135,6 +135,10 @@ impl BlobBacking for BlobEntry {
         buf[..copied].copy_from_slice(&rest[..copied]);
         copied
     }
+
+    fn contiguous(&self) -> Option<&[u8]> {
+        Some(self.bytes())
+    }
 }
 
 impl Drop for BlobEntry {

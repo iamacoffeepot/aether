@@ -348,8 +348,8 @@ fn check_dispatch(
                 let geometry_id = dispatch.geometries[declared.geometry as usize];
                 let entry = &geometries.entries[&geometry_id];
                 let bytes = match declared.buffer {
-                    GeometryBuffer::Vertices => entry.vertices.len() as u64,
-                    GeometryBuffer::Indices => entry.indices.len() as u64,
+                    GeometryBuffer::Vertices => entry.vertex_bytes().len() as u64,
+                    GeometryBuffer::Indices => entry.index_bytes().len() as u64,
                     GeometryBuffer::DrawIndexedIndirect => INDIRECT_CONTROL_BYTES as u64,
                 };
                 if bytes == 0 {

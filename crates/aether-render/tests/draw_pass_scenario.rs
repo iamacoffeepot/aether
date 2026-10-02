@@ -21,6 +21,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
@@ -133,7 +134,7 @@ fn create_output(harness: &mut SubstrateHarness) -> u32 {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         },
     )
 }
@@ -149,8 +150,8 @@ fn create_geometry(
 ) -> u32 {
     let mail = CreateGeometry {
         layout: position_slot().layout,
-        vertices: positions.iter().flatten().flat_map(|value| value.to_le_bytes()).collect(),
-        indices: indices.iter().flat_map(|index| index.to_le_bytes()).collect(),
+        vertices: Blob::from(positions.iter().flatten().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>()),
+        indices: Blob::from(indices.iter().flat_map(|index| index.to_le_bytes()).collect::<Vec<u8>>()),
     };
     let created = harness
         .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail))])

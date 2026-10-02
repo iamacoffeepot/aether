@@ -17,6 +17,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
@@ -126,7 +127,7 @@ fn create_2x2(harness: &mut SubstrateHarness, label: &'static str, pixels: Vec<u
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage,
-            pixels,
+            pixels: Blob::from(pixels),
         },
     )
 }
@@ -270,7 +271,7 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: source_pixels,
+            pixels: Blob::from(source_pixels),
         },
     );
     let output_id = create_texture(
@@ -282,7 +283,7 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         },
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {
@@ -345,7 +346,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
             format: TextureFormat::R8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: vec![255u8; 4],
+            pixels: Blob::from(vec![255u8; 4]),
         },
     );
     let output_id = create_texture(
@@ -357,7 +358,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Writable,
-            pixels: Vec::new(),
+            pixels: Blob::from(Vec::new()),
         },
     );
     let program_id = match register_reply(&mut harness, "register", &ping_pong_register()) {

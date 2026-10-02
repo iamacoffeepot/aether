@@ -17,6 +17,7 @@
 
 use std::env;
 
+use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
@@ -83,7 +84,11 @@ fn geometry_lifecycle_round_trips_over_mail() {
     let first = created_id(
         &mut harness,
         "create",
-        &CreateGeometry { layout: position_layout(), vertices: vec![0u8; 36], indices: indices_bytes(&[0, 1, 2]) },
+        &CreateGeometry {
+            layout: position_layout(),
+            vertices: Blob::from(vec![0u8; 36]),
+            indices: Blob::from(indices_bytes(&[0, 1, 2])),
+        },
     );
     assert_eq!(first, 0, "the first accepted geometry must be id 0");
 
@@ -92,7 +97,11 @@ fn geometry_lifecycle_round_trips_over_mail() {
     let rejected = create_reply(
         &mut harness,
         "create_off_stride",
-        &CreateGeometry { layout: position_layout(), vertices: vec![0u8; 35], indices: Vec::new() },
+        &CreateGeometry {
+            layout: position_layout(),
+            vertices: Blob::from(vec![0u8; 35]),
+            indices: Blob::from(Vec::new()),
+        },
     );
     match rejected {
         CreateGeometryResult::Err { error } => {
@@ -113,8 +122,8 @@ fn geometry_lifecycle_round_trips_over_mail() {
                     &harness.actor_ref::<RenderCapability>(),
                     &UpdateGeometry {
                         geometry_id: first,
-                        vertices: vec![0u8; 48],
-                        indices: indices_bytes(&[0, 1, 2, 0, 2, 3]),
+                        vertices: Blob::from(vec![0u8; 48]),
+                        indices: Blob::from(indices_bytes(&[0, 1, 2, 0, 2, 3])),
                     },
                 ),
             ),
@@ -129,7 +138,11 @@ fn geometry_lifecycle_round_trips_over_mail() {
                 "update_after_destroy",
                 HarnessOp::send_and_settle(
                     &harness.actor_ref::<RenderCapability>(),
-                    &UpdateGeometry { geometry_id: first, vertices: vec![0u8; 12], indices: indices_bytes(&[0]) },
+                    &UpdateGeometry {
+                        geometry_id: first,
+                        vertices: Blob::from(vec![0u8; 12]),
+                        indices: Blob::from(indices_bytes(&[0])),
+                    },
                 ),
             ),
         ])
@@ -138,7 +151,11 @@ fn geometry_lifecycle_round_trips_over_mail() {
     let second = created_id(
         &mut harness,
         "create_after_destroy",
-        &CreateGeometry { layout: position_layout(), vertices: vec![0u8; 12], indices: indices_bytes(&[0]) },
+        &CreateGeometry {
+            layout: position_layout(),
+            vertices: Blob::from(vec![0u8; 12]),
+            indices: Blob::from(indices_bytes(&[0])),
+        },
     );
     assert_eq!(second, 1, "ids stay dense over accepted creates and a destroyed id is not recycled");
 }

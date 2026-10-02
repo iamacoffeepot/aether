@@ -130,6 +130,21 @@ fn slab_members_read_their_own_regions_and_reuse_resident_entries() {
     assert!(Arc::ptr_eq(&entries[2], &resident));
 }
 
+/// Catches a missing `contiguous` override (the default `None` would make
+/// render refuse every store-shared asset) and a slab member answering with
+/// the whole slab or a neighbour's region.
+#[test]
+fn store_entries_answer_contiguous_with_exactly_their_own_bytes() {
+    let store = store();
+    let owned = store.check_in(boxed(b"owned bytes")).into_blob();
+    let members: [&[u8]; 3] = [b"first", b"", b"second"];
+
+    let slab = slab_of(&store, &members).into_iter().map(BlobEntry::into_blob).collect::<Vec<_>>();
+
+    assert_eq!(owned.contiguous(), Some(b"owned bytes".as_slice()));
+    assert_eq!(slab.iter().map(|blob| blob.contiguous()).collect::<Vec<_>>(), members.map(Some));
+}
+
 /// Catches an owned check-in that adopts a slab entry, and a displaced slab
 /// entry whose drop removes the owned entry's slot.
 #[test]

@@ -15,7 +15,7 @@ use aether_render::RenderCapability;
 use std::fs;
 
 use aether_actor::ActorRef;
-use aether_data::{Kind, LoadName};
+use aether_data::{Blob, Kind, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{
     envelope, init_save_sandbox, require_runtime, test_namespace_roots,
@@ -65,7 +65,7 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, pixels: V
                     format: TextureFormat::Rgba8,
                     sampling: TextureSampling::Linear,
                     usage: TextureUsage::Sampled,
-                    pixels,
+                    pixels: Blob::from(pixels),
                 },
             ),
         )])

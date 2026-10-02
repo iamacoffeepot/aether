@@ -71,7 +71,8 @@ via `send_many` (each triangle is `DRAW_TRIANGLE_BYTES` on the wire).
 `create_texture` stages `Rgba8` or `R8` pixels under a session-scoped
 `texture_id` (the reply hands it back); `draw_textured_quads` then draws a batch
 of quads sampling that texture, each carrying a pixel-unit rect, a uv sub-rect,
-and an RGBA tint. `R8` samples contribute their scalar value in the red channel
+and an RGBA tint. The pixels arrive as a `Blob` and are staged as received, with
+JSON callers sending the same byte array as before. `R8` samples contribute their scalar value in the red channel
 (`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
 texture when the producer knows it is no longer used.

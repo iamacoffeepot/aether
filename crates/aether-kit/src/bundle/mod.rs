@@ -50,6 +50,7 @@
 //! parsing, so the actor never links an image decoder.
 
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_data::Blob;
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_math::Rgba;
@@ -161,7 +162,7 @@ impl WasmActor for BundleComponent {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels,
+            pixels: Blob::from(pixels),
         });
     }
 
