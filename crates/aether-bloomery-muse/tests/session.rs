@@ -15,9 +15,9 @@ use aether_bloomery_kinds::{
 use aether_bloomery_muse::{
     Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
     MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput,
-    RestReason, Role, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput,
-    ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit,
-    TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
+    RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen, SessionRecord, ToolCall,
+    ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
+    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -267,6 +267,7 @@ impl Driver {
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
+            name if name == SessionExhausted::NAME => invoke::<SessionExhausted>(invocation),
             name => panic!("no program {name}"),
         };
         match invoked {
@@ -774,7 +775,7 @@ fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -
     let reason = FaultReason::Panicked { message: Detail::new("echo panicked") };
     let fault = Fault { program: program::<Echo>(), input: asked.input, reason: reason.clone() };
     let faulted = driver.append(&fault, Some(asked.requested), Vec::new());
-    assert_eq!(driver.intent(faulted).rule().as_str(), "rest_faulted");
+    assert_eq!(driver.intent(faulted).rule().as_str(), "after_fault");
     assert_eq!(asked_at(&driver, faulted), SessionRecord::NAME, "the fault is recorded as the session's rest");
     let recorded = driver.follow(faulted);
 
@@ -798,6 +799,85 @@ fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -
     assert_eq!(heads.changes(), [HeadChange::new(&SessionKey::new(opened).head(), None, to)]);
     assert!(driver.intents(moved).is_empty(), "the loop rests");
 
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+/// Record the run `asked` requested as faulting with `reason`; the fault's seq.
+fn fault(driver: &mut Driver, request: &Asked, reason: FaultReason) -> u64 {
+    let program = ProgramRef::new(bundle(), request.call.name.clone());
+    let fault = Fault { program, input: request.input, reason };
+    driver.append(&fault, Some(request.requested), Vec::new())
+}
+
+#[test]
+fn an_exhausted_call_is_retried_twice_then_answered_and_the_session_goes_on() -> TestResult {
+    // Catches an exhausted run that fails the session, a retry over another program or input, a retry that never
+    // stops, an answer that names the wrong allotment or count or is never staged (the next turn would refuse its
+    // closure), the next call run before the exhausted one is answered, and folds that diverge between warm-up and
+    // live delivery.
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED]);
+    let (opened, tree) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+    let (_, calls) = called(&driver.result(first_turn));
+    let [call_a, call_b] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+
+    let mut trigger = first_turn;
+    for reason in [FaultReason::TimedOut, FaultReason::ResourceExhausted] {
+        let request = driver.request(trigger);
+        trigger = fault(&mut driver, &request, reason);
+        assert_eq!(driver.intent(trigger).rule().as_str(), "after_fault");
+        let retried = asked(&driver, trigger);
+        assert_eq!(retried.name.as_str(), Echo::NAME);
+        assert_eq!(retried.input, bound(tree, call_a), "the retry runs the same call over the same input");
+    }
+    let request = driver.request(trigger);
+    trigger = fault(&mut driver, &request, FaultReason::ResourceExhausted);
+    assert_eq!(asked_at(&driver, trigger), SessionExhausted::NAME, "the third exhaustion is answered");
+
+    let answered = driver.follow(trigger);
+    assert_eq!(driver.intent(answered).rule().as_str(), "resume");
+    let next = asked(&driver, answered);
+    assert_eq!(next.name.as_str(), Echo::NAME);
+    assert_eq!(next.input, bound(tree, call_b), "the session goes on to the next call");
+    let echoed = driver.follow(answered);
+
+    let CallInput::Value(next_turn) = asked(&driver, echoed).input else {
+        panic!("expected the next turn as a value");
+    };
+    let next_turn: TurnInput = TurnInput::decode_storage(&payload(&next_turn))?.value;
+    let refusal = Ref::of_text("`muse.echo` ran out of memory after 3 attempts");
+    let output = TurnItem::CallOutput { call_id: call_a.call_id().clone(), output: ToolOutput::Refused(refusal) };
+    assert!(next_turn.items().contains(&output), "the exhausted call is answered with the staged refusal");
+
+    driver.settle(echoed);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_call_that_fails_after_a_retry_still_rests_the_session_failed() -> TestResult {
+    // Catches a retried call whose later fault outside exhaustion is swallowed or retried instead of failing the
+    // session with that fault.
+    let mut driver = Driver::new(&[CALLED_ECHO]);
+    let (opened, _) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let request = driver.request(first_turn);
+    let retried = fault(&mut driver, &request, FaultReason::TimedOut);
+    let request = driver.request(retried);
+    let reason = FaultReason::ExecutorFailed { reason: Detail::new("the daemon went away") };
+    let failed = fault(&mut driver, &request, reason.clone());
+    assert_eq!(asked_at(&driver, failed), SessionRecord::NAME, "the failure is recorded as the session's rest");
+
+    driver.settle(failed);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    let program = ProgramName::new(Echo::NAME)?;
+    assert_eq!(*session.rested(), RestReason::Failed(Failure::Faulted { program, reason }));
     assert_warm_and_live_agree(&driver);
     Ok(())
 }

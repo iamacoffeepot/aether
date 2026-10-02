@@ -9,7 +9,9 @@
 //! `continue` sent after `wait` returns always finds that record.
 //!
 //! A fault or failed reaction in the session's chain is reported after the
-//! rest it led to, and `wait` exits non-zero naming it. A second one in the
+//! rest it led to, and `wait` exits non-zero naming it. A tool run that ran
+//! out of time or memory is not one: the loop runs it again or answers the
+//! call saying so, and the session goes on. A second one in the
 //! same chain, or a failed head move, means the session cannot record itself
 //! (its failed record failed too), so the follow stops there instead of
 //! waiting for a rest that will not come.
@@ -20,8 +22,8 @@ use aether_bloomery_kinds::{
     Digest, Fault, JournalEntry, ReactionFailed, RecordedHead, RecordedHeadMove, Transition, Utf8Text,
 };
 use aether_bloomery_muse::{
-    ContinueInput, Failure, MuseTurn, OpenInput, RestReason, Role, Session, SessionContinue, SessionKey, SessionOpen,
-    SessionRecord, TurnItem, TurnOutcome, TurnResult, TurnUsage,
+    ContinueInput, Exhaustion, Failure, MuseTurn, OpenInput, RestReason, Role, Session, SessionContinue,
+    SessionExhausted, SessionKey, SessionOpen, SessionRecord, TurnItem, TurnOutcome, TurnResult, TurnUsage,
 };
 use aether_bloomery_program::Program;
 use aether_data::Kind;
@@ -180,7 +182,11 @@ impl Chain {
             return Ok(None);
         }
         if let Some(fault) = decode_entry::<Fault>(entry)? {
-            self.fail(format!("{} faulted at seq {}: {:?}", fault.program.name().as_str(), entry.seq, fault.reason))?;
+            let retried = retried(&fault);
+            if !retried {
+                let program = fault.program.name().as_str();
+                self.fail(format!("{program} faulted at seq {}: {:?}", entry.seq, fault.reason))?;
+            }
         } else if let Some(failure) = decode_entry::<ReactionFailed>(entry)? {
             let reactor = failure.reactor.as_ref().map_or("the bundle", |reactor| reactor.as_str());
             let message = format!("{reactor} failed a reaction at seq {}: {}", entry.seq, failure.reason.as_str());
@@ -243,6 +249,16 @@ impl Chain {
         }
         Ok(())
     }
+}
+
+/// Whether the loop retries or answers `fault` and the session goes on: a run
+/// of a tool, never one of the loop's own programs, that ran out of time or
+/// memory.
+fn retried(fault: &Fault) -> bool {
+    let program = fault.program.name().as_str();
+    let loops_own = [MuseTurn::NAME, SessionRecord::NAME, SessionExhausted::NAME].contains(&program);
+    let exhausted = Exhaustion::of(&fault.reason).is_some();
+    exhausted && !loops_own
 }
 
 /// The usage a turn's outcome reported, when it reported any.

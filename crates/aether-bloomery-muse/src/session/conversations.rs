@@ -29,6 +29,7 @@ use crate::program::MuseTurn;
 use crate::result::{TurnOutcome, TurnResult};
 use crate::session::MuseSession;
 use crate::session::continue_::SessionContinue;
+use crate::session::exhausted::{ExhaustedInput, Exhaustion, MAX_TOOL_RETRIES, SessionExhausted};
 use crate::session::open::SessionOpen;
 use crate::session::record::{Answered, CallAnswer, RecordInput, SessionRecord};
 use crate::session::replay::replay;
@@ -72,6 +73,9 @@ struct Conversation {
     waiting: Option<Waiting>,
     /// The seq of the tool run answered last.
     answered: Option<Seq>,
+    /// The runs of the call now running that ran out of time or memory, reset
+    /// whenever a call is answered.
+    exhaustions: u32,
     /// What the loop runs next.
     next: Option<Next>,
 }
@@ -114,11 +118,14 @@ enum Next {
     Wait { turn: Ref<TurnInput>, until: Until },
     /// `turn` sent again, once its wait fired.
     Retry(Ref<TurnInput>),
+    /// The answer to the call now running, whose every attempt ran out of
+    /// time or memory.
+    Exhausted(ExhaustedInput),
 }
 
 impl Conversation {
     const fn new(limit: TurnLimit, turn: Ref<TurnInput>, tree: Ref<Tree>) -> Self {
-        Self { limit, turns: 0, turn, retries: 0, tree, waiting: None, answered: None, next: None }
+        Self { limit, turns: 0, turn, retries: 0, tree, waiting: None, answered: None, exhaustions: 0, next: None }
     }
 
     /// The record of this session failing with `failure`: the last turn it
@@ -195,7 +202,44 @@ impl Conversation {
         let schema = waiting.input.tools().iter().find(|tool| tool.program() == program)?.result();
         waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Result { schema, result }));
         self.answered = Some(seq);
+        self.exhaustions = 0;
         Some(())
+    }
+
+    /// Answer the call now running with `refusal`, the staged answer to its
+    /// exhausted attempts, at `seq`; whether a call waited for an answer.
+    fn refuse(&mut self, refusal: Ref<Utf8Text>, seq: Seq) -> bool {
+        let Some(waiting) = self.waiting.as_mut() else {
+            return false;
+        };
+        let Some(call) = waiting.calls.as_slice().get(waiting.outputs.len()) else {
+            return false;
+        };
+        waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(refusal)));
+        self.answered = Some(seq);
+        self.exhaustions = 0;
+        true
+    }
+
+    /// What runs after `fault` of the call now running, when it ran out of
+    /// time or memory: the same run again below the retry cap, and the
+    /// staged answer to its attempts at the cap. `None` for any other fault.
+    fn exhausted(&mut self, fault: &Fault) -> Option<Next> {
+        let resource = Exhaustion::of(&fault.reason)?;
+        let Some(Next::Call { program, input }) = &self.next else {
+            return None;
+        };
+        let same_program = program == fault.program.name();
+        let same_input = input.digest() == fault.input;
+        let answers_the_call = same_program && same_input;
+        if !answers_the_call {
+            return None;
+        }
+        self.exhaustions += 1;
+        if self.exhaustions <= MAX_TOOL_RETRIES {
+            return Some(Next::Call { program: program.clone(), input: input.clone() });
+        }
+        Some(Next::Exhausted(ExhaustedInput::new(program.clone(), resource, self.exhaustions)))
     }
 }
 
@@ -213,6 +257,9 @@ impl Conversations {
             }
             Next::Wait { until, .. } => wait_call(*until),
             Next::Retry(turn) => Some(call::<MuseTurn>(CallInput::Stored(turn.digest()))),
+            Next::Exhausted(exhausted) => {
+                Some(call::<SessionExhausted>(CallInput::Value(EncodedArtifact::new(exhausted).ok()?)))
+            }
             Next::Rest(_) => None,
         }
     }
@@ -233,7 +280,8 @@ impl Conversations {
             | Next::Settled(_)
             | Next::Fail(_)
             | Next::Wait { .. }
-            | Next::Retry(_) => None,
+            | Next::Retry(_)
+            | Next::Exhausted(_) => None,
         }
     }
 
@@ -445,11 +493,44 @@ impl View for Conversations {
         }
     }
 
-    /// A run the loop requested faulted: the session fails, or, when the run
-    /// was its failed record, is dropped.
+    /// The staged answer to a call whose every attempt was exhausted: the
+    /// call's output, when the run answers the `Requested` the loop recorded
+    /// for it. The `resume` rule then runs what comes next, as after a tool's
+    /// own run.
+    #[fold]
+    fn answered_exhausted(&mut self, run: Ran<SessionExhausted>, cited: &Cited, at: At) -> Result<(), CitedError> {
+        let linked = at.cause.and_then(|cause| self.sessions.get(self.links.get(&cause)?));
+        let awaits_answer = linked.is_some_and(|conversation| matches!(conversation.next, Some(Next::Exhausted(_))));
+        if !awaits_answer {
+            return Ok(());
+        }
+        let refusal = cited.get(run.result())?.refusal();
+        if let Some((key, mut conversation)) = self.take(at.cause) {
+            let refused = conversation.refuse(refusal, at.seq);
+            if refused {
+                self.advance(key, conversation, at.seq);
+            } else {
+                conversation.answered = Some(at.seq);
+                let failure = Failure::Unbuilt { reason: Detail::new("the exhausted answer answers no waiting call") };
+                self.fail(key, conversation, failure, at.seq);
+            }
+        }
+        Ok(())
+    }
+
+    /// A run the loop requested faulted. A tool run that ran out of time or
+    /// memory runs again, up to [`MAX_TOOL_RETRIES`] times, and is then
+    /// answered with the staged text saying so; any other fault fails the
+    /// session, or, when the run was its failed record, drops it.
     #[fold]
     fn faulted(&mut self, fault: Fault, at: At) {
-        if let Some((key, conversation)) = self.take(at.cause) {
+        let Some((key, mut conversation)) = self.take(at.cause) else {
+            return;
+        };
+        if let Some(next) = conversation.exhausted(&fault) {
+            conversation.next = Some(next);
+            self.keep(key, conversation, at.seq);
+        } else {
             let failure = Failure::Faulted { program: fault.program.name().clone(), reason: fault.reason };
             self.fail(key, conversation, failure, at.seq);
         }

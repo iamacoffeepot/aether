@@ -116,9 +116,9 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    Answered, CallAnswer, ContinueInput, Failure, MUSE, MuseSession, OpenInput, Opened, RecordInput, RestReason,
-    Session, SessionContinue, SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd,
-    TurnLimit, TurnLimitError, TurnSettings,
+    Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, MAX_TOOL_RETRIES, MUSE,
+    MuseSession, OpenInput, Opened, RecordInput, RestReason, Session, SessionContinue, SessionExhausted, SessionItems,
+    SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
@@ -131,6 +131,7 @@ aether_actor::export!(
         SessionOpen,
         SessionContinue,
         SessionRecord,
+        SessionExhausted,
         Echo,
         End,
         TreeEdit,

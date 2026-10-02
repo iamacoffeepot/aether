@@ -15,7 +15,8 @@
 //!   calls (`resume` runs the next, then sends the first turn with the
 //!   instructions, the user message, every seed's call, and every seed's
 //!   output). Seeds are not a turn and count against no limit; a seed that
-//!   faults fails the session, whose record holds the user message alone.
+//!   faults, other than by running out of time or memory, fails the session,
+//!   whose record holds the user message alone.
 //! - `call` runs the first call a turn asked for over the session's current
 //!   tree and the arguments `muse.turn` decoded for it. A call whose
 //!   arguments did not decode is answered with the stored refusal and
@@ -53,6 +54,14 @@
 //!   sends `muse.turn` again over the same stored turn input, so the resent
 //!   request is byte-identical. A turn is retried at most three times, and a
 //!   retry does not count against the turn limit.
+//! - `after_fault` runs a tool call again, over the same input, when its run
+//!   ran out of the executor's time or memory (`TimedOut` or
+//!   `ResourceExhausted`), up to [`MAX_TOOL_RETRIES`] times: the executor
+//!   grows its estimate for the run after each exhaustion, so a later attempt
+//!   may fit. When the last attempt is exhausted too, it runs
+//!   `muse.session.exhausted`, which stages the text naming the tool, the
+//!   allotment, and the attempts, and `resume` answers the call with it as a
+//!   refusal and goes on. These retries count against no limit.
 //!
 //! A session opens on a tree, and a continue picks up the tree its record
 //! rested with. Every record holds the session's latest tree.
@@ -61,8 +70,9 @@
 //!
 //! Every activation ends with one head move. A session that fails rests with
 //! [`RestReason::Failed`], recorded through `muse.session.record` like any
-//! other rest and moved by `rest`: `rest_faulted` records it when a run the
-//! loop requested faults (a tool, `muse.turn`, the clock's wait, or a record),
+//! other rest and moved by `rest`: `after_fault` records it when a run the
+//! loop requested faults (a tool, other than by running out of time or memory,
+//! `muse.turn`, the clock's wait, or a record),
 //! and `rest_failed` when one of the loop's own rules fails. `call` and
 //! `resume` record it when the vendor ends a turn (rejected, unreadable, or
 //! transient past the retry cap) or the loop cannot build its next request.
@@ -87,6 +97,7 @@
 
 mod continue_;
 mod conversations;
+mod exhausted;
 #[cfg(test)]
 pub mod fixture;
 mod open;
@@ -101,6 +112,7 @@ use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;
+pub use exhausted::{Exhausted, ExhaustedInput, Exhaustion, MAX_TOOL_RETRIES, SessionExhausted};
 pub use open::{OpenInput, Opened, SessionOpen};
 pub use record::{Answered, CallAnswer, RecordInput, SessionRecord, TurnEnd};
 pub use state::{
@@ -252,7 +264,7 @@ impl Reactor for MuseSession {
     }
 
     #[rule]
-    fn rest_faulted(&self, _fault: Fault, step: Step) -> CallProgram {
+    fn after_fault(&self, _fault: Fault, step: Step) -> CallProgram {
         step.0
     }
 
