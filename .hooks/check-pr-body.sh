@@ -110,12 +110,24 @@ valid_scope() {
     "$root/scripts/issue-title-scopes.sh" --check "$scope"
 }
 
+# The scope list is aether's own crates, so an issue filed on another repository
+# (`-R` / `--repo` naming it, as for a nested research repo) keeps the title-shape
+# check but skips scope membership.
+target_repo=$(printf '%s' "$command" | grep -oE -- '(-R|--repo)[ =]+[^ ]+' | head -1 | sed -E 's/^(-R|--repo)[ =]+//' | tr -d "\"'")
+targets_aether=1
+if [[ -n "$target_repo" && "$target_repo" != "iamacoffeepot/aether" ]]; then
+    targets_aether=0
+fi
+
 if [[ ",$allowed," != *",e,"* ]] && (( is_issue_cmd == 1 )) && [[ -n "$title" ]]; then
     title_re='^(feat|fix|chore|docs|perf|refactor|flake)\(([a-z0-9-]+)(/[a-z0-9-]+)?\):[[:space:]].+$'
     if [[ "$title" =~ $title_re ]]; then
         scope="${BASH_REMATCH[2]}"
-        valid_scope "$scope"
-        scope_status=$?
+        scope_status=0
+        if (( targets_aether == 1 )); then
+            valid_scope "$scope"
+            scope_status=$?
+        fi
         case "$scope_status" in
             0) ;;
             1) issues+=("Pattern E: issue title scope '$scope' is not a known crate or meta-scope") ;;
