@@ -10,12 +10,13 @@ use aether_bloomery_kinds::{Ref, Utf8Text};
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "proof.verdict")]
 pub enum ProofVerdict {
-    /// Every step exited 0: the tree is formatted and has no clippy warning.
+    /// Every step exited 0: the tree is formatted and the cargo step passed.
     Passed,
     /// A step exited with any other code, or died by signal.
     Failed {
         /// What the failing step reported, capped with the cut marked: the
-        /// diagnostics cargo rendered, or its stderr when it rendered none.
+        /// cargo step's rendered diagnostics, test failure blocks, or its
+        /// stderr when it rendered none.
         diagnostics: Ref<Utf8Text>,
     },
 }

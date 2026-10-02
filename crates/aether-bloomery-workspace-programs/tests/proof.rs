@@ -1,4 +1,4 @@
-//! `proof.clippy` driven through the guest invocation seam: its workspace run answered in place with a canned
+//! The proofs driven through the guest invocation seam: each workspace run answered in place with a canned
 //! outcome, and every step output it then reads answered from a local store.
 
 use std::error::Error;
@@ -7,11 +7,13 @@ use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ProgramName, ReadArtifactResult, Ref, Refusal, Tree,
     Utf8Text,
 };
-use aether_bloomery_program::{Edited, Pending, PollResult, Program, Started, start_async, tooled};
+use aether_bloomery_program::{AsyncProgram, Edited, Pending, PollResult, Program, Started, start_async, tooled};
 use aether_bloomery_workspace::{
     Outcome, RunError, RunResult, RustToolchain, StepOutcome, ToolName, ToolRecord, TreePath,
 };
-use aether_bloomery_workspace_programs::proof::{ClippyArgs, ClippyProof, ProofBound, ProofVerdict};
+use aether_bloomery_workspace_programs::proof::{
+    ClippyArgs, ClippyProof, ProofBound, ProofVerdict, TestArgs, TestEnv, TestProof,
+};
 use aether_data::{Cites, Kind, Storage};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -56,25 +58,34 @@ fn encoded<K: Storage + Clone + Cites>(value: &K) -> Result<EncodedArtifact, Box
     Ok(EncodedArtifact::new(value)?)
 }
 
-/// Run the proof over a fixed source with its bound in the closure, answer its run with `reply`, and answer every
-/// read from `store`.
+/// Run the clippy proof with `reply`, answering every read from `store`.
 fn answer(reply: &RunResult, store: &[EncodedArtifact]) -> Result<Invoked, Box<dyn Error>> {
+    answer_as::<ClippyProof, _>(&ClippyArgs, reply, store)
+}
+
+/// Run `P` over a fixed source with its bound in the closure, answer its run with `reply`, and answer every read
+/// from `store`.
+fn answer_as<P: AsyncProgram + Program, A: Storage + Clone + Cites>(
+    args: &A,
+    reply: &RunResult,
+    store: &[EncodedArtifact],
+) -> Result<Invoked, Box<dyn Error>> {
     let bound = encoded(&ProofBound::new(
         Ref::from_digest(Digest::from_bytes([2; 32])),
         Ref::from_digest(Digest::from_bytes([3; 32])),
+        TestEnv::default(),
     ))?;
-    let args = encoded(&ClippyArgs)?;
+    let args = encoded(args)?;
     let source = Ref::from_digest(Digest::from_bytes([1; 32]));
     let input = encoded(&tooled(
         source,
-        Ref::<ClippyArgs>::from_digest(args.digest()).erase(),
+        Ref::<A>::from_digest(args.digest()).erase(),
         Ref::<ProofBound>::from_digest(bound.digest()).erase(),
     ))?;
     let closure = [&input, &args, &bound].into_iter().map(member).collect();
-    let invoke = Invoke::new(7, ProgramName::new(ClippyProof::NAME)?, input.digest(), closure);
+    let invoke = Invoke::new(7, ProgramName::new(P::NAME)?, input.digest(), closure);
 
-    let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<ClippyProof>(invoke)
-    else {
+    let Started::Live { mut session, waiting: Some(Pending::Send(pending)) } = start_async::<P>(invoke) else {
         return Err("expected the first poll to capture the workspace run".into());
     };
     session.fulfill_send(&pending, RunResult::ID, reply.encode_into_bytes());
@@ -101,11 +112,14 @@ struct Proved {
     staged: Vec<EncodedArtifact>,
 }
 
-/// Run the proof over `steps`, answering reads from their outputs, and read back its result and verdict.
-fn proved(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box<dyn Error>> {
+/// Run `P` over `steps`, answering reads from their outputs, and read back its result and verdict.
+fn proved_as<P: AsyncProgram + Program, A: Storage + Clone + Cites>(
+    args: &A,
+    steps: Vec<(StepOutcome, [EncodedArtifact; 2])>,
+) -> Result<Proved, Box<dyn Error>> {
     let (steps, outputs): (Vec<_>, Vec<_>) = steps.into_iter().unzip();
     let store = outputs.concat();
-    let invoked = answer(&RunResult::Ok(Outcome { steps, tree: output_tree() }), &store)?;
+    let invoked = answer_as::<P, A>(args, &RunResult::Ok(Outcome { steps, tree: output_tree() }), &store)?;
     let Invoked::Completed { seq: 7, result, staged } = invoked else {
         return Err(format!("expected Completed, got {invoked:?}").into());
     };
@@ -115,6 +129,16 @@ fn proved(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box
     let edited: Edited<ProofVerdict> = value(staged_value(result)?)?;
     let verdict: ProofVerdict = value(staged_value(edited.detail().digest())?)?;
     Ok(Proved { edited, verdict, staged })
+}
+
+/// Run the clippy proof over `steps`, answering reads from their outputs, and read back its result and verdict.
+fn proved(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box<dyn Error>> {
+    proved_as::<ClippyProof, _>(&ClippyArgs, steps)
+}
+
+/// Run the test proof over `steps`, answering reads from their outputs, and read back its result and verdict.
+fn proved_test(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box<dyn Error>> {
+    proved_as::<TestProof, _>(&TestArgs, steps)
 }
 
 /// The staged text `diagnostics` cites.
@@ -135,7 +159,7 @@ fn a_pass_carries_the_formatted_tree_and_names_what_fmt_rewrote() -> TestResult 
     assert_eq!(verdict, ProofVerdict::Passed);
     assert_eq!(
         edited.summary(),
-        "`cargo clippy` passed with no warning. `cargo fmt` rewrote src/lib.rs, src/main.rs; read a rewritten file \
+        "`cargo clippy` passed. `cargo fmt` rewrote src/lib.rs, src/main.rs; read a rewritten file \
          again before you edit it."
     );
     Ok(())
@@ -166,6 +190,36 @@ fn a_clippy_failure_reports_each_rendered_diagnostic_once_or_cargos_own_error() 
     };
     assert_eq!(text(&staged, diagnostics)?, missing);
     assert!(edited.summary().ends_with(missing), "{}", edited.summary());
+    Ok(())
+}
+
+#[test]
+fn a_test_step_failure_reports_each_failing_tests_output_and_the_failed_targets() -> TestResult {
+    // Catches a test failure recorded as a pass, raw JSON shown to the model, a dropped failure block, the
+    // failed-target list missing or after the blocks where the cap could cut it, and a summary that says
+    // `cargo clippy` instead of `cargo test`.
+    let block = "---- failing stdout ----\nthread 'failing' panicked at src/lib.rs:1\n";
+    let passing = "test result: ok. 1 passed; 0 failed;";
+    let failing = "test result: FAILED. 0 passed; 1 failed;";
+    let json = r#"{"reason":"compiler-artifact","filenames":[]}"#;
+    let stdout = format!(
+        "     Running unittests src/lib.rs (passing)\n{passing}\n{json}\n     Running unittests src/lib.rs (failing)\n{block}{failing}\n"
+    );
+    let stderr = "error: 1 target failed:\n    `-p aether-demo --test demo`\n";
+    let steps = vec![step(Some(0), b"", b"")?, step(Some(101), stdout.as_bytes(), stderr.as_bytes())?];
+    let Proved { edited, verdict, staged } = proved_test(steps)?;
+
+    let ProofVerdict::Failed { diagnostics } = verdict else {
+        return Err(format!("expected a failure, got {verdict:?}").into());
+    };
+    let reported = text(&staged, diagnostics)?;
+    assert!(reported.starts_with("error: 1 target failed:"), "{reported}");
+    for want in ["`-p aether-demo --test demo`", "---- failing stdout ----", "test result: FAILED"] {
+        assert!(reported.contains(want), "the diagnostics hold {want:?}: {reported}");
+    }
+    assert!(!reported.contains("compiler-artifact"), "{reported}");
+    assert_eq!(edited.tree(), output_tree());
+    assert!(edited.summary().starts_with("`cargo test` failed. `cargo fmt` changed nothing."), "{}", edited.summary());
     Ok(())
 }
 

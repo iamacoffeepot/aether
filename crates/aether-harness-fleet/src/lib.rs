@@ -31,9 +31,10 @@
 // its heartbeat the same way.
 #![allow(clippy::print_stderr)]
 // The harness reads its process-level test knobs (AETHER_REQUIRE_RUNTIME,
-// the AETHER_HARNESS_FLEET_* budgets, AETHER_HARNESS_FLEET_HEADLESS_BIN)
-// straight from the environment — test-harness tuning, not cap config —
-// and boots its hub as a deliberately bare test chassis (`Builder::new`).
+// the AETHER_HARNESS_FLEET_* budgets, AETHER_HARNESS_FLEET_HEADLESS_BIN and
+// AETHER_HARNESS_FLEET_BIN_DIR) straight from the environment — test-harness
+// tuning, not cap config — and boots its hub as a deliberately bare test
+// chassis (`Builder::new`).
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
@@ -987,6 +988,14 @@ pub fn headless_bin_path() -> PathBuf {
     chassis_bin_path(HEADLESS_BIN)
 }
 
+/// Env override for [`chassis_bin_path`]: a directory holding the chassis
+/// binaries `cargo test --workspace` already built, so the suites that fork
+/// them keep running without a `dist/` tree. When set, `chassis_bin_path`
+/// returns `<dir>/<bin>` without reading the dist manifest, resolving any
+/// chassis binary, including the desktop bin the hub's binary-store suite
+/// uploads. The [`HEADLESS_BIN_ENV`] override keeps its precedence.
+pub const BIN_DIR_ENV: &str = "AETHER_HARNESS_FLEET_BIN_DIR";
+
 /// Resolve any chassis binary by its `dist/manifest.json` chassis-map
 /// name (issue #3812) — the general form [`headless_bin_path`] wraps.
 /// A test that needs a chassis binary other than the forked headless
@@ -999,6 +1008,9 @@ pub fn headless_bin_path() -> PathBuf {
 /// entry is missing — the caller cannot proceed without the binary, so
 /// the failure is loud and actionable rather than a skip.
 pub fn chassis_bin_path(bin: &str) -> PathBuf {
+    if let Ok(dir) = env::var(BIN_DIR_ENV) {
+        return PathBuf::from(dir).join(bin);
+    }
     let dist = dist_dir();
     let manifest_path = dist.join("manifest.json");
     let unavailable = |detail: &str| -> ! {

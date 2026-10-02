@@ -121,8 +121,8 @@ pub struct SessionOpen;
 ///
 /// Refuses settings that offer a tool the session does not bind, or offer a
 /// bound tool with a definition, schema, bundle head, or bound kind other than
-/// its own; the proof tools bind a `ProofBound`, the session's environment and
-/// vendor tree, whatever its value. Refuses seeds when `tree.read` is not
+/// its own; the proof tools bind a `ProofBound`, the session's environment,
+/// vendor tree, and test env, whatever its value. Refuses seeds when `tree.read` is not
 /// offered, since a seed's output renders with the offered tool's result
 /// schema; and more than [`ToolCalls::MAX_CALLS`] seeds.
 #[program]
@@ -250,13 +250,23 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_offer_opens_over_any_proof_bound_from_its_own_bundle_only() {
-        // Catches an open that refuses the proof tools a lane offers, or admits one whose bound the proof cannot
-        // decode or that the loop would call in a bundle that does not hold it.
+    fn proof_offers_open_over_any_proof_bound_from_their_own_bundle_only() {
+        // Catches an open that refuses the proof tools a lane offers, admits one whose bound the proof cannot
+        // decode or that the loop would call in a bundle that does not hold it, or opens over only one of the
+        // offered proofs.
+        use aether_bloomery_workspace_programs::proof::TestEnv;
+
+        use crate::tools::proof_offers;
+
         let digest = |byte| Digest::from_bytes([byte; 32]);
-        let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)));
+        let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)), TestEnv::default());
         let (tools, _) = offered_with_proofs(&proofs);
         run_stored::<SessionOpen>(&open(tools.clone(), Vec::new())).expect("bound proof tools open");
+
+        for (offer, _) in proof_offers(Ref::from_digest(digest(1))) {
+            let single = OfferedTools::new(vec![offer]).expect("tools");
+            run_stored::<SessionOpen>(&open(single, Vec::new())).expect("every proof offer opens");
+        }
 
         let clippy = tools.as_slice().last().expect("the proof is offered last");
         let offer = |head, bound| {
@@ -269,7 +279,7 @@ mod tests {
                 clippy.result(),
             )
         };
-        let other = ProofBound::new(Ref::from_digest(digest(3)), Ref::from_digest(digest(4)));
+        let other = ProofBound::new(Ref::from_digest(digest(3)), Ref::from_digest(digest(4)), TestEnv::default());
         let rebound = offer(WORKSPACE_PROGRAMS, Ref::of_encoded(&other).expect("bound").erase());
         run_stored::<SessionOpen>(&open(OfferedTools::new(vec![rebound]).expect("tools"), Vec::new()))
             .expect("a proof opens over any proof bound");

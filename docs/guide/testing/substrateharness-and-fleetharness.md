@@ -380,8 +380,10 @@ rasterization.
 dev-dependency by the fleet scenario suites. It
 starts a real hub, connects over the production RPC framing, and can fork actual
 child substrate binaries — the headless chassis resolves through
-`dist/manifest.json` (run `cargo xtask dist` first, or set
-`AETHER_HARNESS_FLEET_HEADLESS_BIN`). It exercises the same boundary an MCP
+`dist/manifest.json` (run `cargo xtask dist` first, set
+`AETHER_HARNESS_FLEET_HEADLESS_BIN` for one binary, or set
+`AETHER_HARNESS_FLEET_BIN_DIR` to the directory holding the bins
+`cargo test --workspace` already built). It exercises the same boundary an MCP
 coordinator uses without requiring an interactive MCP session.
 
 Use it for:

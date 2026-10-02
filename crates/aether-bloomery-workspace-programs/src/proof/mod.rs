@@ -1,16 +1,20 @@
-//! `proof.clippy`: format a source tree and check it with clippy in a
-//! published environment, as a tool a Muse session calls (ADR-0237 decisions
+//! `proof.clippy` and `proof.test`: format a source tree and prove it in a
+//! published environment, as tools a Muse session calls (ADR-0237 decisions
 //! 2, 4, 7, and 12; ADR-0234 decision 10).
 //!
-//! The proof is a tool: its input is `Tooled<ClippyArgs, ProofBound>`, the
+//! Each proof is a tool: its input is `Tooled<A, ProofBound>`, the
 //! session's current tree, the empty arguments the model writes, and the
-//! [`ProofBound`] the session binds, the environment and the vendor tree. It
-//! asks the workspace for one run of two steps over the tree at `/work`,
-//! with the network off and the vendor tree at `/vendor` replacing crates.io:
-//! `cargo fmt --all` writes its fixes and lists the files it rewrote, then
-//! `cargo clippy --workspace --all-targets --offline` lints with JSON
-//! diagnostics. The workspace stops after the first step that exits other
-//! than 0.
+//! [`ProofBound`] the session binds, the environment, the vendor tree, and
+//! the test env. It asks the workspace for one run of two steps over the
+//! tree at `/work`, with the network off and the vendor tree at `/vendor`
+//! replacing crates.io: `cargo fmt --all` writes its fixes and lists the
+//! files it rewrote, then the proof's cargo step. The workspace stops after
+//! the first step that exits other than 0.
+//!
+//! Both programs share one body ([`prove`]), differing only in the
+//! [`Proof`] description: the cargo step's argv, whether the step takes the
+//! bound's test env, the summary name, and the function that turns the
+//! failed step's stdout and stderr into diagnostics.
 //!
 //! The answer is an `Edited<ProofVerdict>`: the run's output tree, which
 //! holds fmt's fixes and any `Cargo.lock` update and becomes the session's
@@ -27,15 +31,35 @@ mod report;
 mod result;
 mod run;
 
-use aether_bloomery_kinds::{Detail, Mode, Refusal};
+use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree};
 use aether_bloomery_program::{Async, Edited, Env, Program, Tooled, Workspace, program};
 use aether_bloomery_workspace::StepOutcome;
 
-pub use input::{ClippyArgs, ProofBound};
+pub use input::{ClippyArgs, MAX_TEST_ENV, ProofBound, TestArgs, TestEnv, TestEnvError};
 pub use report::DIAGNOSTICS_MAX_BYTES;
 pub use result::ProofVerdict;
 
-use report::Ended;
+use report::{Ended, clippy_diagnostics, test_diagnostics};
+
+/// What differs between the proofs: the cargo step's argv, whether it takes
+/// the bound's test env, the summary name, and how the failed step's outputs
+/// become diagnostics.
+struct Proof {
+    cargo: &'static [&'static str],
+    takes_test_env: bool,
+    step: &'static str,
+    diagnostics: fn(&[u8], &[u8]) -> String,
+}
+
+/// The clippy proof's description: CI's lint command, no test env, so its run
+/// key and warm layer never vary with the bound's test env.
+const CLIPPY: Proof =
+    Proof { cargo: &run::CLIPPY_ARGS, takes_test_env: false, step: "cargo clippy", diagnostics: clippy_diagnostics };
+
+/// The test proof's description: the workspace tests with the bound's test
+/// env on the test step only.
+const TEST: Proof =
+    Proof { cargo: &run::TEST_ARGS, takes_test_env: true, step: "cargo test", diagnostics: test_diagnostics };
 
 /// The `proof.clippy` program.
 pub struct ClippyProof;
@@ -55,29 +79,68 @@ impl Program for ClippyProof {
     type Input = Tooled<ClippyArgs, ProofBound>;
     type Result = Edited<ProofVerdict>;
 
-    async fn run(input: Self::Input, env: &mut Env<Async>, mut workspace: Workspace) -> Result<Self::Result, Refusal> {
-        let bound = env.read(input.bound()).await?;
-        let outcome = workspace
-            .run(run::request(input.tree(), &bound)?)
-            .await?
-            .map_err(|refusal| refused(format!("the workspace refused the run: {refusal:?}")))?;
-
-        let (ended, fmt, failed) = ended(&outcome.steps)?;
-        let formatted = report::formatted(&env.read_payload(fmt.stdout.erase()).await?);
-        let diagnostics = match failed {
-            Some(step) => {
-                let rendered = report::rendered(&env.read_payload(step.stdout.erase()).await?);
-                Some(report::diagnostics(&rendered, &env.read_payload(step.stderr.erase()).await?))
-            }
-            None => None,
-        };
-
-        let summary = report::summary(&ended, &formatted, diagnostics.as_deref());
-        let verdict = diagnostics.map_or(ProofVerdict::Passed, |diagnostics| ProofVerdict::Failed {
-            diagnostics: env.stage_text(&diagnostics),
-        });
-        Ok(Edited::new(outcome.tree, summary, env.stage_encoded(&verdict)?))
+    async fn run(input: Self::Input, env: &mut Env<Async>, workspace: Workspace) -> Result<Self::Result, Refusal> {
+        prove(&CLIPPY, input.tree(), input.bound(), &mut env, workspace).await
     }
+}
+
+/// The `proof.test` program.
+pub struct TestProof;
+
+/// Formats the whole workspace with `cargo fmt` and runs its tests with the
+/// session's test env.
+///
+/// Takes no arguments: pass `{}`. The proof always runs the whole workspace
+/// in the session's tree. The result is the tree after fmt, whether the tests
+/// passed, and, when they failed, each failing test's output and the targets
+/// that failed.
+#[program]
+impl Program for TestProof {
+    const NAME: &'static str = "proof.test";
+    const MODE: Mode = Mode::Sampled;
+    const INTENT: &'static str = "Format a source tree and run its workspace tests in an environment.";
+    type Input = Tooled<TestArgs, ProofBound>;
+    type Result = Edited<ProofVerdict>;
+
+    async fn run(input: Self::Input, env: &mut Env<Async>, workspace: Workspace) -> Result<Self::Result, Refusal> {
+        prove(&TEST, input.tree(), input.bound(), &mut env, workspace).await
+    }
+}
+
+/// Run `proof` over `tree` bound to `bound`: fmt first, then the proof's
+/// cargo step, answering the formatted tree with its verdict.
+async fn prove(
+    proof: &Proof,
+    tree: Ref<Tree>,
+    bound: Ref<ProofBound>,
+    env: &mut Env<Async>,
+    mut workspace: Workspace,
+) -> Result<Edited<ProofVerdict>, Refusal> {
+    let bound = env.read(bound).await?;
+    let extra = if proof.takes_test_env {
+        bound.test_env().as_slice()
+    } else {
+        &[]
+    };
+    let outcome = workspace
+        .run(run::request(tree, &bound, proof.cargo, extra)?)
+        .await?
+        .map_err(|refusal| refused(format!("the workspace refused the run: {refusal:?}")))?;
+
+    let (ended, fmt, failed) = ended(&outcome.steps)?;
+    let formatted = report::formatted(&env.read_payload(fmt.stdout.erase()).await?);
+    let diagnostics = match failed {
+        Some(step) => Some((proof.diagnostics)(
+            &env.read_payload(step.stdout.erase()).await?,
+            &env.read_payload(step.stderr.erase()).await?,
+        )),
+        None => None,
+    };
+
+    let summary = report::summary(&ended, proof.step, &formatted, diagnostics.as_deref());
+    let verdict = diagnostics
+        .map_or(ProofVerdict::Passed, |diagnostics| ProofVerdict::Failed { diagnostics: env.stage_text(&diagnostics) });
+    Ok(Edited::new(outcome.tree, summary, env.stage_encoded(&verdict)?))
 }
 
 /// How the run's steps ended, its fmt step, and the step that failed it, if
@@ -94,7 +157,7 @@ fn ended(steps: &[StepOutcome]) -> Result<(Ended, &StepOutcome, Option<&StepOutc
     match (steps, exited_zero.as_slice()) {
         ([fmt], [false]) => Ok((Ended::FmtFailed, fmt, Some(fmt))),
         ([fmt, _], [true, true]) => Ok((Ended::Passed, fmt, None)),
-        ([fmt, clippy], [true, false]) => Ok((Ended::ClippyFailed, fmt, Some(clippy))),
+        ([fmt, cargo], [true, false]) => Ok((Ended::CargoFailed, fmt, Some(cargo))),
         _ => Err(refused(format!("the two-step run answered {} steps it cannot end with", steps.len()))),
     }
 }
