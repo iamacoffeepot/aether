@@ -10,15 +10,18 @@ use crate::session::state::{TurnLimit, TurnSettings};
 use crate::session::tools::program_name;
 use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered};
 
-/// A session to open: what every turn sends, the first user message, how
-/// many turns it may make before it rests, the tree its tools work on, and
-/// the files it reads before its first turn.
+/// A session to open: what every turn sends, the session instructions, the
+/// first user message, how many turns it may make before it rests, the tree
+/// its tools work on, and the files it reads before its first turn.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session.open.input")]
 pub struct OpenInput {
     /// What every turn of the session sends besides its conversation. Every
     /// offered tool must be one the session binds, offered as it renders it.
     settings: TurnSettings,
+    /// The cited text of the session instructions, sent as the leading
+    /// developer message of the first turn.
+    instructions: Ref<Utf8Text>,
     /// The cited text of the first user message.
     user: Ref<Utf8Text>,
     /// The most turns the session may make before it rests.
@@ -28,24 +31,31 @@ pub struct OpenInput {
     tree: Ref<Tree>,
     /// The files read with `tree.read` before the first turn, in order, at
     /// most [`ToolCalls::MAX_CALLS`]. Each read runs as a call of the
-    /// session, so the first turn sends the user message, then every seed's
-    /// call, then every seed's output. Empty reads nothing.
+    /// session, so the first turn sends the instructions, the user message,
+    /// then every seed's call, then every seed's output. Empty reads nothing.
     seeds: Vec<TreePath>,
 }
 
 impl OpenInput {
-    /// Open a session with `settings` on `tree`, starting from the user
-    /// message `user` and the reads of `seeds`, that makes at most
+    /// Open a session with `settings` on `tree`, starting from `instructions`,
+    /// the user message `user`, and the reads of `seeds`, that makes at most
     /// `max_turns` turns before it rests.
     #[must_use]
     pub const fn new(
         settings: TurnSettings,
+        instructions: Ref<Utf8Text>,
         user: Ref<Utf8Text>,
         max_turns: TurnLimit,
         tree: Ref<Tree>,
         seeds: Vec<TreePath>,
     ) -> Self {
-        Self { settings, user, max_turns, tree, seeds }
+        Self { settings, instructions, user, max_turns, tree, seeds }
+    }
+
+    /// The cited text of the session instructions.
+    #[must_use]
+    pub const fn instructions(&self) -> Ref<Utf8Text> {
+        self.instructions
     }
 
     /// The most turns the session may make before it rests.
@@ -66,9 +76,10 @@ impl OpenInput {
         &self.seeds
     }
 
-    /// The first turn: the settings and the user message.
+    /// The first turn: the settings with the instructions as the leading
+    /// developer message and the user message.
     pub(crate) fn first_turn(&self) -> TurnInput {
-        self.settings.open(self.user)
+        self.settings.open(self.instructions, self.user)
     }
 }
 
@@ -76,7 +87,8 @@ impl OpenInput {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session.opened")]
 pub struct Opened {
-    /// The first turn: the settings and the user message.
+    /// The first turn: the settings with the instructions as the leading
+    /// developer message and the user message.
     turn: Ref<TurnInput>,
     /// The seeded reads the loop runs before that turn, each a decoded
     /// `tree.read` call `seed-<i>`; `None` when there are no seeds.
@@ -100,9 +112,10 @@ impl Opened {
 /// The `muse.session.open` program.
 pub struct SessionOpen;
 
-/// Opens a Muse session: its first turn is the settings and the user message,
-/// and each seed is a `tree.read` call of the whole window from the file's
-/// start, which the loop runs before that turn.
+/// Opens a Muse session: its first turn is the settings with the instructions
+/// as the leading developer message and the user message, and each seed is a
+/// `tree.read` call of the whole window from the file's start, which the loop
+/// runs before that turn.
 ///
 /// Refuses settings that offer a tool the session does not bind, or offer a
 /// bound tool with a definition, schema, or bound kind other than its own;
@@ -170,20 +183,34 @@ mod tests {
 
     fn open(tools: OfferedTools, seeds: Vec<TreePath>) -> OpenInput {
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
-        OpenInput::new(settings(tools), Ref::of_text("hi"), TurnLimit::new(4).expect("limit"), tree, seeds)
+        OpenInput::new(
+            settings(tools),
+            Ref::of_text("rules"),
+            Ref::of_text("hi"),
+            TurnLimit::new(4).expect("limit"),
+            tree,
+            seeds,
+        )
     }
 
     #[test]
-    fn an_open_is_the_settings_and_the_user_message_over_bound_tools_only() {
-        // Catches an open that drops a setting or sends more than the user message, one that admits a tool the
-        // loop cannot run, a bound tool offered with another definition or a bound of another kind, one that refuses
-        // a bound value it should only check the kind of, and seeds made up from no paths.
+    fn an_open_is_the_settings_and_the_opening_messages_over_bound_tools_only() {
+        // Catches an open that drops a setting or the instructions or swaps them, sends more than the two opening
+        // messages, one that admits a tool the loop cannot run, a bound tool offered with another definition or a
+        // bound of another kind, one that refuses a bound value it should only check the kind of, and seeds made up
+        // from no paths.
         let (bound, _) = offered();
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), Vec::new())).expect("bound tools open");
         assert_eq!(opened.seeds(), None);
         let first: TurnInput = store.value(opened.turn());
         assert_eq!(first.settings(), settings(bound.clone()));
-        assert_eq!(first.items(), [TurnItem::message(Role::User, Ref::of_text("hi"))]);
+        assert_eq!(
+            first.items(),
+            [
+                TurnItem::message(Role::Developer, Ref::of_text("rules")),
+                TurnItem::message(Role::User, Ref::of_text("hi"))
+            ]
+        );
 
         let echo = &bound.as_slice()[0];
         let offer = |definition, bound| {
@@ -212,7 +239,14 @@ mod tests {
         let seeds = vec![path("src/lib.rs"), path("README")];
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), seeds)).expect("seeds open");
         let first: TurnInput = store.value(opened.turn());
-        assert_eq!(first.items(), [TurnItem::message(Role::User, Ref::of_text("hi"))], "seeds are not in the turn");
+        assert_eq!(
+            first.items(),
+            [
+                TurnItem::message(Role::Developer, Ref::of_text("rules")),
+                TurnItem::message(Role::User, Ref::of_text("hi"))
+            ],
+            "seeds are not in the turn"
+        );
 
         let calls = opened.seeds().expect("seeded reads").as_slice();
         assert_eq!(calls.len(), 2);

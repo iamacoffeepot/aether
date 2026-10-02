@@ -6,15 +6,16 @@
 //! decide everything, and the loop's rules only pass references: every new
 //! artifact comes out of a program.
 //!
-//! - `open_turn` and `continue_turn` run `muse.turn` over the open's first
-//!   turn or the continue's result.
+//! - `open_turn` and `continue_turn` run `muse.turn` over the open's
+//!   first turn, which sends the instructions as the leading developer
+//!   message, or the continue's result.
 //! - `seed` runs the first of an open's seeded reads instead, when it has
 //!   any: each seed is a `tree.read` call `muse.session.open` built from a
 //!   path, and the loop runs the seeds through the same path as a turn's
-//!   calls (`resume` runs the next, then sends the first turn with the user
-//!   message, every seed's call, and every seed's output). Seeds are not a
-//!   turn and count against no limit; a seed that faults fails the session,
-//!   whose record holds the user message alone.
+//!   calls (`resume` runs the next, then sends the first turn with the
+//!   instructions, the user message, every seed's call, and every seed's
+//!   output). Seeds are not a turn and count against no limit; a seed that
+//!   faults fails the session, whose record holds the user message alone.
 //! - `call` runs the first call a turn asked for over the session's current
 //!   tree and the arguments `muse.turn` decoded for it. A call whose
 //!   arguments did not decode is answered with the stored refusal and

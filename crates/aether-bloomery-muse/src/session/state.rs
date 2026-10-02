@@ -63,11 +63,11 @@ impl TurnSettings {
         self.input_limit
     }
 
-    /// The first turn of a session: these settings and one user message
-    /// citing `user`.
+    /// The first turn of a session: these settings with the instructions as
+    /// the leading developer message and one user message citing `user`.
     #[must_use]
-    pub fn open(&self, user: Ref<Utf8Text>) -> TurnInput {
-        self.clone().with_items(TurnItems::user(user))
+    pub fn open(&self, instructions: Ref<Utf8Text>, user: Ref<Utf8Text>) -> TurnInput {
+        self.clone().with_items(TurnItems::opening(instructions, user))
     }
 
     /// These settings with `max_output_tokens` as the budget.
@@ -407,8 +407,14 @@ mod tests {
 
         assert_eq!(TurnLimit::new(0), Err(TurnLimitError::Zero));
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
-        let zero =
-            OpenInput::new(settings(OfferedTools::default()), Ref::of_text("hi"), TurnLimit(0), tree, Vec::new());
+        let zero = OpenInput::new(
+            settings(OfferedTools::default()),
+            Ref::of_text("rules"),
+            Ref::of_text("hi"),
+            TurnLimit(0),
+            tree,
+            Vec::new(),
+        );
         let bytes = OpenInput::encode_storage(&StorageData::from_value(zero)).expect("encode");
         assert!(OpenInput::decode_storage(&bytes).is_err(), "a zero limit refuses on decode");
     }

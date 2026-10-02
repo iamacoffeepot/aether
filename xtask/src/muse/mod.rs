@@ -7,7 +7,8 @@
 //!
 //! - [`bind`] binds the muse bundle and the reactor set that runs its session
 //!   loop, once per engine.
-//! - [`open`] stages a tree, a brief, and seeded reads, and opens a session.
+//! - [`open`] stages a tree, instructions, a brief, and seeded reads, and
+//!   opens a session.
 //! - [`continue_`] resumes a rested session with a message, or resends it.
 //! - [`wait`] follows one session to its next rest and prints the rest, the
 //!   tree it moved from and to, and the usage its turns reported.
@@ -16,7 +17,7 @@
 //! `open` and `continue` call their program under a key derived from the
 //! input's digest, so a retry after a lost reply replays the recorded outcome
 //! instead of opening or continuing twice. Two opens with the same tree,
-//! brief, seeds, and settings therefore name the same session.
+//! instructions, brief, seeds, and settings therefore name the same session.
 
 mod bind;
 mod continue_;
@@ -53,8 +54,8 @@ enum Verb {
     /// Bind the muse bundle and a reactor set holding it, unless both heads
     /// already name them. Prints `bound` or `unchanged` with both digests.
     Bind(bind::BindArgs),
-    /// Open a session on a commit's tree, or a stored tree, with a brief and
-    /// seeded reads. Prints `tree=`, `session=`, and `after=`.
+    /// Open a session on a commit's tree, or a stored tree, with instructions,
+    /// a brief, and seeded reads. Prints `tree=`, `session=`, and `after=`.
     Open(open::OpenArgs),
     /// Continue a rested session with a message, or resend its conversation
     /// as it stands. Prints `after=`.

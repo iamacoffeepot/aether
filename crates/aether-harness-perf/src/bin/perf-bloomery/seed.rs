@@ -95,11 +95,19 @@ impl Seed {
         let limit = TurnLimit::new(knobs.turns)?;
         let name = ProgramName::new("muse.session.open")?;
         let origin = NativeOrigin::new(ORIGIN)?;
+        let instructions = batch.stage_text("Work through the tree with only the offered tree tools.");
 
         let calls = (1..=u64::from(knobs.sessions))
             .map(|key| {
                 let user = batch.stage_text(&format!("Session {key}: work through the tree."));
-                let open = batch.stage_encoded(&OpenInput::new(settings.clone(), user, limit, tree, Vec::new()))?;
+                let open = batch.stage_encoded(&OpenInput::new(
+                    settings.clone(),
+                    instructions,
+                    user,
+                    limit,
+                    tree,
+                    Vec::new(),
+                ))?;
                 Ok(Call { program: MUSE, name: name.clone(), input: open.digest(), origin: origin.clone(), key })
             })
             .collect::<Result<_, Box<dyn Error>>>()?;

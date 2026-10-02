@@ -123,9 +123,10 @@ impl TurnItems {
         Ok(Self(items))
     }
 
-    /// A conversation of one user message citing `text`, which keeps every rule.
-    pub(crate) fn user(text: Ref<Utf8Text>) -> Self {
-        Self(vec![TurnItem::message(Role::User, text)])
+    /// A conversation of the instructions as the leading developer message and
+    /// one user message citing `user`, which keeps every rule.
+    pub(crate) fn opening(instructions: Ref<Utf8Text>, user: Ref<Utf8Text>) -> Self {
+        Self(vec![TurnItem::message(Role::Developer, instructions), TurnItem::message(Role::User, user)])
     }
 
     /// Every item in conversation order.

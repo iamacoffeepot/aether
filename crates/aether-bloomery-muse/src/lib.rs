@@ -48,14 +48,15 @@
 //! exactly that host, over HTTPS only.
 //!
 //! A session loops over turns and the calls they ask for as a bloomery
-//! reactor, `MuseSession`, exported from this same bundle. `muse.session.open`
-//! opens one on a tree, optionally with seeded `tree.read` calls the loop
-//! runs before the first turn, and `muse.session.continue` resumes one; the
-//! loop runs each decoded call through a bound tool one at a time, over the
-//! session's current tree and the bound value its offer carries, sends the
-//! next turn with the calls and their outputs appended, and at each rest writes the conversation and the latest tree
-//! down as a [`Session`] (`muse.session`) through `muse.session.record`,
-//! moving the session's head to it. The bound tools are [`TreeEdit`]
+//! reactor, `MuseSession`, exported from this same bundle.
+//! `muse.session.open` opens one on a tree with the session instructions,
+//! optionally with seeded `tree.read` calls the loop runs before the first
+//! turn, and `muse.session.continue` resumes one; the loop runs each decoded
+//! call through a bound tool one at a time, over the session's current tree
+//! and the bound value its offer carries, sends the next turn with the calls
+//! and their outputs appended, and at each rest writes the conversation and
+//! the latest tree down as a [`Session`] (`muse.session`) through
+//! `muse.session.record`, moving the session's head to it. The bound tools are [`TreeEdit`]
 //! (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
