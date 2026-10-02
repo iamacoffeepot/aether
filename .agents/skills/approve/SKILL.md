@@ -65,7 +65,7 @@ Retain the returned digest, size, and model. Recompute them from a fresh body im
 
 Fetch `origin/main` once for the candidate set and capture the full SHA without switching the caller's worktree. This captured commit is the approval base.
 
-Extract repository targets only from explicit paths in Design notes and Implementation plan. A target is a creation only when its exact Plan citation ends in `(create)`. Build one tracked-path list from the captured tree.
+Extract repository targets only from explicit paths in Design notes and Implementation plan. A target is a creation only when its exact Plan citation ends in `(create)`. A path whose exact citation ends in `(read)` is a reference: require it to exist at the captured base, but it is not a target, needs no Declared surface coverage, and never counts toward the surface or tier. Build one tracked-path list from the captured tree.
 
 Hard gates:
 

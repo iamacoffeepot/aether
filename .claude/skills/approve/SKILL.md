@@ -56,7 +56,7 @@ Side findings are excluded from approval identity and never block authorization.
 
 ## Grounding, dependencies, and ADRs
 
-Extract targets only from explicit paths in Design notes and Implementation plan. A creation is valid only when the exact citation ends in `(create)`. At the captured base require existing targets to exist, creations not to exist, cited anchors and searches still to land, and every target to be covered by Declared surface. A broken premise returns to `/scope <issue> --phase plan`; approval is not permission to improvise.
+Extract targets only from explicit paths in Design notes and Implementation plan. A creation is valid only when the exact citation ends in `(create)`. A path cited with a trailing `(read)` is a reference: require it to exist at the base, but it is no target, needs no Declared surface coverage, and never counts toward surface or tier. At the captured base require existing targets to exist, creations not to exist, cited anchors and searches still to land, and every target to be covered by Declared surface. A broken premise returns to `/scope <issue> --phase plan`; approval is not permission to improvise.
 
 Read every issue named under Depends on over REST and require it closed. For ADR-bearing work, inspect the named files and prerequisites. A new ADR or an amendment to an established ADR forces `human`; work confined to an existing Proposed ADR defers to ordinary policy. `--skip-adr` never changes that routing.
 
