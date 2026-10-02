@@ -9,7 +9,7 @@ use aether_bloomery_kinds::{CallInput, CallProgram, Head, OpaqueBytes, ProgramNa
 use aether_bloomery_program::Program;
 
 /// The head of the bundle this crate builds: the loop's own programs and the
-/// tools in [`crate::tools`] resolve through it.
+/// tools [`crate::offered`] lists resolve through it.
 pub const MUSE: Head<OpaqueBytes> = Head::new("muse");
 
 /// A call to the loop's own program `P` in the bundle [`MUSE`] resolves to,
