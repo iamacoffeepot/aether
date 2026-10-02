@@ -607,7 +607,15 @@ fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestR
     let session: Session = driver.result(recorded);
     assert_eq!(*session.rested(), RestReason::Completed);
     let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
-    assert_eq!(session.items().split_last(), Some((&summary, next.items())));
+    let (last, recorded_items) = session.items().split_last().expect("a recorded session has items");
+    assert_eq!(last, &summary, "the summary closes the session");
+    let ended_turn = &recorded_items[next.items().len()..];
+    assert_eq!(&recorded_items[..next.items().len()], next.items(), "the session extends the second turn");
+    assert!(
+        matches!(ended_turn, [TurnItem::Message { .. }, TurnItem::Call(call), TurnItem::CallOutput { call_id, .. }]
+            if call == end && call_id == end.call_id()),
+        "the ended turn's text, its end call, and the call's output come before the summary, got {ended_turn:?}"
+    );
     assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, tree));
 
     let (moved, heads) = driver.move_heads(recorded);
@@ -724,6 +732,12 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_en
 /// sit in the fixture's escaped string.
 const DONE_ARGUMENTS: &str = r#"{\"ending\": {\"Done\": {\"summary\": \"Every briefed change is in the tree.\"}}}"#;
 
+/// The `ended.json` reply under another call id, for a later turn of a
+/// session that already holds its call: a conversation's call ids are unique.
+fn ended_again() -> String {
+    ENDED.replace(r#""call_end""#, r#""call_end_again""#)
+}
+
 /// The `ended.json` reply with its `muse-end` arguments replaced by `ending`,
 /// escaped as the fixture's arguments string is.
 fn ended_with(ending: &Ending) -> String {
@@ -824,7 +838,8 @@ fn a_failed_rule_rests_the_session_and_a_fault_of_that_rest_ends_it_without_loop
 fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues() -> TestResult {
     // Catches a refused head move that is recorded again (which could overwrite another mover's head), and a
     // continue refused from the record the head still names because the unmoved record replaced it.
-    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, ENDED, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, &again, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -832,7 +847,8 @@ fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues
 
     let resumed = continue_from(&mut driver, key, first, "And iron?", 2);
     let resumed_turn = driver.follow(resumed);
-    let recorded = driver.follow(resumed_turn);
+    let ended = driver.follow(resumed_turn);
+    let recorded = driver.follow(ended);
     let refused = reaction_failed(&mut driver, recorded, "set_heads compare-and-swap mismatch");
     assert!(driver.intents(refused).is_empty(), "a refused head move records nothing more");
     assert_eq!(driver.head(key), first);
@@ -840,7 +856,8 @@ fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues
     let again = continue_from(&mut driver, key, first, "And steel?", 2);
     assert_eq!(asked_at(&driver, again), MuseTurn::NAME, "the head's record still continues");
     let again_turn = driver.follow(again);
-    let rested = driver.follow(again_turn);
+    let ended = driver.follow(again_turn);
+    let rested = driver.follow(ended);
     let (moved, heads) = driver.move_heads(rested);
     assert_eq!(heads.changes()[0].from(), Some(first), "the rest compares against the head");
     assert!(driver.intents(moved).is_empty());
@@ -875,7 +892,8 @@ fn a_bare_turn_is_never_a_session() -> TestResult {
 fn a_continue_resumes_only_from_the_latest_record_of_a_resting_session() -> TestResult {
     // Catches a continue run over a stale record or into an activation already in progress, and a later rest
     // that does not compare against the session's previous record.
-    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -889,7 +907,8 @@ fn a_continue_resumes_only_from_the_latest_record_of_a_resting_session() -> Test
     assert!(driver.intents(doubled).is_empty(), "a continue into an activation in progress runs nothing");
 
     let resumed_turn = driver.follow(resumed);
-    let recorded = driver.follow(resumed_turn);
+    let ended = driver.follow(resumed_turn);
+    let recorded = driver.follow(ended);
     let (_, heads) = driver.move_heads(recorded);
     let to = Ref::from_digest(driver.transition(recorded).result);
     assert_eq!(heads.changes(), [HeadChange::new(&key.head(), Some(Ref::from_digest(first)), to)]);
@@ -906,7 +925,8 @@ fn a_session_rests_at_its_turn_limit_and_a_continue_resumes_it() -> TestResult {
     // Catches a limit that counts tool calls instead of turns, a count that does not reset on continue, a limit
     // rest that sends another turn or records other items than the next turn would have sent, and a rested
     // session that cannot be continued.
-    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, CALLED_ECHO_MORE, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_ECHO, ENDED, CALLED_ECHO_MORE, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -998,7 +1018,8 @@ fn an_edit_binds_its_tree_into_the_next_call_and_the_session_rests_with_it() -> 
     // Catches a call run over a tree other than the latest, an `Edited` result whose tree the loop drops, a rest
     // that records the opened tree instead of the edited one, a continue that forgets the tree its record rested
     // with, and folds that diverge between warm-up and live delivery.
-    let mut driver = Driver::new(&[CALLED_EDIT_WRITE, ENDED, CALLED_WRITE, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[CALLED_EDIT_WRITE, ENDED, CALLED_WRITE, &again]);
     let (opened, opened_tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
@@ -1502,7 +1523,7 @@ fn an_end_call_beside_an_edit_rests_after_both_outputs_with_the_edited_tree() ->
     let recorded = driver.follow(ended_run);
     let session: Session = driver.result(recorded);
     assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, written.tree()));
-    assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt_iron() {}\\n");
+    assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt_iron() {}\n");
     let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
     assert_eq!(session.items().last(), Some(&summary));
 
@@ -1536,7 +1557,8 @@ fn a_blocked_or_asked_end_call_rests_with_its_reason_and_text_last() -> TestResu
 fn an_asked_session_continues_with_an_answer_and_ends_done() -> TestResult {
     // Catches an end rest that `continue` cannot resume: the asked session resumes with its context once answered.
     let reply = ended_with(&Ending::Asked { question: "Which file holds the brief?".into() });
-    let mut driver = Driver::new(&[&reply, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[&reply, &again]);
     let (opened, _) = open(&mut driver, 1)?;
     driver.settle(opened);
     let key = SessionKey::new(opened);
@@ -1567,7 +1589,8 @@ fn an_end_call_whose_arguments_do_not_decode_is_refused_and_the_session_goes_on(
     // Catches a broken end call that runs as `muse.end` or drops the session: it is answered with its refusal and the
     // session goes on.
     let broken = ENDED.replace(DONE_ARGUMENTS, "not json");
-    let mut driver = Driver::new(&[&broken, ENDED]);
+    let again = ended_again();
+    let mut driver = Driver::new(&[&broken, &again]);
     let (opened, _) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
 
