@@ -1,9 +1,10 @@
-//! The run a clippy proof asks the workspace for: `cargo fmt`, then
-//! `cargo clippy` (ADR-0237 decision 12).
+//! The run a proof asks the workspace for: `cargo fmt`, then a cargo step
+//! (ADR-0237 decision 12).
 //!
 //! Every argument is fixed, so the run key (ADR-0237 decision 9) is the same
-//! for every clippy proof in one environment, and they share one allotment
-//! estimate and one warm build layer.
+//! for every proof of one kind in one environment, and they share one
+//! allotment estimate and one warm build layer. The test step also takes the
+//! bound's test env, so its key varies only with the session's env.
 
 use aether_bloomery_kinds::{Ref, Refusal, Tree};
 use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
@@ -42,7 +43,7 @@ const ENV: [(&str, &str); 3] = [("CARGO_HOME", CARGO_HOME), ("CARGO_TARGET_DIR",
 /// parse a file.
 pub(super) const FMT_ARGS: [&str; 4] = ["fmt", "--all", "--", "-l"];
 
-/// The second step: CI's lint command, workspace-wide and `--offline` rather
+/// The clippy step: CI's lint command, workspace-wide and `--offline` rather
 /// than `--frozen`, so a change to a workspace-internal dependency updates
 /// `Cargo.lock` inside the run. Crates.io is replaced by the vendor tree at
 /// `/vendor`, `--quiet` keeps cargo's progress lines out of stderr, and the
@@ -65,20 +66,45 @@ pub(super) const CLIPPY_ARGS: [&str; 13] = [
     "warnings",
 ];
 
-/// The run that formats and lints `tree` in `bound`'s environment with the
-/// network off.
+/// The test step: the workspace tests with cargo's default target selection
+/// (lib, bins, tests, doctests), `--offline` rather than `--frozen` like
+/// clippy's. `--no-fail-fast` reports every failing target, not only the
+/// first, and `--quiet` keeps cargo's status lines out of stderr.
+pub(super) const TEST_ARGS: [&str; 10] = [
+    "test",
+    "--config",
+    "source.crates-io.replace-with=\"vendored\"",
+    "--config",
+    "source.vendored.directory=\"/vendor\"",
+    "--workspace",
+    "--offline",
+    "--quiet",
+    "--no-fail-fast",
+    "--message-format=json",
+];
+
+/// The run that formats `tree` in `bound`'s environment with the network
+/// off, then runs the cargo step `cargo` with `extra` appended to its
+/// variables. Only the cargo step takes `extra`, so the fmt step, and with an
+/// empty `extra` the whole request, is the same whatever the bound's test env
+/// is.
 ///
 /// # Errors
 ///
 /// A [`Refusal::Refused`] naming the value a request constructor refused.
-pub(super) fn request(tree: Ref<Tree>, bound: &ProofBound) -> Result<RunRequest, Refusal> {
+pub(super) fn request(
+    tree: Ref<Tree>,
+    bound: &ProofBound,
+    cargo: &[&str],
+    extra: &[EnvVar],
+) -> Result<RunRequest, Refusal> {
     let vendor = Mount { at: path(VENDOR)?, tree: bound.vendor() };
 
     Ok(RunRequest {
         tree,
         environment: bound.environment(),
         mounts: Mounts::new(vec![vendor]).map_err(|error| refused(format!("the vendor mount: {error}")))?,
-        steps: Steps::new(vec![step(&FMT_ARGS)?, step(&CLIPPY_ARGS)?])
+        steps: Steps::new(vec![step(&FMT_ARGS, &[])?, step(cargo, extra)?])
             .map_err(|error| refused(format!("the proof steps: {error}")))?,
         scratch: Scratch::new(vec![path(TARGET_SCRATCH)?, path(TMP_SCRATCH)?])
             .map_err(|error| refused(format!("the scratch paths: {error}")))?,
@@ -86,14 +112,16 @@ pub(super) fn request(tree: Ref<Tree>, bound: &ProofBound) -> Result<RunRequest,
     })
 }
 
-/// One cargo step with `args` and every variable in [`ENV`].
-fn step(args: &[&str]) -> Result<Step, Refusal> {
+/// One cargo step with `args`, every variable in [`ENV`], and `extra`
+/// appended after them.
+fn step(args: &[&str], extra: &[EnvVar]) -> Result<Step, Refusal> {
     Ok(Step {
         tool: ToolName::new(TOOL).map_err(|error| refused(format!("tool {TOOL:?}: {error}")))?,
         args: args.iter().map(|&arg| arg.to_owned()).collect(),
         env: ENV
             .iter()
             .map(|&(key, value)| EnvVar::new(key, value).map_err(|error| refused(format!("variable {key}: {error}"))))
+            .chain(extra.iter().cloned().map(Ok))
             .collect::<Result<Vec<EnvVar>, Refusal>>()?,
         stdin: None,
     })
@@ -107,29 +135,57 @@ fn path(value: &str) -> Result<TreePath, Refusal> {
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{Digest, Ref};
-    use aether_bloomery_workspace::Mounts;
+    use aether_bloomery_workspace::{EnvVar, Mounts};
 
-    use super::{ENV, ProofBound, request};
+    use super::{CLIPPY_ARGS, ENV, TEST_ARGS, request};
+    use crate::proof::{ProofBound, TestEnv};
+
+    fn bound() -> ProofBound {
+        ProofBound::new(
+            Ref::from_digest(Digest::from_bytes([2; 32])),
+            Ref::from_digest(Digest::from_bytes([3; 32])),
+            TestEnv::default(),
+        )
+    }
 
     #[test]
     fn every_path_a_step_writes_lies_in_scratch() {
         // Catches a target directory, cargo home, or temp directory that would
         // land in the output tree, or on the read-only root where it fails only live.
-        let bound = ProofBound::new(
-            Ref::from_digest(Digest::from_bytes([2; 32])),
-            Ref::from_digest(Digest::from_bytes([3; 32])),
-        );
-        let run = request(Ref::from_digest(Digest::from_bytes([1; 32])), &bound).expect("the fixed request builds");
+        let tree = Ref::from_digest(Digest::from_bytes([1; 32]));
+        for cargo in [CLIPPY_ARGS.as_slice(), TEST_ARGS.as_slice()] {
+            let run = request(tree, &bound(), cargo, &[]).expect("the fixed request builds");
 
-        for step in run.steps.as_slice() {
-            for (key, _) in ENV {
-                let value = step.env.iter().find(|var| var.key() == key).expect("the step sets the variable").value();
-                let in_scratch = run.scratch.as_slice().iter().any(|scratch| {
-                    let root = format!("/{}/{}", Mounts::WORK, scratch.as_str());
-                    value == root || value.starts_with(&format!("{root}/"))
-                });
-                assert!(in_scratch, "{key}={value} lies outside every /work/<scratch>");
+            for step in run.steps.as_slice() {
+                for (key, _) in ENV {
+                    let value =
+                        step.env.iter().find(|var| var.key() == key).expect("the step sets the variable").value();
+                    let in_scratch = run.scratch.as_slice().iter().any(|scratch| {
+                        let root = format!("/{}/{}", Mounts::WORK, scratch.as_str());
+                        value == root || value.starts_with(&format!("{root}/"))
+                    });
+                    assert!(in_scratch, "{key}={value} lies outside every /work/<scratch>");
+                }
             }
         }
+    }
+
+    #[test]
+    fn the_extra_variables_reach_the_cargo_step_only() {
+        // Catches a test env leaking into the fmt step, and through it into clippy's run key and warm layer.
+        let tree = Ref::from_digest(Digest::from_bytes([1; 32]));
+        let extra = [EnvVar::new("AETHER_ALLOW_WASM_SKIP", "1").expect("test variable")];
+        let plain = request(tree, &bound(), &TEST_ARGS, &[]).expect("the plain request builds");
+        let varied = request(tree, &bound(), &TEST_ARGS, &extra).expect("the varied request builds");
+
+        let [plain_fmt, plain_cargo] = plain.steps.as_slice() else {
+            panic!("two steps")
+        };
+        let [fmt, cargo] = varied.steps.as_slice() else {
+            panic!("two steps")
+        };
+        assert_eq!(fmt, plain_fmt);
+        assert_eq!(cargo.env[..ENV.len()], plain_cargo.env[..]);
+        assert_eq!(cargo.env[ENV.len()..], extra);
     }
 }

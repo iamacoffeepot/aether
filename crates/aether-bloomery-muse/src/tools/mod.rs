@@ -10,10 +10,12 @@
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
 //! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
 //! run as done, blocked, or asking a question. [`offered_with_proofs`] adds
-//! the proofs from the bundle `WORKSPACE_PROGRAMS` resolves to, today
-//! `proof.clippy`, which formats the tree and checks it with clippy and
-//! returns the formatted tree as an `Edited`; each binds the session's
-//! `ProofBound`, its environment and vendor tree.
+//! the proofs from the bundle `WORKSPACE_PROGRAMS` resolves to,
+//! `proof.clippy`, which formats the tree and checks it with clippy, and
+//! `proof.test`, which formats the tree and runs its workspace tests with
+//! the session's test env; each returns the formatted tree as an `Edited`
+//! and binds the session's `ProofBound`, its environment, vendor tree, and
+//! test env.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -36,7 +38,7 @@ use std::iter;
 use aether_bloomery_kinds::{EncodedArtifact, Head, OpaqueBytes, Ref, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
-use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound};
+use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, TestProof};
 use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
@@ -102,7 +104,7 @@ pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArt
 /// binding `proofs` into every call, and the artifacts each offer cites
 /// besides `proofs`.
 pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<(OfferedTool, Vec<EncodedArtifact>)> {
-    vec![bound::<ClippyProof>(WORKSPACE_PROGRAMS, proofs)]
+    vec![bound::<ClippyProof>(WORKSPACE_PROGRAMS, proofs), bound::<TestProof>(WORKSPACE_PROGRAMS, proofs)]
 }
 
 /// `P` as a bound tool from the bundle `head` resolves to, binding the cited

@@ -79,7 +79,7 @@ after=<seq>
   saying the session works only through the offered tools, makes every
   independent call in the same turn, and ends its run only by calling
   `muse-end`; with proofs offered, it also tells the model to run
-  `proof-clippy` until it passes before ending `Done`.
+  `proof-clippy` and `proof-test` until each passes before ending `Done`.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -92,12 +92,13 @@ after=<seq>
   another turn. The first turn sends the instructions as the developer
   message ahead of the brief.
 - `--environment <digest>` and `--vendor <digest>`, given together, also offer
-  `proof.clippy` from the `workspace-programs` bundle, bound to that
-  environment and vendor tree (see
-  [The clippy proof](../systems/workspace.md#the-clippy-proof)). It formats
-  the session's tree with `cargo fmt`, checks it with workspace-wide
-  `cargo clippy`, and returns the formatted tree, which becomes the session's
-  tree as an edit's does. The engine must run the workspace (a Docker daemon
+  `proof.clippy` and `proof.test` from the `workspace-programs` bundle, bound
+  to that environment, vendor tree, and the `--test-env` variables (see
+  [The proofs](../systems/workspace.md#the-proofs)). Each formats the
+  session's tree with `cargo fmt` and returns the formatted tree, which
+  becomes the session's tree as an edit's does: `proof.clippy` checks it with
+  workspace-wide `cargo clippy`, and `proof.test` runs its workspace tests
+  with the session's test env. The engine must run the workspace (a Docker daemon
   at `--workspace-endpoint`; `--workspace-warm-layers` builds over warm
   layers), have the `aether_bloomery_workspace_programs` bundle bound at the
   head `workspace-programs`, and hold both digests: the environment the head
@@ -105,6 +106,14 @@ after=<seq>
   of a `vendor.cargo` run over a source with the session tree's `Cargo.lock`.
   A proof that runs out of time or memory is retried twice, then answered
   with what happened; any other proof fault fails the session.
+- `--test-env KEY=VALUE`, repeatable, needs `--environment` / `--vendor`: a
+  variable the test proof hands cargo. This repository's lane passes
+  `AETHER_ALLOW_WASM_SKIP=1`, so a SubstrateHarness scenario whose component
+  wasm was not built skips instead of failing; `AETHER_STORE_PATH=:memory:`,
+  so no store-backed test opens a real journal; and
+  `AETHER_HARNESS_FLEET_BIN_DIR=/work/target/debug`, so the FleetHarness
+  suites that fork a chassis resolve the bins the test build already
+  produced.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of

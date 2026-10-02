@@ -680,7 +680,7 @@ and no row. The journal records nothing about the commit either. The operator
 holds the commit, and a proof cites the tree.
 
 To cite the tree, pass the printed digest as `source` in
-`vendor.cargo.input` and as the tree of the `proof.clippy` call (a Muse
+`vendor.cargo.input` and as the tree of a proof call (a Muse
 session's tree, or the tree of a `Tooled` input), so the vendor tree and the
 proof share one `Cargo.lock`. The hex is the same 32 bytes a `Ref<Tree>` field
 carries, written two hex digits per byte in order. No head is published for a
@@ -715,7 +715,7 @@ every reply. The embed and mask grammar is in
 
 ## Vendoring crate sources
 
-`vendor.cargo` produces the tree [the clippy proof](#the-clippy-proof) mounts
+`vendor.cargo` produces the tree [the proofs](#the-proofs) mount
 at `/vendor`. It lives in the same `aether-bloomery-workspace-programs` bundle
 and runs `cargo vendor --locked` once through the `Workspace` binding, with
 the network on (ADR-0237 decision 4). It is Sampled, because the tree depends
@@ -763,7 +763,7 @@ The answer maps to the result, `vendor.cargo.result`, or to a refusal:
 **Pairing.** `Vendored.tree` is the `cargo vendor --locked` directory for the
 `Cargo.lock` at the root of the input's `source`: one directory per registry
 package, each holding its `.cargo-checksum.json`, the layout
-`source.vendored.directory` reads. A `proof.clippy` call is well-formed when
+`source.vendored.directory` reads. A proof call is well-formed when
 its bound `vendor` is the `Vendored.tree` of a `vendor.cargo` transition whose
 `source` has the same `Cargo.lock` as the tree under proof, and in practice the
 same `source` digest. The proof replaces only `crates-io`, so the pairing
@@ -775,31 +775,33 @@ Two preconditions hold for every vendor run:
 
 - The source is a mount, not the run tree, so the workspace's
   `rust-toolchain.toml` check does not run. The vendor layout depends on
-  cargo, not rustc, and `proof.clippy` still runs that check over the same
+  cargo, not rustc, and the proofs still run that check over the same
   source.
 - Cargo reads config from its working directory, `/work`, so a
   `.cargo/config.toml` in the source does not apply. The proof also runs with
   `--config` only.
 
-## The clippy proof
+## The proofs
 
 `proof.clippy` is the first program that runs cargo through the `Workspace`
-binding (ADR-0237 decision 12). It lives in the
-`aether-bloomery-workspace-programs` bundle beside `environment.merge`, bound
-under the head `workspace-programs` (`WORKSPACE_PROGRAMS`), and is a tool a
-Muse session calls (ADR-0234 decision 10): it formats a source tree, checks it
-with clippy in a published environment, and returns the formatted tree. It is
-Sampled, because the verdict depends on the run.
+binding (ADR-0237 decision 12), and `proof.test` is the second, in the same
+shape. Both live in the `aether-bloomery-workspace-programs` bundle beside
+`environment.merge`, bound under the head `workspace-programs`
+(`WORKSPACE_PROGRAMS`), and are tools a Muse session calls (ADR-0234 decision
+10): each formats a source tree, proves it in a published environment, and
+returns the formatted tree. Each is Sampled, because the verdict depends on
+the run.
 
-Its input is a tool's, `Tooled<ClippyArgs, ProofBound>`
+Each proof's input is a tool's, `Tooled<A, ProofBound>`
 (`bloomery.program.tooled`):
 
 | Part | What it is | Where the run sees it |
 |---|---|---|
 | the tree | the cargo workspace under proof: a Muse session's current tree, or a tree such as `import-commit` prints ([Importing a source tree](#importing-a-source-tree)) | `/work` |
-| `ClippyArgs` (`proof.clippy.args`) | the arguments the model writes: none, `{}` | nowhere |
+| `ClippyArgs` (`proof.clippy.args`) / `TestArgs` (`proof.test.args`) | the arguments the model writes: none, `{}` | nowhere |
 | `ProofBound.environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bootstrap sends](#what-the-bootstrap-sends)) | the root |
 | `ProofBound.vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
+| `ProofBound.test_env: TestEnv` | the session-supplied test env (see [The test proof](#the-test-proof)) | the test step's env only |
 
 `ProofBound` (`proof.bound`) is the value every proof binds besides its tree;
 the session that offers the proof binds it into the offer, so the model never
@@ -808,28 +810,23 @@ network off and a read-only root, so crate sources are an input too (ADR-0237
 decision 4): cargo replaces crates.io with the vendor tree. A crate with no
 dependencies passes an empty tree.
 
-The program asks for one run of two steps, and every argument is fixed:
+Each proof asks for one run of two steps, and every argument but the test env
+is fixed:
 
 | Part | Value |
 |---|---|
 | Tool | `cargo` for both steps, resolved through the environment's `tools` table; cargo finds `cargo-fmt` and `cargo-clippy` on the environment's `PATH` |
 | Step 1 | `fmt --all -- -l`: rustfmt writes its fixes and prints each file it rewrote |
-| Step 2 | `clippy --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --all-targets --offline --quiet --message-format=json -- -D warnings` |
-| Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` on both steps |
+| Step 2 | clippy's lint command (see [The clippy proof](#the-clippy-proof)) or the test command (see [The test proof](#the-test-proof)) |
+| Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` on both steps, plus the bound's test env on the test step only |
 | Mounts | the vendor tree at `vendor` |
 | Scratch | `target` and `tmp`, so neither the build output nor cargo's home reaches the output tree |
 | Network | `Off` |
 
-fmt runs first and fixes, so a proof never fails on formatting alone. The
-clippy step is CI's lint command over the whole workspace (a narrower `-p`
-selection unifies features differently and rebuilds shared dependencies),
-`--offline` rather than `--frozen`, so a change to a workspace-internal
-dependency updates `Cargo.lock` inside the run and the updated lock comes back
-in the output tree. A crate missing from the vendor tree fails with cargo's own
-error. `--quiet` keeps cargo's progress lines out of stderr. Because nothing
-varies, every clippy proof in one environment has the same run key and shares
-one allotment estimate and one warm build layer (see
-[Provisioning](#provisioning)).
+fmt runs first and fixes, so a proof never fails on formatting alone. Both
+cargo steps run workspace-wide and `--offline` rather than `--frozen`, so a
+change to a workspace-internal dependency updates `Cargo.lock` inside the run
+and the updated lock comes back in the output tree.
 
 The answer is an `Edited<ProofVerdict>` (`bloomery.program.edited`), or a
 refusal. The workspace stops after the first step that exits other than 0:
@@ -837,8 +834,8 @@ refusal. The workspace stops after the first step that exits other than 0:
 | Run answer | Program answer |
 |---|---|
 | `Ok`, both steps exit `Some(0)` | `Passed` |
-| `Ok`, clippy exits other than 0 | `Failed { diagnostics }`: the `rendered` text of each `compiler-message` cargo printed, each once, or cargo's stderr when it rendered none |
-| `Ok`, fmt alone, exiting other than 0 | `Failed { diagnostics }`: rustfmt's stderr; clippy did not run |
+| `Ok`, the cargo step exits other than 0 | `Failed { diagnostics }`: the proof's diagnostics (see below) |
+| `Ok`, fmt alone, exiting other than 0 | `Failed { diagnostics }`: rustfmt's stderr; the cargo step did not run |
 | `Ok` with any other steps | the program's `Refused`, naming the count |
 | `Refused(..)` | the program's `Refused`, naming the workspace refusal |
 | `Exhausted(..)` or `Failed { .. }` | never seen: the binding ends the invocation, and the driver records the fault |
@@ -852,3 +849,48 @@ the same text cited as `Utf8Text`. The diagnostics are capped at 64 KiB
 bytes were cut. A workspace refusal, such as `ToolchainMismatch` when the
 source's `rust-toolchain.toml` asks for a component the environment lacks, is
 never recorded as a failed proof of the tree.
+
+### The clippy proof
+
+The clippy step is CI's lint command over the whole workspace (a narrower `-p`
+selection unifies features differently and rebuilds shared dependencies):
+
+`clippy --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --all-targets --offline --quiet --message-format=json -- -D warnings`
+
+`--quiet` keeps cargo's progress lines out of stderr, and the diagnostics come
+as JSON lines on stdout. A crate missing from the vendor tree fails with
+cargo's own error. Because nothing varies, every clippy proof in one
+environment has the same run key and shares one allotment estimate and one
+warm build layer (see [Provisioning](#provisioning)).
+
+A failed clippy step reports the `rendered` text of each `compiler-message`
+cargo printed, each once, or cargo's stderr when it rendered none.
+
+### The test proof
+
+The test step runs the workspace tests with cargo's default target selection
+(lib, bins, tests, doctests), the set CI's test lane covers through nextest
+plus its doctest pass:
+
+`test --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --offline --quiet --no-fail-fast --message-format=json`
+
+`--no-fail-fast` lets one run report every failing target, not only the
+first. `--quiet` keeps cargo's status lines out of stderr and makes libtest
+print one character per passing test. Like clippy, the run takes no
+`--all-features`, so every proof run gets the same feature resolution. It
+takes no test-name filter either: the run key hashes every step's args and
+env, so each distinct filter would build cold into its own warm layer, while
+running the tests once the build is warm costs little beside that.
+
+The test step also takes the bound's `test_env`, and only that step does, so
+clippy's run key and warm layer never vary with it. `TestEnv` holds at most
+32 variables with no repeated key; whoever opens the session supplies them,
+and each distinct env value yields its own run key and warm layer.
+
+A failed test step reports, in order: the build errors when the build failed
+(the `rendered` text of each `error` `compiler-message`); else the test
+failures, starting with cargo's failed-target list from stderr and then each
+libtest `---- <name> stdout ----` block with its binary's
+`test result: FAILED` line, the interleaved JSON lines skipped and the target
+list first so the cap keeps it; else the step's stderr, as the clippy proof
+falls back to.

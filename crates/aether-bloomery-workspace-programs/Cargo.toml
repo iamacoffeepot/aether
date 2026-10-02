@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The bundle of workspace programs: environment.merge, which builds a run environment from the imported base and toolchain trees, and proof.clippy, the tool that formats a source tree and checks it with clippy in that environment (ADR-0237)."
+description = "The bundle of workspace programs: environment.merge, which builds a run environment from the imported base and toolchain trees, and proof.clippy and proof.test, the tools that format a source tree and check it with clippy or run its workspace tests in that environment (ADR-0237)."
 
 # One bundle crate: the cdylib is the program bundle `cargo xtask build-wasm`
 # discovers structurally (cdylib + aether-actor); the rlib lets the native
@@ -27,7 +27,8 @@ aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 # The identity half only: the `Environment` kind and the values it carries.
 aether-bloomery-workspace = { path = "../aether-bloomery-workspace", default-features = false }
-# `proof.clippy` reads cargo's `--message-format=json` diagnostics.
+# `proof.clippy` reads cargo's `--message-format=json` diagnostics, and
+# `proof.test` parses libtest's failure blocks from it.
 serde_json = { workspace = true }
 
 [lints]

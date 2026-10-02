@@ -26,7 +26,7 @@ use aether_bloomery_program::{
 };
 use aether_bloomery_workspace::{Outcome, RunResult, StepOutcome, ToolName, ToolRecord, TreePath};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
-use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, ProofVerdict};
+use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, ProofVerdict, TestEnv};
 use aether_data::{Cites, Kind, Storage, StorageData};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
@@ -495,9 +495,13 @@ fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Res
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
-/// The environment and vendor tree every proof in these sessions binds.
+/// The environment, vendor tree, and test env every proof in these sessions binds.
 fn proofs() -> ProofBound {
-    ProofBound::new(Ref::from_digest(Digest::from_bytes([2; 32])), Ref::from_digest(Digest::from_bytes([3; 32])))
+    ProofBound::new(
+        Ref::from_digest(Digest::from_bytes([2; 32])),
+        Ref::from_digest(Digest::from_bytes([3; 32])),
+        TestEnv::default(),
+    )
 }
 
 /// Open a session on the small tree that offers every bound tool and the proofs bound to [`proofs`], and makes at

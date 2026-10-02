@@ -20,12 +20,14 @@ use aether_bloomery_muse::{
     TurnSettings,
 };
 use aether_bloomery_program::Program;
+use aether_bloomery_workspace::EnvVar;
 use aether_codec::encode_storage_schema;
 use aether_data::{Cites, Schema, Storage};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::export::{Action, Change, export};
+use super::open::parse_test_env;
 use super::wait::{Usage, follow};
 use crate::bloomery::Reads;
 
@@ -271,6 +273,19 @@ fn marker(batch: &mut Batch, target: &str) -> Result<Ref<Tree>> {
 
 const fn usage(input: u64, cached: u64, output: u64, reasoning: u64) -> Usage {
     Usage { input, cached, output, reasoning }
+}
+
+#[test]
+fn test_env_splits_each_value_at_its_first_equals_and_refuses_a_repeated_key() {
+    // Catches a `KEY=VALUE` split at the last `=`, a value without one accepted, and two values for one
+    // variable passed to the bound.
+    let env = parse_test_env(&["AETHER_A=1", "AETHER_B=x=y"]).expect("split at the first `=`");
+    let want = [EnvVar::new("AETHER_A", "1").expect("variable"), EnvVar::new("AETHER_B", "x=y").expect("variable")];
+    assert_eq!(env.as_slice(), want);
+
+    let repeated = parse_test_env(&["AETHER_A=1", "AETHER_A=2"]).expect_err("a repeated key is refused");
+    assert!(repeated.to_string().contains("AETHER_A"), "the error names the key: {repeated}");
+    parse_test_env(&["AETHER_A"]).expect_err("a value without `=` is refused");
 }
 
 #[test]

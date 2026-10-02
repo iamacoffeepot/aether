@@ -64,10 +64,12 @@
 //! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
 //! (`muse.end`), which ends the run as done, blocked, or asking a question;
 //! and the fixture [`Echo`] (`muse.echo`). A session opened with
-//! [`offered_with_proofs`] also offers `proof.clippy` from the
-//! `workspace-programs` bundle, bound to its environment and vendor tree,
-//! which formats the tree and checks it with clippy and whose `Edited` tree
-//! the loop carries on like an edit's. Only a `muse.end` call ends a run:
+//! [`offered_with_proofs`] also offers `proof.clippy` and `proof.test` from
+//! the `workspace-programs` bundle, bound to its environment, vendor tree,
+//! and test env: the first formats the tree and checks it with clippy, the
+//! second formats the tree and runs its workspace tests with the session's
+//! test env, and each one's `Edited` tree the loop carries on like an edit's.
+//! Only a `muse.end` call ends a run:
 //! a reply without a call is nudged back for another turn. Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
 //! [`RestReason::TurnLimit`]. Each turn carries an [`InputLimit`]; a called

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use aether_bloomery_kinds::{EncodedArtifact, Ref};
 use aether_bloomery_muse::{OpenInput, SessionOpen, offered, offered_with_proofs};
-use aether_bloomery_workspace::TreePath;
-use aether_bloomery_workspace_programs::proof::ProofBound;
+use aether_bloomery_workspace::{EnvVar, TreePath};
+use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
@@ -19,7 +19,7 @@ use crate::import_commit::Imported;
 const PREFACE: &str = "You work only through the offered tools, and end your run only by calling `muse-end`: `Done` with a summary once every briefed change is in the tree, `Blocked` with what stopped you when the work cannot be finished, or `Asked` with the one question you cannot go on without. A reply without a tool call does not end the session. A plan's open questions still go in its Questions section; `Asked` is for work that cannot go on without an answer. Make every independent tool call in the same turn: reads, searches, and edits to different files go together, not one per turn. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
 
 /// What a session offered the proof tools is told after [`PREFACE`].
-const PROOFS: &str = "`proof-clippy` formats the whole workspace with `cargo fmt` and checks it with `cargo clippy`, as CI does. Run it once your changes are in, fix what it reports, and run it again until it passes before you end `Done`. It returns the formatted tree, so read a file it rewrote again before you edit it.\n\n";
+const PROOFS: &str = "`proof-clippy` formats the whole workspace with `cargo fmt` and checks it with `cargo clippy`, as CI does. `proof-test` formats the whole workspace and runs its tests with the session's test env. Run each once your changes are in, fix what it reports, and run it again until it passes before you end `Done`. Each returns the formatted tree, so read a file it rewrote again before you edit it.\n\n";
 
 /// Arguments for `cargo xtask muse open`.
 #[derive(Args, Debug)]
@@ -60,15 +60,20 @@ pub(super) struct OpenArgs {
     /// session's `Cargo.lock`.
     #[arg(long, requires = "environment")]
     vendor: Option<String>,
+    /// A variable the test proof hands cargo, `KEY=VALUE`, repeatable. Needs
+    /// `--environment` / `--vendor`.
+    #[arg(long, requires = "environment")]
+    test_env: Vec<String>,
 }
 
 /// Open the session and print `tree=<digest>`, `session=<key>`, and
 /// `after=<seq>`, the boundary `wait` reads from.
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
-    let ((tools, mut artifacts), preface) = proofs(args.environment.as_deref(), args.vendor.as_deref())?.map_or_else(
-        || (offered(), PREFACE.to_owned()),
-        |proofs| (offered_with_proofs(&proofs), [PREFACE, PROOFS].concat()),
-    );
+    let ((tools, mut artifacts), preface) =
+        proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?.map_or_else(
+            || (offered(), PREFACE.to_owned()),
+            |proofs| (offered_with_proofs(&proofs), [PREFACE, PROOFS].concat()),
+        );
     let brief =
         fs::read_to_string(&args.brief).with_context(|| format!("reading the brief {}", args.brief.display()))?;
     let instructions = fs::read_to_string(&args.instructions)
@@ -103,15 +108,31 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
     Ok(())
 }
 
-/// The proofs' environment and vendor tree, when both digests are given.
-fn proofs(environment: Option<&str>, vendor: Option<&str>) -> Result<Option<ProofBound>> {
+/// The proofs' environment, vendor tree, and test env, when the environment and vendor digests are given.
+fn proofs(environment: Option<&str>, vendor: Option<&str>, test_env: &[String]) -> Result<Option<ProofBound>> {
     match (environment, vendor) {
         (Some(environment), Some(vendor)) => Ok(Some(ProofBound::new(
             Ref::from_digest(parse_digest(environment).context("--environment")?),
             Ref::from_digest(parse_digest(vendor).context("--vendor")?),
+            parse_test_env(test_env)?,
         ))),
         _ => Ok(None),
     }
+}
+
+/// The session-supplied test env: each `--test-env` value split at its first
+/// `=`.
+pub(super) fn parse_test_env(values: &[impl AsRef<str>]) -> Result<TestEnv> {
+    let vars = values
+        .iter()
+        .map(|value| {
+            let value = value.as_ref();
+            let (key, var) = value.split_once('=').ok_or_else(|| anyhow!("--test-env {value:?} is not KEY=VALUE"))?;
+            EnvVar::new(key, var).map_err(|error| anyhow!("--test-env {value:?}: {error}"))
+        })
+        .collect::<Result<Vec<EnvVar>>>()?;
+    let keys: Vec<String> = vars.iter().map(|var| var.key().to_owned()).collect();
+    TestEnv::new(vars).map_err(|error| anyhow!("--test-env {keys:?}: {error}"))
 }
 
 /// The tree paths a seeds file names, one per line, blank lines skipped.
