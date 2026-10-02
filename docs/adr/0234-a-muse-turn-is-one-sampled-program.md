@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-23
+- **Amended:** 2026-10-01 — decision 10: the session loop retries a tool run that ran out of time or memory up to twice, then answers the call with what happened instead of failing the session; an offered tool names its bundle, so a session can call proof programs from `aether-bloomery-workspace-programs`, bound to the environment and vendor tree the session opens with.
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (its
 Consequences leave Muse and HTTP out of scope: "Muse / HTTP is not this
@@ -289,6 +290,41 @@ program is tested without spending money.
      them.
    - `muse.turn` never runs a call. Running the calls, and any loop that
      feeds their outputs into the next turn, live above the program.
+
+10. **The session loop retries an exhausted tool run, and calls tools from
+    other bundles.** *(Added 2026-10-01.)* The loop is the `muse.session`
+    reactor (`crates/aether-bloomery-muse/src/session/`). ADR-0237 decision
+    2 leaves retrying an exhausted run to reactor policy; this is Muse's.
+    - **Retry.** Today every fault of a tool run fails the session: `faulted`
+      in `session/conversations.rs` records `Failure::Faulted` and
+      `rest_faulted` rests it, which is why the session's own tools never
+      refuse over what the model wrote (`tools/mod.rs`). A tool run
+      that faults with `TimedOut` or `ResourceExhausted` is instead requested
+      again over the same input, up to twice. The executor's estimate for
+      that run key grows after each exhaustion (ADR-0237 decision 9), so each
+      attempt gets more time or memory without the session asking. If the
+      third attempt is exhausted too, the loop answers the call with a
+      `ToolOutput::Refused` text naming the tool, the resource, and the
+      attempts (for example "`proof.clippy` ran out of time after 3
+      attempts"), staged by a program like every artifact the loop cites, and
+      the session goes on. The model then fixes its code or ends the run with
+      `muse.end` as blocked. Retries count against no limit.
+    - **Still fatal.** Every other fault still fails the session, including
+      `ExecutorFailed` and a refusal such as a toolchain mismatch: they say
+      the executor or the session's inputs are broken, not the model's code.
+    - **Tools from other bundles.** `OfferedTool`
+      (`crates/aether-bloomery-muse/src/input/tools.rs`) gains the head of the
+      bundle its program lives in, and the loop calls `tool.head()` instead of
+      the bundle `MUSE` it names for every call today
+      (`session/conversations.rs:208`). The proof programs stay in
+      `aether-bloomery-workspace-programs`.
+    - **Bound inputs.** A proof tool takes `Tooled<A, B>`
+      (`crates/aether-bloomery-program/src/program/tool/tooled.rs`), and its
+      bound value `B` carries the environment and vendor tree. Today
+      `OpenInput` (`session/open.rs`) carries neither; `muse.session.open`
+      gains both and binds them into the proof tools it offers. A proof
+      result's tree becomes the session's current tree, as an `Edited`
+      result's does today (ADR-0237 decision 12).
 
 ## Consequences
 
