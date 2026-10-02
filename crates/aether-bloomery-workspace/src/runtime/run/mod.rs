@@ -11,8 +11,9 @@
 //!    the archive.
 //! 2. [`environment`] makes sure the daemon holds the environment's image,
 //!    importing the root as a filesystem tar when it does not.
-//! 3. [`volumes`] creates the `/work` volume and one volume per mount, and
-//!    writes each mount's tree through a helper container that never starts.
+//! 3. [`volumes`] creates the `/work` volume and [`mounts`] makes sure the
+//!    daemon holds each mount's tree, writing a missed one through a helper
+//!    container that never starts.
 //! 4. [`step`] runs each step in its own container over the shared `/work`
 //!    volume, under the sandbox pins and the run's [`Allotment`], which the
 //!    actor's provisioning chose; the run tree is written into the first
@@ -20,8 +21,11 @@
 //!    while it runs. The steps stop after the first non-zero exit.
 //! 5. [`output`] decodes the last container's `/work` into a tree, minus
 //!    `scratch`.
-//! 6. [`cleanup`] removes every container and volume on every path; then,
-//!    for an `Ok`, the last stage is answered before the reply.
+//! 6. [`cleanup`] removes every container and the `/work` volume on every
+//!    path; then, for an `Ok`, the last stage is answered before the reply.
+//!    The environment image and the mount volumes stay: they are rebuildable
+//!    derivatives of the journal, named by digest and checked before every
+//!    use.
 //!
 //! Every read and stage goes through the run's [`StorageSession`]: outputs
 //! are staged as they are produced, and a run that ends any other way than
@@ -38,6 +42,7 @@
 
 mod cleanup;
 mod environment;
+mod mounts;
 mod output;
 mod resolve;
 mod step;

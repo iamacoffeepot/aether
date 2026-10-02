@@ -7,10 +7,11 @@ use std::thread;
 use aether_bloomery_journal::Batch;
 use aether_bloomery_kinds::{Digest, Node, OpaqueBytes, ReadArtifacts, Ref, Tree, artifact_blob};
 use aether_bloomery_workspace::testing::{
-    RUN_CONTAINER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
+    MountScript, RUN_CONTAINER, RUN_HELPER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
+    pointer_reply,
 };
 use aether_bloomery_workspace::{
-    EnvVar, Environment, ImageRef, Import, ImportResult, Mounts, Network, Outcome, Platform, Provides, Refusal,
+    EnvVar, Environment, ImageRef, Import, ImportResult, Mount, Mounts, Network, Outcome, Platform, Provides, Refusal,
     Resource, Run, RunError, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools,
     TreePath,
 };
@@ -121,6 +122,58 @@ pub fn script<'a>(environment: &'a str, output: &'a [u8]) -> RunScript<'a> {
     RunScript { environment, logs: LOGS, exit_code: 0, output }
 }
 
+/// A one-entry vendor tree staged into `inputs`' batch, and the request
+/// mounting it at `vendor`.
+fn vendored(
+    inputs: &mut Inputs,
+    request: &RunRequest,
+    content: &[u8],
+) -> Result<(RunRequest, Ref<Tree>), Box<dyn Error>> {
+    let file = Node::File(inputs.batch.stage_bytes(content));
+    let vendor = directory(&mut inputs.batch, vec![("crate.rs", file)])?;
+    let mounted = RunRequest {
+        mounts: Mounts::new(vec![Mount { at: TreePath::new("vendor")?, tree: vendor }])?,
+        ..request.clone()
+    };
+    Ok((mounted, vendor))
+}
+
+/// The request lines of a single-step run over environment `hex`: the platform and image inspects and the `/work`
+/// volume create, then `mounts`, then the step's create, `/work` write, start, stats, wait, inspect, logs, and output
+/// read, then `removals`.
+fn run_lines(hex: &str, mounts: &[String], removals: &[String]) -> Vec<String> {
+    let prelude = [
+        "GET /v1.44/info".to_owned(),
+        format!("GET /v1.44/images/aether-workspace-environment:{hex}/json"),
+        "POST /v1.44/volumes/create".to_owned(),
+    ];
+    let step = [
+        "POST /v1.44/containers/create".to_owned(),
+        format!("PUT /v1.44/containers/{RUN_CONTAINER}/archive?path=/work"),
+        format!("POST /v1.44/containers/{RUN_CONTAINER}/start"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/stats?stream=true"),
+        format!("POST /v1.44/containers/{RUN_CONTAINER}/wait"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/json"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/logs?stdout=1&stderr=1"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/logs?stdout=1&stderr=0"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/logs?stdout=0&stderr=1"),
+        format!("GET /v1.44/containers/{RUN_CONTAINER}/archive?path=/work"),
+    ];
+    [&prelude[..], mounts, &step, removals].concat()
+}
+
+/// The removal lines of a run: the helper container when one was created, the step container, then `/work`.
+fn removal_lines(helper: bool) -> Vec<String> {
+    let helper = helper.then(|| format!("DELETE /v1.44/containers/{RUN_HELPER}?force=true&v=true"));
+    helper
+        .into_iter()
+        .chain([
+            format!("DELETE /v1.44/containers/{RUN_CONTAINER}?force=true&v=true"),
+            format!("DELETE /v1.44/volumes/{RUN_VOLUME}?force=true"),
+        ])
+        .collect()
+}
+
 /// Boot over `inputs`, run `request` once while a fresh stub serves `replies`, and answer the result, the requests
 /// the stub read, and the harness.
 fn run_against(
@@ -148,11 +201,6 @@ fn detail(answer: &RunResult) -> Result<&str, Box<dyn Error>> {
         RunResult::Err(RunError::Failed { detail }) => Ok(detail.as_str()),
         other => Err(format!("expected Failed, got {other:?}").into()),
     }
-}
-
-/// The `containers/create` body of the step container, the fourth request of a run.
-fn step_spec(requests: &[StubRequest]) -> Result<serde_json::Value, Box<dyn Error>> {
-    Ok(serde_json::from_slice(&requests.get(3).ok_or("a step container was created")?.body)?)
 }
 
 #[test]
@@ -297,6 +345,174 @@ fn a_run_resolves_creates_writes_starts_waits_reads_logs_and_output_then_removes
     assert!(harness.stores(&step.stderr.digest()), "the stderr blob is staged");
     stored::<Tree>(&harness, outcome.tree.digest())?;
     Ok(())
+}
+
+#[test]
+fn a_missing_pointer_writes_a_new_data_volume_and_creates_the_pointer_after() -> TestResult {
+    // Catches a run trusting a half-written volume: with no pointer (an orphaned data volume from a crashed write is
+    // invisible; only the pointer proves completeness), the run writes a fresh data volume through the helper and
+    // creates the pointer only after the write, keeping both out of per-run removal while `/work` is removed. Also
+    // catches a helper mounting the miss anywhere but its path, and a pointer whose labels do not name the digest and
+    // its data volume.
+    let mut inputs = Inputs::new(Vec::new())?;
+    let base = inputs.request("tool", "target")?;
+    let (request, vendor) = vendored(&mut inputs, &base, b"pub fn vendor() {}\n")?;
+    let hex = inputs.hex();
+    let digest = vendor.digest().to_string();
+    let pointer = format!("aether-workspace-mount-{digest}");
+    let output = built_work();
+    let miss = MountScript::Miss { hex: &digest, data_volume: "da7a0001", winner: None };
+
+    let (answer, requests, _) = run_against(inputs, request, script(&hex, &output).mount_replies(&[miss]), FLAGS)?;
+
+    outcome(answer)?;
+    let mounts = [
+        format!("GET /v1.44/volumes/{pointer}"),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/containers/create".to_owned(),
+        format!("PUT /v1.44/containers/{RUN_HELPER}/archive?path=/vendor"),
+        "POST /v1.44/volumes/create".to_owned(),
+    ];
+    assert_eq!(lines(&requests), run_lines(&hex, &mounts, &removal_lines(true)));
+    let body = |index: usize| -> Result<serde_json::Value, Box<dyn Error>> {
+        Ok(serde_json::from_slice(&requests.get(index).ok_or("the run made the request")?.body)?)
+    };
+    assert_eq!(body(4)?, serde_json::json!({ "Labels": { "aether.workspace.mount": digest } }));
+    let helper = body(5)?;
+    assert_eq!(helper["Image"], serde_json::json!(format!("aether-workspace-environment:{hex}")));
+    assert_eq!(
+        helper["HostConfig"]["Mounts"],
+        serde_json::json!([{
+            "Type": "volume",
+            "Source": "da7a0001",
+            "Target": "/vendor",
+            "ReadOnly": false,
+            "VolumeOptions": { "NoCopy": true },
+        }])
+    );
+    assert_eq!(
+        body(7)?,
+        serde_json::json!({
+            "Name": pointer,
+            "Labels": { "aether.workspace.mount": digest, "aether.workspace.mount.data": "da7a0001" },
+        })
+    );
+    assert!(mounts_read_only(&step_spec(&requests)?, "da7a0001", "/vendor"), "the step mounts the written tree");
+    Ok(())
+}
+
+#[test]
+fn a_second_run_with_the_same_digest_reuses_the_mount_without_writing() -> TestResult {
+    // Catches the regression this cache exists for: the second run citing the same mount-tree digest inspects the
+    // pointer and mounts its data volume, with no helper, no `PUT …/archive` for the mount, and no volume create
+    // beyond `/work`.
+    let mut inputs = Inputs::new(Vec::new())?;
+    let base = inputs.request("tool", "target")?;
+    let (request, vendor) = vendored(&mut inputs, &base, b"pub fn vendor() {}\n")?;
+    let hex = inputs.hex();
+    let digest = vendor.digest().to_string();
+    let output = built_work();
+    let first = script(&hex, &output).mount_replies(&[MountScript::Miss {
+        hex: &digest,
+        data_volume: "da7a0001",
+        winner: None,
+    }]);
+    let second = script(&hex, &output).mount_replies(&[MountScript::Hit { hex: &digest, data_volume: "da7a0001" }]);
+    let first_len = first.len();
+    let stub = StubDaemon::bind()?;
+    let mut harness = inputs.boot(&stub, FLAGS)?;
+    let run = over(&harness, request);
+
+    let (answers, requests) =
+        serving(stub, first.into_iter().chain(second).collect(), || [harness.run(&run), harness.run(&run)])?;
+
+    for answer in answers {
+        outcome(answer)?;
+    }
+    let second = &requests[first_len..];
+    let mounts = [format!("GET /v1.44/volumes/aether-workspace-mount-{digest}")];
+    assert_eq!(lines(second), run_lines(&hex, &mounts, &removal_lines(false)));
+    assert!(mounts_read_only(&step_spec(second)?, "da7a0001", "/vendor"), "the second step mounts the same tree");
+    Ok(())
+}
+
+#[test]
+fn a_lost_pointer_race_mounts_the_winner_and_removes_its_own_write() -> TestResult {
+    // Catches a race that leaks or mounts the wrong volume: answered 409 on the pointer create, the run re-inspects,
+    // mounts the winner's data volume read-only, and removes the data volume it wrote itself, which no pointer names.
+    let mut inputs = Inputs::new(Vec::new())?;
+    let base = inputs.request("tool", "target")?;
+    let (request, vendor) = vendored(&mut inputs, &base, b"pub fn vendor() {}\n")?;
+    let hex = inputs.hex();
+    let digest = vendor.digest().to_string();
+    let pointer = format!("aether-workspace-mount-{digest}");
+    let output = built_work();
+    let miss = MountScript::Miss { hex: &digest, data_volume: "da7a0003", winner: Some("da7af00d") };
+
+    let (answer, requests, _) = run_against(inputs, request, script(&hex, &output).mount_replies(&[miss]), FLAGS)?;
+
+    outcome(answer)?;
+    let mounts = [
+        format!("GET /v1.44/volumes/{pointer}"),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/containers/create".to_owned(),
+        format!("PUT /v1.44/containers/{RUN_HELPER}/archive?path=/vendor"),
+        "POST /v1.44/volumes/create".to_owned(),
+        format!("GET /v1.44/volumes/{pointer}"),
+    ];
+    let removals = [removal_lines(true), vec!["DELETE /v1.44/volumes/da7a0003?force=true".to_owned()]].concat();
+    assert_eq!(lines(&requests), run_lines(&hex, &mounts, &removals));
+    assert!(mounts_read_only(&step_spec(&requests)?, "da7af00d", "/vendor"), "the step mounts the winner");
+    Ok(())
+}
+
+#[test]
+fn a_pointer_labelled_for_another_digest_is_refused_before_any_step() -> TestResult {
+    // Catches a skipped label check running in the wrong filesystem: a pointer whose mount label does not name the
+    // cited digest refuses as MountUnavailable before any container is created, while `/work` is still removed.
+    let mut inputs = Inputs::new(Vec::new())?;
+    let base = inputs.request("tool", "target")?;
+    let (request, vendor) = vendored(&mut inputs, &base, b"pub fn vendor() {}\n")?;
+    let hex = inputs.hex();
+    let digest = vendor.digest().to_string();
+    let replies = vec![
+        StubReply::with_length(200, r#"{"Architecture":"x86_64","OSType":"linux"}"#),
+        StubReply::with_length(200, format!(r#"{{"Config":{{"Labels":{{"aether.workspace.environment":"{hex}"}}}}}}"#)),
+        StubReply::with_length(201, format!(r#"{{"Name":"{RUN_VOLUME}"}}"#)),
+        pointer_reply(&digest, "00", "v9left"),
+        StubReply::with_length(204, Vec::new()),
+    ];
+
+    let (answer, requests, _) = run_against(inputs, request, replies, FLAGS)?;
+
+    assert_eq!(answer, RunResult::Err(RunError::Refused(Refusal::MountUnavailable)));
+    assert_eq!(
+        lines(&requests),
+        [
+            "GET /v1.44/info".to_owned(),
+            format!("GET /v1.44/images/aether-workspace-environment:{hex}/json"),
+            "POST /v1.44/volumes/create".to_owned(),
+            format!("GET /v1.44/volumes/aether-workspace-mount-{digest}"),
+            format!("DELETE /v1.44/volumes/{RUN_VOLUME}?force=true"),
+        ]
+    );
+    Ok(())
+}
+
+/// The `containers/create` body of the step container: the last container a single-step run creates.
+fn step_spec(requests: &[StubRequest]) -> Result<serde_json::Value, Box<dyn Error>> {
+    let create = requests
+        .iter()
+        .rfind(|request| request.line() == "POST /v1.44/containers/create")
+        .ok_or("a step container was created")?;
+    Ok(serde_json::from_slice(&create.body)?)
+}
+
+/// Whether `spec` mounts `source` read-only at `target`.
+fn mounts_read_only(spec: &serde_json::Value, source: &str, target: &str) -> bool {
+    spec["HostConfig"]["Mounts"].as_array().is_some_and(|mounts| {
+        mounts.iter().any(|mount| mount["Source"] == source && mount["Target"] == target && mount["ReadOnly"] == true)
+    })
 }
 
 #[test]
