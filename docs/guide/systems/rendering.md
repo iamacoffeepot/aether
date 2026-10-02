@@ -69,10 +69,10 @@ via `send_many` (each triangle is `DRAW_TRIANGLE_BYTES` on the wire).
 
 **Textured quads are the generic image surface** ([ADR-0105](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0105-text-rendering.md)).
 `create_texture` stages `Rgba8` or `R8` pixels under a session-scoped
-`texture_id` (the reply hands it back); the pixels arrive as a `Blob` and are
-staged as received, with JSON callers sending the same byte array as before; `draw_textured_quads` then draws a batch
+`texture_id` (the reply hands it back); `draw_textured_quads` then draws a batch
 of quads sampling that texture, each carrying a pixel-unit rect, a uv sub-rect,
-and an RGBA tint. `R8` samples contribute their scalar value in the red channel
+and an RGBA tint. The pixels arrive as a `Blob` and are staged as received, with
+JSON callers sending the same byte array as before. `R8` samples contribute their scalar value in the red channel
 (`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
 texture when the producer knows it is no longer used.
