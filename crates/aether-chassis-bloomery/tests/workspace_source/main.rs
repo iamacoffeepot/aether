@@ -6,5 +6,6 @@
 #[cfg(target_os = "linux")]
 mod bench;
 mod import;
+mod layers;
 mod run;
 mod support;

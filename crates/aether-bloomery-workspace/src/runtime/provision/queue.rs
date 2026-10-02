@@ -103,6 +103,8 @@ impl<W> Admission<W> {
 /// request's turn, and the reply it owes its caller.
 struct Waiting {
     source: ProtocolRef<ArtifactStorage>,
+    /// The source's path text: the unit a warm layer is kept for.
+    unit: String,
     run: RunRequest,
     task: StagedTask<Ran>,
     held: Held<RunResult>,
@@ -122,20 +124,22 @@ impl RunQueue {
         Self { runner, admission: Admission::new(budget, estimates), running: HashMap::new() }
     }
 
-    /// Accept `run` over `source` in its own turn: hold its reply and stage
-    /// its task, then start the task now when the run is admitted, opening
-    /// its storage session at `desk`, or queue it.
+    /// Accept `run` over `source`, whose path text is `unit`, in its own
+    /// turn: hold its reply and stage its task, then start the task now when
+    /// the run is admitted, opening its storage session at `desk`, or queue
+    /// it.
     pub fn submit(
         &mut self,
         ctx: &mut NativeCtx<'_, WorkspaceCapability>,
         desk: &mut StorageDesk,
         source: ProtocolRef<ArtifactStorage>,
+        unit: String,
         run: RunRequest,
     ) -> Pending<RunResult> {
         let key = RunKey::of(&run);
         let (pending, held) = ctx.hold::<RunResult>();
         let task = ctx.stage_blocking::<Ran>();
-        let waiting = Waiting { source, run, task, held };
+        let waiting = Waiting { source, unit, run, task, held };
         if let Some(admitted) = self.admission.admit_now(key) {
             self.start(ctx, desk, admitted, waiting);
             return pending;
@@ -189,10 +193,10 @@ impl RunQueue {
         admitted: Admitted,
         waiting: Waiting,
     ) {
-        let Waiting { source, run, task, held } = waiting;
+        let Waiting { source, unit, run, task, held } = waiting;
         self.log_admitted(&admitted);
         let session = desk.open(source, ctx.blob_check_in());
-        let request = task.start(ctx, self.work(&admitted, run, session));
+        let request = task.start(ctx, self.work(&admitted, unit, run, session));
         self.running.insert(request, (held, admitted));
     }
 
@@ -200,12 +204,13 @@ impl RunQueue {
     fn work(
         &self,
         admitted: &Admitted,
+        unit: String,
         run: RunRequest,
         session: StorageSession,
     ) -> impl FnOnce() -> Ran + Send + 'static {
         let runner = self.runner.clone();
-        let allotment = admitted.allotment.clone();
-        move || runner.answer(&run, &allotment, session)
+        let Admitted { key, allotment } = admitted.clone();
+        move || runner.answer(&run, &unit, key, &allotment, session)
     }
 
     fn log_admitted(&self, admitted: &Admitted) {

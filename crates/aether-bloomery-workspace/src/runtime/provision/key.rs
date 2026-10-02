@@ -45,6 +45,11 @@ impl RunKey {
         }
         Self(hash_bytes(&input))
     }
+
+    /// The whole digest, where [`fmt::Display`] shows only its start.
+    pub fn digest(&self) -> Digest {
+        self.0
+    }
 }
 
 impl fmt::Display for RunKey {

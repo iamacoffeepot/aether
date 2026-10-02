@@ -5,9 +5,10 @@
 //! `aether.workspace=run`, rather than an anonymous one, because every step
 //! runs in its own container and all of them must see the same `/work`. On a
 //! read-only root a volume mount is also what lets `PUT …/archive` write
-//! before `start`. `/work` is the only per-run volume: mount data and
-//! pointer volumes persist as rebuildable derivatives of the journal (see
-//! [`super::mounts`]) and are never registered for per-run removal.
+//! before `start`. `/work` is a cold run's only per-run volume; a warm run
+//! adds its layer's (see [`super::layers`]). Mount data and pointer volumes
+//! persist as rebuildable derivatives of the journal (see [`super::mounts`])
+//! and are never registered for per-run removal.
 //!
 //! A missed mount's tree is written into its data volume through one helper
 //! container from the environment image, created with each missed mount
@@ -52,16 +53,17 @@ pub fn prepare(
     mounts: &Mounts,
 ) -> Result<Volumes, Stop> {
     let work = engine
-        .create_volume(None, &BTreeMap::from([RUN_LABEL]))
-        .map_err(engine_failed(format!("creating the {} volume", Volumes::WORK_PATH)))?;
+        .create_volume(None, &BTreeMap::from([RUN_LABEL]), &BTreeMap::new())
+        .map_err(engine_failed(format!("creating the {} volume", Volumes::WORK_PATH)))?
+        .name;
     cleanup.volume(work.clone());
 
     Ok(Volumes { work, mounts: mounts::ensure(engine, cleanup, session, image, mounts)? })
 }
 
-/// A container that exists only to hold the missed mount volumes writable
-/// while their trees are written. Its command is a placeholder; it never
-/// starts.
+/// A container that exists only to hold `volumes` writable: the missed
+/// mount volumes while their trees are written, or a warm run's `/work` while
+/// its output is read. Its command is a placeholder; it never starts.
 pub fn helper_spec(image: &str, volumes: &[(String, VolumeName)]) -> Value {
     let mounts: Vec<Value> = volumes.iter().map(|(path, volume)| volume_mount(volume, path, false)).collect();
     json!({

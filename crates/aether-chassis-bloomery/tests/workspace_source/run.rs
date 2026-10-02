@@ -176,7 +176,7 @@ fn removal_lines(helper: bool) -> Vec<String> {
 
 /// Boot over `inputs`, run `request` once while a fresh stub serves `replies`, and answer the result, the requests
 /// the stub read, and the harness.
-fn run_against(
+pub fn run_against(
     inputs: Inputs,
     request: RunRequest,
     replies: Vec<StubReply>,
