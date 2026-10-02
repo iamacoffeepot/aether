@@ -302,9 +302,18 @@ to, and `AETHER_WORKSPACE_BUDGET_MEMORY_BYTES` the memory it may reserve at
 once. What the host keeps for itself is the cores left out of the list and the
 memory left out of the budget.
 
-**Allotment.** Each run gets `run_cores` pinned cores (at most the list's
-count), a memory limit for each step's container, and one deadline its steps
-share, from the first step's container create to the last step's exit.
+**Allotment.** Each run gets pinned cores, a memory limit for each step's
+container, and one deadline its steps share, from the first step's container
+create to the last step's exit.
+
+- **Cores** are the executor's choice, with no knob: 8 to 16 per run, or the
+  whole list when it holds fewer than 8. As a run starts it gets the free
+  cores split evenly among the runs that want them now, itself included,
+  clamped to that range, so a lone run gets 16 and four waiting runs get 8
+  each. Measured on the build host, a leaf-edit clippy over warm layers took
+  6.6 s on 32 cores alone, 6.6 s each as 2 runs on 16, 8.9 s each as 4 runs
+  on 8, and 15.3 s each as 8 runs on 4: past 16 cores a run gains nothing,
+  and below 8 it slows faster than running more at once pays back.
 
 - A run key the actor has not seen gets `default_memory_bytes` and
   `default_deadline_millis`.
@@ -334,14 +343,20 @@ to the budget, and the deadline to `max_deadline_millis`, so repeated timeouts
 stop growing at 4 hours by default. Whether to keep retrying at the ceiling is
 reactor policy.
 
-**Admission.** Strict FIFO. A run starts only when no run waits ahead of it
-and its allotment fits the free cores and free memory; it is pinned to the
-lowest-numbered free cores. Otherwise it waits, its caller's settlement chain
-held, and is never dropped or refused for load. Each completion releases the
-finished run's cores and memory and starts runs from the front while the
-front fits, computing the front's allotment from the estimate as it is then.
-A small run behind a large waiting one waits too, so the large one is never
-starved.
+**Admission.** Runs wait in arrival order, and the front run starts as soon
+as its allotment fits the free cores and free memory. While the front waits
+it holds a reservation: the earliest time enough cores (8, or the whole list
+when smaller) and its memory free up, found by releasing the running runs in
+the order their deadlines end. A run behind it starts first only when it fits
+the free budget now and its own deadline ends by that reservation. A run's
+deadline is its estimate (a key never seen has the default deadline), and the
+actor kills a run at its deadline, so a backfilled run never delays the
+front, and a stream of short runs cannot starve it. Every run is pinned to the
+lowest-numbered free cores. A run that cannot start waits, its caller's
+settlement chain held, and is never dropped or refused for load. Each
+completion releases the finished run's cores and memory, then starts the
+front while it fits and any run that backfills past it, computing each
+allotment from the estimate as it is then.
 
 **Executor-local.** The budget, the queue, and the estimates live only in the
 actor's memory. Nothing is written to the journal or placed in a result, and
@@ -379,7 +394,6 @@ environment variable of its own.
 | `AETHER_WORKSPACE_IMPORT_MAX_BYTES` | `--workspace-import-max-bytes` | 8 GiB |
 | `AETHER_WORKSPACE_CPUSET` | `--workspace-cpuset` | `0` |
 | `AETHER_WORKSPACE_BUDGET_MEMORY_BYTES` | `--workspace-budget-memory-bytes` | 8 GiB |
-| `AETHER_WORKSPACE_RUN_CORES` | `--workspace-run-cores` | 4 |
 | `AETHER_WORKSPACE_DEFAULT_MEMORY_BYTES` | `--workspace-default-memory-bytes` | 8 GiB |
 | `AETHER_WORKSPACE_DEFAULT_DEADLINE_MILLIS` | `--workspace-default-deadline-millis` | 1,800,000 (30 minutes) |
 | `AETHER_WORKSPACE_MAX_DEADLINE_MILLIS` | `--workspace-max-deadline-millis` | 14,400,000 (4 hours) |

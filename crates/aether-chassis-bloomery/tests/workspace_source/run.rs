@@ -28,16 +28,8 @@ const TOOL: &[u8] = b"#!tool\n";
 const LOGS: &[(u8, &[u8])] = &[(1, b"checked\n"), (2, b"warning: unused\n")];
 
 /// The workspace every run scenario boots: two cores, both given to each run, 1 GiB per step, and 64 processes.
-pub const FLAGS: &[&str] = &[
-    "--workspace-cpuset",
-    "2-3",
-    "--workspace-run-cores",
-    "2",
-    "--workspace-default-memory-bytes",
-    "1073741824",
-    "--workspace-pids-limit",
-    "64",
-];
+pub const FLAGS: &[&str] =
+    &["--workspace-cpuset", "2-3", "--workspace-default-memory-bytes", "1073741824", "--workspace-pids-limit", "64"];
 
 /// A seed holding an environment whose root holds `usr/bin/tool` (executable) and `usr/bin/text` (not), providing
 /// Rust 1.97.1 with clippy, and a run tree of `src/main.rs` plus its extra root files.

@@ -122,6 +122,12 @@ impl FreeCores {
         Self(cpus.0.iter().copied().collect())
     }
 
+    /// How many cores are free.
+    pub fn count(&self) -> u32 {
+        // At most 1024 indices.
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
+
     /// Take the `count` lowest-numbered free cores, or `None`, taking
     /// nothing, when fewer are free.
     pub fn take_lowest(&mut self, count: NonZeroU32) -> Option<CpuSet> {

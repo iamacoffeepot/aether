@@ -77,8 +77,8 @@ use resolve::Resolved;
 use volumes::Volumes;
 
 /// The deadline a configured allotment too large for the clock stands in
-/// for: a century.
-const FAR_FUTURE: Duration = Duration::from_hours(100 * 365 * 24);
+/// for, here and in admission's plan: a century.
+pub const FAR_FUTURE: Duration = Duration::from_hours(100 * 365 * 24);
 
 /// What one run is given: the cores its containers are pinned to, each
 /// step's memory, and the deadline its steps share. Chosen per run at

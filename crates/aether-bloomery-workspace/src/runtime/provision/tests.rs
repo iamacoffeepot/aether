@@ -1,13 +1,16 @@
 //! Provisioning's decisions without a daemon or a context: core lists, run
-//! keys, estimates, the budget, and FIFO admission.
+//! keys, estimates, each run's cores, the budget, and admission with
+//! backfill.
 
 use std::error::Error;
+use std::iter;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_bloomery_kinds::{Detail, Digest, Ref};
 
 use super::budget::Budget;
+use super::cores::CoreRange;
 use super::cpuset::{CpuSet, CpuSetError};
 use super::estimate::{Amounts, Estimates, Headroom, MIN_DEADLINE, MIN_MEMORY_BYTES};
 use super::key::RunKey;
@@ -27,18 +30,14 @@ fn cpus(list: &str) -> Result<CpuSet, Box<dyn Error>> {
     Ok(CpuSet::parse(list)?)
 }
 
-fn amounts(cores: u32, memory_bytes: u64, deadline: Duration) -> Result<Amounts, Box<dyn Error>> {
-    Ok(Amounts {
-        cores: NonZeroU32::new(cores).ok_or("zero cores")?,
-        memory_bytes: NonZeroU64::new(memory_bytes).ok_or("zero memory")?,
-        deadline,
-    })
+fn amounts(memory_bytes: u64, deadline: Duration) -> Result<Amounts, Box<dyn Error>> {
+    Ok(Amounts { memory_bytes: NonZeroU64::new(memory_bytes).ok_or("zero memory")?, deadline })
 }
 
-/// An estimate table with 1 core, 1 GiB, and 30 minutes for an unseen key,
-/// under a 4-core, 8 GiB, 4-hour ceiling.
+/// An estimate table with 1 GiB and 30 minutes for an unseen key, under an
+/// 8 GiB, 4-hour ceiling.
 fn estimates(headroom: u32) -> Result<Estimates, Box<dyn Error>> {
-    Ok(Estimates::new(amounts(1, GIB, 30 * MINUTE)?, Headroom::new(headroom)?, amounts(4, 8 * GIB, 240 * MINUTE)?))
+    Ok(Estimates::new(amounts(GIB, 30 * MINUTE)?, Headroom::new(headroom)?, amounts(8 * GIB, 240 * MINUTE)?))
 }
 
 fn allotment(given: &Amounts) -> Result<Allotment, Box<dyn Error>> {
@@ -148,13 +147,13 @@ fn an_unseen_key_gets_the_defaults_and_a_seen_one_its_observation_times_headroom
     let tiny = key(&run(2, vec![step("cargo", &["check"], &[])?])?);
     let given = allotment(&table.amounts(&big))?;
 
-    assert_eq!(table.amounts(&big), amounts(1, GIB, 30 * MINUTE)?);
+    assert_eq!(table.amounts(&big), amounts(GIB, 30 * MINUTE)?);
 
     table.observe(&big, &given, &ok(), &seen(2 * GIB, 10 * MINUTE));
     table.observe(&tiny, &given, &ok(), &seen(1 << 20, Duration::from_secs(1)));
 
-    assert_eq!(table.amounts(&big), amounts(1, 3 * GIB, 15 * MINUTE)?);
-    assert_eq!(table.amounts(&tiny), amounts(1, MIN_MEMORY_BYTES, MIN_DEADLINE)?);
+    assert_eq!(table.amounts(&big), amounts(3 * GIB, 15 * MINUTE)?);
+    assert_eq!(table.amounts(&tiny), amounts(MIN_MEMORY_BYTES, MIN_DEADLINE)?);
     Ok(())
 }
 
@@ -169,7 +168,7 @@ fn a_later_observation_blends_in_at_a_quarter() -> TestResult {
     table.observe(&build, &given, &ok(), &seen(4 * GIB, 40 * MINUTE));
     table.observe(&build, &given, &ok(), &seen(8 * GIB, 80 * MINUTE));
 
-    assert_eq!(table.amounts(&build), amounts(1, 5 * GIB, 50 * MINUTE)?);
+    assert_eq!(table.amounts(&build), amounts(5 * GIB, 50 * MINUTE)?);
     Ok(())
 }
 
@@ -215,13 +214,12 @@ fn repeated_timeouts_double_the_deadline_until_the_ceiling_and_stop_there() -> T
 #[test]
 fn defaults_above_the_ceiling_are_clamped_to_it() -> TestResult {
     // Catches a default deadline over `max_deadline_millis`, or default
-    // cores or memory over the budget, handed out as configured: the run
-    // would outlive the ceiling or never fit the budget.
-    let table =
-        Estimates::new(amounts(8, 16 * GIB, 300 * MINUTE)?, Headroom::new(150)?, amounts(2, 4 * GIB, 240 * MINUTE)?);
+    // memory over the budget, handed out as configured: the run would
+    // outlive the ceiling or never fit the budget.
+    let table = Estimates::new(amounts(16 * GIB, 300 * MINUTE)?, Headroom::new(150)?, amounts(4 * GIB, 240 * MINUTE)?);
     let build = key(&run(2, vec![step("cargo", &["build"], &[])?])?);
 
-    assert_eq!(table.amounts(&build), amounts(2, 4 * GIB, 240 * MINUTE)?);
+    assert_eq!(table.amounts(&build), amounts(4 * GIB, 240 * MINUTE)?);
     Ok(())
 }
 
@@ -245,47 +243,84 @@ fn refused_and_failed_runs_leave_the_estimate_as_it_was() -> TestResult {
 }
 
 #[test]
-fn the_budget_pins_the_lowest_free_cores_and_release_returns_them() -> TestResult {
-    // Catches two runs pinned to the same core, a take that ignores the
-    // free memory, and a release that loses cores or memory, so the budget
-    // shrinks with every run until nothing fits.
-    let mut budget = Budget::new(&cpus("0-3")?, NonZeroU64::new(4 * GIB).ok_or("zero")?);
-    let two = amounts(2, GIB, MINUTE)?;
+fn a_run_gets_8_to_16_cores_shared_among_the_runs_that_want_them() -> TestResult {
+    // Catches a run given more than 16 cores, where it gains nothing, or
+    // sliced below 8, where it slows faster than running more at once pays
+    // back; a share that ignores the runs waiting; a run started on fewer
+    // free cores than its floor; and a budget under 8 cores whose runs never
+    // start.
+    let wide = CoreRange::for_budget(NonZeroU32::new(32).ok_or("zero")?);
+    let narrow = CoreRange::for_budget(NonZeroU32::new(4).ok_or("zero")?);
+    let sharing = |runs: u32| NonZeroU32::new(runs).ok_or("zero");
 
-    let first = budget.take(&two).ok_or("the first run fits")?;
-    let second = budget.take(&two).ok_or("the second run fits")?;
-    assert_eq!((first.cpus.docker_list(), second.cpus.docker_list()), ("0-1".to_owned(), "2-3".to_owned()));
-    assert!(budget.take(&amounts(1, GIB, MINUTE)?).is_none(), "no core is free");
+    assert_eq!(wide.choose(32, sharing(1)?).map(NonZeroU32::get), Some(16), "a lone run gets at most 16");
+    assert_eq!(wide.choose(32, sharing(4)?).map(NonZeroU32::get), Some(8), "four runs split 32 cores");
+    assert_eq!(wide.choose(32, sharing(8)?).map(NonZeroU32::get), Some(8), "never sliced below 8");
+    assert_eq!(wide.choose(10, sharing(1)?).map(NonZeroU32::get), Some(10));
+    assert_eq!(wide.choose(7, sharing(1)?), None, "fewer than 8 free starts nothing");
 
-    budget.release(&first);
-    assert!(budget.take(&amounts(1, 4 * GIB, MINUTE)?).is_none(), "only 3 GiB is free");
-    assert_eq!(budget.take(&two).ok_or("the released cores fit")?.cpus.docker_list(), "0-1");
+    assert_eq!(narrow.choose(4, sharing(3)?).map(NonZeroU32::get), Some(4), "a small budget gives all of it");
+    assert_eq!(narrow.choose(3, sharing(1)?), None);
     Ok(())
 }
 
 #[test]
-fn a_small_run_behind_a_big_one_waits_its_turn() -> TestResult {
-    // Catches backfill: a small run that fits the free budget admitted past
-    // a big one waiting at the front would let a stream of small runs starve
-    // the big one for ever. FIFO admits nothing past a front that does not
-    // fit, at submit and at completion alike.
-    let big = key(&run(2, vec![step("cargo", &["build"], &[])?])?);
-    let small = key(&run(2, vec![step("cargo", &["check"], &[])?])?);
+fn the_budget_pins_the_lowest_free_cores_and_release_returns_them() -> TestResult {
+    // Catches two runs pinned to the same core, a take that ignores the
+    // free memory, and a release that loses cores or memory, so the budget
+    // shrinks with every run until nothing fits.
+    let mut budget = Budget::new(&cpus("0-31")?, NonZeroU64::new(4 * GIB).ok_or("zero")?);
+    let one = amounts(GIB, MINUTE)?;
+    let alone = NonZeroU32::MIN;
+
+    let first = budget.take(&one, alone).ok_or("the first run fits")?;
+    let second = budget.take(&one, alone).ok_or("the second run fits")?;
+    assert_eq!((first.cpus.docker_list(), second.cpus.docker_list()), ("0-15".to_owned(), "16-31".to_owned()));
+    assert!(budget.take(&one, alone).is_none(), "no core is free");
+
+    budget.release(&first);
+    assert!(budget.take(&amounts(4 * GIB, MINUTE)?, alone).is_none(), "only 3 GiB is free");
+    assert_eq!(budget.take(&one, alone).ok_or("the released cores fit")?.cpus.docker_list(), "0-15");
+    Ok(())
+}
+
+#[test]
+fn a_run_backfills_past_a_waiting_front_only_when_it_ends_by_the_front_reservation() -> TestResult {
+    // Catches head-of-line blocking (a short run that fits waits behind a
+    // big one that does not), and backfill that delays or starves the front:
+    // a run whose deadline ends past the front's reservation, or a key never
+    // seen on the default 30-minute deadline, must wait. Also catches a
+    // reservation taken at the earliest end rather than the end at which
+    // enough memory frees, and a front not started first once it fits.
+    let big = key(&run(2, vec![step("cargo", &["test"], &[])?])?);
+    let short = key(&run(2, vec![step("cargo", &["fmt"], &[])?])?);
+    let unseen = key(&run(2, vec![step("cargo", &["clippy"], &[])?])?);
     let mut table = estimates(100)?;
-    table.observe(&big, &allotment(&amounts(1, GIB, MINUTE)?)?, &ok(), &seen(6 * GIB, MINUTE));
-    let mut admission = Admission::new(Budget::new(&cpus("0-3")?, NonZeroU64::new(8 * GIB).ok_or("zero")?), table);
+    let given = allotment(&amounts(GIB, MINUTE)?)?;
+    table.observe(&big, &given, &ok(), &seen(6 * GIB, 10 * MINUTE));
+    table.observe(&short, &given, &ok(), &seen(GIB, MINUTE));
+    let mut admission = Admission::new(Budget::new(&cpus("0-31")?, NonZeroU64::new(8 * GIB).ok_or("zero")?), table);
+    let start = Instant::now();
+    let at = |minutes: f64| start + MINUTE.mul_f64(minutes);
 
-    let running = admission.admit_now(big).ok_or("the first big run fits an idle host")?;
-    assert!(admission.admit_now(big).is_none(), "the second big run does not fit beside the first");
+    let first = admission.admit_now(big, at(0.0)).ok_or("the first big run fits an idle host")?;
+    assert!(admission.admit_now(big, at(0.0)).is_none(), "the second big run does not fit beside the first");
     admission.enqueue(big, "big");
-    assert!(admission.admit_now(small).is_none(), "a small run behind a waiting one waits, though it fits");
-    admission.enqueue(small, "small");
-    assert!(admission.next().is_none(), "nothing past a front that does not fit is admitted");
 
-    admission.finish(&running, &ok(), &Observed::default());
-    let (_, first) = admission.next().ok_or("the big run is admitted once the first finishes")?;
-    let (_, second) = admission.next().ok_or("the small run fits beside it")?;
-    assert_eq!((first, second), ("big", "small"));
+    let backfilled = admission.admit_now(short, at(1.0)).ok_or("a short run ending by minute 10 starts")?;
+    assert!(admission.admit_now(unseen, at(1.0)).is_none(), "an unseen key's default deadline ends past minute 10");
+    admission.enqueue(unseen, "unseen");
+    let behind = admission.admit_now(short, at(1.5)).ok_or("the reservation is minute 10, not the short run's end")?;
+
+    admission.finish(&backfilled, &ok(), &Observed::default());
+    admission.finish(&behind, &ok(), &Observed::default());
+    assert!(admission.next(at(2.0)).is_none(), "nothing that ends past the reservation starts");
+    assert!(admission.admit_now(short, at(9.5)).is_none(), "a short run ending at minute 10.5 would delay the front");
+    admission.enqueue(short, "late");
+
+    admission.finish(&first, &ok(), &Observed::default());
+    let started: Vec<_> = iter::from_fn(|| admission.next(at(10.0))).map(|(_, name)| name).collect();
+    assert_eq!(started, ["big", "unseen", "late"]);
     Ok(())
 }
 
@@ -293,17 +328,19 @@ fn a_small_run_behind_a_big_one_waits_its_turn() -> TestResult {
 fn an_allotment_larger_than_the_whole_budget_is_clamped_and_admitted_on_an_idle_host() -> TestResult {
     // Catches a run whose estimate or default exceeds the whole budget left
     // waiting for ever: on an idle host it must start, clamped to the
-    // budget, even after exhaustion doubled its memory past it.
-    let table = Estimates::new(amounts(8, 16 * GIB, 30 * MINUTE)?, Headroom::new(150)?, amounts(2, GIB, 240 * MINUTE)?);
+    // budget, even after exhaustion doubled its memory past it, and on a
+    // budget of fewer than 8 cores it gets all of them.
+    let table = Estimates::new(amounts(16 * GIB, 30 * MINUTE)?, Headroom::new(150)?, amounts(GIB, 240 * MINUTE)?);
     let mut admission: Admission<()> =
         Admission::new(Budget::new(&cpus("4-5")?, NonZeroU64::new(GIB).ok_or("zero")?), table);
     let build = key(&run(2, vec![step("cargo", &["build"], &[])?])?);
+    let now = Instant::now();
 
-    let given = admission.admit_now(build).ok_or("a clamped allotment fits an idle host")?;
+    let given = admission.admit_now(build, now).ok_or("a clamped allotment fits an idle host")?;
     assert_eq!((given.allotment.cpus.docker_list(), given.allotment.memory_bytes), ("4-5".to_owned(), GIB));
 
     admission.finish(&given, &RunResult::Err(RunError::Exhausted(Resource::Memory)), &Observed::default());
-    let again = admission.admit_now(build).ok_or("the retry, grown past the budget, is clamped and fits")?;
+    let again = admission.admit_now(build, now).ok_or("the retry, grown past the budget, is clamped and fits")?;
     assert_eq!(again.allotment.memory_bytes, GIB);
     Ok(())
 }
