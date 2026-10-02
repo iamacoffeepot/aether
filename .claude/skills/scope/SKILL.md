@@ -96,7 +96,7 @@ Inspect every consumer for a type move and record a rerunnable inverse-dependenc
 
 ## Plan artifact
 
-Read every planned edit site at the captured ref. Write ordered steps that each name behavior, repository-relative paths and stable symbol anchors, verification, and a rerunnable search for multi-site edits. Mark a new file exactly as ``path/to/file (create)`` and a rename as old-path removal plus new-path creation.
+Read every planned edit site at the captured ref. Write ordered steps that each name behavior, repository-relative paths and stable symbol anchors, verification, and a rerunnable search for multi-site edits. Mark a new file exactly as ``path/to/file (create)`` and a rename as old-path removal plus new-path creation. Cite a file the work only reads, as a reference, exactly as ``path/to/file (read)``: it must exist at the base but is not a target, so it needs no Declared surface entry, and the finishing report lists it under `targets.read`.
 
 End Implementation plan with exactly:
 

@@ -94,7 +94,7 @@ Require complete Problem and Design sections. Read every planned edit site from 
 - verification or test coverage;
 - a rerunnable search for multi-site edits.
 
-Use line numbers only as hints. Mark a new file exactly as ``path/to/file (create)`` and represent a rename as an old-path removal plus a new-path creation.
+Use line numbers only as hints. Mark a new file exactly as ``path/to/file (create)`` and represent a rename as an old-path removal plus a new-path creation. Cite a file the work only reads, as a reference, exactly as ``path/to/file (read)``: it must exist at the base but is not a target, so it needs no Declared surface entry, and the finishing report lists it under `targets.read`.
 
 End the section with exactly:
 

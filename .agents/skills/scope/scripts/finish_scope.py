@@ -352,18 +352,24 @@ def _extract_code_spans(text: str) -> list[str]:
     return [match.group(1) if match.group(1) is not None else match.group(2) for match in CODE_SPAN.finditer(text)]
 
 
-def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set[str], set[str], list[str]]:
+def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set[str], set[str], set[str], list[str]]:
     raw_spans = _extract_code_spans(sections.get("Design notes", "")) + _extract_code_spans(
         sections.get("Implementation plan", "")
     )
 
     parsed: list[tuple[str, bool]] = []
+    read_candidates: list[str] = []
     for span in raw_spans:
         candidate = span[: -len(" (create)")].strip() if span.endswith(" (create)") else ""
+        read_candidate = span[: -len(" (read)")].strip() if span.endswith(" (read)") else ""
         if candidate:
             # A real creation citation, not prose quoting the bare " (create)"
             # marker itself (this Plan's own step 2 does exactly that).
             parsed.append((candidate.rstrip("/"), True))
+        elif read_candidate:
+            # A reference citation: it must exist at the base but is not a
+            # target, so it never reaches the surface check.
+            read_candidates.append(read_candidate.rstrip("/"))
         else:
             parsed.append((span.split(":", 1)[0].rstrip("/"), False))
 
@@ -382,7 +388,16 @@ def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set
 
     existing: set[str] = set()
     create: set[str] = set()
+    read: set[str] = set()
     failures: list[str] = []
+
+    for path in read_candidates:
+        if not _kept(path):
+            failures.append(f"read path is not a safe repository-relative path: {path!r}")
+        elif path in tracked_paths or any(tracked.startswith(path + "/") for tracked in tracked_paths):
+            read.add(path)
+        else:
+            failures.append(f"read path absent at base: {path!r}")
 
     seen: set[str] = set()
     unique_paths = [path for path, _ in parsed if not (path in seen or seen.add(path))]
@@ -416,7 +431,7 @@ def _check_targets(repo: Path, base: str, sections: dict[str, str]) -> tuple[set
         else:
             failures.append(f"cited path absent at base: {path!r}")
 
-    return existing, create, failures
+    return existing, create, read, failures
 
 
 def _check_surface(
@@ -465,7 +480,7 @@ def _empty_report(issue: int, base: str) -> dict[str, Any]:
         "failures": [],
         "digest": None,
         "surface": None,
-        "targets": {"existing": [], "create": []},
+        "targets": {"existing": [], "create": [], "read": []},
         "dropped_sections": [],
         "unmanaged_refreshed": False,
         "staged_body": None,
@@ -553,9 +568,13 @@ def _finish(
     failures.extend(_check_depends_on(sections.get("Depends on", "")))
     failures.extend(_check_host_paths(sections))
 
-    existing_targets, create_targets, target_failures = _check_targets(repo, base, sections)
+    existing_targets, create_targets, read_targets, target_failures = _check_targets(repo, base, sections)
     failures.extend(target_failures)
-    report["targets"] = {"existing": sorted(existing_targets), "create": sorted(create_targets)}
+    report["targets"] = {
+        "existing": sorted(existing_targets),
+        "create": sorted(create_targets),
+        "read": sorted(read_targets),
+    }
 
     surface_result, surface_failures = _check_surface(
         repo, base, sections, existing_targets | create_targets, stage_dir

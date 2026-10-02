@@ -359,6 +359,37 @@ class FinishScopeTests(unittest.TestCase):
                 self.assertEqual(exit_code, finish_scope.EXIT_INVALID)
                 self.assertTrue(any(expected in failure for failure in report["failures"]))
 
+    def test_read_citation_needs_the_base_but_not_the_surface(self) -> None:
+        # Catches a (read) reference being demanded inside the Declared
+        # surface, or an absent (read) path passing as grounded.
+        cases = {
+            "present_outside_surface": ("``docs/guide/page.md (read)``", None),
+            "absent": ("``docs/guide/missing.md (read)``", "read path absent at base"),
+        }
+        for name, (citation, expected) in cases.items():
+            with self.subTest(name=name):
+                issue_number = 700 + len(name)
+                new_sections = dict(BASE_SECTIONS)
+                new_sections["Design notes"] = (
+                    BASE_SECTIONS["Design notes"].rstrip() + f"\n\nReference {citation}.\n"
+                )
+                snapshot = issue(issue_number, render_body(PREFIX, BASE_SECTIONS))
+
+                exit_code, report = self.fixture.run(
+                    issue=issue_number,
+                    snapshot=snapshot,
+                    sections=render_sections(new_sections),
+                    github=FakeGitHubClient([snapshot]),
+                )
+
+                if expected is None:
+                    self.assertEqual(report["outcome"], "validated", report["failures"])
+                    self.assertEqual(report["targets"]["read"], ["docs/guide/page.md"])
+                    self.assertNotIn("docs/guide/page.md", report["targets"]["existing"])
+                else:
+                    self.assertEqual(report["outcome"], "invalid")
+                    self.assertTrue(any(expected in failure for failure in report["failures"]))
+
     def test_non_path_code_spans_are_silently_ignored(self) -> None:
         # Catches a non-path code span such as `origin/main` or a bare
         # `plan_digest.digest_body` symbol reference being wrongly flagged as
