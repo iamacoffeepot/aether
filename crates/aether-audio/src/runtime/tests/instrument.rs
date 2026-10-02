@@ -1,4 +1,5 @@
 use super::*;
+use aether_data::Blob;
 
 // ADR-0103 sampled instrument banks (#1679). These drive `Synth` directly
 // (registry + sample-voice kernel) and the bank assembly; the cap's
@@ -218,8 +219,8 @@ fn assemble_bank_scales_loop_points_by_resample_ratio() {
         loop_spec: Some(SfzLoop { start: 100, end: 400, mode: sfz::LoopMode::Continuous }),
     };
     let wav = decode::wav_int16_mono(&ramp(1000), 24_000);
-    let bank =
-        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
+    let bank = assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), Blob::from(wav))], 48_000)
+        .expect("bank assembles");
     let lp = bank.regions[0].loop_region.expect("loop scaled through to the region");
     assert!((lp.start - 200.0).abs() < 2.0, "loop_start should scale ~2x to 200, got {}", lp.start);
     assert!((lp.end - 800.0).abs() < 2.0, "loop_end should scale ~2x to 800, got {}", lp.end);
@@ -239,8 +240,8 @@ fn assemble_bank_clamps_loop_end_to_resampled_length() {
         loop_spec: Some(SfzLoop { start: 10, end: 100_000, mode: sfz::LoopMode::Continuous }),
     };
     let wav = decode::wav_int16_mono(&ramp(1000), 24_000);
-    let bank =
-        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
+    let bank = assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), Blob::from(wav))], 48_000)
+        .expect("bank assembles");
     let region = &bank.regions[0];
     let lp = region.loop_region.expect("loop scaled through");
     #[allow(clippy::cast_precision_loss)]
@@ -262,8 +263,8 @@ fn unlooped_region_assembles_without_a_loop() {
         loop_spec: None,
     };
     let wav = decode::wav_int16_mono(&ramp(256), 24_000);
-    let bank =
-        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
+    let bank = assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), Blob::from(wav))], 48_000)
+        .expect("bank assembles");
     assert_eq!(bank.regions[0].loop_region, None);
 }
 

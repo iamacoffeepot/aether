@@ -214,7 +214,14 @@ impl AudioCapabilityState {
             ReadResult::Ok { addr, bytes } => match context {
                 AudioLoadContext::Track { load_id } => self.start_track_decode(ctx, load_id, bytes),
                 AudioLoadContext::Instrument { held } => {
-                    self.on_sfz_loaded(ctx, held, addr.namespace, addr.path, &bytes);
+                    let NamespaceAddr { namespace, path } = addr;
+                    let Some(text) = bytes.contiguous() else {
+                        let error = "sfz bytes are not resident in this process".to_owned();
+                        held.answer(ctx, &LoadInstrumentResult::Err { namespace, path, error });
+                        return;
+                    };
+
+                    self.on_sfz_loaded(ctx, held, namespace, path, text);
                 }
                 AudioLoadContext::Sample { assembly_id, slot } => {
                     self.on_sample_loaded(ctx, assembly_id, slot, bytes);

@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use super::Held;
-use super::decode::{decode_wav_to_mono, wav_source_rate};
+use super::decode::{DecodeError, decode_wav_to_mono, wav_source_rate};
 use super::sfz::{SfzLoop, SfzRegion};
 use super::voice::{BankStage, STEAL_RELEASE_SECS};
 use crate::kinds::LoadInstrumentResult;
+use aether_data::Blob;
 
 /// Attack ramp (seconds) wrapping a sample voice — a short swell so a
 /// re-pitched recording doesn't click on at full level (ADR-0103 §6,
@@ -252,7 +253,7 @@ impl SampleVoice {
 pub struct SampleSlot {
     pub sample_rel: String,
     pub fs_path: String,
-    pub bytes: Option<Vec<u8>>,
+    pub bytes: Option<Blob>,
 }
 
 /// A bank load in progress: the `.sfz` parsed into regions, fanning out
@@ -296,7 +297,7 @@ pub type BankAssemblyOutput = Result<Arc<SampleBank>, String>;
 pub fn assemble_bank(
     name: String,
     regions: &[SfzRegion],
-    sample_bytes: &[(String, Vec<u8>)],
+    sample_bytes: &[(String, Blob)],
     target_rate: u32,
 ) -> BankAssemblyOutput {
     // Decode each unique sample, carrying its source rate so loop frame
@@ -304,7 +305,11 @@ pub fn assemble_bank(
     // PCM (ADR-0103 §6).
     let mut decoded: Vec<(String, Arc<[f32]>, u32)> = Vec::with_capacity(sample_bytes.len());
     let mut resident_bytes = 0usize;
-    for (rel, bytes) in sample_bytes {
+    for (rel, blob) in sample_bytes {
+        let Some(bytes) = blob.contiguous() else {
+            return Err(format!("sample {rel}: {}", DecodeError::NotResident));
+        };
+
         let pcm = decode_wav_to_mono(bytes, target_rate).map_err(|e| format!("sample {rel}: {e}"))?;
         let source_rate = wav_source_rate(bytes).map_err(|e| format!("sample {rel}: {e}"))?;
         resident_bytes += pcm.len() * size_of::<f32>();

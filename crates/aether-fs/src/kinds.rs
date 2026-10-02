@@ -17,7 +17,7 @@
 //! constructor that folds an adapter `Result` into its `Ok` / `Err`
 //! arms so the echo is written once per family member.
 
-use aether_data::{KindId, TransformId};
+use aether_data::{Blob, KindId, TransformId};
 use serde::{Deserialize, Serialize};
 
 /// Structured failure reason for an I/O request (ADR-0041 §1).
@@ -82,26 +82,20 @@ pub struct Read {
 /// group by file identity. A caller that can have duplicate in-flight
 /// reads for the same address should use the request id returned by
 /// `send_tracked` and match it against `ctx.in_reply_to()` instead.
-/// `Ok` carries the full file contents; `Err` carries an `FsError`
-/// variant.
+/// `Ok` carries the full file contents as a blob (an in-process
+/// consumer reads `contiguous()`, a guest streams with `BlobReader`);
+/// `Err` carries an `FsError` variant.
 #[aether_data::kind(name = "aether.fs.read_result")]
 pub enum ReadResult {
-    Ok {
-        addr: NamespaceAddr,
-        #[serde(with = "aether_data::bytes")]
-        bytes: Vec<u8>,
-    },
-    Err {
-        addr: NamespaceAddr,
-        error: FsError,
-    },
+    Ok { addr: NamespaceAddr, bytes: Blob },
+    Err { addr: NamespaceAddr, error: FsError },
 }
 
 impl ReadResult {
     /// Fold an adapter read into the reply, echoing the address on
     /// both arms. The one place the `Ok`/`Err` split is written.
     #[must_use]
-    pub fn from_op(addr: NamespaceAddr, read: Result<Vec<u8>, FsError>) -> Self {
+    pub fn from_op(addr: NamespaceAddr, read: Result<Blob, FsError>) -> Self {
         match read {
             Ok(bytes) => Self::Ok { addr, bytes },
             Err(error) => Self::Err { addr, error },
@@ -113,12 +107,11 @@ impl ReadResult {
 /// `namespace://path`. v1's local-file adapter stages to a
 /// temporary sibling and `rename`s on success so a crash
 /// mid-write leaves either the old contents or the new, never a
-/// torn file. Reply: `WriteResult`.
+/// torn file. `bytes` is a blob. Reply: `WriteResult`.
 #[aether_data::kind(name = "aether.fs.write")]
 pub struct Write {
     pub addr: NamespaceAddr,
-    #[serde(with = "aether_data::bytes")]
-    pub bytes: Vec<u8>,
+    pub bytes: Blob,
 }
 
 /// Reply to `Write`. Both arms echo `addr` as domain context; the
@@ -343,7 +336,7 @@ pub struct FsFetch {
 /// Reply to `FsFetch`. Both arms echo `addr` as domain context.
 /// Duplicate in-flight fetches for the same address should be matched
 /// by `send_tracked` / `ctx.in_reply_to()`. `Ok` carries the folded
-/// output bytes (`data`) and the `output_kind` of the last transform
+/// output bytes (`data`, a blob) and the `output_kind` of the last transform
 /// (`None` when `transforms` was empty, i.e. a raw-read). `Err`
 /// carries a structured `FsFetchError`.
 #[aether_data::kind(name = "aether.fs.fetch_result")]
@@ -356,8 +349,7 @@ pub enum FsFetchResult {
         output_kind: Option<KindId>,
         /// Wire-encoded output: raw file bytes when `output_kind` is
         /// `None`, or the last transform's encoded output value.
-        #[serde(with = "aether_data::bytes")]
-        data: Vec<u8>,
+        data: Blob,
     },
     Err {
         addr: NamespaceAddr,
@@ -370,7 +362,7 @@ impl FsFetchResult {
     /// address on both arms. `Ok` carries the folded bytes and the
     /// last transform's output kind.
     #[must_use]
-    pub fn from_op(addr: NamespaceAddr, fetch: Result<(Option<KindId>, Vec<u8>), FsFetchError>) -> Self {
+    pub fn from_op(addr: NamespaceAddr, fetch: Result<(Option<KindId>, Blob), FsFetchError>) -> Self {
         match fetch {
             Ok((output_kind, data)) => Self::Ok { addr, output_kind, data },
             Err(error) => Self::Err { addr, error },

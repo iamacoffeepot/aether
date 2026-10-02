@@ -114,8 +114,11 @@ impl NativeActor for FsCapability {
     /// # Agent
     /// Reply: `ReadResult`. Echoes the address on both arms.
     #[handler::request]
-    fn on_read(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
-        let bytes = state.adapter(&mail.addr).and_then(|adapter| adapter.read(&mail.addr.path));
+    fn on_read(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
+        let bytes = state
+            .adapter(&mail.addr)
+            .and_then(|adapter| adapter.read(&mail.addr.path))
+            .map(|bytes| ctx.check_in(bytes.into_boxed_slice()));
 
         ReadResult::from_op(mail.addr, bytes)
     }
@@ -128,7 +131,13 @@ impl NativeActor for FsCapability {
     /// Reply: `WriteResult`. Echoes the address (NOT bytes).
     #[handler::request]
     fn on_write(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Write) -> WriteResult {
-        let written = state.adapter(&mail.addr).and_then(|adapter| adapter.write(&mail.addr.path, &mail.bytes));
+        let Some(bytes) = mail.bytes.contiguous() else {
+            let error = FsError::AdapterError("write bytes are not resident in this process".to_owned());
+
+            return WriteResult::from_op(mail.addr, Err(error));
+        };
+
+        let written = state.adapter(&mail.addr).and_then(|adapter| adapter.write(&mail.addr.path, bytes));
 
         WriteResult::from_op(mail.addr, written)
     }
@@ -193,8 +202,10 @@ impl NativeActor for FsCapability {
     /// # Agent
     /// Reply: `FsFetchResult`. Echoes the address on both arms.
     #[handler::request]
-    fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
-        let fetched = state.fetch(&mail.addr, &mail.transforms);
+    fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: FsFetch) -> FsFetchResult {
+        let fetched = state
+            .fetch(&mail.addr, &mail.transforms)
+            .map(|(output_kind, data)| (output_kind, ctx.check_in(data.into_boxed_slice())));
 
         FsFetchResult::from_op(mail.addr, fetched)
     }
@@ -543,7 +554,7 @@ mod tests {
         let mut fsys = PumpedFs::boot("cap-ro");
 
         let result: WriteResult =
-            fsys.request(&Write { addr: NamespaceAddr::new("assets", "slot.bin"), bytes: vec![1] });
+            fsys.request(&Write { addr: NamespaceAddr::new("assets", "slot.bin"), bytes: vec![1].into() });
 
         match result {
             WriteResult::Err { addr, error: FsError::Forbidden } => assert_eq!(addr.namespace, "assets"),
@@ -692,7 +703,7 @@ mod tests {
                 assert_eq!(addr.namespace, "assets");
                 assert_eq!(addr.path, "data.bin");
                 assert!(output_kind.is_none(), "empty transform list → output_kind is None");
-                assert_eq!(data, b"raw payload");
+                assert_eq!(data.contiguous(), Some(&b"raw payload"[..]));
             }
             FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
@@ -727,7 +738,8 @@ mod tests {
         match fsys.fetch("number.bin", vec![double_id]) {
             FsFetchResult::Ok { output_kind, data, .. } => {
                 assert_eq!(output_kind, Some(expected_output_kind), "output_kind should be double_fs's output kind");
-                let out = TestNumber::decode_from_bytes(&data).expect("output decodes as TestNumber");
+                let out = TestNumber::decode_from_bytes(data.contiguous().expect("in-process data is resident"))
+                    .expect("output decodes as TestNumber");
                 assert_eq!(out.value, 14, "double_fs(7) == 14");
             }
             FsFetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),

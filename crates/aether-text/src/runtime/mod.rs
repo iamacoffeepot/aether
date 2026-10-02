@@ -185,8 +185,8 @@ impl TextCapabilityState {
     /// Stage the parse of a font's `bytes` off the hot path (ADR-0243 §9).
     /// Its completion, `on_font_parsed`, takes the [`FontParse`] context and
     /// answers the font's waiters.
-    pub fn stage_font_parse<A>(ctx: &mut NativeCtx<'_, A>, parse: FontParse, bytes: Vec<u8>) {
-        ctx.stage_blocking_with::<FontParseOutput, FontParse>(parse).start(ctx, move || parse_font_bytes(bytes));
+    pub fn stage_font_parse<A>(ctx: &mut NativeCtx<'_, A>, parse: FontParse, bytes: Blob) {
+        ctx.stage_blocking_with::<FontParseOutput, FontParse>(parse).start(ctx, move || parse_font_bytes(&bytes));
     }
 
     /// Send `create_texture` for the zeroed atlas, unless a creation is
@@ -382,8 +382,12 @@ fn read_failed(error: &FsError) -> String {
     format!("file read failed: {error:?}")
 }
 
-fn parse_font_bytes(bytes: Vec<u8>) -> FontParseOutput {
-    match fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default()) {
+fn parse_font_bytes(blob: &Blob) -> FontParseOutput {
+    let Some(bytes) = blob.contiguous() else {
+        return Err("font bytes are not resident in this process".to_owned());
+    };
+
+    match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
         Ok(font) => Ok(ParsedFont { font: Arc::new(font), resident_bytes: bytes.len() as u64 }),
         Err(e) => Err(format!("font parse failed: {e}")),
     }
@@ -441,7 +445,7 @@ impl NativeActor for TextCapability {
         if state.join_font_load(MEMORY_FONT_NAMESPACE, &mail.name, |waiters| waiters.load.push(held)) {
             let parse =
                 FontParse { namespace: MEMORY_FONT_NAMESPACE.to_owned(), path: mail.name.clone(), name: mail.name };
-            TextCapabilityState::stage_font_parse(ctx, parse, mail.bytes);
+            TextCapabilityState::stage_font_parse(ctx, parse, Blob::from(mail.bytes));
         }
         pending
     }
