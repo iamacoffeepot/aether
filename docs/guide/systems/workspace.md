@@ -151,7 +151,9 @@ like an import:
    container, and one per mount, each labelled `aether.workspace=run`. Each
    mount's tree streams into its volume through a helper container that is
    created and never started. The run tree streams into the first step's
-   container at `/work` before it starts.
+   container at `/work` before it starts. With warm layers on, a warm run
+   also gets its layer at cargo's target directory (see
+   [Warm layers](#warm-layers)).
 4. **Steps.** Each step gets its own container under the sandbox pins below.
    Stdin, when set, streams through a hijacked `attach`. The container starts,
    and `GET …/stats?stream=true` opens beside it: a second thread keeps the
@@ -162,7 +164,8 @@ like an import:
    log stream, which fixes the blob's length, then one writing read staged to
    the source. The steps stop after the first non-zero
    exit.
-5. **Output.** `GET …/archive?path=/work` on the last step's container decodes
+5. **Output.** `GET …/archive?path=/work` on the last step's container (on a
+   warm run, a collector container holding only the `/work` volume) decodes
    under the canonical rules and the output bounds, staged to the source as it
    decodes. The `work` entry is the
    output, minus each scratch path; a scratch tmpfs comes back as an empty
@@ -176,6 +179,34 @@ Running the same `Run` twice gives the same `RunResult` digest: the result
 carries no container id, volume name, duration, host name, or timestamp, and
 every blob and tree is content-addressed.
 
+### Warm layers
+
+With `AETHER_WORKSPACE_WARM_LAYERS` on, cargo's build output is kept between
+runs as executor state (ADR-0237 decision 11). It never enters an output tree,
+the journal, or a result, and cargo's own fingerprints decide what it reuses,
+so a warm run answers what a cold run would.
+
+A run is warm when its tree's root holds a `Cargo.lock` file and cargo's
+target directory is one of its scratch paths: every step's environment names
+the same `CARGO_TARGET_DIR` of the form `/work/<scratch>`, or none names it
+and `target` is a scratch path. Every other run builds cold. The layer is
+keyed by the unit (the run's `source` path), the run key (see
+[Provisioning](#provisioning)), and the digest of the `Cargo.lock` blob, so a
+changed lock or environment writes a new layer beside the old one.
+
+| Case | What the run does |
+|---|---|
+| Miss | No pointer volume `aether-workspace-layer-<hex>`: the run builds into a fresh data volume labelled `aether.workspace.layer=<hex>` and `aether.workspace.layer.lock=<lock>`, mounted writable at the target directory. Once its steps ran to their exits, whatever the exit codes, it creates the pointer naming the data volume, and the data volume stays. A run that ends any other way, or loses the pointer race, removes it. |
+| Hit | The pointer and the data volume it names both carry the hex. The run creates an upper and a work volume of its own and a `local`-driver `overlay` volume whose `lowerdir` is the data volume's `Mountpoint` and whose `upperdir` and `workdir` are theirs, mounted writable at the target directory. All three are removed with the run, so no run sees another's writes, and the bottom layer is never written again. |
+| Anything else | A pointer or data volume labelled for another layer, a data volume gone, or a mountpoint holding `,`, `:`, or `\`: the run builds cold and logs why. |
+
+The daemon writes and removes every layer byte, so this works against a remote
+daemon and needs no host directory. Layers are rebuildable: removing the
+volumes labelled `aether.workspace.layer` costs only the next run's cold
+build. The output archive of a step's container would carry the layer nested
+under `/work`, so a warm run reads its output from a collector container that
+mounts only the `/work` volume and never starts.
+
 ### The sandbox pins
 
 | Hidden input | Pinned as |
@@ -183,7 +214,7 @@ every blob and tree is content-addressed.
 | Command | `Cmd` = `/` + the tool's path, then `args`; no `Entrypoint`, no shell |
 | Environment variables | `Environment::env`, overlaid by `Step::env`, overlaid by `SOURCE_DATE_EPOCH=315532800` |
 | Working directory, user, hostname | `/work`, `0:0`, `workspace` |
-| Filesystem | read-only root from the environment image; `/work` on the run's volume; a tmpfs (`rw,exec`) at each `/work/<scratch>`; mounts read-only; volumes never seeded from the image (`NoCopy`) |
+| Filesystem | read-only root from the environment image; `/work` on the run's volume; a tmpfs (`rw,exec`) at each `/work/<scratch>` except a warm run's target directory, which mounts its layer writable; mounts read-only; volumes never seeded from the image (`NoCopy`) |
 | Network | `NetworkMode none` unless `Network::On` |
 | CPU | `CpusetCpus` = the allotment's pinned cores; `NanoCpus` = their count × 10^9 |
 | Memory, processes | `Memory` = `MemorySwap` = the allotment's memory; `PidsLimit` = the fixed pids limit |
@@ -357,6 +388,7 @@ environment variable of its own.
 | `AETHER_WORKSPACE_OUTPUT_MAX_ENTRIES` | `--workspace-output-max-entries` | 1,000,000 |
 | `AETHER_WORKSPACE_OUTPUT_MAX_BYTES` | `--workspace-output-max-bytes` | 8 GiB |
 | `AETHER_WORKSPACE_PREFETCH_BYTES` | `--workspace-prefetch-bytes` | 256 MiB |
+| `AETHER_WORKSPACE_WARM_LAYERS` | `--workspace-warm-layers` (a presence flag) | off |
 
 - `unix://<absolute path>` dials the daemon's socket, on Unix only.
 - `tcp://<host>:<port>` dials a daemon anywhere, always over mutual TLS. The

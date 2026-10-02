@@ -654,9 +654,6 @@ impl RunScript<'_> {
     /// own data volume.
     #[must_use]
     pub fn mount_replies(&self, mounts: &[MountScript<'_>]) -> Vec<StubReply> {
-        let only = |kind: u8| -> Vec<(u8, &[u8])> {
-            self.logs.iter().filter(|(stream, _)| *stream == kind).copied().collect()
-        };
         let misses: Vec<(&str, Option<&str>)> = mounts
             .iter()
             .filter_map(|mount| match *mount {
@@ -666,14 +663,7 @@ impl RunScript<'_> {
             .collect();
         let lost = misses.iter().filter(|(_, winner)| winner.is_some()).count();
 
-        let mut replies = vec![
-            StubReply::with_length(200, r#"{"Architecture":"x86_64","OSType":"linux"}"#),
-            StubReply::with_length(
-                200,
-                format!(r#"{{"Config":{{"Labels":{{"aether.workspace.environment":"{}"}}}}}}"#, self.environment),
-            ),
-            StubReply::with_length(201, format!(r#"{{"Name":"{RUN_VOLUME}"}}"#)),
-        ];
+        let mut replies = self.prelude_replies();
         for mount in mounts {
             match *mount {
                 MountScript::Hit { hex, data_volume } => replies.push(pointer_reply(hex, hex, data_volume)),
@@ -698,7 +688,76 @@ impl RunScript<'_> {
             }
         }
 
-        replies.extend([
+        replies.extend(self.step_replies());
+        replies.push(self.output_reply());
+
+        let removals = usize::from(!misses.is_empty()) + 2 + lost;
+        replies.extend(iter::repeat_with(|| StubReply::with_length(204, Vec::new())).take(removals));
+        replies
+    }
+
+    /// The replies a warm single-step run with no mounts and no stdin reads,
+    /// in order, when the environment image is already present: the platform
+    /// and image inspects and the `/work` volume create; then `layer`'s
+    /// pointer inspect and either a miss's data volume create or a hit's data
+    /// volume inspect and its upper, work, and overlay volume creates; the
+    /// step from its create to its logs; a miss's pointer create; the
+    /// collector's create and its output read; and the removals: the step,
+    /// the collector, `/work`, then the layer volumes the run registered.
+    #[must_use]
+    pub fn layer_replies(&self, layer: &LayerScript<'_>) -> Vec<StubReply> {
+        let mut replies = self.prelude_replies();
+        let registered = match *layer {
+            LayerScript::Miss { data_volume, completes } => {
+                replies.extend([
+                    StubReply::with_length(404, r#"{"message":"No such volume"}"#),
+                    volume_reply(data_volume, &[]),
+                ]);
+                replies.extend(self.step_replies());
+                replies.push(if completes {
+                    volume_reply("pointer0", &[])
+                } else {
+                    StubReply::with_length(409, r#"{"message":"volume exists"}"#)
+                });
+                usize::from(!completes)
+            }
+            LayerScript::Hit { hex, data_volume } => {
+                replies.extend([
+                    layer_pointer_reply(hex, data_volume),
+                    volume_reply(data_volume, &[("aether.workspace.layer", hex)]),
+                    volume_reply(LAYER_UPPER, &[]),
+                    volume_reply(LAYER_WORK, &[]),
+                    volume_reply(LAYER_OVERLAY, &[]),
+                ]);
+                replies.extend(self.step_replies());
+                3
+            }
+        };
+        replies.push(StubReply::with_length(201, format!(r#"{{"Id":"{RUN_COLLECTOR}","Warnings":[]}}"#)));
+        replies.push(self.output_reply());
+        replies.extend(iter::repeat_with(|| StubReply::with_length(204, Vec::new())).take(3 + registered));
+        replies
+    }
+
+    /// The platform and image inspects and the `/work` volume create.
+    fn prelude_replies(&self) -> Vec<StubReply> {
+        vec![
+            StubReply::with_length(200, r#"{"Architecture":"x86_64","OSType":"linux"}"#),
+            StubReply::with_length(
+                200,
+                format!(r#"{{"Config":{{"Labels":{{"aether.workspace.environment":"{}"}}}}}}"#, self.environment),
+            ),
+            StubReply::with_length(201, format!(r#"{{"Name":"{RUN_VOLUME}"}}"#)),
+        ]
+    }
+
+    /// The step's create, `/work` write, start, stats, wait, inspect, and
+    /// three log reads.
+    fn step_replies(&self) -> Vec<StubReply> {
+        let only = |kind: u8| -> Vec<(u8, &[u8])> {
+            self.logs.iter().filter(|(stream, _)| *stream == kind).copied().collect()
+        };
+        vec![
             StubReply::with_length(201, format!(r#"{{"Id":"{RUN_CONTAINER}","Warnings":[]}}"#)),
             StubReply::with_length(200, Vec::new()),
             StubReply::with_length(204, Vec::new()),
@@ -708,13 +767,58 @@ impl RunScript<'_> {
             StubReply::chunked(200, vec![log_stream(self.logs)]),
             StubReply::chunked(200, vec![log_stream(&only(1))]),
             StubReply::chunked(200, vec![log_stream(&only(2))]),
-            StubReply::chunked(200, self.output.chunks(64 * 1024).map(<[u8]>::to_vec).collect()),
-        ]);
-
-        let removals = usize::from(!misses.is_empty()) + 2 + lost;
-        replies.extend(iter::repeat_with(|| StubReply::with_length(204, Vec::new())).take(removals));
-        replies
+        ]
     }
+
+    /// `GET …/archive?path=/work` answering [`Self::output`].
+    fn output_reply(&self) -> StubReply {
+        StubReply::chunked(200, self.output.chunks(64 * 1024).map(<[u8]>::to_vec).collect())
+    }
+}
+
+/// What one scripted warm layer answers.
+pub enum LayerScript<'a> {
+    /// No pointer: the run builds into `data_volume`, then creates the
+    /// pointer, or loses the pointer race with 409 when `completes` is false,
+    /// leaving `data_volume` to its removal.
+    Miss { data_volume: &'a str, completes: bool },
+    /// A pointer labelled `hex` names `data_volume`, which carries `hex` too.
+    Hit { hex: &'a str, data_volume: &'a str },
+}
+
+/// The container id a scripted warm run's output collector gets.
+pub const RUN_COLLECTOR: &str = "c011ec7";
+
+/// The names a scripted warm hit's overlay upper, work, and overlay volumes
+/// get.
+pub const LAYER_UPPER: &str = "upper0";
+pub const LAYER_WORK: &str = "work0";
+pub const LAYER_OVERLAY: &str = "overlay0";
+
+/// Where a scripted daemon keeps the volume `name`: its `Mountpoint`.
+#[must_use]
+pub fn mountpoint(name: &str) -> String {
+    format!("/daemon/volumes/{name}/_data")
+}
+
+/// A volume create or inspect answer for `name` carrying `labels`, at
+/// [`mountpoint`].
+#[must_use]
+pub fn volume_reply(name: &str, labels: &[(&str, &str)]) -> StubReply {
+    let labels: serde_json::Map<String, serde_json::Value> =
+        labels.iter().map(|&(key, value)| (key.to_owned(), value.into())).collect();
+    let body = serde_json::json!({ "Name": name, "Labels": labels, "Mountpoint": mountpoint(name) });
+    StubReply::with_length(200, body.to_string())
+}
+
+/// The inspect answer for the layer pointer labelled `hex`, naming
+/// `data_volume`.
+#[must_use]
+pub fn layer_pointer_reply(hex: &str, data_volume: &str) -> StubReply {
+    volume_reply(
+        &format!("aether-workspace-layer-{hex}"),
+        &[("aether.workspace.layer", hex), ("aether.workspace.layer.data", data_volume)],
+    )
 }
 
 /// The inspect answer for `hex`'s mount pointer, its mount label `labelled`

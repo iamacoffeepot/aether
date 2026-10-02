@@ -7,7 +7,7 @@
 //! | Command | `Cmd` = the tool's absolute path plus `args`; no `Entrypoint`, no shell |
 //! | Environment | `Env` = `Environment::env`, overlaid by `Step::env`, overlaid by `SOURCE_DATE_EPOCH=315532800` |
 //! | Identity | `WorkingDir /work`, `User 0:0`, `Hostname workspace` |
-//! | Filesystem | read-only root; `/work` on the run's volume; a tmpfs at each `/work/<scratch>`; each mount read-only |
+//! | Filesystem | read-only root; `/work` on the run's volume; a tmpfs at each `/work/<scratch>` but a warm layer's, which mounts the layer writable; each mount read-only |
 //! | Network | `NetworkMode none` unless `Network::On` |
 //! | CPU | `CpusetCpus` = the allotment's cores, `NanoCpus` = their count × 10^9 |
 //! | Memory, processes | `Memory` = `MemorySwap` = the allotment's memory; `PidsLimit` = the fixed pids limit |
@@ -39,6 +39,7 @@ use aether_bloomery_tar::{BlobWriter, TreeSink};
 use serde_json::{Value, json};
 
 use super::cleanup::Cleanup;
+use super::layers::Layer;
 use super::volumes::{RUN_LABEL, Volumes, volume_mount};
 use super::{Allotment, RunError, Stop, engine_failed, storage_stop};
 use crate::runtime::engine::logs::{self, Demux, Output};
@@ -72,6 +73,9 @@ pub struct Sandbox<'a> {
     pub image: &'a str,
     pub volumes: &'a Volumes,
     pub scratch: &'a Scratch,
+    /// The warm layer mounted writable at cargo's target directory, in place
+    /// of that scratch path's tmpfs.
+    pub layer: Option<&'a Layer>,
     pub network: Network,
     pub allotment: &'a Allotment,
     /// Each container's process and thread count.
@@ -101,11 +105,15 @@ fn spec(sandbox: &Sandbox<'_>, tool: &ToolRecord, step: &Step) -> Value {
         iter::once(format!("/{}", tool.path.as_str())).chain(step.args.iter().cloned()).collect();
     let mut mounts = vec![volume_mount(&sandbox.volumes.work, Volumes::WORK_PATH, false)];
     mounts.extend(sandbox.volumes.mounts.iter().map(|(path, volume)| volume_mount(volume, path, true)));
+    mounts.extend(sandbox.layer.map(|layer| volume_mount(layer.volume(), layer.at(), false)));
+    let layered = sandbox.layer.map(Layer::at);
     let tmpfs: BTreeMap<String, &str> = sandbox
         .scratch
         .as_slice()
         .iter()
-        .map(|path| (format!("{}/{}", Volumes::WORK_PATH, path.as_str()), "rw,exec"))
+        .map(|path| format!("{}/{}", Volumes::WORK_PATH, path.as_str()))
+        .filter(|path| Some(path.as_str()) != layered)
+        .map(|path| (path, "rw,exec"))
         .collect();
     let network_mode = match sandbox.network {
         Network::Off => "none",

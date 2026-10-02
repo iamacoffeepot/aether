@@ -15,7 +15,8 @@ use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 #[cfg(not(target_family = "wasm"))]
 use aether_data::{__inventory::inventory, storage::StorageKindEntry};
 use aether_data::{
-    Citations, Cites, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageError, StorageLeaves,
+    Citations, Cites, DocNode, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageError,
+    StorageLeaves,
 };
 
 use crate::{Digest, Ref};
@@ -30,9 +31,12 @@ struct FlatHeadMoved {
     to: Digest,
 }
 
+/// A head's stored form.
 #[derive(Clone, Debug, aether_data::Storage)]
 struct FlatHead {
+    /// The kind of value the head points at.
     kind: KindId,
+    /// The head's name.
     name: String,
 }
 
@@ -104,6 +108,7 @@ impl Schema for RecordedHead {
     const SCHEMA: SchemaType = <FlatHead as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::RecordedHead"));
     const LABEL_NODE: LabelNode = <FlatHead as Schema>::LABEL_NODE;
+    const DOC_NODE: DocNode = <FlatHead as Schema>::DOC_NODE;
 }
 
 impl aether_data::CrossesActors for RecordedHead {}
@@ -113,6 +118,7 @@ impl<K> Schema for Head<K> {
     const SCHEMA: SchemaType = <FlatHead as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::Head"));
     const LABEL_NODE: LabelNode = <FlatHead as Schema>::LABEL_NODE;
+    const DOC_NODE: DocNode = <FlatHead as Schema>::DOC_NODE;
 }
 
 impl<K> aether_data::CrossesActors for Head<K> {}

@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::str;
 
-use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Name, Node, OpaqueBytes, Ref, Tree};
 use aether_data::Storage;
 
 use super::{RunError, Stop, engine_failed, storage_stop};
@@ -30,14 +30,20 @@ use crate::{Environment, Platform, Provides, Refusal, RunRequest, RustToolchain,
 /// The file a tree names its toolchain in, at its root.
 const TOOLCHAIN_FILE: &str = "rust-toolchain.toml";
 
+/// The file a cargo workspace pins its dependency graph in, at its root.
+const LOCK_FILE: &str = "Cargo.lock";
+
 /// The largest `rust-toolchain.toml` read.
 const TOOLCHAIN_FILE_MAX_BYTES: u64 = 64 * 1024;
 
-/// What resolution found: the loaded environment and each step's tool, in
-/// step order.
+/// What resolution found: the loaded environment, each step's tool, in step
+/// order, and the run tree's root `Cargo.lock`, when it holds one as a file.
 pub struct Resolved {
     pub environment: Environment,
     pub tools: Vec<ToolRecord>,
+    /// The digest of the run tree's root `Cargo.lock` blob, which a warm
+    /// layer is keyed by.
+    pub lock: Option<Digest>,
 }
 
 /// Load and check everything the run's source holds for `run`.
@@ -61,7 +67,11 @@ pub fn resolve(session: &mut StorageSession, run: &RunRequest) -> Result<Resolve
         .iter()
         .map(|step| tool(&mut reader, &environment, &step.tool))
         .collect::<Result<_, _>>()?;
-    Ok(Resolved { environment, tools })
+    let lock = match tree.entries().get(&name_of(LOCK_FILE)?) {
+        Some(Node::File(blob) | Node::Executable(blob)) => Some(blob.digest()),
+        _ => None,
+    };
+    Ok(Resolved { environment, tools, lock })
 }
 
 /// Compare the environment's platform with the one the daemon runs, read

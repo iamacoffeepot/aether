@@ -52,9 +52,10 @@
 //! `muse.session.open` opens one on a tree with the session instructions,
 //! optionally with seeded `tree.read` calls the loop runs before the first
 //! turn, and `muse.session.continue` resumes one; the loop runs each decoded
-//! call through a bound tool one at a time, over the session's current tree
-//! and the bound value its offer carries, sends the next turn with the calls
-//! and their outputs appended, and at each rest writes the conversation and
+//! call through a bound tool one at a time, in the bundle its offer names,
+//! over the session's current tree and the bound value its offer carries,
+//! sends the next turn with the calls and their outputs appended, and at each
+//! rest writes the conversation and
 //! the latest tree down as a [`Session`] (`muse.session`) through
 //! `muse.session.record`, moving the session's head to it. The bound tools are
 //! [`TreeEdit`] (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`

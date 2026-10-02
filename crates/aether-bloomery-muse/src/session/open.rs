@@ -169,7 +169,7 @@ fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> 
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{ErasedRef, Head, ProgramName, Ref, Refusal, Tree};
     use aether_bloomery_program::Program;
     use aether_bloomery_workspace::TreePath;
     use aether_data::Kind;
@@ -177,6 +177,7 @@ mod tests {
     use super::{OpenInput, SessionOpen};
     use crate::input::tests::offered_tool;
     use crate::input::{OfferedTool, OfferedTools, Role, ToolInput, TurnInput, TurnItem};
+    use crate::session::MUSE;
     use crate::session::fixture::{path, run_stored, settings};
     use crate::session::state::TurnLimit;
     use crate::tools::{ReadArgs, TreeRead, offered};
@@ -197,7 +198,7 @@ mod tests {
     fn an_open_is_the_settings_and_the_opening_messages_over_bound_tools_only() {
         // Catches an open that drops a setting or the instructions or swaps them, sends more than the two opening
         // messages, one that admits a tool the loop cannot run, a bound tool offered with another definition or a
-        // bound of another kind, one that refuses a bound value it should only check the kind of, and seeds made up
+        // bound of another kind or from another bundle head, one that refuses a bound value it should only check the kind of, and seeds made up
         // from no paths.
         let (bound, _) = offered();
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), Vec::new())).expect("bound tools open");
@@ -213,18 +214,20 @@ mod tests {
         );
 
         let echo = &bound.as_slice()[0];
-        let offer = |definition, bound| {
-            OfferedTool::new(echo.program().clone(), definition, echo.input(), bound, echo.result())
+        let offer = |head, definition, bound| {
+            OfferedTool::new(echo.program().clone(), head, definition, echo.input(), bound, echo.result())
         };
-        let revalued = offer(echo.definition(), ErasedRef::new(echo.bound().kind(), Ref::of_text("another").digest()));
+        let revalued =
+            offer(MUSE, echo.definition(), ErasedRef::new(echo.bound().kind(), Ref::of_text("another").digest()));
         let tools = OfferedTools::new(vec![revalued]).expect("tools");
         run_stored::<SessionOpen>(&open(tools, Vec::new()))
             .expect("a bound of the tool's kind opens, whatever its value");
 
-        let redefined = offer(Ref::of_text("{}"), echo.bound());
-        let rebound = offer(echo.definition(), ErasedRef::new(Tree::ID, echo.bound().digest()));
+        let redefined = offer(MUSE, Ref::of_text("{}"), echo.bound());
+        let rebound = offer(MUSE, echo.definition(), ErasedRef::new(Tree::ID, echo.bound().digest()));
+        let rehomed = offer(Head::new("proofs"), echo.definition(), echo.bound());
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
-        for tool in [redefined, rebound, unbound] {
+        for tool in [redefined, rebound, rehomed, unbound] {
             let tools = OfferedTools::new(vec![tool]).expect("tools");
             let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
             assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());

@@ -6,7 +6,7 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
 };
 use aether_bloomery_muse::{
-    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, ModelName, MuseTurn,
+    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, MUSE, ModelName, MuseTurn,
     OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput,
     TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
@@ -75,6 +75,7 @@ fn start_turn(
         let (input, result) = (Ref::of_encoded(&tool.input)?, Ref::of_encoded(&tool.result)?);
         offered.push(OfferedTool::new(
             ProgramName::new(tool.program)?,
+            MUSE,
             Ref::of_text(&tool.definition),
             input,
             bound,

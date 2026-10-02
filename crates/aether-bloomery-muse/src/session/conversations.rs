@@ -19,8 +19,8 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, Detail, EncodedArtifact, ErasedRef, Fault, HeadChange, HeadMoved, ProgramName,
-    ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until, Utf8Text,
+    CallInput, CallProgram, Detail, EncodedArtifact, ErasedRef, Fault, Head, HeadChange, HeadMoved, OpaqueBytes,
+    ProgramName, ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until, Utf8Text,
 };
 use aether_bloomery_program::{At, Cited, CitedError, ClockUntil, Edited, Ran, Reactor, ViewCursor, tooled, view};
 
@@ -35,7 +35,7 @@ use crate::session::record::{Answered, CallAnswer, RecordInput, SessionRecord};
 use crate::session::replay::replay;
 use crate::session::retry::{MAX_RETRIES, retry_wait, wait_call};
 use crate::session::state::{Failure, Session, SessionKey, TurnLimit};
-use crate::session::tools::{MUSE, call};
+use crate::session::tools::call;
 use crate::tools::{NUDGE_TEXT, ends_run};
 
 /// Every live session and the journal entries linked to them.
@@ -99,9 +99,9 @@ struct Waiting {
 
 /// What the loop runs after the entry linked to a session.
 enum Next {
-    /// A called program, over the session's tree and the arguments its call
-    /// decoded to.
-    Call { program: ProgramName, input: EncodedArtifact },
+    /// A called program from the bundle its offer names, over the session's
+    /// tree and the arguments its call decoded to.
+    Call { head: Head<OpaqueBytes>, program: ProgramName, input: EncodedArtifact },
     /// The next turn, once every call has its output, or after a reply
     /// without calls with the reply text and the nudge appended.
     Turn(TurnInput),
@@ -159,7 +159,7 @@ impl Conversation {
                         .ok_or_else(|| Detail::new(format!("{} is not an offered tool", program.as_str())))?;
                     let input = EncodedArtifact::new(&tooled(self.tree, *input, tool.bound()))
                         .map_err(|error| Detail::new(format!("a call's input did not encode: {error}")))?;
-                    self.next = Some(Next::Call { program: program.clone(), input });
+                    self.next = Some(Next::Call { head: tool.head().clone(), program: program.clone(), input });
                     return Ok(());
                 }
             }
@@ -188,7 +188,7 @@ impl Conversation {
     fn awaits(&self, run: &Transition) -> bool {
         matches!(
             &self.next,
-            Some(Next::Call { program, input }) if program == run.program.name() && input.digest() == run.input
+            Some(Next::Call { program, input, .. }) if program == run.program.name() && input.digest() == run.input
         )
     }
 
@@ -248,9 +248,11 @@ impl Conversations {
     /// or a call that did not rest the session.
     pub fn step(&self, at: At) -> Option<CallProgram> {
         match self.next(at)? {
-            Next::Call { program, input } => {
-                Some(CallProgram { program: MUSE, name: program.clone(), input: CallInput::Value(input.clone()) })
-            }
+            Next::Call { head, program, input } => Some(CallProgram {
+                program: head.clone(),
+                name: program.clone(),
+                input: CallInput::Value(input.clone()),
+            }),
             Next::Turn(turn) => Some(call::<MuseTurn>(CallInput::Value(EncodedArtifact::new(turn).ok()?))),
             Next::Settled(record) | Next::Fail(record) => {
                 Some(call::<SessionRecord>(CallInput::Value(EncodedArtifact::new(record).ok()?)))
@@ -562,5 +564,52 @@ impl View for Conversations {
         if let Some(cause) = at.cause.filter(|cause| self.links.get(cause) == Some(&key)) {
             self.links.remove(&cause);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_bloomery_kinds::{Head, ProgramName, Ref, Seq, Tree};
+    use aether_bloomery_program::At;
+
+    use super::{Conversation, Conversations, Waiting};
+    use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls};
+    use crate::session::fixture::settings;
+    use crate::session::state::{SessionKey, TurnLimit};
+    use crate::tools::offered;
+
+    #[test]
+    fn a_call_runs_in_the_bundle_its_offer_names() {
+        // Catches a loop that calls every tool in the muse bundle, or reads the head of another offer than the one
+        // the call names.
+        let (muse, _) = offered();
+        let echo = &muse.as_slice()[0];
+        let proofs = Head::new("proofs");
+        let program = ProgramName::new("proof.check").expect("program");
+        let foreign = OfferedTool::new(
+            program.clone(),
+            proofs.clone(),
+            echo.definition(),
+            echo.input(),
+            echo.bound(),
+            echo.result(),
+        );
+        let input = settings(OfferedTools::new(vec![echo.clone(), foreign]).expect("tools"))
+            .open(Ref::of_text("rules"), Ref::of_text("hi"));
+
+        let call =
+            ToolCall::decoded(CallId::new("call-1").expect("id"), program.clone(), Ref::of_text("{}"), echo.bound());
+        let calls = ToolCalls::new(vec![call]).expect("calls");
+        let (turn, tree) = (Ref::of_encoded(&input).expect("turn"), Ref::of_encoded(&Tree::empty()).expect("tree"));
+        let mut conversation = Conversation::new(TurnLimit::new(4).expect("limit"), turn, tree);
+        let text = Ref::of_text("");
+        conversation.waiting =
+            Some(Waiting { input, turn, result: None, text, calls, outputs: Vec::new(), full: false });
+
+        let mut conversations = Conversations::default();
+        conversations.advance(SessionKey::new(1), conversation, Seq(2));
+        let step =
+            conversations.step(At { seq: Seq(2), cause: None, recorded_at_millis: 0 }).expect("a call runs next");
+        assert_eq!((step.program, step.name), (proofs, program));
     }
 }
