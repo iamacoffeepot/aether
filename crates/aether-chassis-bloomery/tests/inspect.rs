@@ -167,8 +167,10 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
         InputLimit::new(u64::MAX).expect("limit"),
     );
     let user = batch.stage_text(QUESTION);
+    let instructions = batch.stage_text("Work through the tree with only the offered tree tools.");
     let tree = batch.stage_encoded(&Tree::empty())?;
-    let open = batch.stage_encoded(&OpenInput::new(settings, user, TurnLimit::new(4)?, tree, Vec::new()))?;
+    let open =
+        batch.stage_encoded(&OpenInput::new(settings, instructions, user, TurnLimit::new(4)?, tree, Vec::new()))?;
     let call = Call {
         program: MUSE,
         name: ProgramName::new("muse.session.open")?,

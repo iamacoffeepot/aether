@@ -1,5 +1,5 @@
-//! `muse open`: stage a tree, a brief, and seeded reads, and open a session
-//! on them through `muse.session.open`.
+//! `muse open`: stage a tree, instructions, a brief, and seeded reads, and open
+//! a session on them through `muse.session.open`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,9 @@ use clap::Args;
 use super::{EngineArgs, SettingsArgs, call, turn_limit};
 use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
+
+/// What every session is told ahead of the instructions file.
+const PREFACE: &str = "You work only through the offered tree tools: list, read, grep, edit, and write. You cannot build, run, or test anything. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
 
 /// Arguments for `cargo xtask muse open`.
 #[derive(Args, Debug)]
@@ -29,6 +32,10 @@ pub(super) struct OpenArgs {
     /// A file holding the first user message.
     #[arg(long)]
     brief: PathBuf,
+    /// A file holding the session instructions, sent as the leading developer
+    /// message ahead of the brief with [`PREFACE`] chained ahead of it.
+    #[arg(long)]
+    instructions: PathBuf,
     /// A file naming one tree path per line, each read with `tree.read`
     /// before the first turn; blank lines are skipped.
     #[arg(long)]
@@ -45,6 +52,9 @@ pub(super) struct OpenArgs {
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
     let brief =
         fs::read_to_string(&args.brief).with_context(|| format!("reading the brief {}", args.brief.display()))?;
+    let instructions = fs::read_to_string(&args.instructions)
+        .map(|text| format!("{PREFACE}{text}"))
+        .with_context(|| format!("reading the instructions {}", args.instructions.display()))?;
     let seeds = args.seeds.as_deref().map(seeds).transpose()?.unwrap_or_default();
     let mut engine = args.engine.connect()?;
 
@@ -57,6 +67,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
     let (tools, mut artifacts) = offered();
     let input = OpenInput::new(
         args.settings.settings(tools)?,
+        Ref::of_text(&instructions),
         Ref::of_text(&brief),
         turn_limit(args.max_turns)?,
         Ref::from_digest(tree),
@@ -64,7 +75,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
     );
     let open = EncodedArtifact::new(&input)?;
     let input = Ref::from_digest(open.digest());
-    artifacts.extend([EncodedArtifact::text(&brief), open]);
+    artifacts.extend([EncodedArtifact::text(&instructions), EncodedArtifact::text(&brief), open]);
     engine.stage_artifacts(artifacts)?;
 
     let session = call::<SessionOpen>(&mut engine, input)?;

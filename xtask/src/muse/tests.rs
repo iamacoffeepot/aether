@@ -274,8 +274,17 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
         InputLimit::new(u64::MAX)?,
     );
     let user = batch.stage_text("hi");
-    let open_a = batch.stage_encoded(&OpenInput::new(settings.clone(), user, TurnLimit::new(4)?, a0, Vec::new()))?;
-    let open_b = batch.stage_encoded(&OpenInput::new(settings, user, TurnLimit::new(4)?, b0, Vec::new()))?;
+    let instructions = batch.stage_text("rules");
+    let open_a = batch.stage_encoded(&OpenInput::new(
+        settings.clone(),
+        instructions,
+        user,
+        TurnLimit::new(4)?,
+        a0,
+        Vec::new(),
+    ))?;
+    let open_b =
+        batch.stage_encoded(&OpenInput::new(settings, instructions, user, TurnLimit::new(4)?, b0, Vec::new()))?;
     let (session_a, session_b, session_b2) =
         (session(&mut batch, a1)?, session(&mut batch, b1)?, session(&mut batch, b2)?);
     let a_called = turn(&mut batch, usage(10, 1, 100, 5))?;

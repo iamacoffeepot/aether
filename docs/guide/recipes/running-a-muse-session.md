@@ -57,7 +57,7 @@ every member the bound set already holds. A rebind of the same bundle prints
 
 ```sh
 cargo xtask muse open --rpc-port <port> --unit primary \
-  --commit <revision> --brief brief.md --seeds seeds.txt \
+  --commit <revision> --brief brief.md --instructions CLAUDE.md --seeds seeds.txt \
   --endpoint https://api.muse.example/v1/responses --model <model> \
   --effort medium --max-output-tokens 16000 --max-turns 40 --input-limit 184220
 ```
@@ -74,6 +74,9 @@ after=<seq>
   repository around the working directory. `--tree <digest>` names a tree
   already in the journal instead.
 - `--brief` is a file holding the first user message.
+- `--instructions` is required: a file holding the session instructions, sent
+  as the leading developer message ahead of the brief with a short preface
+  saying the session works only through the tree tools.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -81,11 +84,13 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.edit`, `tree.write`, and `muse.echo`.
+  `tree.edit`, `tree.write`, and `muse.echo`. The first turn sends the
+  instructions as the developer message ahead of the brief.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of
-opening a second one. Keep `session=` and `after=` for the next step.
+opening a second one. The digest covers the instructions with the tree, brief,
+seeds, and settings. Keep `session=` and `after=` for the next step.
 
 ## 4. Wait for it to rest
 

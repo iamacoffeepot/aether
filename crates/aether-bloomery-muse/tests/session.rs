@@ -41,6 +41,7 @@ const RATE_LIMITED: &str = include_str!("../fixtures/rate_limited.json");
 const ANSWER: &str = "A bloomery is a furnace that smelts iron into a bloom.";
 const URL: &str = "https://example.test/v1/responses";
 const QUESTION: &str = "Echo alpha and beta, then say what a bloomery is.";
+const INSTRUCTIONS: &str = "Work through the tree with only the offered tree tools.";
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -433,8 +434,15 @@ fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64
         InputLimit::new(tokens)?,
     );
     let tree = small_tree(driver);
-    driver.stage([EncodedArtifact::text(QUESTION)]);
-    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree, Vec::new());
+    driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
+    let input = OpenInput::new(
+        settings,
+        Ref::of_text(INSTRUCTIONS),
+        Ref::of_text(QUESTION),
+        TurnLimit::new(max_turns)?,
+        tree,
+        Vec::new(),
+    );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
@@ -443,8 +451,15 @@ fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64
 fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     let settings = settings(driver)?;
     let tree = small_tree(driver);
-    driver.stage([EncodedArtifact::text(QUESTION)]);
-    let input = OpenInput::new(settings, Ref::of_text(QUESTION), TurnLimit::new(max_turns)?, tree, seeds);
+    driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
+    let input = OpenInput::new(
+        settings,
+        Ref::of_text(INSTRUCTIONS),
+        Ref::of_text(QUESTION),
+        TurnLimit::new(max_turns)?,
+        tree,
+        seeds,
+    );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
 
@@ -518,15 +533,24 @@ fn assert_warm_and_live_agree(driver: &Driver) {
 #[test]
 fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() -> TestResult {
     // Catches calls run out of order or over the wrong input, a next turn that is not an exact extension of the
-    // previous one or that `muse.turn` refuses, a limit counting tool calls instead of turns, a rest recorded from
-    // the wrong turn, a first head move comparing against anything but an unbound head, and folds that diverge
-    // between warm-up and live delivery.
+    // previous one or that `muse.turn` refuses, instructions lost between the open and the fetch, a limit counting
+    // tool calls instead of turns, a rest recorded from the wrong turn, a first head move comparing against anything
+    // but an unbound head, and folds that diverge between warm-up and live delivery.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
     let (opened, tree) = open(&mut driver, 2)?;
     let first_input = driver.first_turn(opened);
     let opening = asked(&driver, opened);
     assert_eq!(opening.name.as_str(), MuseTurn::NAME);
     assert_eq!(opening.input, CallInput::Stored(first_input), "the opened turn runs over the open's result");
+    let first: TurnInput = driver.value(first_input);
+    assert_eq!(
+        first.items(),
+        [
+            TurnItem::message(Role::Developer, Ref::of_text(INSTRUCTIONS)),
+            TurnItem::message(Role::User, Ref::of_text(QUESTION))
+        ],
+        "the first turn sends the instructions ahead of the brief"
+    );
     let first_turn = driver.follow(opened);
     assert_eq!(driver.intent(first_turn).rule().as_str(), "call", "a turn's run is not also a tool's output");
 
@@ -547,7 +571,6 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
         outputs.push(TurnItem::CallOutput { call_id: call.call_id().clone(), output });
     }
 
-    let first: TurnInput = driver.value(first_input);
     let replayed =
         [TurnItem::message(Role::Assistant, text), TurnItem::Call(call_a.clone()), TurnItem::Call(call_b.clone())];
     let items = first.items().iter().cloned().chain(replayed).chain(outputs).collect();
@@ -580,6 +603,18 @@ fn an_opened_session_runs_both_calls_in_order_then_records_and_moves_its_head() 
     let to = Ref::from_digest(driver.transition(recorded).result);
     assert_eq!(heads.changes(), [HeadChange::new(&SessionKey::new(opened).head(), None, to)], "moved from unbound");
     assert!(driver.intents(moved).is_empty(), "the loop rests");
+
+    let [first_sent, ..] = driver.sent.as_slice() else {
+        panic!("expected the first turn to send, got {}", driver.sent.len());
+    };
+    let sent = first_sent["input"].as_array().expect("items are sent");
+    let [developer, user] = sent.as_slice() else {
+        panic!("expected the developer instructions and the brief, got {sent:?}");
+    };
+    assert_eq!(developer["role"], "developer");
+    assert_eq!(developer["content"][0]["text"], INSTRUCTIONS);
+    assert_eq!(user["role"], "user");
+    assert_eq!(user["content"][0]["text"], QUESTION);
 
     assert_warm_and_live_agree(&driver);
     Ok(())
@@ -1271,9 +1306,10 @@ fn a_read_with_a_non_numeric_string_is_refused_with_how_to_fix_it_and_the_turn_c
 
 #[test]
 fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_them() -> TestResult {
-    // Catches seeds rendered without running `tree.read`, run over another tree or path, sent before the user
-    // message or with outputs other than their runs' results, counted as a turn, or dropped from later turns and the
-    // record, and seed folds that diverge between warm-up and live delivery.
+    // Catches seeds rendered without running `tree.read`, run over another tree or path, sent before the
+    // instructions or the user message or with outputs other than their runs' results, counted as a turn, dropped
+    // from later turns and the record, a continue that drops the prefix, or seed folds that diverge between warm-up
+    // and live delivery.
     let mut driver = Driver::new(&[CALLED_ECHO, COMPLETED]);
     let seeds = vec![TreePath::new("src/lib.rs")?, TreePath::new("README")?];
     let (opened, tree) = open_seeded(&mut driver, 2, seeds)?;
@@ -1300,9 +1336,11 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
         panic!("expected two requests, got {}", driver.sent.len());
     };
     let sent = first_sent["input"].as_array().expect("items are sent");
-    let [user, call_0, call_1, output_0, output_1] = sent.as_slice() else {
-        panic!("expected the user message, two calls, and two outputs, got {sent:?}");
+    let [developer, user, call_0, call_1, output_0, output_1] = sent.as_slice() else {
+        panic!("expected the instructions, the user message, two calls, and two outputs, got {sent:?}");
     };
+    assert_eq!(developer["role"], "developer");
+    assert_eq!(developer["content"][0]["text"], INSTRUCTIONS);
     assert_eq!(user["role"], "user");
     assert_eq!(user["content"][0]["text"], QUESTION);
     for (call, (id, path)) in [call_0, call_1].into_iter().zip([("seed-0", "src/lib.rs"), ("seed-1", "README")]) {
@@ -1323,8 +1361,8 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
     assert_eq!(*session.rested(), RestReason::Completed, "the seeds spent none of the two turns");
     let first: TurnInput = driver.value(driver.first_turn(opened));
     let seeded: Vec<_> = calls.iter().cloned().map(TurnItem::Call).collect();
-    assert_eq!(session.items().first(), first.items().first());
-    assert_eq!(session.items().get(1..3), Some(seeded.as_slice()), "the record holds the seeded calls");
+    assert_eq!(session.items().get(..2), first.items().get(..2), "the record keeps the opening messages");
+    assert_eq!(session.items().get(2..4), Some(seeded.as_slice()), "the record holds the seeded calls");
 
     assert_warm_and_live_agree(&driver);
     Ok(())
