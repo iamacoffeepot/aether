@@ -127,7 +127,9 @@ sessions on one engine are each followed by their own `wait`.
 - A fault or failed reaction in the session's chain is printed after the rest
   and exits non-zero naming it. A second one, or a failed head move, means the
   session cannot record its rest; `wait` exits non-zero at once instead of
-  blocking.
+  blocking. A tool run that ran out of time or memory is not printed: the loop
+  runs it again, up to twice, then answers the call with a text saying so, and
+  the session goes on.
 
 ## 5. Export the changes
 

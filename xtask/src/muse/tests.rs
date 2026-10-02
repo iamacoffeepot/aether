@@ -10,13 +10,14 @@ use std::{env, process};
 
 use aether_bloomery_journal::{Batch, Journal};
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, JournalEntry, Name, NativeOrigin, Node, Path, ProgramName, ProgramRef,
-    ReactorName, ReadArtifacts, ReadArtifactsResult, ReadEvents, ReadEventsResult, Ref, RequestSource, Requested,
-    RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
+    ClosureArtifact, Digest, EncodedArtifact, Fault, FaultReason, JournalEntry, Name, NativeOrigin, Node, Path,
+    ProgramName, ProgramRef, ReactorName, ReadArtifacts, ReadArtifactsResult, ReadEvents, ReadEventsResult, Ref,
+    RequestSource, Requested, RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_muse::{
-    ContinueInput, Endpoint, InputLimit, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget, ReasoningEffort,
-    Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult, TurnSettings,
+    ContinueInput, Echo, Endpoint, InputLimit, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
+    ReasoningEffort, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult,
+    TurnSettings,
 };
 use aether_bloomery_program::Program;
 use aether_codec::encode_storage_schema;
@@ -102,6 +103,21 @@ impl JournalReads {
         batch.push_event(event, cause.map(Seq))?;
         let head = self.0.head()?;
         Ok(self.0.append(head, &batch)?.start.0)
+    }
+
+    /// Record a run of `P` over `input` that the session loop's rule
+    /// triggered at `cause` requested and that faulted with `reason`; return
+    /// the fault's seq.
+    fn fault<P: Program>(&mut self, input: Digest, reason: FaultReason, cause: u64) -> Result<u64> {
+        let program = ProgramRef::new(BUNDLE, ProgramName::new(P::NAME)?);
+        let source = RequestSource::Reaction {
+            bundle: BUNDLE,
+            reactor: ReactorName::new("muse.session")?,
+            rule: RuleName::new("call")?,
+            ordinal: 0,
+        };
+        let requested = self.push(&Requested { program: program.clone(), input, source }, Some(cause))?;
+        self.push(&Fault { program, input, reason }, Some(requested))
     }
 
     /// Record a run of `P` over `input` with `result`, requested natively
@@ -260,7 +276,7 @@ const fn usage(input: u64, cached: u64, output: u64, reasoning: u64) -> Usage {
 #[test]
 fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result<()> {
     // Catches a summary that mixes two interleaved sessions' turns, one that reads past its own rest into a later
-    // activation, and a continue attributed to the wrong session.
+    // activation, a continue attributed to the wrong session, and a tool run the loop retried reported as a fault.
     let (_root, mut reads) = scratch_journal()?;
     let mut batch = Batch::new();
     let (a0, a1) = (marker(&mut batch, "a0")?, marker(&mut batch, "a1")?);
@@ -300,6 +316,7 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
     let sent = Digest::from_bytes([2; 32]);
     let b_turn = reads.run::<MuseTurn>(sent, b_completed, Some(key_b))?;
     let a_turn = reads.run::<MuseTurn>(sent, a_called, Some(key_a))?;
+    reads.fault::<Echo>(sent, FaultReason::TimedOut, a_turn)?;
     let a_turn = reads.run::<MuseTurn>(sent, a_completed, Some(a_turn))?;
     let b_record = reads.run::<SessionRecord>(sent, session_b, Some(b_turn))?;
     let b_rested = reads.push(&b.head().move_to(Ref::from_digest(session_b)), Some(b_record))?;
@@ -317,6 +334,7 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
 
     let rested = follow(&mut reads, a, 0)?;
     assert_eq!((rested.turns, rested.usage), (2, usage(30, 3, 300, 11)));
+    assert!(rested.faults.is_empty(), "a tool run the loop retries is no fault of the session");
     assert_eq!((rested.from, rested.session.tree()), (Some(a0.digest()), a1));
 
     let rested = follow(&mut reads, b, 0)?;
