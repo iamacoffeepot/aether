@@ -107,11 +107,6 @@ fn intern_all<'line>(ids: &mut HashMap<&'line str, u32>, next: &mut u32, lines: 
 /// round's copy for the backtrack.
 fn search(old: &[u32], new: &[u32], max_edits: usize) -> Option<Vec<Edit>> {
     let (count_old, count_new) = (old.len(), new.len());
-    let both_empty = old.is_empty() && new.is_empty();
-    if both_empty {
-        return Some(Vec::new());
-    }
-
     let max_edits = max_edits.min(count_old.saturating_add(count_new));
     let need = count_old.abs_diff(count_new);
     if need > max_edits {
@@ -135,21 +130,21 @@ fn search(old: &[u32], new: &[u32], max_edits: usize) -> Option<Vec<Edit>> {
                 reach[diagonal - 1] + 1
             };
             let mut new_index = counterpart(old_index, diagonal, offset);
-            while let Some(below) = new_index {
-                let matched = lines_match(old, new, old_index, below);
-                if !matched {
-                    break;
-                }
+            while lines_match(old, new, old_index, new_index) {
                 old_index += 1;
-                new_index = below.checked_add(1);
+                new_index += 1;
             }
             reach[diagonal] = old_index;
         }
         trace.push(reach.clone());
 
+        // Before round `need` the end diagonal is unvisited and still 0, which
+        // an empty old side would read as reached. `==` is exact: in the
+        // first round that reaches the end, no path on the end diagonal runs
+        // past the grid, since one that did would have reached the end a
+        // round earlier.
         let past_need = round >= need;
-        let same_parity = past_need && (round - need) % 2 == 0;
-        let reached_end = same_parity && reach[end] == count_old;
+        let reached_end = past_need && reach[end] == count_old;
         if reached_end {
             return Some(backtrack(&trace, count_old, count_new, offset, end, round));
         }
@@ -222,14 +217,14 @@ fn backtrack(
 fn go_down(reach: &[usize], diagonal: usize, offset: usize, round: usize) -> bool {
     let at_top = diagonal == offset - round;
     let at_bottom = diagonal == offset + round;
-    let above_reaches_farther = reach[diagonal - 1] < reach[diagonal + 1];
-    at_top || (!at_bottom && above_reaches_farther)
+    let next_reaches_farther = reach[diagonal - 1] < reach[diagonal + 1];
+    at_top || (!at_bottom && next_reaches_farther)
 }
 
-/// The new-side index on `diagonal` for `old_index`, or `None` when it would
-/// go negative.
-fn counterpart(old_index: usize, diagonal: usize, offset: usize) -> Option<usize> {
-    old_index.checked_add(offset)?.checked_sub(diagonal)
+/// The new-side index on `diagonal` for `old_index`. Every point the search
+/// reaches lies on a path from the origin, so the index is never negative.
+fn counterpart(old_index: usize, diagonal: usize, offset: usize) -> usize {
+    old_index + offset - diagonal
 }
 
 /// Whether the lines at these indices match: both sides still have one, and
