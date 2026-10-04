@@ -17,7 +17,11 @@ use super::{ProofBound, refused};
 const TOOL: &str = "cargo";
 
 /// Where the vendor tree is mounted, relative to the root: `/vendor`.
-const VENDOR: &str = "vendor";
+pub(super) const VENDOR: &str = "vendor";
+
+/// Where the cargo config tree is mounted, relative to the root: `/.cargo`,
+/// an ancestor of every step's working directory `/work`.
+const CARGO_CONFIG: &str = ".cargo";
 
 /// The scratch path that holds cargo's build output.
 const TARGET_SCRATCH: &str = "target";
@@ -45,43 +49,19 @@ pub(super) const FMT_ARGS: [&str; 4] = ["fmt", "--all", "--", "-l"];
 
 /// The clippy step: CI's lint command, workspace-wide and `--offline` rather
 /// than `--frozen`, so a change to a workspace-internal dependency updates
-/// `Cargo.lock` inside the run. Crates.io is replaced by the vendor tree at
-/// `/vendor`, `--quiet` keeps cargo's progress lines out of stderr, and the
-/// diagnostics come as JSON lines on stdout. The `--config` flags follow the
-/// subcommand: `cargo clippy` is an external subcommand that re-runs cargo,
-/// and only flags after its name reach that inner cargo.
-pub(super) const CLIPPY_ARGS: [&str; 13] = [
-    "clippy",
-    "--config",
-    "source.crates-io.replace-with=\"vendored\"",
-    "--config",
-    "source.vendored.directory=\"/vendor\"",
-    "--workspace",
-    "--all-targets",
-    "--offline",
-    "--quiet",
-    "--message-format=json",
-    "--",
-    "-D",
-    "warnings",
-];
+/// `Cargo.lock` inside the run. Crates.io is replaced by the vendor tree
+/// through the config at `/.cargo`, `--quiet` keeps cargo's progress lines
+/// out of stderr, and the diagnostics come as JSON lines on stdout.
+pub(super) const CLIPPY_ARGS: [&str; 9] =
+    ["clippy", "--workspace", "--all-targets", "--offline", "--quiet", "--message-format=json", "--", "-D", "warnings"];
 
 /// The test step: the workspace tests with cargo's default target selection
 /// (lib, bins, tests, doctests), `--offline` rather than `--frozen` like
-/// clippy's. `--no-fail-fast` reports every failing target, not only the
-/// first, and `--quiet` keeps cargo's status lines out of stderr.
-pub(super) const TEST_ARGS: [&str; 10] = [
-    "test",
-    "--config",
-    "source.crates-io.replace-with=\"vendored\"",
-    "--config",
-    "source.vendored.directory=\"/vendor\"",
-    "--workspace",
-    "--offline",
-    "--quiet",
-    "--no-fail-fast",
-    "--message-format=json",
-];
+/// clippy's, with crates.io replaced by the config at `/.cargo`.
+/// `--no-fail-fast` reports every failing target, not only the first, and
+/// `--quiet` keeps cargo's status lines out of stderr.
+pub(super) const TEST_ARGS: [&str; 6] =
+    ["test", "--workspace", "--offline", "--quiet", "--no-fail-fast", "--message-format=json"];
 
 /// The run that formats `tree` in `bound`'s environment with the network
 /// off, then runs the cargo step `cargo` with `extra` appended to its
@@ -99,11 +79,13 @@ pub(super) fn request(
     extra: &[EnvVar],
 ) -> Result<RunRequest, Refusal> {
     let vendor = Mount { at: path(VENDOR)?, tree: bound.vendor() };
+    let cargo_config = Mount { at: path(CARGO_CONFIG)?, tree: bound.cargo_config() };
 
     Ok(RunRequest {
         tree,
         environment: bound.environment(),
-        mounts: Mounts::new(vec![vendor]).map_err(|error| refused(format!("the vendor mount: {error}")))?,
+        mounts: Mounts::new(vec![vendor, cargo_config])
+            .map_err(|error| refused(format!("the proof mounts: {error}")))?,
         steps: Steps::new(vec![step(&FMT_ARGS, &[])?, step(cargo, extra)?])
             .map_err(|error| refused(format!("the proof steps: {error}")))?,
         scratch: Scratch::new(vec![path(TARGET_SCRATCH)?, path(TMP_SCRATCH)?])
@@ -167,6 +149,18 @@ mod tests {
                     assert!(in_scratch, "{key}={value} lies outside every /work/<scratch>");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_cargo_config_is_mounted_above_work() {
+        // Catches a dropped config mount, or one mounted where cargo's ancestor walk from /work never reaches it.
+        let tree = Ref::from_digest(Digest::from_bytes([1; 32]));
+        for cargo in [CLIPPY_ARGS.as_slice(), TEST_ARGS.as_slice()] {
+            let run = request(tree, &bound(), cargo, &[]).expect("the fixed request builds");
+
+            let mounted = run.mounts.as_slice().iter().find(|mount| mount.tree == bound().cargo_config());
+            assert_eq!(mounted.map(|mount| mount.at.as_str()), Some(".cargo"));
         }
     }
 

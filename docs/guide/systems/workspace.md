@@ -779,8 +779,11 @@ Two preconditions hold for every vendor run:
   cargo, not rustc, and the proofs still run that check over the same
   source.
 - Cargo reads config from its working directory, `/work`, so a
-  `.cargo/config.toml` in the source does not apply. The proof also runs with
-  `--config` only.
+  `.cargo/config.toml` in the source does not apply. The proof mounts the
+  bound's cargo config at `/.cargo`, an ancestor of `/work`, so every cargo in
+  the run reads it. A top-level `--config` flag is not enough: child cargo
+  processes, such as the `cargo metadata` a test spawns, do not inherit it and
+  would retry crates.io with the network off.
 
 ## The proofs
 
@@ -802,6 +805,7 @@ Each proof's input is a tool's, `Tooled<A, ProofBound>`
 | `ClippyArgs` (`proof.clippy.args`) / `TestArgs` (`proof.test.args`) | the arguments the model writes: none, `{}` | nowhere |
 | `ProofBound.environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bootstrap sends](#what-the-bootstrap-sends)) | the root |
 | `ProofBound.vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
+| `ProofBound.cargo_config: Ref<Tree>` | the tree holding `config.toml`, which replaces crates.io with `/vendor` and sets `net.offline`; fixed by the proof and staged beside the bound by `cargo_config_artifacts` | `/.cargo`, read-only |
 | `ProofBound.test_env: TestEnv` | the session-supplied test env (see [The test proof](#the-test-proof)) | the test step's env only |
 
 `ProofBound` (`proof.bound`) is the value every proof binds besides its tree;
@@ -820,7 +824,7 @@ is fixed:
 | Step 1 | `fmt --all -- -l`: rustfmt writes its fixes and prints each file it rewrote |
 | Step 2 | clippy's lint command (see [The clippy proof](#the-clippy-proof)) or the test command (see [The test proof](#the-test-proof)) |
 | Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` on both steps, plus the bound's test env on the test step only |
-| Mounts | the vendor tree at `vendor` |
+| Mounts | the vendor tree at `vendor`, the cargo config at `.cargo` |
 | Scratch | `target` and `tmp`, so neither the build output nor cargo's home reaches the output tree |
 | Network | `Off` |
 
@@ -856,7 +860,7 @@ never recorded as a failed proof of the tree.
 The clippy step is CI's lint command over the whole workspace (a narrower `-p`
 selection unifies features differently and rebuilds shared dependencies):
 
-`clippy --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --all-targets --offline --quiet --message-format=json -- -D warnings`
+`clippy --workspace --all-targets --offline --quiet --message-format=json -- -D warnings`
 
 `--quiet` keeps cargo's progress lines out of stderr, and the diagnostics come
 as JSON lines on stdout. A crate missing from the vendor tree fails with
@@ -873,7 +877,7 @@ The test step runs the workspace tests with cargo's default target selection
 (lib, bins, tests, doctests), the set CI's test lane covers through nextest
 plus its doctest pass:
 
-`test --config source.crates-io.replace-with="vendored" --config source.vendored.directory="/vendor" --workspace --offline --quiet --no-fail-fast --message-format=json`
+`test --workspace --offline --quiet --no-fail-fast --message-format=json`
 
 `--no-fail-fast` lets one run report every failing target, not only the
 first. `--quiet` keeps cargo's status lines out of stderr and makes libtest

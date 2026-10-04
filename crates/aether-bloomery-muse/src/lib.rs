@@ -66,9 +66,10 @@
 //! and the fixture [`Echo`] (`muse.echo`). A session opened with
 //! [`offered_with_proofs`] also offers `proof.clippy` and `proof.test` from
 //! the `workspace-programs` bundle, bound to its environment, vendor tree,
-//! and test env: the first formats the tree and checks it with clippy, the
-//! second formats the tree and runs its workspace tests with the session's
-//! test env, and each one's `Edited` tree the loop carries on like an edit's.
+//! cargo config, and test env: the first formats the tree and checks it with
+//! clippy, the second formats the tree and runs its workspace tests with the
+//! session's test env, and each one's `Edited` tree the loop carries on like
+//! an edit's.
 //! Only a `muse.end` call ends a run:
 //! a reply without a call is nudged back for another turn. Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
