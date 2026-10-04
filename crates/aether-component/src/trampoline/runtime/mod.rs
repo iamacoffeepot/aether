@@ -80,12 +80,13 @@ impl NativeActor for WasmTrampoline {
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
-        // ADR-0163 §3 (#3984): open an asset load window over the module's
-        // asset blobs and install it before instantiate, so the guest's
-        // `init` (run inside `instantiate`) and its later `wire` can pull
-        // assets through the `asset_fetch_p32` host fn. Closed once `wire`
-        // returns (below).
-        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module));
+        // ADR-0163 §3 (#3984): open an asset load window over the code this
+        // instance's load brought and install it before instantiate, so the
+        // guest's `init` (run inside `instantiate`) and its later `wire` can
+        // pull assets through the `asset_fetch_p32` host fn. The window owns
+        // the code, which the state never keeps, and lets go of it once
+        // `wire` returns (below).
+        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module, config.code));
         // ADR-0231 §4: an inline child the guest spawns publishes its own
         // namespace and rows, read from this module's exported and private
         // groups.
@@ -243,7 +244,7 @@ impl NativeActor for WasmTrampoline {
         };
 
         let target = ctx.path();
-        state.prepare(ctx, &target, candidate, config)
+        state.prepare(ctx, &target, candidate, code, config)
     }
 
     /// Install the prepared candidate (ADR-0241 §7): its held mail leaves on
