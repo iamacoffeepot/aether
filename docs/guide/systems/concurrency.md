@@ -146,8 +146,8 @@ them all.
 
 **A bounded queue holds each reply and stages each request's work.** A native
 capability that bounds its concurrent blocking calls uses `TaskQueue<R>`
-(`aether-http`'s per-sender egress and the workspace run queue are the same
-shape). `submit` runs in the request's own turn: it holds the reply with
+(`aether-http`'s per-sender egress, the workspace run queue, and `aether.fs`
+reads are the same shape). `submit` runs in the request's own turn: it holds the reply with
 `ctx.hold::<R>()`, keeps the `Held<R>`, and stages the work, so the task holds
 that request's chain whether it starts now or waits for a slot. The completion
 is one line:
@@ -164,6 +164,15 @@ correlated to, answers it with the output, and starts the next waiting task in
 the freed slot. The waiting task's chain is still its own request's, so a
 request's chain settles when that request is answered, never when another
 request's work finishes.
+
+Work the caller should not wait for holds no chain at all. `aether.fs.load`
+answers its request at once and starts each load with
+`dispatch_blocking_resumed_with(None, ..)`, which takes no settlement hold, so
+the caller's chain settles as soon as the acceptance is handled. The load's
+completion sends the bytes to the requester with `send_detached_to`, on a fresh
+chain, through the `Subscriber<Loaded>` reference it cast the sender to at
+receipt. The cap bounds these workers with its own queue, since no reply is
+held for them.
 
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the

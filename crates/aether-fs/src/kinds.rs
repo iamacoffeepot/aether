@@ -8,8 +8,14 @@
 //! both need these types, so they ride the target-agnostic build.
 //!
 //! ADR-0041 substrate file I/O. Request kinds on the `"aether.fs"`
-//! mailbox (read / write / copy / delete / list), paired 1:1 with
-//! reply kinds that carry a structured `FsError` on failure.
+//! mailbox (read / write / copy / delete / list / fetch), paired 1:1
+//! with reply kinds that carry a structured `FsError` on failure.
+//!
+//! `load` is the one two-phase verb: its reply, `LoadResult`, only
+//! accepts or refuses the request, and the bytes arrive later as a
+//! separate `Loaded` mail to the requester, on a fresh chain. A `read`
+//! holds the caller's chain (and so a `Tick` frame) until its bytes are
+//! answered; a `load` lets the caller's chain settle at once.
 //!
 //! Every request and reply addresses its file through one
 //! [`NamespaceAddr`] — `{ namespace, path }` — rather than a loose pair
@@ -17,6 +23,7 @@
 //! constructor that folds an adapter `Result` into its `Ok` / `Err`
 //! arms so the echo is written once per family member.
 
+use aether_actor::HeldReply;
 use aether_data::{Blob, KindId, TransformId};
 use serde::{Deserialize, Serialize};
 
@@ -103,7 +110,19 @@ impl ReadResult {
     }
 }
 
-/// `aether.fs.write` — request the substrate write `bytes` to
+/// A read `aether.fs` holds on its bounded read queue, answered when the
+/// actor closes before the read finished (ADR-0243 §1). The request's
+/// address is gone with the queue, so the echo is empty.
+impl HeldReply for ReadResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            addr: NamespaceAddr::new("", ""),
+            error: FsError::AdapterError("aether.fs closed before answering".to_owned()),
+        }
+    }
+}
+
+/// `aether.fs.write` —request the substrate write `bytes` to
 /// `namespace://path`. v1's local-file adapter stages to a
 /// temporary sibling and `rename`s on success so a crash
 /// mid-write leaves either the old contents or the new, never a
@@ -244,6 +263,73 @@ impl ListResult {
         match list {
             Ok(entries) => Self::Ok { addr, entries },
             Err(error) => Self::Err { addr, error },
+        }
+    }
+}
+
+/// `aether.fs.load` — read a file in the background. The reply,
+/// [`LoadResult`], comes at once and only accepts or refuses the
+/// request, so the caller's chain (and a `Tick` frame it rides) settles
+/// without waiting for the disk. The bytes arrive later as a separate
+/// [`Loaded`] mail to the requester, on a fresh chain.
+///
+/// The requester must handle `Loaded` silently, with
+/// `#[handler::event] fn on_loaded(.., loaded: Loaded)`; a sender that
+/// does not, or mail with no actor sender, is refused. `tag` is the
+/// caller's own key: `Loaded` is not a reply, so request ids and stored
+/// contexts do not reach it, and the tag is how one requester tells its
+/// loads apart. Use `aether.fs.read` instead when the caller's frame
+/// should wait for the bytes.
+#[aether_data::kind(name = "aether.fs.load")]
+pub struct Load {
+    pub addr: NamespaceAddr,
+    pub tag: u64,
+}
+
+/// Reply to `Load`, sent before any byte is read. `Accepted` means a
+/// [`Loaded`] with the same `addr` and `tag` will follow, whatever the
+/// read's outcome. `Refused` means none will: the mail had no actor
+/// sender, or the sender does not handle `aether.fs.loaded` silently,
+/// and `reason` says which.
+#[aether_data::kind(name = "aether.fs.load_result")]
+pub enum LoadResult {
+    Accepted { addr: NamespaceAddr, tag: u64 },
+    Refused { addr: NamespaceAddr, tag: u64, reason: String },
+}
+
+impl LoadResult {
+    /// The load was queued and a [`Loaded`] will follow.
+    #[must_use]
+    pub fn accepted(addr: NamespaceAddr, tag: u64) -> Self {
+        Self::Accepted { addr, tag }
+    }
+
+    /// The load was not queued, for `reason`; no [`Loaded`] follows.
+    #[must_use]
+    pub fn refused(addr: NamespaceAddr, tag: u64, reason: impl Into<String>) -> Self {
+        Self::Refused { addr, tag, reason: reason.into() }
+    }
+}
+
+/// The outcome of an accepted `Load`, sent to the requester on a fresh
+/// causal chain once the file has been read. Both arms echo the load's
+/// `addr` and `tag`. `Ok` carries the file contents as a blob, as
+/// `ReadResult::Ok` does; `Err` carries the same `FsError` a `read` of
+/// the address would.
+#[aether_data::kind(name = "aether.fs.loaded")]
+pub enum Loaded {
+    Ok { addr: NamespaceAddr, tag: u64, bytes: Blob },
+    Err { addr: NamespaceAddr, tag: u64, error: FsError },
+}
+
+impl Loaded {
+    /// Fold an adapter read into the delivery, echoing the address and
+    /// tag on both arms.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, tag: u64, read: Result<Blob, FsError>) -> Self {
+        match read {
+            Ok(bytes) => Self::Ok { addr, tag, bytes },
+            Err(error) => Self::Err { addr, tag, error },
         }
     }
 }
