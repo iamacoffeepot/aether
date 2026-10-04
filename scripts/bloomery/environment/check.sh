@@ -18,7 +18,9 @@
 #      path and nothing else.
 #   3. The check runs in that image with no network, the repository
 #      bind-mounted read-only, the fetched crates as CARGO_HOME, and the target
-#      directory on a tmpfs. A missing `-dev` package fails here.
+#      directory on a tmpfs. A missing `-dev` package fails here. The same
+#      image first runs `git --version` and `python3 --version`, proving the
+#      tools the workspace tests spawn, which the build never runs.
 #
 # The throwaway image and volume are removed on exit. AETHER_ENV_CHECK_TMPFS
 # sizes the target tmpfs (default 32g).
@@ -59,6 +61,8 @@ FROM ${base}
 COPY --from=${toolchain} ${sysroot} ${sysroot}
 ENV PATH=${sysroot}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
+
+docker run --rm --network none "$check_image" sh -c 'git --version && python3 --version'
 
 docker run --rm --network none \
   -v "$repo:/src:ro" -v "$cargo_volume:/cargo" \
