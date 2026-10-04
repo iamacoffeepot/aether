@@ -10,13 +10,13 @@ use std::thread;
 use std::time::Duration;
 
 use aether_bloomery_kinds::{Name, Node, Tree};
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, artifact_blob, artifact_digest};
 use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 use super::ArtifactBatch;
 use crate::runtime::journal::DATABASE_FILE;
-use crate::{AppendError, Batch, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, artifact_blob, artifact_digest};
+use crate::{AppendError, Batch, Journal, JournalError, Seq};
 
 type TestResult = Result<(), Box<dyn Error>>;
 

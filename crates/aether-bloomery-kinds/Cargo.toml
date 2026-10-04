@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, and the tree."
+description = "The shared vocabulary of bloomery kinds: unit keys, the tree, programs, heads, and journal mail."
 
 [dependencies]
 # `HeldReply` (ADR-0243 §1): the held reply kinds here name the answer a
@@ -12,7 +12,6 @@ description = "The shared vocabulary of bloomery kinds: digests, typed citations
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
-sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 
 [lints]

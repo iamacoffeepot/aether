@@ -40,9 +40,10 @@ use std::sync::mpsc;
 
 use aether_actor::{ProtocolRef, ReplyMode};
 use aether_bloomery_kinds::{
-    ArtifactStorage, ClosureLimit, Digest, DigestMismatch, ReadArtifact, ReadArtifactResult, ReadArtifacts,
+    ArtifactStorage, ClosureLimit, DigestMismatch, ReadArtifact, ReadArtifactResult, ReadArtifacts,
     ReadArtifactsResult, ReadClosure, ReadClosureResult, Stage, StageResult,
 };
+use aether_data::Digest;
 use aether_substrate::actor::native::{BlobCheckIn, NativeCtx, SelfWake};
 
 pub use sink::{StagingBlob, StagingSink};

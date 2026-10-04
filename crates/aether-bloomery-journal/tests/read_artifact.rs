@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    ArtifactDigests, ClosureLimit, Digest, DigestMismatch, Head, OpaqueBytes, ReactorSet, ReadArtifact,
-    ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, Utf8Text, artifact_blob, artifact_digest,
+    ArtifactDigests, ClosureLimit, DigestMismatch, Head, ReactorSet, ReadArtifact, ReadArtifactResult, ReadArtifacts,
+    ReadArtifactsResult,
 };
-use aether_data::{Kind, KindId, Storage, StorageData};
+use aether_data::{Digest, Kind, KindId, OpaqueBytes, Storage, StorageData, Utf8Text, artifact_blob, artifact_digest};
 use aether_substrate::Subname;
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};

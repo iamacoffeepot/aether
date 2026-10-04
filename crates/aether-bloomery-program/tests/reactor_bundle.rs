@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::ProtocolRef;
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION,
-    ReactorRoot, Ref, SetHeads, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest,
-    reactor_declarations,
+    BUNDLE_NAMESPACE, Evaluated, Event, Head, HeadMoved, JournalEntry, Program, REACTORS_SECTION, ReactorRoot,
+    SetHeads, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, reactor_declarations,
 };
-use aether_data::{ErasedActorPath, Kind, Storage, StorageData};
+use aether_data::{Digest, ErasedActorPath, Kind, OpaqueBytes, Ref, Storage, StorageData, artifact_digest};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness};
 use aether_kinds::LoadComponent;

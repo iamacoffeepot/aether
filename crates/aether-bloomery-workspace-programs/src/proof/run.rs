@@ -6,8 +6,9 @@
 //! allotment estimate and one warm build layer. The test step also takes the
 //! bound's test env, so its key varies only with the session's env.
 
-use aether_bloomery_kinds::{Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Refusal, Tree};
 use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
+use aether_data::Ref;
 
 use super::{ProofBound, refused};
 
@@ -116,8 +117,8 @@ fn path(value: &str) -> Result<TreePath, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Digest, Ref};
     use aether_bloomery_workspace::{EnvVar, Mounts};
+    use aether_data::{Digest, Ref};
 
     use super::{CLIPPY_ARGS, ENV, TEST_ARGS, request};
     use crate::proof::{ProofBound, TestEnv};

@@ -1,8 +1,8 @@
 //! A program request, recorded before the attempt.
 
-use crate::Digest;
 use crate::program::name::{NativeOrigin, ReactorName, RuleName};
 use crate::program::reference::ProgramRef;
+use aether_data::Digest;
 
 /// Where a program request came from.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, aether_data::Storage)]

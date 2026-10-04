@@ -16,8 +16,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
 
-use aether_bloomery_kinds::{Digest, Name, Node, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
 use aether_bloomery_tar::{Limits, Rules, TreeSink, decode};
+use aether_data::{Digest, Ref};
 
 use super::volumes::Volumes;
 use super::{RunError, engine_failed};

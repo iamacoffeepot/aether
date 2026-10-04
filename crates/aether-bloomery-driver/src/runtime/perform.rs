@@ -1,10 +1,10 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::{DependsOn, ProtocolRef, ReplyMode, Target};
-use aether_bloomery_kinds::{Digest, StatusQuery};
+use aether_bloomery_kinds::StatusQuery;
 use aether_bloomery_workspace::Run;
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorMail, Kind};
+use aether_data::{ActorMail, Digest, Kind};
 use aether_http::HttpCapability;
 use aether_kinds::{Publish, Spawn};
 use aether_substrate::actor::native::NativeCtx;

@@ -8,7 +8,8 @@
 //! poisons the instance. Restart warming then starts from that cursor, and
 //! live routing delivers from the seq after it.
 
-use aether_bloomery_kinds::{Detail, Digest, Status};
+use aether_bloomery_kinds::{Detail, Status};
+use aether_data::Digest;
 
 use super::instance::{Health, Instance};
 use crate::runtime::bundles::{DeclaredRoles, LoadState};

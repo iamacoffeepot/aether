@@ -8,10 +8,11 @@ use std::sync::{Arc, mpsc};
 use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Entry, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
-    OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReactorName, ReadEvents, ReadEventsResult, RecordedHead,
-    RecordedHeadMove, Ref, RequestSource, Requested, RuleName, Transition, Utf8Text,
+    Activated, AppendRecords, AppendRecordsResult, Detail, DriverRecord, EncodedArtifact, Head, NativeOrigin,
+    ProgramName, ProgramRef, ReactionFailed, ReactorName, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove,
+    RequestSource, Requested, RuleName, Transition,
 };
+use aether_data::{Digest, OpaqueBytes, Ref, Utf8Text};
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};

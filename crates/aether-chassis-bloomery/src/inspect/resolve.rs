@@ -2,8 +2,8 @@
 //!
 //! A stored kind resolves in four steps:
 //!
-//! 1. `bloomery.artifact.text` renders its raw payload as a JSON string, and
-//!    `bloomery.artifact.bytes` as `{length, hex}`: both are raw payloads with
+//! 1. `aether.artifact.text` renders its raw payload as a JSON string, and
+//!    `aether.artifact.bytes` as `{length, hex}`: both are raw payloads with
 //!    no storage encoding.
 //! 2. The native storage-kind inventory linked into this binary.
 //! 3. The program declarations the driver answers, asked at most once per
@@ -18,10 +18,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::str;
 
-use aether_bloomery_kinds::{DeclarationsResult, Digest, OpaqueBytes, Utf8Text};
+use aether_bloomery_kinds::DeclarationsResult;
 use aether_codec::{DecodeError, decode_storage_schema};
 use aether_data::storage::storage_kind;
-use aether_data::{EnumVariant, Kind, KindId, Primitive, SchemaType, wire};
+use aether_data::{Digest, EnumVariant, Kind, KindId, OpaqueBytes, Primitive, SchemaType, Utf8Text, wire};
 use serde_json::{Map, Value};
 
 use super::kinds::MAX_HEX_BYTES;

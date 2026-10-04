@@ -6,8 +6,8 @@ mod reactor_world;
 mod support;
 
 use aether_bloomery_driver::{Command, EvaluateTicket};
-use aether_bloomery_kinds::{Detail, Digest, Evaluated, OpaqueBytes, RecordedHead, RecordedHeadMove, Utf8Text, Warmed};
-use aether_data::Kind;
+use aether_bloomery_kinds::{Detail, Evaluated, RecordedHead, RecordedHeadMove, Warmed};
+use aether_data::{Digest, Kind, OpaqueBytes, Utf8Text};
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, bundle_wasm, digest, program_head};
 

@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Digest, HeadNameError, RecordedHead, Seq};
+use aether_bloomery_kinds::{HeadNameError, RecordedHead, Seq};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode, decode_from_slice, encode_to_vec};
-use aether_data::{KindId, LabelNode, Schema, SchemaType};
+use aether_data::{Digest, KindId, LabelNode, Schema, SchemaType};
 
 use crate::view::contract::View;
 use crate::view::heads::Heads;
@@ -182,8 +182,8 @@ impl Publish for Heads {
 mod tests {
     use super::{HeadsSnapshot, Publish, PublishError, PublishedBinding};
     use crate::view::Heads;
-    use aether_bloomery_kinds::{Digest, RecordedHead};
-    use aether_data::{Kind, KindId, wire};
+    use aether_bloomery_kinds::RecordedHead;
+    use aether_data::{Digest, Kind, KindId, wire};
     use alloc::string::String;
     use alloc::vec;
 

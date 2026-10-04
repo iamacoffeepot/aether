@@ -4,11 +4,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_data::{
-    Blob, BlobReader, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData, StorageError,
+    Blob, BlobReader, Citations, Cites, Digest, Kind, KindId, MAX_READ_BYTES, OpaqueBytes, Storage, StorageData,
+    StorageError, Utf8Text,
 };
 
 use crate::artifact::blob_digest;
-use crate::{Digest, OpaqueBytes, Utf8Text};
 
 /// One portable citation collected from an encoded artifact.
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema)]

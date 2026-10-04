@@ -1,7 +1,7 @@
 //! Framing tripwire: pinned bytes identical to the journal's original.
 
-use aether_bloomery_kinds::artifact_digest;
-use aether_data::KindId;
+use super::artifact_digest;
+use crate::KindId;
 
 const TRIPWIRE_KIND: KindId = KindId(0x0123_4567_89ab_cdef);
 const TRIPWIRE_PAYLOAD: &[u8] = b"aether-bloomery-journal";

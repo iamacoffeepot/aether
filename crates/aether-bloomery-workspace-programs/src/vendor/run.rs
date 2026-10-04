@@ -9,8 +9,9 @@
 //! for every vendor run in one environment, and they share one allotment
 //! estimate.
 
-use aether_bloomery_kinds::{Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Refusal, Tree};
 use aether_bloomery_workspace::{EnvVar, Mount, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
+use aether_data::Ref;
 
 use super::{VendorInput, refused};
 
@@ -81,8 +82,9 @@ fn path(value: &str) -> Result<TreePath, Refusal> {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Digest, Ref, Tree};
+    use aether_bloomery_kinds::Tree;
     use aether_bloomery_workspace::Mounts;
+    use aether_data::{Digest, Ref};
 
     use super::{ENV, VendorInput, request};
 

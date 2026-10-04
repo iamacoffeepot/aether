@@ -1,6 +1,7 @@
 // Two arms share Heads, and refutable enum trigger cases compile as declines.
 
-use aether_bloomery_kinds::{Digest, Head, HeadMoved, Ref, SetHeads, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, SetHeads, Tree};
+use aether_data::{Digest, Ref};
 use aether_bloomery_program::{Guard, Reactor, reactor, At, Heads};
 
 const SOURCE: Head<Tree> = Head::new("source");

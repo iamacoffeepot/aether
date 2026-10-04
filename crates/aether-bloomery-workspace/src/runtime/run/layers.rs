@@ -39,8 +39,9 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{Digest, Ref, Tree, hash_bytes};
+use aether_bloomery_kinds::Tree;
 use aether_bloomery_tar::Stamp;
+use aether_data::{Digest, Ref, hash_bytes};
 
 use super::cleanup::Cleanup;
 use super::volumes::{RUN_LABEL, Volumes};
@@ -330,7 +331,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::error::Error;
 
-    use aether_bloomery_kinds::{Digest, Ref, Tree, hash_bytes};
+    use aether_bloomery_kinds::Tree;
+    use aether_data::{Digest, Ref, hash_bytes};
 
     use super::{TREE_LABEL, base_of, wanted};
     use crate::runtime::engine::{Volume, VolumeName};

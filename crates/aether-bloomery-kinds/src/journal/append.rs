@@ -3,9 +3,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::Digest;
+
 use crate::{
-    Activated, ActivationRejected, Digest, EncodedArtifact, Fault, ReactionFailed, RecordedHeadMove, Requested,
-    Transition,
+    Activated, ActivationRejected, EncodedArtifact, Fault, ReactionFailed, RecordedHeadMove, Requested, Transition,
 };
 
 /// One driver-owned record, typed with the journal cause it carries (ADR-0226 decisions 3, 6, 8).

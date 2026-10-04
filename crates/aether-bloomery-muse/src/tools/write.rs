@@ -1,8 +1,9 @@
 //! `tree.write`: create a file or replace its whole text.
 
-use aether_bloomery_kinds::{Mode, Node, Ref, Refusal};
+use aether_bloomery_kinds::{Mode, Node, Refusal};
 use aether_bloomery_program::{Async, Edited, Env, NoDetail, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 
 use crate::tools::spine::{Blocked, leaf, place};
 use crate::tools::{MAX_TEXT_BYTES, read_args};
@@ -74,8 +75,9 @@ impl Program for TreeWrite {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Node, Ref, Tree};
+    use aether_bloomery_kinds::{Node, Tree};
     use aether_bloomery_program::Edited;
+    use aether_data::Ref;
 
     use super::{TreeWrite, WriteArgs};
     use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};

@@ -9,12 +9,12 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aether_actor::{ProtocolRef, actor};
-use aether_bloomery_journal::{Digest, Journal, JournalActor, OpaqueBytes, ReadCacheBudget, Ref};
+use aether_bloomery_journal::{Journal, JournalActor, ReadCacheBudget};
 use aether_bloomery_kinds::{
     ArtifactStorage, EncodedArtifact, Name, Node, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult,
-    ReadHead, ReadHeadResult, Stage, StageResult, Tree, artifact_digest,
+    ReadHead, ReadHeadResult, Stage, StageResult, Tree,
 };
-use aether_data::{Kind, MAX_READ_BYTES};
+use aether_data::{Digest, Kind, MAX_READ_BYTES, OpaqueBytes, Ref, artifact_digest};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
 use aether_substrate::{BootError, Subname};

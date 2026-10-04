@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_bloomery_journal::{Batch, Clock, Digest, Journal, JournalActor, OpaqueBytes, ReadCacheBudget, Ref, Seq};
+use aether_bloomery_journal::{Batch, Clock, Journal, JournalActor, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
     ClosureLimit, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadHead, ReadHeadResult,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref};
 use aether_substrate::Subname;
 use aether_substrate::testing::{bare_substrate, boot_test_chassis_with};
 

@@ -4,9 +4,10 @@
 //! to load this bundle and the driver records the refusal.
 
 use aether_actor::export;
-use aether_bloomery_kinds::{Mode, OpaqueBytes, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{Mode, Refusal};
 use aether_bloomery_program::kinds::Detail;
 use aether_bloomery_program::{Async, Env, Process, Program, program};
+use aether_data::{OpaqueBytes, Ref, Utf8Text};
 use aether_process::{Run, RunResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]

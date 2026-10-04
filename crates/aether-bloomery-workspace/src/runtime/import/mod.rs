@@ -16,8 +16,9 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Detail, Ref, Tree};
+use aether_bloomery_kinds::{Detail, Tree};
 use aether_bloomery_tar::{DecodeError, Rules, decode};
+use aether_data::Ref;
 
 use super::engine::{ContainerId, Engine, EngineError};
 use super::storage::{StorageError, StorageSession};

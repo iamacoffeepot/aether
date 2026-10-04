@@ -2,10 +2,9 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use aether_bloomery_kinds::{
-    Activated, Detail, Digest, DriverRecord, Evaluated, Head, OpaqueBytes, Seq, Warm, WarmEntries, Warmed,
-};
+use aether_bloomery_kinds::{Activated, Detail, DriverRecord, Evaluated, Head, Seq, Warm, WarmEntries, Warmed};
 use aether_bloomery_program::HeadActivation;
+use aether_data::{Digest, OpaqueBytes};
 
 use crate::runtime::core::{Command, ProgramCore, WarmTicket};
 use crate::runtime::reactors::claim::Claim;

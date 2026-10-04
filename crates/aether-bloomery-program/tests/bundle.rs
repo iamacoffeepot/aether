@@ -5,12 +5,12 @@ use std::error::Error;
 use std::fs;
 
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi, ProgramName,
-    ProgramRoot, Ref, Refusal, Utf8Text, artifact_digest,
+    BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, ProgramApi, ProgramName, ProgramRoot,
+    Refusal,
 };
 use aether_bloomery_program::declarations;
 use aether_component::ComponentHostCapability;
-use aether_data::{Cites, Doc, DocNode, Kind, Storage};
+use aether_data::{Cites, Doc, DocNode, Kind, OpaqueBytes, Ref, Storage, Utf8Text, artifact_digest};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{ListComponents, ListComponentsResult, LoadComponent};

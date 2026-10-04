@@ -169,7 +169,6 @@ dependencies = [
  "aether-actor",
  "aether-data",
  "serde",
- "sha2",
  "unicode-normalization",
 ]
 
@@ -216,6 +215,7 @@ name = "aether-bloomery-tar"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery-kinds",
+ "aether-data",
 ]
 
 [[package]]
@@ -460,6 +460,7 @@ dependencies = [
  "bytemuck",
  "inventory",
  "serde",
+ "sha2",
  "uuid",
 ]
 
@@ -586,6 +587,7 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-muse",
+ "aether-data",
  "aether-harness-bloomery",
  "aether-harness-substrate",
  "plotters",

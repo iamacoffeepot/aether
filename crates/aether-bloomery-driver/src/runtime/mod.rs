@@ -98,11 +98,11 @@ use aether_actor::{ActorPath, ActorRef, ProtocolPath, ReplyMode, runtime};
 use aether_bloomery_journal::{Clock, JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecordsResult, ArtifactStorage, AwaitProcessed, BUNDLE_NAMESPACE, Call, CallOutcome,
-    ClosureLimit, Declarations, DeclarationsResult, Digest, Evaluated, Invoked, Processed, ReadArtifact,
-    ReadArtifactResult, ReadArtifactsResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed,
-    WatchHeadResult,
+    ClosureLimit, Declarations, DeclarationsResult, Evaluated, Invoked, Processed, ReadArtifact, ReadArtifactResult,
+    ReadArtifactsResult, ReadClosureResult, ReadEventsResult, Status, UnitKey, Warmed, WatchHeadResult,
 };
 use aether_bloomery_workspace::WorkspaceCapability;
+use aether_data::Digest;
 use aether_http::FetchResult;
 use aether_kinds::{PublishResult, SpawnResult};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};

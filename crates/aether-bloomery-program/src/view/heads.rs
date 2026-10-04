@@ -7,10 +7,9 @@ use core::fmt;
 use crate::view::contract::View;
 use crate::view::sequence::{SequenceError, check_next};
 use aether_bloomery_kinds::{
-    DecodeError, Digest, Entry, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
-    Seq,
+    DecodeError, Entry, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Seq,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind, Ref};
 
 /// Last move per recorded `(target KindId, name)` over a contiguous log prefix.
 ///

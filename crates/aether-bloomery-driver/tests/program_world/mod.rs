@@ -4,10 +4,10 @@
 //! so every item here is used there and the dead-code gate stays green.
 
 use aether_bloomery_kinds::{
-    Call, ClosureArtifact, Digest, Fault, FaultReason, Invoked, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef,
-    RequestSource, Requested, Transition,
+    Call, ClosureArtifact, Fault, FaultReason, Invoked, NativeOrigin, ProgramName, ProgramRef, RequestSource,
+    Requested, Transition,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes};
 
 use crate::support::{World, program_head};
 

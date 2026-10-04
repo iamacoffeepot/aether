@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use crate::{Head, OpaqueBytes};
+use aether_data::OpaqueBytes;
+
+use crate::Head;
 
 /// Why a reactor set's stored member order was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

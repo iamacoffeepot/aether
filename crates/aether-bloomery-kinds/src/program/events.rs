@@ -1,9 +1,10 @@
 //! Events that bind a name to a program and that record one execution of it.
 
+use aether_data::{Digest, Ref};
+
 use crate::program::Program;
 use crate::program::name::ProgramName;
 use crate::program::reference::ProgramRef;
-use crate::{Digest, Ref};
 
 /// Points the head string `name` at a declaration. Last move wins. First
 /// binding, rebinding after a signature change, and pointing back at an

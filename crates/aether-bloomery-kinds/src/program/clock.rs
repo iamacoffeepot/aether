@@ -18,7 +18,9 @@
 //! between the work and the timer, and the loser's outcome is ignored by
 //! the rule that reads it.
 
-use crate::{Digest, Head, OpaqueBytes};
+use aether_data::{Digest, OpaqueBytes};
+
+use crate::Head;
 
 /// The reserved program head a rule or a native caller names the clock by.
 ///

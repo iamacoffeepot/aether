@@ -1,7 +1,7 @@
 //! Portable `Entry::decode` without the journal store.
 
-use aether_bloomery_kinds::{DecodeError, Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_data::{Invariant, Kind, Storage, StorageData, StorageError};
+use aether_bloomery_kinds::{DecodeError, Entry, Head, HeadMoved, Program, Seq, Tree};
+use aether_data::{Digest, Invariant, Kind, Ref, Storage, StorageData, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.kinds.note")]

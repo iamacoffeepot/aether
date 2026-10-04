@@ -5,10 +5,12 @@ use alloc::vec::Vec;
 
 use aether_data::storage::{StorageElement, StorageError};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{CastEligible, Citations, Cites, EnumVariant, LabelNode, Schema, SchemaType, VariantLabel};
+use aether_data::{
+    CastEligible, Citations, Cites, EnumVariant, LabelNode, OpaqueBytes, Ref, Schema, SchemaType, VariantLabel,
+};
 
+use crate::Tree;
 use crate::tree::path::Path;
-use crate::{OpaqueBytes, Ref, Tree};
 
 /// One entry in a [`super::Tree`].
 ///

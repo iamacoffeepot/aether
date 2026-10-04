@@ -6,10 +6,11 @@
 use std::fmt::Display;
 
 use aether_actor::export;
-use aether_bloomery_kinds::{Mode, OpaqueBytes, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Mode, Refusal, Tree};
 use aether_bloomery_program::kinds::Detail;
 use aether_bloomery_program::{Async, Env, Program, Workspace, program};
 use aether_bloomery_workspace::{Environment, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName};
+use aether_data::{OpaqueBytes, Ref};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.workspace.run.input")]

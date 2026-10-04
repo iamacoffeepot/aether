@@ -24,7 +24,7 @@ to live in the same workspace.
 
 | Crate | Owns | Reach for it when… |
 |---|---|---|
-| `aether-data` | typed ids, schemas, canonical kind identity, wire-facing data traits | a value must cross an actor or process boundary |
+| `aether-data` | typed ids, schemas, canonical kind identity, wire-facing data traits, content-addressed artifact digests and the typed citations `Ref` / `ErasedRef` | a value must cross an actor or process boundary |
 | `aether-codec` | schema-driven JSON/wire conversion and framed streams | translating public values or carrying frames over a stream |
 | `aether-math` | vectors, matrices, quaternions, bounds | sharing math between native and wasm code |
 | `aether-kinds` | cross-cutting substrate vocabulary and shared descriptors | the kind is genuinely substrate-wide; capability-local kinds belong with their capability |
@@ -93,7 +93,7 @@ the bundle driver on the `aether-bloomery` binary.
 
 | Crate | Owns |
 |---|---|
-| `aether-bloomery-kinds` | the shared `no_std` vocabulary: digests, typed citations, the tree, programs, heads, driver and reactor records and mail |
+| `aether-bloomery-kinds` | the shared `no_std` vocabulary: unit keys, the tree, programs, heads, driver and reactor records and mail |
 | `aether-bloomery-journal` | the append-only, single-writer journal root: a `SQLite` log of typed events plus one digest-named blob file per content-addressed artifact, held under an exclusive lock (ADR-0220) |
 | `aether-bloomery-program` | the guest SDK for bloomery authoring: stateless wasm programs (`Program`, `Env`, invoke mail); the `view` module's folds over a journal prefix (the typed `Heads` last-move fold and the ADR-0226 request and activation folds); the `reactor` module's preparation and pure evaluation of typed stored-event arms (ADR-0222); and the `bundle` export generator, one root for a module's programs and reactors |
 | `aether-bloomery-derive` | the authoring macros: `#[program]`, `#[view]` / `#[fold]`, `#[reactor]` / `#[rule]`, and the `bundle` generator's codegen |

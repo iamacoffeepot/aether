@@ -18,10 +18,9 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use aether_data::KindId;
+use aether_data::{Digest, KindId};
 use tempfile::{NamedTempFile, TempPath};
 
-use crate::Digest;
 use crate::runtime::artifact::split_artifact;
 use crate::runtime::journal::JournalError;
 

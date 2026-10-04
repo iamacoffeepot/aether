@@ -52,11 +52,11 @@ use std::io::{self, Read};
 use std::iter;
 
 use aether_bloomery_kinds::{
-    ArtifactDigests, ClosureArtifact, ClosureLimit, Digest, Node, OpaqueBytes, ReadArtifact, ReadArtifactResult,
-    ReadArtifacts, ReadArtifactsResult, ReadClosure, ReadClosureResult, Ref, Tree, VerifiedRead,
+    ArtifactDigests, ClosureArtifact, ClosureLimit, Node, ReadArtifact, ReadArtifactResult, ReadArtifacts,
+    ReadArtifactsResult, ReadClosure, ReadClosureResult, Tree, VerifiedRead,
 };
 use aether_bloomery_tar::{SourceBlob, TreeSource};
-use aether_data::{Kind, Storage};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Storage};
 
 use super::{StorageAnswer, StorageCall, StorageError, StoragePort};
 

@@ -19,8 +19,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use aether_bloomery_kinds::{ErasedRef, Head, OpaqueBytes, ProgramName, Ref, Utf8Text};
+use aether_bloomery_kinds::{Head, ProgramName};
 use aether_bloomery_program::{ToolDefinitionError, ToolSchema, function_name};
+use aether_data::{ErasedRef, OpaqueBytes, Ref, Utf8Text};
 
 /// One program offered to the model, with the head of the bundle it lives in,
 /// the definition sent for it, the schemas of its input and result, and the
@@ -461,8 +462,8 @@ invariant_errors!(OfferedToolsError, CallIdError, FunctionNameError, ToolCallsEr
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref};
-    use aether_data::{Storage, StorageData};
+    use aether_bloomery_kinds::ProgramName;
+    use aether_data::{Ref, Storage, StorageData};
 
     use super::{
         CallId, CallIdError, FunctionName, FunctionNameError, OfferedTools, OfferedToolsError, ToolCalls,

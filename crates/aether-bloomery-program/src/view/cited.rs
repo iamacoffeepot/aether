@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, DigestMismatch, Ref};
-use aether_data::{KindId, Storage, StorageError};
+use aether_bloomery_kinds::{ClosureArtifact, DigestMismatch};
+use aether_data::{Digest, KindId, Ref, Storage, StorageError};
 
 /// The artifacts one journal entry cites directly, read by the driver before
 /// the entry was delivered.

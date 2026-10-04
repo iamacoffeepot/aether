@@ -3,11 +3,11 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    Activated, Detail, Digest, Entry, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef,
-    ReactionFailed, ReactorName, RecordedHead, RecordedHeadMove, RequestSource, Requested, RuleName, Seq, Transition,
+    Activated, Detail, Entry, Fault, FaultReason, Head, NativeOrigin, ProgramName, ProgramRef, ReactionFailed,
+    ReactorName, RecordedHead, RecordedHeadMove, RequestSource, Requested, RuleName, Seq, Transition,
 };
 use aether_bloomery_program::{Outcome, Request, RequestFoldError, Requests, SequenceError};
-use aether_data::{Storage, StorageData};
+use aether_data::{Digest, OpaqueBytes, Storage, StorageData};
 
 fn entry_for<K: Storage + Clone>(seq: u64, cause: Option<u64>, event: &K) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {

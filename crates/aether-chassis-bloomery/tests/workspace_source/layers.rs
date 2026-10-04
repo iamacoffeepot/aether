@@ -4,12 +4,12 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::Ref;
 use aether_bloomery_workspace::testing::{
     LAYER_OVERLAY, LAYER_UPPER, LAYER_WORK, LayerScript, RUN_COLLECTOR, RUN_CONTAINER, RUN_VOLUME, RunScript,
     StubDaemon, StubReply, StubRequest, mountpoint,
 };
 use aether_bloomery_workspace::{Resource, RunError, RunResult};
+use aether_data::Ref;
 
 use crate::run::{FLAGS, Inputs, built_work, outcome, over, run_against, script};
 use crate::support::{TestResult, answering, lines, serving};

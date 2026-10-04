@@ -5,11 +5,11 @@ use std::fs;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Activated, BUNDLE_NAMESPACE, Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, OpaqueBytes, Processed,
-    ProgramName, ProgramRef, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested,
-    RuleName, Transition, Utf8Text,
+    Activated, BUNDLE_NAMESPACE, EncodedArtifact, Head, MoveHead, MoveHeadResult, Processed, ProgramName, ProgramRef,
+    ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, RequestSource, Requested, RuleName, Transition,
 };
 use aether_bloomery_program::{Activations, HeadActivation};
+use aether_data::{Digest, OpaqueBytes, Ref, Utf8Text};
 use aether_harness_bloomery::{BloomeryHarness, Record, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{PublishResult, Spawn, SpawnResult};

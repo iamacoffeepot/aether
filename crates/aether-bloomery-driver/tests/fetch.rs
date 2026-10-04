@@ -7,10 +7,8 @@
 mod support;
 
 use aether_bloomery_driver::{CallerId, Command};
-use aether_bloomery_kinds::{
-    Digest, DigestMismatch, OpaqueBytes, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_digest,
-};
-use aether_data::{Kind, KindId};
+use aether_bloomery_kinds::{DigestMismatch, ReadArtifact, ReadArtifactResult};
+use aether_data::{Digest, Kind, KindId, OpaqueBytes, Utf8Text, artifact_digest};
 use support::{World, bundle_wasm, digest};
 
 /// Fetch `digest` the way a bundle root's fetch-on-miss reaches the core.

@@ -7,10 +7,10 @@
 
 use aether_bloomery_driver::Command;
 use aether_bloomery_kinds::{
-    Activated, ActivationRejected, Digest, DriverRecord, Head, OpaqueBytes, ReactionFailed, ReactorSet, RecordedHead,
-    RecordedHeadMove, Requested,
+    Activated, ActivationRejected, DriverRecord, Head, ReactionFailed, ReactorSet, RecordedHead, RecordedHeadMove,
+    Requested,
 };
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, OpaqueBytes, Storage, StorageData};
 
 use crate::support::{World, bundle_wasm};
 

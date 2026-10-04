@@ -8,7 +8,8 @@
 //! maps; the double only advances its cursor over replies it actually
 //! returns, plus replies tests feed by hand through its [`note_evaluated`](Reactor::note_evaluated).
 
-use aether_bloomery_kinds::{Detail, Digest, Evaluated, Status, Warmed};
+use aether_bloomery_kinds::{Detail, Evaluated, Status, Warmed};
+use aether_data::Digest;
 
 /// One scripted reactor root behind a mailbox.
 #[derive(Debug, Default)]

@@ -7,14 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Name, Node, OpaqueBytes, ProgramName, Ref, Refusal, Tree,
+    ClosureArtifact, EncodedArtifact, Invoke, Invoked, Name, Node, ProgramName, Refusal, Tree,
 };
 use aether_bloomery_program::{Program, invoke};
 use aether_bloomery_workspace::{
     EnvVar, Environment, Platform, Provides, RustToolchain, Tool, ToolName, Tools, TreePath,
 };
 use aether_bloomery_workspace_programs::environment::{EnvironmentMerge, MergeInput};
-use aether_data::{Cites, Storage};
+use aether_data::{Cites, Digest, OpaqueBytes, Ref, Storage};
 
 /// The toolchain directory rustup installs for the repository's channel.
 const DIRECTORY: &str = "1.97.1-x86_64-unknown-linux-gnu";

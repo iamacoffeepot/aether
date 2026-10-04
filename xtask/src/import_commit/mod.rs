@@ -28,8 +28,9 @@ mod tests;
 
 use std::path::Path;
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, UnitKey};
+use aether_bloomery_kinds::{EncodedArtifact, UnitKey};
 use aether_codec::frame::max_frame_size;
+use aether_data::Digest;
 use anyhow::{Context, Result};
 use clap::Args;
 

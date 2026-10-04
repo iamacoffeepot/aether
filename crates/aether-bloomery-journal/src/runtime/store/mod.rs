@@ -20,8 +20,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, artifact_blob, hash_bytes};
-use aether_data::{Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData};
+use aether_data::{
+    Blob, BlobReader, Citation, Citations, Cites, Digest, Kind, KindId, MAX_READ_BYTES, OpaqueBytes, Ref, Storage,
+    StorageData, artifact_blob, hash_bytes,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use crate::runtime::blobs::{BlobDir, PendingSyncs};

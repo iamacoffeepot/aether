@@ -2,8 +2,9 @@
 //! rule calls that program.
 
 use aether_actor::export;
-use aether_bloomery_kinds::{CallInput, CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{CallInput, CallProgram, HeadMoved, Mode, ProgramName, Refusal};
 use aether_bloomery_program::{At, Env, Guard, NoViews, Program, Sync, program, reactor};
+use aether_data::{Ref, Utf8Text};
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]

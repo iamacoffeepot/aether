@@ -12,14 +12,14 @@ use aether_bloomery_bootstrap::BootstrapConfig;
 use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::{Batch, JournalActor, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove,
-    RequestSource, Requested, Transition, Tree, UnitKey, WatchHeadResult,
+    Head, Name, NativeOrigin, Node, ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, RequestSource, Requested,
+    Transition, Tree, UnitKey, WatchHeadResult,
 };
 use aether_bloomery_program::Heads;
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
 use aether_bloomery_workspace::{Environment, ImageRef};
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::{Kind, LoadName};
+use aether_data::{Kind, LoadName, OpaqueBytes};
 use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_kinds::{LoadComponent, LoadResult};

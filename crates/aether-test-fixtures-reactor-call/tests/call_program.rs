@@ -6,10 +6,10 @@ use std::fs;
 
 use aether_actor::{ProtocolRef, Undeclared};
 use aether_bloomery_kinds::{
-    BUNDLE_NAMESPACE, CallInput, CallProgram, Digest, EncodedArtifact, Evaluated, Event, Head, HeadMoved, JournalEntry,
-    OpaqueBytes, ProgramName, Ref, Tree, Utf8Text, artifact_digest,
+    BUNDLE_NAMESPACE, CallInput, CallProgram, EncodedArtifact, Evaluated, Event, Head, HeadMoved, JournalEntry,
+    ProgramName, Tree,
 };
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Storage, StorageData, Utf8Text, artifact_digest};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;

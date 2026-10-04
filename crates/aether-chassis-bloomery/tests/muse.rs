@@ -10,15 +10,15 @@ use std::thread;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Call, CallOutcome, Detail, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef,
-    RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, artifact_digest,
+    Call, CallOutcome, Detail, Fault, FaultReason, Head, NativeOrigin, ProgramName, ProgramRef, RecordedHead,
+    RecordedHeadMove, RequestSource, Requested,
 };
 use aether_bloomery_muse::{
     Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput, TurnItem,
     TurnItems, TurnOutcome, TurnResult,
 };
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::{Kind, Schema, SchemaType, wire};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Schema, SchemaType, artifact_digest, wire};
 use aether_harness_bloomery::{BloomeryHarness, Record, SeededJournal, StubVendor};
 use aether_harness_substrate::test_helpers::require_wasm;
 use clap::Parser;
