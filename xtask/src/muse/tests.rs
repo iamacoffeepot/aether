@@ -232,6 +232,7 @@ fn reference(digest: Digest) -> Value {
 /// A turn that completed after reporting `usage`.
 fn turn(batch: &mut Batch, usage: Usage) -> Result<Digest> {
     let outcome = json!({ "Completed": {
+        "reasoning": [],
         "text": reference(Ref::of_text("done").digest()),
         "usage": {
             "input_tokens": usage.input,
