@@ -14,10 +14,10 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_muse::{
     Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
-    MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput,
-    RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen, SessionRecord, ToolCall,
-    ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
-    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered, offered_with_proofs,
+    MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning, ReasoningEffort,
+    ReasoningId, RecordInput, RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen,
+    SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput,
+    TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered, offered_with_proofs,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -584,6 +584,11 @@ fn called(result: &TurnResult) -> (Ref<Utf8Text>, Vec<ToolCall>) {
     (*text, calls.as_slice().to_vec())
 }
 
+/// The reasoning item `called_echo.json`'s reply carries, as the next turn resends it.
+fn echo_thought() -> Reasoning {
+    Reasoning::new(ReasoningId::new("rs_0010").expect("reasoning id"), Ref::of_text("gAAAAABecho-reasoning"))
+}
+
 /// The arguments `call` decoded to.
 fn decoded(call: &ToolCall) -> ErasedRef {
     let ToolInput::Decoded { input, .. } = call.input() else {
@@ -635,7 +640,8 @@ fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestR
     // Catches calls run out of order or over the wrong input, a next turn that is not an exact extension of the
     // previous one or that `muse.turn` refuses, instructions lost between the open and the fetch, a limit counting
     // tool calls instead of turns, a rest recorded from the wrong turn, a first head move comparing against anything
-    // but an unbound head, and folds that diverge between warm-up and live delivery.
+    // but an unbound head, folds that diverge between warm-up and live delivery, and the reply's reasoning dropped
+    // between turns or resent anywhere but ahead of its text.
     let mut driver = Driver::new(&[CALLED_ECHO, ENDED]);
     let (opened, tree) = open(&mut driver, 2)?;
     let first_input = driver.first_turn(opened);
@@ -671,8 +677,12 @@ fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestR
         outputs.push(TurnItem::CallOutput { call_id: call.call_id().clone(), output });
     }
 
-    let replayed =
-        [TurnItem::message(Role::Assistant, text), TurnItem::Call(call_a.clone()), TurnItem::Call(call_b.clone())];
+    let replayed = [
+        TurnItem::Reasoning(echo_thought()),
+        TurnItem::message(Role::Assistant, text),
+        TurnItem::Call(call_a.clone()),
+        TurnItem::Call(call_b.clone()),
+    ];
     let items = first.items().iter().cloned().chain(replayed).chain(outputs).collect();
     let next = TurnInput::new(
         first.endpoint().clone(),
@@ -862,7 +872,8 @@ fn reaction_failed(driver: &mut Driver, cause: u64, reason: &str) -> u64 {
 #[test]
 fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -> TestResult {
     // Catches a fault that leaves the session unrecorded or its head unmoved, a record that replays the faulted call
-    // (leaving it unanswered) or drops the call answered before it, and a failed rest that loses the session's tree.
+    // (leaving it unanswered) or drops the call answered before it or the reasoning ahead of its text, and a failed
+    // rest that loses the session's tree.
     let mut driver = Driver::new(&[CALLED_ECHO]);
     let (opened, tree) = open(&mut driver, 2)?;
     let first_turn = driver.follow(opened);
@@ -884,6 +895,7 @@ fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -
     let output = ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result };
     let first: TurnInput = driver.value(driver.first_turn(opened));
     let answered = [
+        TurnItem::Reasoning(echo_thought()),
         TurnItem::message(Role::Assistant, text),
         TurnItem::Call(calls[0].clone()),
         TurnItem::CallOutput { call_id: calls[0].call_id().clone(), output },
@@ -1631,7 +1643,7 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
 #[test]
 fn a_reply_without_a_call_sends_another_turn_with_the_reply_text_and_the_nudge() -> TestResult {
     // Catches the old rest-on-reply: a plain completed reply must send another `muse.turn` carrying the previous
-    // items, the reply text, and the nudge, and must record nothing yet.
+    // items, the reply's reasoning, the reply text, and the nudge, and must record nothing yet.
     let plain = include_str!("../fixtures/completed.json");
     let mut driver = Driver::new(&[plain, ENDED]);
     let (opened, _) = open(&mut driver, 2)?;
@@ -1648,9 +1660,11 @@ fn a_reply_without_a_call_sends_another_turn_with_the_reply_text_and_the_nudge()
     };
     let next: TurnInput = TurnInput::decode_storage(&payload(&next))?.value;
     let first: TurnInput = driver.value(driver.first_turn(opened));
+    let thought = Reasoning::new(ReasoningId::new("rs_0001")?, Ref::of_text("gAAAAABcompleted-reasoning"));
     let reply = TurnItem::message(Role::Assistant, text);
     let nudge = TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT));
-    assert_eq!(next.items().split_at(first.items().len()), (first.items(), [reply, nudge].as_slice()));
+    let replied = [TurnItem::Reasoning(thought), reply, nudge];
+    assert_eq!(next.items().split_at(first.items().len()), (first.items(), replied.as_slice()));
 
     let second_turn = driver.follow(first_turn);
     let (_, ended) = called(&driver.result(second_turn));

@@ -10,7 +10,9 @@ mod tools;
 
 use crate::session::TurnSettings;
 
-pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order};
+pub use items::{
+    Reasoning, ReasoningId, ReasoningIdError, Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order,
+};
 pub use limits::{
     Endpoint, EndpointError, InputLimit, InputLimitError, ModelName, ModelNameError, OutputBudget, OutputBudgetError,
     ReasoningEffort,

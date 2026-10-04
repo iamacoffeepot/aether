@@ -9,7 +9,7 @@ use core::borrow::Borrow;
 
 use aether_bloomery_kinds::{Detail, OpaqueBytes, Ref, Utf8Text};
 
-use crate::input::ToolCalls;
+use crate::input::{Reasoning, ToolCalls};
 
 /// Why [`HttpStatus::new`] or decode refused a status code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,10 +112,14 @@ impl TurnUsage {
 pub enum TurnOutcome {
     /// The model finished its answer with a reply without calls, which the
     /// loop nudges back for another turn.
-    Completed { text: Ref<Utf8Text>, usage: TurnUsage },
+    ///
+    /// `reasoning` is the reply's reasoning items in reply order, resent ahead of the reply.
+    Completed { reasoning: Vec<Reasoning>, text: Ref<Utf8Text>, usage: TurnUsage },
     /// The model finished by asking for one or more calls, each to a program the turn offered. Any message text
     /// the reply also carried is kept.
-    Called { calls: ToolCalls, text: Ref<Utf8Text>, usage: TurnUsage },
+    ///
+    /// `reasoning` is the reply's reasoning items in reply order, resent ahead of the reply.
+    Called { reasoning: Vec<Reasoning>, calls: ToolCalls, text: Ref<Utf8Text>, usage: TurnUsage },
     /// The model stopped early, for example on the output budget; the partial text is kept.
     Incomplete { text: Ref<Utf8Text>, reason: Detail, usage: TurnUsage },
     /// The model refused; the refusal text is kept instead of an answer.

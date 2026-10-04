@@ -69,7 +69,12 @@ program is tested without spending money.
    full `input` array every turn. It also sends `prompt_cache_key`, the hex
    sha256 of the first `input` item as sent: every turn of a session resends
    that item unchanged, so every turn shares one key, and the key stays a
-   function of the closure. The recorded closure (the input plus every
+   function of the closure. Because the vendor stores nothing, the request
+   also sends `include: ["reasoning.encrypted_content"]`, so each reply
+   carries its reasoning as encrypted content, and the input resends the
+   reasoning items kept from earlier replies (decisions 3 and 4) ahead of
+   the items they produced, so the model keeps its chain of thought across
+   turns. The recorded closure (the input plus every
    cited text and definition) is therefore the whole request except the
    credential. A fork is a
    different closure that shares its leading text artifacts, which the
@@ -94,7 +99,7 @@ program is tested without spending money.
      its result. An empty list offers nothing and the
      request sends no `tools` field (decision 9).
    - `items: TurnItems`: non-empty, at most 4096 items. Each `TurnItem` is
-     one of three arms:
+     one of four arms:
      - `Message { role, text }`: a `Role` (`Developer`, `User`, or
        `Assistant`) plus a `Ref<Utf8Text>`, sent as a message item.
        System-style instructions are a leading `Developer` message; there is
@@ -117,6 +122,12 @@ program is tested without spending money.
        JSON; or `Refused(Ref<Utf8Text>)`, sent as its stored text. A result
        cites its own schema, since a later turn may no longer offer the
        program.
+     - `Reasoning { id, encrypted }`: a reasoning item an earlier reply
+       carried, resent as a `reasoning` item with an empty `summary`, which
+       the input schema requires. `id` is a `ReasoningId` (1 to 256 bytes of
+       ASCII graphic characters) and `encrypted` a `Ref<Utf8Text>` citing the
+       encrypted content, sent verbatim. It sits ahead of the items its reply
+       produced.
 
      The last item is a `User` message or a `CallOutput`; every
      `CallOutput` names the `call_id` of an earlier `Call`; and no two
@@ -144,8 +155,8 @@ program is tested without spending money.
    - `status: HttpStatus`, a validated code in `100..=599`.
    - `body: Ref<OpaqueBytes>`, the raw response body, always staged, so a
      classification bug can be corrected later from the record.
-   - `outcome: TurnOutcome`: `Completed { text, usage }`;
-     `Called { calls, text, usage }` when a completed reply asks for one or
+   - `outcome: TurnOutcome`: `Completed { reasoning, text, usage }`;
+     `Called { reasoning, calls, text, usage }` when a completed reply asks for one or
      more calls (decision 9); `Incomplete { text, reason, usage }` when the
      vendor status is
      `incomplete`, keeping the partial text; `Declined { refusal, usage }`
@@ -181,8 +192,14 @@ program is tested without spending money.
      zero.
 
    The text is every `output_text` part of every `message` output item,
-   concatenated in order; reasoning items never contribute, and a `Called`
-   outcome keeps any message text the reply also carried. Every staged
+   concatenated in order; reasoning items contribute no text, and a `Called`
+   outcome keeps any message text the reply also carried. `Called` and
+   `Completed` keep the reply's reasoning items as `Reasoning` values in
+   reply order, each with its encrypted content staged, and skip an item
+   that carries none, since there is nothing to resend; a kept item whose id
+   is not a valid `ReasoningId` makes the reply `Unreadable`. `Incomplete`
+   and `Declined` keep no reasoning: those turns rest the session, and a
+   resent reasoning item needs the item it produced after it. Every staged
    artifact is cited by the result, so the SDK's orphan check passes.
 
 5. **Failure recording: a fault only for a failure with no reply that a
@@ -256,7 +273,7 @@ program is tested without spending money.
      function name refuses the run before any fetch: the input was built
      wrong, and nothing was bought.
    - A completed reply with `function_call` output items is
-     `Called { calls, text, usage }`, every call in order as
+     `Called { reasoning, calls, text, usage }`, every call in order as
      a `ToolCall` with the arguments staged verbatim. `calls` is a
      `ToolCalls`: 1 to 128 calls, no `call_id` twice. A call names an
      offered program only when its name is exactly that program's function

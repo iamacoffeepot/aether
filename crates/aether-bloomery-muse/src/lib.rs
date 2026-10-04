@@ -30,7 +30,11 @@
 //! program never runs a call. A later turn replays the call as
 //! [`TurnItem::Call`] and its [`ToolOutput`] as [`TurnItem::CallOutput`]:
 //! a stored result, which the program renders to JSON with the result schema
-//! the output cites, or the refusal text, sent as stored.
+//! the output cites, or the refusal text, sent as stored. The request asks
+//! for each reply's reasoning as encrypted content, and a called or completed
+//! reply keeps every reasoning item that carries it as a [`Reasoning`], which
+//! the next turn resends as [`TurnItem::Reasoning`] ahead of the reply's text
+//! and calls, so the model keeps its chain of thought across turns.
 //!
 //! The program links no tool's types; everything it decodes or renders with
 //! is cited. The rendering is deterministic, so the request a turn sends is a
@@ -118,8 +122,8 @@ mod tools;
 pub use input::{
     CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, InputLimit, InputLimitError,
     ModelName, ModelNameError, OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError,
-    ReasoningEffort, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
-    TurnItemsError,
+    Reasoning, ReasoningEffort, ReasoningId, ReasoningIdError, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput,
+    ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};

@@ -41,6 +41,9 @@ pub enum TurnItem {
         /// The program's result, or the reason its arguments did not decode.
         output: ToolOutput,
     },
+    /// A reasoning item an earlier reply carried, resent ahead of the items
+    /// the reply produced.
+    Reasoning(Reasoning),
 }
 
 impl TurnItem {
@@ -48,6 +51,99 @@ impl TurnItem {
     #[must_use]
     pub const fn message(role: Role, text: Ref<Utf8Text>) -> Self {
         Self::Message { role, text }
+    }
+}
+
+/// Why [`ReasoningId::new`] or decode refused a reasoning id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningIdError {
+    /// The id was empty.
+    Empty,
+    /// Longer than [`ReasoningId::MAX_BYTES`].
+    TooLong,
+    /// A byte was not an ASCII graphic character.
+    BadChar,
+}
+
+impl ReasoningIdError {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too-long",
+            Self::BadChar => "bad-char",
+        }
+    }
+}
+
+/// The vendor's id for one reasoning item: 1 to 256 bytes of ASCII graphic
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct ReasoningId(String);
+
+impl ReasoningId {
+    /// Longest accepted id in bytes.
+    pub const MAX_BYTES: usize = 256;
+
+    /// Accept a reasoning id.
+    ///
+    /// # Errors
+    ///
+    /// The [`ReasoningIdError`] naming the rule the id broke.
+    pub fn new(id: impl Into<String>) -> Result<Self, ReasoningIdError> {
+        let id = id.into();
+        Self::check(&id)?;
+        Ok(Self(id))
+    }
+
+    /// Borrow the id.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(id: &str) -> Result<(), ReasoningIdError> {
+        if id.is_empty() {
+            return Err(ReasoningIdError::Empty);
+        }
+        if id.len() > Self::MAX_BYTES {
+            return Err(ReasoningIdError::TooLong);
+        }
+        let graphic = id.bytes().all(|byte| byte.is_ascii_graphic());
+        if !graphic {
+            return Err(ReasoningIdError::BadChar);
+        }
+        Ok(())
+    }
+}
+
+/// A reply's reasoning item, kept so the next turn resends it: the vendor's
+/// id and the cited encrypted content, which the client hands back as sent.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+pub struct Reasoning {
+    /// The vendor's id for the item, resent as sent.
+    id: ReasoningId,
+    /// The cited encrypted content, resent as sent.
+    encrypted: Ref<Utf8Text>,
+}
+
+impl Reasoning {
+    /// A reasoning item with `id`, citing its encrypted content.
+    #[must_use]
+    pub const fn new(id: ReasoningId, encrypted: Ref<Utf8Text>) -> Self {
+        Self { id, encrypted }
+    }
+
+    /// The vendor's id for the item.
+    #[must_use]
+    pub const fn id(&self) -> &ReasoningId {
+        &self.id
+    }
+
+    /// The cited encrypted content.
+    #[must_use]
+    pub const fn encrypted(&self) -> Ref<Utf8Text> {
+        self.encrypted
     }
 }
 
@@ -158,7 +254,7 @@ pub fn check_order(items: &[TurnItem]) -> Result<BTreeSet<&CallId>, TurnItemsErr
     let mut unanswered = BTreeSet::new();
     for item in items {
         match item {
-            TurnItem::Message { .. } => {}
+            TurnItem::Message { .. } | TurnItem::Reasoning(_) => {}
             TurnItem::Call(call) => {
                 if !calls.insert(call.call_id()) {
                     return Err(TurnItemsError::DuplicateCall);
@@ -176,7 +272,7 @@ pub fn check_order(items: &[TurnItem]) -> Result<BTreeSet<&CallId>, TurnItemsErr
     Ok(unanswered)
 }
 
-invariant_errors!(TurnItemsError);
+invariant_errors!(TurnItemsError, ReasoningIdError);
 
 #[cfg(test)]
 mod tests {

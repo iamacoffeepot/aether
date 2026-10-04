@@ -224,14 +224,17 @@ fn rest(
 ) -> Result<(Vec<TurnItem>, RestReason), Refusal> {
     let said = |text: &Ref<Utf8Text>| vec![TurnItem::message(Role::Assistant, *text)];
     match (outcome, outputs.is_empty()) {
-        (TurnOutcome::Completed { text, usage, .. }, true) => Ok((said(text), limited(turn, usage))),
+        (TurnOutcome::Completed { reasoning, text, usage }, true) => {
+            let reply = reasoning.iter().cloned().map(TurnItem::Reasoning).chain(said(text)).collect();
+            Ok((reply, limited(turn, usage)))
+        }
         (TurnOutcome::Incomplete { text, .. }, true) if *text == Ref::of_text("") => {
             Ok((Vec::new(), RestReason::Incomplete))
         }
         (TurnOutcome::Incomplete { text, .. }, true) => Ok((said(text), RestReason::Incomplete)),
         (TurnOutcome::Declined { refusal, .. }, true) => Ok((said(refusal), RestReason::Declined)),
-        (TurnOutcome::Called { calls, text, usage, .. }, _) if answers(calls.as_slice(), outputs) => {
-            let reply = replay(*text, calls.as_slice(), outputs);
+        (TurnOutcome::Called { reasoning, calls, text, usage }, _) if answers(calls.as_slice(), outputs) => {
+            let reply = replay(reasoning, *text, calls.as_slice(), outputs);
             match ended {
                 Some(ending) => {
                     let rested = ending.rest_reason();
@@ -257,15 +260,15 @@ fn limited(turn: &TurnInput, usage: &TurnUsage) -> RestReason {
 }
 
 /// What a called turn whose first `outputs.len()` calls were answered before
-/// the session failed adds to the conversation: its text, those calls, and
-/// their outputs.
+/// the session failed adds to the conversation: its reasoning, its text,
+/// those calls, and their outputs.
 fn partial(outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<Vec<TurnItem>, Refusal> {
-    let TurnOutcome::Called { calls, text, .. } = outcome else {
+    let TurnOutcome::Called { reasoning, calls, text, .. } = outcome else {
         return Err(refused("only a turn that asked for calls has answered calls"));
     };
     let calls = calls.as_slice().get(..outputs.len()).filter(|calls| answers(calls, outputs));
     let calls = calls.ok_or_else(|| refused("the outputs do not answer the turn's first calls in order"))?;
-    Ok(replay(*text, calls, outputs))
+    Ok(replay(reasoning, *text, calls, outputs))
 }
 
 /// Refuses an `outcome` that rests a session instead of ending it.
@@ -293,7 +296,10 @@ mod tests {
 
     use super::{Answered, CallAnswer, RecordInput, SessionRecord};
     use crate::input::tests::call;
-    use crate::input::{CallId, OfferedTools, Role, ToolCall, ToolCalls, ToolOutput, TurnInput, TurnItem, TurnItems};
+    use crate::input::{
+        CallId, OfferedTools, Reasoning, ReasoningId, Role, ToolCall, ToolCalls, ToolOutput, TurnInput, TurnItem,
+        TurnItems,
+    };
     use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
     use crate::session::fixture::{run, settings, stored};
     use crate::session::state::{Failure, RestReason, Session};
@@ -338,8 +344,18 @@ mod tests {
         ToolCalls::new(vec![call]).expect("calls")
     }
 
+    /// The reasoning item [`called`]'s reply carried.
+    fn thought() -> Reasoning {
+        Reasoning::new(ReasoningId::new("rs_1:rs_1").expect("reasoning id"), Ref::of_text("encrypted"))
+    }
+
     fn called() -> TurnOutcome {
-        TurnOutcome::Called { calls: calls(), text: Ref::of_text("Checking."), usage: USAGE }
+        TurnOutcome::Called {
+            reasoning: vec![thought()],
+            calls: calls(),
+            text: Ref::of_text("Checking."),
+            usage: USAGE,
+        }
     }
 
     fn tree() -> Ref<Tree> {
@@ -366,7 +382,8 @@ mod tests {
     #[test]
     fn a_rest_records_the_reply_or_at_the_limit_every_call_and_its_output() {
         // Catches a rest recording the wrong reply or reason, a limit rest whose items differ from what the next turn
-        // would have sent, and outputs that do not answer the calls being recorded anyway.
+        // would have sent (its reasoning dropped or not ahead of its text), and outputs that do not answer the calls
+        // being recorded anyway.
         let turn = turn(vec![user()]);
         let rested = |outcome, outputs| {
             let result = result(outcome);
@@ -379,8 +396,11 @@ mod tests {
             record(&turn, &result, &input)
         };
 
-        let completed = rested(TurnOutcome::Completed { text: Ref::of_text("done"), usage: USAGE }, Vec::new())
-            .expect("a completed turn records");
+        let completed = rested(
+            TurnOutcome::Completed { reasoning: Vec::new(), text: Ref::of_text("done"), usage: USAGE },
+            Vec::new(),
+        )
+        .expect("a completed turn records");
         assert_eq!(completed.items(), [user(), TurnItem::message(Role::Assistant, Ref::of_text("done"))]);
         assert_eq!(*completed.rested(), RestReason::TurnLimit);
         assert_eq!(*completed.settings(), turn.settings());
@@ -390,6 +410,7 @@ mod tests {
             limited.items(),
             [
                 user(),
+                TurnItem::Reasoning(thought()),
                 TurnItem::message(Role::Assistant, Ref::of_text("Checking.")),
                 TurnItem::Call(calls().as_slice()[0].clone()),
                 TurnItem::Call(calls().as_slice()[1].clone()),
@@ -413,7 +434,7 @@ mod tests {
         assert!(limit > 0, "the fixture limit is non-zero");
         let rested = |input_tokens| {
             let usage = TurnUsage::new(input_tokens, 0, 0, 0);
-            let result = result(TurnOutcome::Completed { text: Ref::of_text("done"), usage });
+            let result = result(TurnOutcome::Completed { reasoning: Vec::new(), text: Ref::of_text("done"), usage });
             let input = RecordInput::rested(
                 Ref::of_encoded(&turn).expect("turn"),
                 Ref::of_encoded(&result).expect("result"),
@@ -448,6 +469,7 @@ mod tests {
         };
         let usage = |input_tokens| TurnUsage::new(input_tokens, 0, 0, 0);
         let called_at = |input_tokens| TurnOutcome::Called {
+            reasoning: Vec::new(),
             calls: calls(),
             text: Ref::of_text("Checking."),
             usage: usage(input_tokens),
@@ -477,6 +499,7 @@ mod tests {
         let turn = turn(vec![user()]);
         let rested = |ending: Ending| {
             let outcome = TurnOutcome::Called {
+                reasoning: Vec::new(),
                 calls: end_calls("end", &ending),
                 text: Ref::of_text("Finishing up."),
                 usage: USAGE,
@@ -527,8 +550,12 @@ mod tests {
         // Catches a rest that guesses a reason when the end call's output is missing, refused, or of another kind.
         let turn = turn(vec![user()]);
         let ending = Ending::Done { summary: "All briefed changes are in the tree.".into() };
-        let outcome =
-            TurnOutcome::Called { calls: end_calls("end", &ending), text: Ref::of_text("Finishing up."), usage: USAGE };
+        let outcome = TurnOutcome::Called {
+            reasoning: Vec::new(),
+            calls: end_calls("end", &ending),
+            text: Ref::of_text("Finishing up."),
+            usage: USAGE,
+        };
         let outcome = result(outcome);
         let rested = |outputs| {
             let input = RecordInput::rested(
@@ -589,6 +616,7 @@ mod tests {
             session.items(),
             [
                 user(),
+                TurnItem::Reasoning(thought()),
                 TurnItem::message(Role::Assistant, Ref::of_text("Checking.")),
                 TurnItem::Call(calls().as_slice()[0].clone()),
                 answer("a").item(),
@@ -616,7 +644,7 @@ mod tests {
         let rejected = failed(TurnOutcome::Rejected).expect("a rejected turn records");
         assert_eq!(rejected.items(), turn.items());
         assert!(matches!(rejected.rested(), RestReason::Failed(Failure::Turn { .. })));
-        let completed = TurnOutcome::Completed { text: Ref::of_text("done"), usage: USAGE };
+        let completed = TurnOutcome::Completed { reasoning: Vec::new(), text: Ref::of_text("done"), usage: USAGE };
         assert!(matches!(failed(completed), Err(Refusal::Refused { .. })), "a resting outcome refuses");
     }
 }
