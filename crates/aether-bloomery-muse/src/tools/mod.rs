@@ -23,6 +23,7 @@
 //! unchanged), since a refused run is a fault and ends the session. Only a
 //! tree node or blob the store cannot give refuses.
 
+mod diff;
 mod echo;
 mod edit;
 mod end;
