@@ -11,6 +11,7 @@
     {
       "id": "rs_0001",
       "type": "reasoning",
+      "encrypted_content": "gAAAAABcompleted-reasoning",
       "summary": [
         { "type": "summary_text", "text": "The user asks what a bloomery is." }
       ]

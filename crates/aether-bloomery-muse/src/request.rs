@@ -1,6 +1,10 @@
 //! The one `Fetch` a turn sends: the offered tools and the whole
 //! conversation, stateless.
 //!
+//! The vendor stores nothing (`store: false`), so the body asks for each reply's reasoning as encrypted content
+//! (`include: ["reasoning.encrypted_content"]`), and the conversation resends the reasoning items earlier replies
+//! carried, ahead of the items they produced.
+//!
 //! The body also carries a prompt cache key derived from the conversation's first item, which every turn of a session
 //! resends unchanged, so the vendor routes a session's turns to the servers that hold its prefix.
 //!
@@ -36,6 +40,7 @@ const fn timeout_millis(reasoning: ReasoningEffort) -> u32 {
 struct Body<'a> {
     model: &'a str,
     store: bool,
+    include: [&'static str; 1],
     max_output_tokens: u32,
     reasoning: Reasoning,
     prompt_cache_key: String,
@@ -50,7 +55,8 @@ struct Reasoning {
 }
 
 /// One responses-API input item. A message carries no `type`, as before
-/// tools; a replayed call and its output carry theirs.
+/// tools; a replayed call, its output, and a resent reasoning item carry
+/// theirs.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Item<'a> {
@@ -70,6 +76,14 @@ enum Item<'a> {
         kind: &'static str,
         call_id: &'a str,
         output: &'a str,
+    },
+    /// The input schema requires `summary` on a reasoning item, and the vendor accepts it empty.
+    Reasoning {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        id: &'a str,
+        encrypted_content: &'a str,
+        summary: [(); 0],
     },
 }
 
@@ -100,6 +114,9 @@ impl<'a> Item<'a> {
             },
             TurnItem::CallOutput { call_id, .. } => {
                 Self::FunctionCallOutput { kind: "function_call_output", call_id: call_id.as_str(), output: text }
+            }
+            TurnItem::Reasoning(reasoning) => {
+                Self::Reasoning { kind: "reasoning", id: reasoning.id().as_str(), encrypted_content: text, summary: [] }
             }
         })
     }
@@ -160,6 +177,7 @@ pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Res
     let body = Body {
         model: input.model().as_str(),
         store: false,
+        include: ["reasoning.encrypted_content"],
         max_output_tokens: input.max_output_tokens().get(),
         reasoning: Reasoning { effort: effort(input.reasoning()) },
         prompt_cache_key: cache_key(items.first().ok_or_else(|| refused("the turn sends no items".into()))?),
@@ -192,8 +210,8 @@ mod tests {
     use super::fetch;
     use crate::input::tests::offered_tool;
     use crate::input::{
-        CallId, Endpoint, FunctionName, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role,
-        ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
+        CallId, Endpoint, FunctionName, InputLimit, ModelName, OfferedTools, OutputBudget, Reasoning, ReasoningEffort,
+        ReasoningId, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
     };
 
     fn input(tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
@@ -268,10 +286,10 @@ mod tests {
 
     #[test]
     fn request_resends_every_item_in_order_with_store_off() {
-        // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, a
-        // conversation handle, an extra header, the wrong method, URL, or timeout, and a reasoning effort not threaded
-        // into the timeout, a misspelled wire value for `xhigh` or `max` (the endpoint refuses `x-high`), and a new
-        // effort left on a shorter wait.
+        // Catches dropped or reordered items, the wrong part type on assistant items, `store` left on, the request
+        // not asking for the reasoning's encrypted content, a conversation handle, an extra header, the wrong method,
+        // URL, or timeout, a reasoning effort not threaded into the timeout, a misspelled wire value for `xhigh` or
+        // `max` (the endpoint refuses `x-high`), and a new effort left on a shorter wait.
         let texts = ["Be brief.", "What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
         let roles = [Role::Developer, Role::User, Role::Assistant, Role::User];
         let items = roles.iter().zip(&texts).map(|(&role, text)| TurnItem::message(role, Ref::of_text(text))).collect();
@@ -304,6 +322,7 @@ mod tests {
             json!({
                 "model": "muse-spark-1.3",
                 "store": false,
+                "include": ["reasoning.encrypted_content"],
                 "max_output_tokens": 512,
                 "reasoning": { "effort": "medium" },
                 "input": [
@@ -320,37 +339,47 @@ mod tests {
     fn request_offers_each_tool_and_replays_calls_beside_their_outputs() {
         // Catches unsent or reordered tools, a replayed call under the program name instead of its function name, a
         // refused call's name normalized or re-derived instead of sent as the model wrote it, replay items in the
-        // wrong shape, and `store` left on.
+        // wrong shape, a resent reasoning item dropped, misplaced, without its `summary`, or with its encrypted
+        // content in the wrong field, and `store` left on.
         let definitions = [
             json!({ "type": "function", "name": "workspace-read", "parameters": { "type": "object" } }),
             json!({ "type": "function", "name": "muse-turn", "description": "One turn.", "strict": false }),
         ];
         let definition_texts = definitions.iter().map(ToString::to_string).collect::<Vec<_>>();
-        let texts =
-            ["Read the notes.", r#"{"path":"notes.md"}"#, "a bloom", "{}", "no such tool: Muse Turn"].map(String::from);
+        let texts = [
+            "Read the notes.",
+            "gAAAAB-encrypted",
+            r#"{"path":"notes.md"}"#,
+            "a bloom",
+            "{}",
+            "no such tool: Muse Turn",
+        ]
+        .map(String::from);
         let id = |id: &str| CallId::new(id).expect("call id");
         let decoded = ToolCall::decoded(
             id("call_1"),
             program("workspace.read"),
-            Ref::of_text(&texts[1]),
+            Ref::of_text(&texts[2]),
             ErasedRef::new(KindId(1), Ref::of_text("input").digest()),
         );
         let unoffered = ToolCall::refused(
             id("call_2"),
             FunctionName::new("Muse Turn").expect("name"),
-            Ref::of_text(&texts[3]),
             Ref::of_text(&texts[4]),
+            Ref::of_text(&texts[5]),
         );
         let output = |call: &str, text: &str| TurnItem::CallOutput {
             call_id: id(call),
             output: ToolOutput::Refused(Ref::of_text(text)),
         };
+        let thought = Reasoning::new(ReasoningId::new("rs_1:rs_2").expect("reasoning id"), Ref::of_text(&texts[1]));
         let items = vec![
             TurnItem::message(Role::User, Ref::of_text(&texts[0])),
+            TurnItem::Reasoning(thought),
             TurnItem::Call(decoded),
-            output("call_1", &texts[2]),
+            output("call_1", &texts[3]),
             TurnItem::Call(unoffered),
-            output("call_2", &texts[4]),
+            output("call_2", &texts[5]),
         ];
         let input = input(offered(&["workspace.read", "muse.turn"]), items);
 
@@ -362,11 +391,18 @@ mod tests {
             json!({
                 "model": "muse-spark-1.3",
                 "store": false,
+                "include": ["reasoning.encrypted_content"],
                 "max_output_tokens": 512,
                 "reasoning": { "effort": "medium" },
                 "tools": definitions,
                 "input": [
                     { "role": "user", "content": [{ "type": "input_text", "text": "Read the notes." }] },
+                    {
+                        "type": "reasoning",
+                        "id": "rs_1:rs_2",
+                        "encrypted_content": "gAAAAB-encrypted",
+                        "summary": [],
+                    },
                     {
                         "type": "function_call",
                         "call_id": "call_1",

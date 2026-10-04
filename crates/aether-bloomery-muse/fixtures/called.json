@@ -9,8 +9,9 @@
   "store": false,
   "output": [
     {
-      "id": "rs_0002",
+      "id": "rs_0002:rs_0002",
       "type": "reasoning",
+      "encrypted_content": "gAAAAABcalled-reasoning",
       "summary": [
         { "type": "summary_text", "text": "The notes answer this; read them, then ask a sub-turn." }
       ]

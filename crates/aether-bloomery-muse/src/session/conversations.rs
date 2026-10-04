@@ -26,7 +26,7 @@ use aether_bloomery_program::{
     At, Cited, CitedError, ClockUntil, ErasedEdited, Ran, Reactor, ViewCursor, tooled, view,
 };
 
-use crate::input::{Role, ToolCalls, ToolInput, ToolOutput, TurnInput, TurnItem};
+use crate::input::{Reasoning, Role, ToolCalls, ToolInput, ToolOutput, TurnInput, TurnItem};
 use crate::program::MuseTurn;
 use crate::result::{TurnOutcome, TurnResult};
 use crate::session::MuseSession;
@@ -90,6 +90,9 @@ struct Waiting {
     /// The result of the turn that asked for the calls; `None` for seeds,
     /// which no turn asked for.
     result: Option<Ref<TurnResult>>,
+    /// The reasoning items of the turn that asked for the calls, resent ahead
+    /// of its text; empty for seeds.
+    reasoning: Vec<Reasoning>,
     text: Ref<Utf8Text>,
     calls: ToolCalls,
     outputs: Vec<CallAnswer>,
@@ -174,7 +177,7 @@ impl Conversation {
                 Next::Settled(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
             _ => {
-                let replayed = replay(waiting.text, waiting.calls.as_slice(), &waiting.outputs);
+                let replayed = replay(&waiting.reasoning, waiting.text, waiting.calls.as_slice(), &waiting.outputs);
                 Next::Turn(
                     waiting
                         .input
@@ -355,8 +358,16 @@ impl View for Conversations {
             None => self.keep(key, conversation, at.seq),
             Some(seeds) => {
                 let (calls, text, first) = (seeds.clone(), Ref::of_text(""), input.first_turn());
-                let waiting =
-                    Waiting { input: first, turn, result: None, text, calls, outputs: Vec::new(), full: false };
+                let waiting = Waiting {
+                    input: first,
+                    turn,
+                    result: None,
+                    reasoning: Vec::new(),
+                    text,
+                    calls,
+                    outputs: Vec::new(),
+                    full: false,
+                };
                 conversation.waiting = Some(waiting);
                 self.advance(key, conversation, at.seq);
             }
@@ -392,21 +403,24 @@ impl View for Conversations {
                 conversation.next = Some(Next::Wait { turn: run.input(), until });
                 self.keep(key, conversation, at.seq);
             }
-            TurnOutcome::Called { calls, text, usage } => {
+            TurnOutcome::Called { reasoning, calls, text, usage } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
                 let (turn, result) = (run.input(), Some(run.result()));
                 let full = input.input_limit().reached(usage.input_tokens());
-                conversation.waiting = Some(Waiting { input, turn, result, text, calls, outputs: Vec::new(), full });
+                let outputs = Vec::new();
+                conversation.waiting = Some(Waiting { input, turn, result, reasoning, text, calls, outputs, full });
                 self.advance(key, conversation, at.seq);
             }
-            TurnOutcome::Completed { text, usage } => {
+            TurnOutcome::Completed { reasoning, text, usage } => {
                 conversation.turns += 1;
                 conversation.retries = 0;
                 let spent = conversation.turns >= conversation.limit.get();
                 let full = input.input_limit().reached(usage.input_tokens());
-                let nudged =
-                    [TurnItem::message(Role::Assistant, text), TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT))];
+                let nudged = reasoning.into_iter().map(TurnItem::Reasoning).chain([
+                    TurnItem::message(Role::Assistant, text),
+                    TurnItem::message(Role::User, Ref::of_text(NUDGE_TEXT)),
+                ]);
                 conversation.next = Some(if spent || full {
                     Next::Rest(RecordInput::rested(run.input(), run.result(), Vec::new(), conversation.tree))
                 } else {
@@ -607,8 +621,16 @@ mod tests {
         let (turn, tree) = (Ref::of_encoded(&input).expect("turn"), Ref::of_encoded(&Tree::empty()).expect("tree"));
         let mut conversation = Conversation::new(TurnLimit::new(4).expect("limit"), turn, tree);
         let text = Ref::of_text("");
-        conversation.waiting =
-            Some(Waiting { input, turn, result: None, text, calls, outputs: Vec::new(), full: false });
+        conversation.waiting = Some(Waiting {
+            input,
+            turn,
+            result: None,
+            reasoning: Vec::new(),
+            text,
+            calls,
+            outputs: Vec::new(),
+            full: false,
+        });
 
         let mut conversations = Conversations::default();
         conversations.advance(SessionKey::new(1), conversation, Seq(2));
