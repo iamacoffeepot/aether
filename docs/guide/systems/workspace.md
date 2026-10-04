@@ -485,6 +485,8 @@ Run the steps on the host whose daemon the actor dials.
    - `cargo fetch --locked` runs in the toolchain image, so the base carries
      no network tooling or CA certificates;
    - a throwaway image adds only the toolchain directory to the base;
+   - that image runs `git --version` and `python3 --version` with no network,
+     the tools xtask's tests and the verifier spawn;
    - `cargo check --workspace --locked --offline` runs in it with no network,
      the repository mounted read-only, and the target directory on a tmpfs.
 
