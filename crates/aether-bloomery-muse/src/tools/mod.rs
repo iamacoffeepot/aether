@@ -14,8 +14,8 @@
 //! `proof.clippy`, which formats the tree and checks it with clippy, and
 //! `proof.test`, which formats the tree and runs its workspace tests with
 //! the session's test env; each returns the formatted tree as an `Edited`
-//! and binds the session's `ProofBound`, its environment, vendor tree, and
-//! test env.
+//! and binds the session's `ProofBound`, its environment, vendor tree, cargo
+//! config, and test env.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -38,7 +38,7 @@ use std::iter;
 use aether_bloomery_kinds::{EncodedArtifact, Head, OpaqueBytes, Ref, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
-use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, TestProof};
+use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, TestProof, cargo_config_artifacts};
 use aether_data::{Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
@@ -95,7 +95,7 @@ pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArt
     let (tools, mut artifacts) = offered();
     let bound = EncodedArtifact::new(proofs).expect("the proof bound encodes");
     let (proofs, cited): (Vec<_>, Vec<_>) = proof_offers(Ref::from_digest(bound.digest())).into_iter().unzip();
-    artifacts.extend(cited.into_iter().flatten().chain([bound]));
+    artifacts.extend(cited.into_iter().flatten().chain([bound]).chain(cargo_config_artifacts()));
     let tools = tools.as_slice().iter().cloned().chain(proofs).collect();
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
