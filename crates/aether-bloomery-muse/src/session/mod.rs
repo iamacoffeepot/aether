@@ -1,14 +1,15 @@
 //! A Muse session: a reactor loop over its turns and tool calls.
 //!
-//! A session starts only with a `muse.session.open` run and resumes only with
-//! a `muse.session.continue` run whose `from` is the session's latest record;
-//! a bare `muse.turn` run is never a session. After that, recorded entries
-//! decide everything, and the loop's rules only pass references: every new
-//! artifact comes out of a program.
+//! A session starts only with a `muse.session.open` run, which draws the
+//! session's prompt cache key unless the opener named one to share, and
+//! resumes only with a `muse.session.continue` run whose `from` is the
+//! session's latest record; a bare `muse.turn` run is never a session. After
+//! that, recorded entries decide everything, and the loop's rules only pass
+//! references: every new artifact comes out of a program.
 //!
 //! - `open_turn` and `continue_turn` run `muse.turn` over the open's
 //!   first turn, which sends the instructions as the leading developer
-//!   message, or the continue's result.
+//!   message with the session's cache key, or the continue's result.
 //! - `seed` runs the first of an open's seeded reads instead, when it has
 //!   any: each seed is a `tree.read` call `muse.session.open` built from a
 //!   path, and the loop runs the seeds through the same path as a turn's

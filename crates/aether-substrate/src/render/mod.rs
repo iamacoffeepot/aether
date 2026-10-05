@@ -42,14 +42,14 @@ pub use material::{
 };
 pub use pipeline::{MainPassRecord, Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use program::{
-    PROGRAM_DEPTH_FORMAT, PROGRAM_FULLSCREEN_ENTRY, PROGRAM_FULLSCREEN_WGSL, PassTimestamps, ProgramComputePass,
-    ProgramComputePipelineSpec, ProgramDepthAttachment, ProgramDepthState, ProgramDrawCommand, ProgramDrawPass,
-    ProgramDrawPassOpen, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler, ProgramInputView, ProgramPassDraw,
-    ProgramPipelineSpec, ProgramTransientSpec, ProgramVertexBuffer, begin_program_draw_pass,
-    build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
-    build_program_pipeline, create_program_depth_transient, create_program_transient, program_inputs_layout,
-    program_storage_layout, program_uniform_layout, record_program_compute_pass, record_program_draw_pass,
-    record_program_pass,
+    PROGRAM_DEPTH_FORMAT, PROGRAM_FULLSCREEN_ENTRY, PROGRAM_FULLSCREEN_WGSL, PassTimestamps, ProgramColorAttachment,
+    ProgramColorTarget, ProgramComputePass, ProgramComputePipelineSpec, ProgramDepthAttachment, ProgramDepthSampler,
+    ProgramDepthState, ProgramDrawCommand, ProgramDrawPass, ProgramDrawPassOpen, ProgramDrawPipelineSpec, ProgramInput,
+    ProgramInputSampler, ProgramInputView, ProgramPassDraw, ProgramPipelineSpec, ProgramTransientSpec,
+    ProgramVertexBuffer, begin_program_draw_pass, build_fullscreen_vertex_module, build_program_compute_pipeline,
+    build_program_draw_pipeline, build_program_pipeline, create_program_depth_transient, create_program_transient,
+    program_inputs_layout, program_storage_layout, program_uniform_layout, record_program_compute_pass,
+    record_program_draw_pass, record_program_pass,
 };
 pub use quad::{
     CompositeBlend, OverlayDraw, OverlaySource, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,

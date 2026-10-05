@@ -5,7 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery_kinds::{EncodedArtifact, ProgramName};
-use aether_bloomery_muse::{OpenInput, RequiredProofs, SessionOpen, offered, offered_with_proofs, required_proofs};
+use aether_bloomery_muse::{
+    CacheKey, OpenInput, RequiredProofs, SessionOpen, offered, offered_with_proofs, required_proofs,
+};
 use aether_bloomery_program::function_name;
 use aether_bloomery_workspace::{EnvVar, TreePath};
 use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
@@ -76,6 +78,10 @@ pub(super) struct OpenArgs {
     /// nothing.
     #[arg(long, requires = "environment")]
     require: Vec<String>,
+    /// The prompt cache key this session shares with every other session
+    /// opened with it, drawn fresh when omitted.
+    #[arg(long)]
+    share_cache_key: Option<String>,
 }
 
 /// Open the session and print `tree=<digest>`, `session=<key>`, and
@@ -105,7 +111,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         .map_or_else(|| offered(Ref::from_digest(tree)), |proofs| offered_with_proofs(Ref::from_digest(tree), proofs));
     artifacts.extend(required_args);
 
-    let input = OpenInput::new(
+    let mut input = OpenInput::new(
         args.settings.settings(tools)?,
         Ref::of_text(&instructions),
         Ref::of_text(&brief),
@@ -114,6 +120,9 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         seeds,
         required,
     );
+    if let Some(key) = shared_key(args.share_cache_key.as_deref())? {
+        input = input.sharing(key);
+    }
     let open = EncodedArtifact::new(&input)?;
     let input = Ref::from_digest(open.digest());
     artifacts.extend([EncodedArtifact::text(&instructions), EncodedArtifact::text(&brief), open]);
@@ -124,6 +133,11 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
     println!("session={session}");
     println!("after={}", session - 1);
     Ok(())
+}
+
+/// The session's shared prompt cache key, when `--share-cache-key` names one.
+pub(super) fn shared_key(value: Option<&str>) -> Result<Option<CacheKey>> {
+    value.map(|key| CacheKey::new(key).map_err(|error| anyhow!("--share-cache-key {key:?}: {error}"))).transpose()
 }
 
 /// The proofs' environment, vendor tree, and test env, when the environment and vendor digests are given.

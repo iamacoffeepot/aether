@@ -3,7 +3,8 @@
 //!
 //! A turn's input ([`TurnInput`], `muse.turn.input`) names the endpoint, the
 //! model, the programs offered as tools, the whole conversation as a flat
-//! list of cited items, the output budget, and the reasoning effort. The
+//! list of cited items, the output budget, the reasoning effort, the input
+//! limit, and the session's cache key. The
 //! program reads everything those cite, sends one `Fetch` with `store: false`, the
 //! offered tool definitions, and the full conversation, and records the reply
 //! as a [`TurnResult`] (`muse.turn.result`): the HTTP status, the raw body
@@ -126,10 +127,10 @@ mod session;
 mod tools;
 
 pub use input::{
-    CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, InputLimit, InputLimitError,
-    ModelName, ModelNameError, OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError,
-    Reasoning, ReasoningEffort, ReasoningId, ReasoningIdError, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput,
-    ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
+    CacheKey, CacheKeyError, CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, InputLimit,
+    InputLimitError, ModelName, ModelNameError, OfferedTool, OfferedTools, OfferedToolsError, OutputBudget,
+    OutputBudgetError, Reasoning, ReasoningEffort, ReasoningId, ReasoningIdError, Role, ToolCall, ToolCalls,
+    ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};

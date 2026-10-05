@@ -548,7 +548,8 @@ impl View for Conversations {
         match opened.seeds() {
             None => self.keep(key, conversation, at.seq),
             Some(seeds) => {
-                let (calls, text, first) = (seeds.clone(), Ref::of_text(""), input.first_turn());
+                let first = input.first_turn(opened.cache_key().clone());
+                let (calls, text) = (seeds.clone(), Ref::of_text(""));
                 let waiting = Waiting {
                     input: first,
                     turn,
@@ -843,7 +844,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{Conversation, Conversations, Waiting};
-    use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls};
+    use crate::input::{CacheKey, CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls};
     use crate::session::fixture::settings;
     use crate::session::gate::RequiredProofs;
     use crate::session::state::{SessionKey, TurnLimit};
@@ -866,8 +867,12 @@ mod tests {
             echo.bound(),
             echo.result(),
         );
-        let input = settings(OfferedTools::new(vec![echo.clone(), foreign]).expect("tools"))
-            .open(Ref::of_text("rules"), Ref::of_text("hi"));
+        let key = CacheKey::new("test-key").expect("key");
+        let input = settings(OfferedTools::new(vec![echo.clone(), foreign]).expect("tools")).open(
+            Ref::of_text("rules"),
+            Ref::of_text("hi"),
+            key,
+        );
 
         let call =
             ToolCall::decoded(CallId::new("call-1").expect("id"), program.clone(), Ref::of_text("{}"), echo.bound());

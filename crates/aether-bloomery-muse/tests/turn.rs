@@ -6,9 +6,9 @@ use aether_bloomery_kinds::{
     ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Refusal,
 };
 use aether_bloomery_muse::{
-    CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, MUSE, ModelName, MuseTurn,
-    OfferedTool, OfferedTools, OutputBudget, Reasoning, ReasoningEffort, ReasoningId, Role, ToolCall, ToolInput,
-    ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome, TurnResult,
+    CacheKey, CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, MUSE, ModelName,
+    MuseTurn, OfferedTool, OfferedTools, OutputBudget, Reasoning, ReasoningEffort, ReasoningId, Role, ToolCall,
+    ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome, TurnResult, TurnSettings,
 };
 use aether_bloomery_program::{
     AsyncSession, NoBound, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
@@ -84,15 +84,15 @@ fn start_turn(
         closure.extend([text(&tool.definition), stored(&tool.input)?, stored(&tool.result)?]);
     }
     closure.push(stored(&NoBound)?);
-    let input = TurnInput::new(
+    let settings = TurnSettings::new(
         Endpoint::new(URL)?,
         ModelName::new("muse-spark-1.3")?,
         OfferedTools::new(offered)?,
-        TurnItems::new(items)?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
         InputLimit::new(u64::MAX).expect("limit"),
     );
+    let input = TurnInput::new(settings, TurnItems::new(items)?, CacheKey::new("test-key").expect("key"));
     let input_artifact = stored(&input)?;
     closure.push(input_artifact.clone());
 

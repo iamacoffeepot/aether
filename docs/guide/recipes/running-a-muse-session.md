@@ -152,6 +152,8 @@ after=<seq>
   required proof that runs out of time or memory three times answers the end
   call the same way. `Blocked` and `Asked` ends are not gated, and a continue
   keeps the gate.
+- `--share-cache-key <text>`: the prompt cache key this session shares with
+  every other session opened with it, drawn fresh when omitted.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of

@@ -33,7 +33,7 @@
 //!   the verdict and similarity directly.
 
 use crate::runtime::config::parse_clear_color;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::iter;
 use std::mem;
 use std::path::PathBuf;
@@ -66,6 +66,9 @@ mod capture;
 mod config;
 pub use config::{DEFAULT_CLEAR_COLOR, apply_manifest_clear_color};
 mod device;
+// The program and texture-array requests that arrived before the first
+// render device, kept until it is installed.
+mod awaiting_device;
 // The ADR-0246 draw-set registry: retained lists of draws, each checked
 // when its set is made or patched, holding the geometries and instance
 // buffers they name.
@@ -113,6 +116,8 @@ use self::pipeline::{OverlayObservation, record_material_batches, record_overlay
 use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_offscreen};
 #[cfg(feature = "desktop")]
 use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTargets};
+
+use self::awaiting_device::AwaitingDevice;
 
 // These seam items are `pub` (visible in `render`) in their now-nested child
 // modules, so the re-export up to runtime level keeps that exact visibility.
@@ -223,6 +228,10 @@ pub struct RenderCapabilityState {
     shape_observation: Mutex<Vec<DrawShapes>>,
 
     pending_capture: Option<PendingCapture>,
+    /// Requests that need the render device and arrived before the first
+    /// one, in arrival order. Installing that device answers every entry,
+    /// so this is non-empty only while the device is unbooted.
+    awaiting_device: VecDeque<AwaitingDevice>,
 
     assets_dir: Option<PathBuf>,
 }
@@ -320,9 +329,16 @@ impl RenderCapabilityState {
     /// selects the adapter/device and builds shared pipelines; later
     /// attachments must support the same copy-compatible color format.
     /// Every fallible operation completes before insertion, so failure leaves
-    /// both the target map and shared GPU state unchanged.
+    /// both the target map and shared GPU state unchanged. `ctx` is the
+    /// render actor's own: the first attachment installs the device, which
+    /// answers every request that was waiting for one.
     #[cfg(feature = "desktop")]
-    pub fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
+    pub fn attach_window<M: ReplyMode, A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        path: ErasedActorPath,
+        window: Arc<Window>,
+    ) -> Result<(), String> {
         if self.offscreen_size.is_some() {
             return Err("cannot attach a window target to an explicitly surfaceless render runtime".to_owned());
         }
@@ -345,10 +361,8 @@ impl RenderCapabilityState {
         };
 
         if let Some(FirstWindowGpu { context, gpu, wire_pipeline }) = install {
-            self.device_recovery.install_initial(&gpu.device);
             self.desktop_gpu = Some(context);
-            self.gpu = Some(gpu);
-            self.wire_pipeline = wire_pipeline;
+            self.install_first_device(ctx, gpu, wire_pipeline);
         }
         Ok(())
     }
@@ -454,10 +468,72 @@ impl RenderCapabilityState {
         })
     }
 
+    /// Whether a request that needs the render device must wait for it: no
+    /// device has ever been installed. A lost or unusable device is not
+    /// waited on; such a request is answered at once with the device error.
+    fn awaits_first_device(&self) -> bool {
+        let unpublished = self.gpu.is_none();
+        let unbooted = self.device_recovery.is_unbooted();
+        unpublished && unbooted
+    }
+
+    /// Publish the first render device, then answer every request that was
+    /// waiting for one, in arrival order, each with the answer it gets now.
+    /// `ctx` is the render actor's own, which answers the held replies.
+    fn install_first_device<M: ReplyMode, A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        gpu: RenderGpu,
+        wire_pipeline: Option<wgpu::RenderPipeline>,
+    ) {
+        self.device_recovery.install_initial(&gpu.device);
+        self.wire_pipeline = wire_pipeline;
+        self.gpu = Some(gpu);
+
+        while let Some(waiting) = self.awaiting_device.pop_front() {
+            match waiting {
+                AwaitingDevice::ProgramRegister { mail, held } => {
+                    held.answer(ctx, &self.answer_program_register(mail));
+                }
+                AwaitingDevice::CreateTextureArray { mail, held } => {
+                    held.answer(ctx, &self.answer_create_texture_array(mail));
+                }
+            }
+        }
+    }
+
+    /// The reply a `ProgramRegister` gets from the device as it stands:
+    /// the device error while it is lost or unusable, otherwise the
+    /// registry's verdict on the mail.
+    fn answer_program_register(&mut self, mail: ProgramRegister) -> ProgramRegisterResult {
+        if let Err(error) = self.service_device_for_request() {
+            return ProgramRegisterResult::Err { error };
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return ProgramRegisterResult::Err { error: "the render device is not published".to_owned() };
+        };
+
+        self.programs.register(gpu, mail)
+    }
+
+    /// The reply a `CreateTextureArray` gets from the device as it stands,
+    /// checked against that device's layer ceiling.
+    fn answer_create_texture_array(&mut self, mail: CreateTextureArray) -> CreateTextureArrayResult {
+        if let Err(error) = self.service_device_for_request() {
+            return CreateTextureArrayResult::Err { error };
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return CreateTextureArrayResult::Err { error: "the render device is not published".to_owned() };
+        };
+
+        self.textures.create_array(mail, gpu.device.limits().max_texture_array_layers)
+    }
+
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
-    /// `attach_window`, never by a frame or a shared handle.
-    fn ensure_offscreen_gpu_booted(&mut self) {
-        if self.gpu.is_some() || !self.device_recovery.is_unbooted() {
+    /// `attach_window`, never by a frame or a shared handle. `ctx` is the
+    /// render actor's own, handed to the install.
+    fn ensure_offscreen_gpu_booted<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) {
+        if !self.awaits_first_device() {
             return;
         }
         let Some((width, height)) = self.offscreen_size else {
@@ -472,9 +548,7 @@ impl RenderCapabilityState {
             booted.polygon_mode,
             booted.build_overlay,
         );
-        self.device_recovery.install_initial(&gpu.device);
-        self.wire_pipeline = wire_pipeline;
-        self.gpu = Some(gpu);
+        self.install_first_device(ctx, gpu, wire_pipeline);
     }
 
     fn build_offscreen_gpu(
@@ -888,6 +962,7 @@ impl NativeActor for RenderCapability {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
+            awaiting_device: VecDeque::new(),
             assets_dir: params.assets_dir,
         })
     }
@@ -961,24 +1036,29 @@ impl NativeActor for RenderCapability {
 
     /// `CreateTextureArray` (ADR-0246 decision 6), on the owned texture
     /// registry. The layer ceiling is the granted device's, so the
-    /// offscreen GPU boots here if configured; on desktop a create before
-    /// the first window attaches replies `Err` rather than parking.
+    /// offscreen GPU boots here if configured. A create the device can
+    /// answer is answered before the handler returns, on the caller's
+    /// chain. One that arrives before the first device (desktop: before
+    /// the first window attaches) is kept without holding that chain, and
+    /// answered when the device is installed.
     #[handler::request]
     fn on_create_texture_array(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         mail: CreateTextureArray,
-    ) -> CreateTextureArrayResult {
-        state.ensure_offscreen_gpu_booted();
-        if let Err(error) = state.service_device_for_request() {
-            return CreateTextureArrayResult::Err { error };
+    ) -> Pending<CreateTextureArrayResult> {
+        state.ensure_offscreen_gpu_booted(ctx);
+        if state.awaits_first_device() {
+            let (pending, held) = ctx.defer::<CreateTextureArrayResult>();
+            state.awaiting_device.push_back(AwaitingDevice::CreateTextureArray { mail, held });
+
+            return pending;
         }
-        let Some(gpu) = state.gpu.as_ref() else {
-            return CreateTextureArrayResult::Err {
-                error: "the render GPU is not booted; create texture arrays after the first window attaches".to_owned(),
-            };
-        };
-        state.textures.create_array(mail, gpu.device.limits().max_texture_array_layers)
+
+        let (pending, held) = ctx.hold::<CreateTextureArrayResult>();
+        held.answer(ctx, &state.answer_create_texture_array(mail));
+
+        pending
     }
 
     /// `WriteTextureLayer` (ADR-0246 decision 6), on the owned texture
@@ -1101,25 +1181,29 @@ impl NativeActor for RenderCapability {
     /// build every pass pipeline under a wgpu validation error scope, and
     /// reply the assigned session-scoped `program_id` — or the failing
     /// check's distinguishable `Err` message. Pipeline construction needs a
-    /// live device, so the offscreen GPU boots here if configured; on
-    /// desktop a register before the first window attaches replies `Err`
-    /// rather than parking.
+    /// live device, so the offscreen GPU boots here if configured. A
+    /// register the device can answer is answered before the handler
+    /// returns, on the caller's chain. One that arrives before the first
+    /// device (desktop: before the first window attaches) is kept without
+    /// holding that chain, and answered when the device is installed.
     #[handler::request]
     fn on_program_register(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         mail: ProgramRegister,
-    ) -> ProgramRegisterResult {
-        state.ensure_offscreen_gpu_booted();
-        if let Err(error) = state.service_device_for_request() {
-            return ProgramRegisterResult::Err { error };
+    ) -> Pending<ProgramRegisterResult> {
+        state.ensure_offscreen_gpu_booted(ctx);
+        if state.awaits_first_device() {
+            let (pending, held) = ctx.defer::<ProgramRegisterResult>();
+            state.awaiting_device.push_back(AwaitingDevice::ProgramRegister { mail, held });
+
+            return pending;
         }
-        let Some(gpu) = state.gpu.as_ref() else {
-            return ProgramRegisterResult::Err {
-                error: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
-            };
-        };
-        state.programs.register(gpu, mail)
+
+        let (pending, held) = ctx.hold::<ProgramRegisterResult>();
+        held.answer(ctx, &state.answer_program_register(mail));
+
+        pending
     }
 
     /// `ProgramDispatch` (ADR-0170): queue one execution for the next
@@ -1275,7 +1359,7 @@ impl NativeActor for RenderCapability {
             );
         }
 
-        state.ensure_offscreen_gpu_booted();
+        state.ensure_offscreen_gpu_booted(ctx);
         if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
@@ -1414,11 +1498,15 @@ impl NativeActor for RenderCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
+    use super::super::{
+        Blend, Mips, OutputSlot, PassStage, ProgramPass, Sampling, ScreenTriangle, ScreenVertex, Shape, SlotExtent,
+        SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, Wrap,
+    };
     use super::texture::{StagedTexture, TexturePixels};
     use super::*;
     use aether_actor::HandlesKind;
     use aether_data::{Blob, Kind, SessionToken, Uuid};
+    use aether_harness_substrate_capture::test_helpers::require_wgpu_adapter;
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
     use aether_substrate::chassis::builder::ReplyTarget;
@@ -1478,6 +1566,7 @@ mod tests {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
+            awaiting_device: VecDeque::new(),
             assets_dir: None,
         }
     }
@@ -1490,6 +1579,19 @@ mod tests {
     struct RenderFixture {
         cap: PumpedDriver<RenderCapability>,
         egress: Receiver<EgressEvent>,
+    }
+
+    /// One reply as the egress carried it to a session.
+    struct SessionReply {
+        kind_name: String,
+        payload: Vec<u8>,
+    }
+
+    impl SessionReply {
+        fn decode<R: Kind>(&self) -> R {
+            assert_eq!(self.kind_name, R::NAME, "the reply at this position is another kind");
+            R::decode_from_bytes(&self.payload).expect("test: reply payload decodes")
+        }
     }
 
     impl RenderFixture {
@@ -1532,14 +1634,36 @@ mod tests {
             self.deliver(mail, None);
         }
 
-        /// [`Self::deliver`] with the reply routed to a session, decoded.
-        fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
+        /// [`Self::deliver`] with the reply routed to a session and left on
+        /// the egress, for a request whose reply may come later.
+        fn ask<K: Kind>(&mut self, mail: &K)
         where
             RenderCapability: HandlesKind<K>,
         {
             let reply = ReplyTarget::Session { session: SessionToken(Uuid::from_u128(0x7045)), correlation: 1 };
             self.deliver(mail, Some(reply));
+        }
+
+        /// [`Self::ask`], with the reply decoded.
+        fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
+        where
+            RenderCapability: HandlesKind<K>,
+        {
+            self.ask(mail);
             decode_session_reply(&self.egress)
+        }
+
+        /// Take every session reply queued on the egress, oldest first.
+        fn session_replies(&self) -> Vec<SessionReply> {
+            self.egress
+                .try_iter()
+                .filter_map(|event| {
+                    let EgressEvent::ToSession { kind_name, payload, .. } = event else {
+                        return None;
+                    };
+                    Some(SessionReply { kind_name, payload })
+                })
+                .collect()
         }
 
         fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
@@ -1647,6 +1771,99 @@ mod tests {
             assert_eq!(state.textures.entries[&3].pixels.bytes(), vec![7; 16], "fire-and-forget updates are dropped");
             assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
         });
+    }
+
+    /// Issue #7452. Catches a program or texture-array handler that holds
+    /// its caller's chain open while no device exists, a first-device
+    /// install that answers nothing or answers out of arrival order, and a
+    /// waiting request answered with a refusal in place of its own result.
+    #[test]
+    fn requests_before_the_first_device_are_answered_in_order_once_it_is_installed() {
+        if !require_wgpu_adapter() {
+            return;
+        }
+        let mut render = RenderFixture::boot(RenderParams::default());
+        let solid = || ProgramRegister {
+            wgsl: "@fragment fn fs_solid() -> @location(0) vec4<f32> { return vec4<f32>(0.25, 0.5, 0.75, 1.0); }"
+                .to_owned(),
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
+            transients: Vec::new(),
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes: vec![ProgramPass {
+                stage: PassStage::Fragment,
+                blend: Blend::Alpha,
+                entry_point: "fs_solid".to_owned(),
+                inputs: Vec::new(),
+                output: OutputSlot::Binding { index: 0 },
+                uniform_offset: 0,
+                uniform_length: 0,
+                repeat: None,
+            }],
+        };
+
+        // Each `ask` returns once its chain has settled, with no device.
+        render.ask(&solid());
+        render.ask(&CreateTextureArray { format: TextureFormat::Rgba8, side: 4, layers: 2, mips: Mips::Base });
+        render.ask(&ProgramRegister { wgsl: "not wgsl at all".to_owned(), ..solid() });
+        render.ask(&CreateTexture {
+            width: 4,
+            height: 4,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Writable,
+            pixels: Blob::from(Vec::new()),
+        });
+
+        let early = render.session_replies();
+        let [created] = early.as_slice() else {
+            panic!("only the CPU-side create is answered before a device exists: {} replies", early.len());
+        };
+        let CreateTextureResult::Ok { texture_id: plain_texture_id } = created.decode() else {
+            panic!("the writable texture create is accepted");
+        };
+        assert_eq!(render.read(|state| state.awaiting_device.len()), 3, "the three device requests wait");
+
+        render
+            .cap
+            .host_turn(|state, ctx| {
+                let booted = boot_offscreen(None);
+                let (gpu, wire_pipeline) = state.build_offscreen_gpu(
+                    booted.device,
+                    booted.queue,
+                    booted.format,
+                    (4, 4),
+                    booted.polygon_mode,
+                    booted.build_overlay,
+                );
+                state.install_first_device(ctx, gpu, wire_pipeline);
+            })
+            .expect("the slot is live");
+
+        let late = render.session_replies();
+        let [registered, array, refused] = late.as_slice() else {
+            panic!("the install answers each waiting request once: {} replies", late.len());
+        };
+        let registered: ProgramRegisterResult = registered.decode();
+        let array: CreateTextureArrayResult = array.decode();
+        let refused: ProgramRegisterResult = refused.decode();
+        assert!(
+            matches!(registered, ProgramRegisterResult::Ok { .. }),
+            "the valid register gets its own result: {registered:?}",
+        );
+        assert!(
+            matches!(array, CreateTextureArrayResult::Ok { texture_id } if texture_id > plain_texture_id),
+            "the array takes an id after the texture created while it waited: {array:?}",
+        );
+        assert!(
+            matches!(refused, ProgramRegisterResult::Err { ref error } if error.starts_with("invalid wgsl")),
+            "the unparsable register gets its own refusal: {refused:?}",
+        );
+        assert!(render.read(|state| state.awaiting_device.is_empty()), "nothing waits once the device is installed");
     }
 
     /// Issue #2831. Catches a `destroy_texture` that leaves a user-owned

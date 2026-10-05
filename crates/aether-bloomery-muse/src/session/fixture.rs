@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, EncodedArtifact, Invoke, Invoked, Name, Node, Path, ProgramName, ReadArtifactResult, Refusal, Tree,
+    ClosureArtifact, EncodedArtifact, EntropyDraw, EntropyResult, Invoke, Invoked, Name, Node, Path, ProgramApi,
+    ProgramName, ReadArtifactResult, Refusal, Tree,
 };
 use aether_bloomery_program::{
     AsyncProgram, ErasedTooled, NoBound, NoDetail, Pending, PollResult, Started, SyncProgram, invoke, start_async,
@@ -13,7 +14,7 @@ use aether_bloomery_program::{
 use aether_bloomery_workspace::TreePath;
 use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
 use aether_codec::encode_storage_schema;
-use aether_data::{Cites, Digest, ErasedRef, Ref, Schema, Storage};
+use aether_data::{Cites, Digest, ErasedRef, Kind, Ref, Schema, Storage};
 use serde_json::Value;
 
 use crate::input::{Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort};
@@ -41,12 +42,6 @@ pub fn settings(tools: OfferedTools) -> TurnSettings {
 /// invokes it, and decode the result it stages.
 pub fn run<P: SyncProgram>(input: &P::Input, closure: Vec<ClosureArtifact>) -> Result<P::Result, Refusal> {
     run_with::<P>(input, closure).map(|(result, _)| result)
-}
-
-/// Run `P` over `input` alone, as [`run`] does, and decode the result it
-/// stages beside every artifact it staged.
-pub fn run_stored<P: SyncProgram>(input: &P::Input) -> Result<(P::Result, Store), Refusal> {
-    run_with::<P>(input, Vec::new())
 }
 
 fn run_with<P: SyncProgram>(
@@ -105,6 +100,53 @@ pub fn run_async<P: AsyncProgram>(
             PollResult::Finished(invoked) => return finish::<P::Result>(invoked, store),
             PollResult::NeedArtifact(pending) => Some(Pending::Artifact(pending)),
             other => panic!("expected a pure program to finish or read, got {other:?}"),
+        };
+    }
+}
+
+/// Run async `P` over `input` with `closure` injected beside it, as the driver
+/// invokes it, answering every `Entropy` draw with `entropy` and every read it
+/// fetches from `closure`, and decode the result it stages.
+pub fn run_drawn<P: AsyncProgram>(
+    input: &P::Input,
+    closure: Vec<ClosureArtifact>,
+    entropy: &[u8],
+) -> Result<(P::Result, Store), Refusal> {
+    let input = stored(input);
+    let digest = input.claimed().unverified();
+    let mut injected = closure.clone();
+    injected.push(input);
+    let store = Store(closure.into_iter().map(|artifact| (artifact.claimed().unverified(), artifact)).collect());
+    let name = ProgramName::new(P::NAME).expect("program name");
+    let (mut session, mut waiting) = match start_async::<P>(Invoke::new(1, name, digest, injected)) {
+        Started::Finished(invoked) => return finish::<P::Result>(invoked, store),
+        Started::Live { session, waiting } => (session, waiting),
+    };
+    loop {
+        let Some(pending) = waiting else {
+            panic!("expected a sampled program to wait, got no pending");
+        };
+        match pending {
+            Pending::Artifact(artifact) => {
+                let reply = store.0.get(&artifact.digest).map_or_else(
+                    || ReadArtifactResult::Missing { digest: artifact.digest },
+                    |found| ReadArtifactResult::Found { artifact: found.clone() },
+                );
+                session.fulfill(artifact, reply);
+            }
+            Pending::Send(call) => {
+                assert_eq!(call.api, ProgramApi::Entropy, "a sampled open draws only entropy");
+                assert_eq!(call.kind_id, EntropyDraw::ID, "an entropy draw");
+                assert_eq!(call.expected_reply, EntropyResult::ID, "answered as entropy");
+                let reply = EntropyResult::Drawn { bytes: entropy.to_vec() };
+                session.fulfill_send(&call, EntropyResult::ID, reply.encode_into_bytes());
+            }
+        }
+        waiting = match session.poll() {
+            PollResult::Finished(invoked) => return finish::<P::Result>(invoked, store),
+            PollResult::NeedArtifact(pending) => Some(Pending::Artifact(pending)),
+            PollResult::NeedSend(pending) => Some(Pending::Send(pending)),
+            other @ PollResult::Waiting => panic!("expected a sampled program to finish, read, or draw, got {other:?}"),
         };
     }
 }

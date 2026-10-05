@@ -1,14 +1,16 @@
 //! `muse.session.open`: the one way a session starts.
 
+use core::num::NonZeroU8;
+
 use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
-use aether_bloomery_program::{Env, Program, Sync, program};
+use aether_bloomery_program::{Async, Entropy, Env, Program, program};
 use aether_bloomery_workspace::TreePath;
 use aether_data::{Ref, Utf8Text};
 use serde_json::Value;
 
 use aether_bloomery_workspace_programs::proof::ProofBound;
 
-use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls, TurnInput};
+use crate::input::{CacheKey, CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls, TurnInput};
 use crate::session::gate::{RequiredProof, RequiredProofs};
 use crate::session::state::{TurnLimit, TurnSettings};
 use crate::session::tools::program_name;
@@ -44,6 +46,9 @@ pub struct OpenInput {
     /// arguments of the kind its offer's input schema names. Chosen by the
     /// opener and never sent to the model; empty gates nothing.
     required: RequiredProofs,
+    /// The prompt cache key the session shares with every other session
+    /// opened with it; `None` draws one fresh for this session.
+    shared_key: Option<CacheKey>,
 }
 
 impl OpenInput {
@@ -61,7 +66,14 @@ impl OpenInput {
         seeds: Vec<TreePath>,
         required: RequiredProofs,
     ) -> Self {
-        Self { settings, instructions, user, max_turns, tree, seeds, required }
+        Self { settings, instructions, user, max_turns, tree, seeds, required, shared_key: None }
+    }
+
+    /// Share `key` as this session's prompt cache key with every other session
+    /// opened with it. The one way sessions come to share a prompt cache.
+    #[must_use]
+    pub fn sharing(self, key: CacheKey) -> Self {
+        Self { shared_key: Some(key), ..self }
     }
 
     /// The cited text of the session instructions.
@@ -95,9 +107,9 @@ impl OpenInput {
     }
 
     /// The first turn: the settings with the instructions as the leading
-    /// developer message and the user message.
-    pub(crate) fn first_turn(&self) -> TurnInput {
-        self.settings.open(self.instructions, self.user)
+    /// developer message and the user message, sent with `cache_key`.
+    pub(crate) fn first_turn(&self, cache_key: CacheKey) -> TurnInput {
+        self.settings.open(self.instructions, self.user, cache_key)
     }
 }
 
@@ -111,6 +123,8 @@ pub struct Opened {
     /// The seeded reads the loop runs before that turn, each a decoded
     /// `tree.read` call `seed-<i>`; `None` when there are no seeds.
     seeds: Option<ToolCalls>,
+    /// The key the first turn sends: drawn by the open, or the one it shares.
+    cache_key: CacheKey,
 }
 
 impl Opened {
@@ -125,15 +139,22 @@ impl Opened {
     pub const fn seeds(&self) -> Option<&ToolCalls> {
         self.seeds.as_ref()
     }
+
+    /// The key the first turn sends.
+    #[must_use]
+    pub const fn cache_key(&self) -> &CacheKey {
+        &self.cache_key
+    }
 }
 
 /// The `muse.session.open` program.
 pub struct SessionOpen;
 
-/// Opens a Muse session: its first turn is the settings with the instructions
-/// as the leading developer message and the user message, and each seed is a
-/// `tree.read` call of the whole window from the file's start, which the loop
-/// runs before that turn.
+/// Opens a Muse session: it draws the session's prompt cache key, unless the
+/// opener named one to share, and its first turn is the settings with the
+/// instructions as the leading developer message and the user message, sent
+/// with that key. Each seed is a `tree.read` call of the whole window from the
+/// file's start, which the loop runs before that turn.
 ///
 /// Refuses settings that offer a tool the session does not bind, or offer a
 /// bound tool with a definition, schema, bundle head, or bound kind other than
@@ -149,12 +170,12 @@ pub struct SessionOpen;
 #[program]
 impl Program for SessionOpen {
     const NAME: &'static str = "muse.session.open";
-    const MODE: Mode = Mode::Pure;
+    const MODE: Mode = Mode::Sampled;
     const INTENT: &'static str = "Open a Muse session and build its first turn and its seeded reads.";
     type Input = OpenInput;
     type Result = Opened;
 
-    fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+    async fn run(input: Self::Input, env: &mut Env<Async>, mut entropy: Entropy) -> Result<Self::Result, Refusal> {
         let (own, _) = offered(input.tree());
         let unbound = input.settings.tools().iter().find(|tool| !binds(&own, tool));
         if let Some(tool) = unbound {
@@ -166,15 +187,26 @@ impl Program for SessionOpen {
             return Err(refused(String::from("tree.diff is bound to a tree other than the session's")));
         }
         for proof in input.required.as_slice() {
-            gates(&input, proof, *env)?;
+            gates(&input, proof, env)?;
         }
 
+        let cache_key = if let Some(key) = input.shared_key.clone() {
+            key
+        } else {
+            CacheKey::drawn(
+                &entropy
+                    .draw(NonZeroU8::new(16).ok_or_else(|| refused(String::from("entropy draw needs a count")))?)
+                    .await?,
+            )
+            .map_err(|error| refused(format!("the drawn cache key: {error}")))?
+        };
         let seeds = if input.seeds.is_empty() {
             None
         } else {
-            Some(seeded(&input, env)?)
+            Some(seeded(&input, &mut env)?)
         };
-        Ok(Opened { turn: env.stage_encoded(&input.first_turn())?, seeds })
+        let turn = env.stage_encoded(&input.first_turn(cache_key.clone()))?;
+        Ok(Opened { turn, seeds, cache_key })
     }
 }
 
@@ -209,7 +241,7 @@ fn proves(tool: &OfferedTool) -> bool {
 
 /// Refuses `proof` unless `input` offers its program as a proof tool and its
 /// arguments are of the kind that offer's input schema names.
-fn gates(input: &OpenInput, proof: &RequiredProof, env: Env<Sync>) -> Result<(), Refusal> {
+fn gates(input: &OpenInput, proof: &RequiredProof, env: Env<Async>) -> Result<(), Refusal> {
     let program = proof.program().as_str();
     let offer =
         input.settings.tools().iter().find(|tool| tool.program() == proof.program()).filter(|tool| proves(tool));
@@ -230,7 +262,7 @@ fn refused(reason: String) -> Refusal {
 
 /// Each seed of `input` as a decoded `tree.read` call `seed-<i>`, its
 /// arguments JSON and its arguments staged.
-fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> {
+fn seeded(input: &OpenInput, env: &mut Env<Async>) -> Result<ToolCalls, Refusal> {
     let read = program_name::<TreeRead>();
     if !input.settings.tools().iter().any(|tool| *tool.program() == read) {
         return Err(Refusal::Refused { reason: Detail::new(format!("seeds need {} offered", TreeRead::NAME)) });
@@ -261,9 +293,9 @@ mod tests {
 
     use super::{OpenInput, SessionOpen};
     use crate::input::tests::offered_tool;
-    use crate::input::{OfferedTool, OfferedTools, Role, ToolInput, TurnInput, TurnItem};
+    use crate::input::{CacheKey, OfferedTool, OfferedTools, Role, ToolInput, TurnInput, TurnItem};
     use crate::session::MUSE;
-    use crate::session::fixture::{path, run_stored, settings};
+    use crate::session::fixture::{path, run_async, run_drawn, settings};
     use crate::session::gate::RequiredProofs;
     use crate::session::state::TurnLimit;
     use crate::tools::{ReadArgs, TreeRead, VendorGrep, VendorList, VendorRead, offered, offered_with_proofs};
@@ -285,6 +317,10 @@ mod tests {
         )
     }
 
+    fn drawn(bytes: &[u8]) -> CacheKey {
+        CacheKey::drawn(bytes).expect("drawn key")
+    }
+
     #[test]
     fn an_open_is_the_settings_and_the_opening_messages_over_bound_tools_only() {
         // Catches an open that drops a setting or the instructions or swaps them, sends more than the two opening
@@ -293,10 +329,12 @@ mod tests {
         // from no paths.
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
         let (bound, _) = offered(tree);
-        let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), Vec::new())).expect("bound tools open");
+        let (opened, store) =
+            run_drawn::<SessionOpen>(&open(bound.clone(), Vec::new()), Vec::new(), &[7; 16]).expect("bound tools open");
         assert_eq!(opened.seeds(), None);
         let first: TurnInput = store.value(opened.turn());
         assert_eq!(first.settings(), settings(bound.clone()));
+        assert_eq!(first.cache_key(), &drawn(&[7; 16]));
         assert_eq!(
             first.items(),
             [
@@ -312,7 +350,7 @@ mod tests {
         let revalued =
             offer(MUSE, echo.definition(), ErasedRef::new(echo.bound().kind(), Ref::of_text("another").digest()));
         let tools = OfferedTools::new(vec![revalued]).expect("tools");
-        run_stored::<SessionOpen>(&open(tools, Vec::new()))
+        run_drawn::<SessionOpen>(&open(tools, Vec::new()), Vec::new(), &[7; 16])
             .expect("a bound of the tool's kind opens, whatever its value");
 
         let redefined = offer(MUSE, Ref::of_text("{}"), echo.bound());
@@ -321,7 +359,7 @@ mod tests {
         let unbound = offered_tool(ProgramName::new("muse.turn").expect("program"));
         for tool in [redefined, rebound, rehomed, unbound] {
             let tools = OfferedTools::new(vec![tool]).expect("tools");
-            let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
+            let refused = run_drawn::<SessionOpen>(&open(tools, Vec::new()), Vec::new(), &[7; 16]);
             assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
         }
     }
@@ -340,10 +378,11 @@ mod tests {
             Tree::new(once((Name::new("other").expect("name"), Node::File(Ref::of_bytes(b"other")))).collect());
         let other = Ref::of_encoded(&other_root).expect("other");
         let (other_offer, _) = offered(other);
-        let refused = run_stored::<SessionOpen>(&open(other_offer, Vec::new()));
+        let refused = run_drawn::<SessionOpen>(&open(other_offer, Vec::new()), Vec::new(), &[7; 16]);
         assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
         let (same_offer, _) = offered(tree);
-        run_stored::<SessionOpen>(&open(same_offer, Vec::new())).expect("a diff bound to the session's tree opens");
+        run_drawn::<SessionOpen>(&open(same_offer, Vec::new()), Vec::new(), &[7; 16])
+            .expect("a diff bound to the session's tree opens");
     }
 
     #[test]
@@ -359,11 +398,13 @@ mod tests {
         let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)), TestEnv::default());
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
         let (tools, _) = offered_with_proofs(tree, &proofs);
-        run_stored::<SessionOpen>(&open(tools.clone(), Vec::new())).expect("bound proof tools open");
+        run_drawn::<SessionOpen>(&open(tools.clone(), Vec::new()), Vec::new(), &[7; 16])
+            .expect("bound proof tools open");
 
         for (offer, _) in proof_bound_offers(Ref::from_digest(digest(1))) {
             let single = OfferedTools::new(vec![offer]).expect("tools");
-            run_stored::<SessionOpen>(&open(single, Vec::new())).expect("every proof-bound offer opens");
+            run_drawn::<SessionOpen>(&open(single, Vec::new()), Vec::new(), &[7; 16])
+                .expect("every proof-bound offer opens");
         }
 
         let other = ProofBound::new(Ref::from_digest(digest(3)), Ref::from_digest(digest(4)), TestEnv::default());
@@ -386,14 +427,18 @@ mod tests {
                 OfferedTool::new(tool.program().clone(), head, tool.definition(), tool.input(), bound, tool.result())
             };
             let rebound = offer(home.clone(), other);
-            run_stored::<SessionOpen>(&open(OfferedTools::new(vec![rebound]).expect("tools"), Vec::new()))
-                .unwrap_or_else(|refused| panic!("{name} opens over any proof bound: {refused:?}"));
+            run_drawn::<SessionOpen>(
+                &open(OfferedTools::new(vec![rebound]).expect("tools"), Vec::new()),
+                Vec::new(),
+                &[7; 16],
+            )
+            .unwrap_or_else(|refused| panic!("{name} opens over any proof bound: {refused:?}"));
 
             let foreign = offer(home, ErasedRef::new(Tree::ID, tool.bound().digest()));
             let rehomed = offer(other_home, tool.bound());
             for tool in [foreign, rehomed] {
                 let tools = OfferedTools::new(vec![tool]).expect("tools");
-                let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
+                let refused = run_drawn::<SessionOpen>(&open(tools, Vec::new()), Vec::new(), &[7; 16]);
                 assert!(matches!(refused, Err(Refusal::Refused { .. })), "{name}: {:?}", refused.err());
             }
         }
@@ -407,7 +452,6 @@ mod tests {
         use aether_bloomery_kinds::ClosureArtifact;
         use aether_bloomery_workspace_programs::proof::{ClippyArgs, TestArgs, TestEnv};
 
-        use crate::session::fixture::run;
         use crate::session::gate::RequiredProof;
         use crate::tools::EchoArgs;
 
@@ -428,7 +472,8 @@ mod tests {
         };
         let clippy_args = Ref::of_encoded(&ClippyArgs).expect("args").erase();
         let opens = |tools: &OfferedTools, required| {
-            run::<SessionOpen>(&open_requiring(tools.clone(), Vec::new(), required), closure.clone())
+            run_drawn::<SessionOpen>(&open_requiring(tools.clone(), Vec::new(), required), closure.clone(), &[7; 16])
+                .map(|(opened, _)| opened)
         };
 
         opens(&proving, required("proof.clippy", clippy_args)).expect("a required proof over its offer opens");
@@ -456,7 +501,8 @@ mod tests {
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
         let (bound, _) = offered(tree);
         let seeds = vec![path("src/lib.rs"), path("README")];
-        let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), seeds)).expect("seeds open");
+        let (opened, store) =
+            run_drawn::<SessionOpen>(&open(bound.clone(), seeds), Vec::new(), &[7; 16]).expect("seeds open");
         let first: TurnInput = store.value(opened.turn());
         assert_eq!(
             first.items(),
@@ -481,7 +527,48 @@ mod tests {
         }
 
         let unread = OfferedTools::new(vec![bound.as_slice()[0].clone()]).expect("tools");
-        let refused = run_stored::<SessionOpen>(&open(unread, vec![path("README")]));
+        let refused = run_drawn::<SessionOpen>(&open(unread, vec![path("README")]), Vec::new(), &[7; 16]);
         assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
+    }
+
+    #[test]
+    fn an_open_draws_its_cache_key_from_entropy() {
+        // Catches a shared key made up when none was named, which would route
+        // sessions with the same opening together.
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (bound, _) = offered(tree);
+        let bytes = [9, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67];
+        let (opened, store) =
+            run_drawn::<SessionOpen>(&open(bound, Vec::new()), Vec::new(), &bytes).expect("an open draws");
+        let first: TurnInput = store.value(opened.turn());
+        assert_eq!(first.cache_key(), &drawn(&bytes));
+    }
+
+    #[test]
+    fn two_opens_fed_different_bytes_get_different_keys() {
+        // Catches a drawn key that ignores its bytes, which would share a cache
+        // across sessions no one asked to share.
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (bound, _) = offered(tree);
+        let (first, first_store) =
+            run_drawn::<SessionOpen>(&open(bound.clone(), Vec::new()), Vec::new(), &[1; 16]).expect("first open draws");
+        let (second, second_store) =
+            run_drawn::<SessionOpen>(&open(bound, Vec::new()), Vec::new(), &[2; 16]).expect("second open draws");
+        let first_turn: TurnInput = first_store.value(first.turn());
+        let second_turn: TurnInput = second_store.value(second.turn());
+        assert_ne!(first_turn.cache_key(), second_turn.cache_key());
+    }
+
+    #[test]
+    fn a_shared_key_opens_on_the_named_key_without_drawing() {
+        // Catches a shared open that draws anyway, or sends another key than
+        // the named one.
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (bound, _) = offered(tree);
+        let shared = CacheKey::new("shared-cache").expect("shared key");
+        let input = open(bound, Vec::new()).sharing(shared.clone());
+        let (opened, store) = run_async::<SessionOpen>(&input, Vec::new()).expect("a shared open draws nothing");
+        let first: TurnInput = store.value(opened.turn());
+        assert_eq!(first.cache_key(), &shared);
     }
 }

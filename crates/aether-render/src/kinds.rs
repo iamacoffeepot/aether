@@ -12,6 +12,7 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
+use aether_actor::HeldReply;
 use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::{ClipRect, QuadSpace};
 use aether_math::{Rgb, Rgba};
@@ -299,9 +300,12 @@ pub struct DestroyTexture {
 /// The id comes from the sequence `CreateTexture` draws from, so one
 /// `texture_id` names a texture or an array and never both, and
 /// `DestroyTexture` releases either. The layer ceiling is the render
-/// device's, so creation needs a device: on desktop a create sent
-/// before the first window attaches replies `Err`. Reply:
-/// `CreateTextureArrayResult`.
+/// device's, so creation needs a device. A create sent before the
+/// render device exists (desktop: before the first window attaches) is
+/// answered once the device is up. Its own chain settles first, so
+/// nothing waits on a window: a `send_mail` over MCP returns with no
+/// reply for it, and one sent after a window is listed is answered
+/// inside the call. Reply: `CreateTextureArrayResult`.
 #[aether_data::kind(name = "aether.render.create_texture_array")]
 pub struct CreateTextureArray {
     pub format: TextureFormat,
@@ -321,6 +325,12 @@ pub struct CreateTextureArray {
 pub enum CreateTextureArrayResult {
     Ok { texture_id: u32 },
     Err { error: String },
+}
+
+impl HeldReply for CreateTextureArrayResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "render capability closed before the texture array request was answered".into() }
+    }
 }
 
 /// `aether.render.write_texture_layer` — replace the contents of one
@@ -1131,25 +1141,65 @@ pub struct TransientSpec {
     pub samples: Samples,
 }
 
+/// How a depth transient is sized (ADR-0246 decision 9).
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DepthExtent {
+    /// Sized from the program's output, as a transient is: the
+    /// reference extent scaled by the [`SlotExtent`].
+    Output(SlotExtent),
+    /// A square of its own size, `side` texels on each axis, whatever
+    /// the reference extent is: a shadow map. `side` must be at least 1
+    /// and at most the device's `max_texture_dimension_2d`; a side
+    /// outside that rejects at register. A `Fixed` slot keeps its size,
+    /// and its pooled texture, when the output is resized.
+    Fixed { side: u32 },
+}
+
 /// One depth transient: an entry in `ProgramRegister.depth_transients`,
 /// a pooled `Depth32Float` target rasterizing passes clear and test
-/// against (ADR-0171, ADR-0246 decision 7).
+/// against (ADR-0171, ADR-0246 decisions 7 and 9).
 ///
-/// A pass attaches its depth slot beside its color output, so the slot
-/// declares that output's `extent` and its `samples`: a pass writing a
+/// A pass with a color output attaches its depth slot beside that
+/// output, so the slot declares [`DepthExtent::Output`] of the output's
+/// [`SlotExtent`] and the output's `samples`: a pass writing a
 /// [`Samples::Four`] transient names a `Four` depth slot, and a pass
 /// writing a binding or a `One` transient names a `One` depth slot. A
-/// depth slot is never resolved and no pass reads one.
+/// [`DepthExtent::Fixed`] slot under a color output is refused at
+/// register whatever its side, because the output's size is the size of
+/// the texture a dispatch binds and is not known when the program
+/// registers.
+///
+/// A depth-only pass ([`OutputSlot::None`] on a rasterizing stage) has
+/// no color output to match and attaches a slot of either extent and
+/// either sample count. A depth slot is never resolved.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DepthSpec {
-    pub extent: SlotExtent,
+    pub extent: DepthExtent,
     pub samples: Samples,
 }
 
-/// One input slot a program pass samples (ADR-0170). Every variant
-/// resolves to a texture the pass binds at group 1 in declaration
-/// order: a binding with the sampler its [`Sampling`] declares, and a
-/// transient with the sampler every transient has.
+/// How a pass reads a depth slot it names as an input (ADR-0246
+/// decision 9). The read is declared on the input, so one pass may
+/// compare a slot that another loads.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DepthRead {
+    /// A `texture_depth_2d` and no sampler, read with `textureLoad`,
+    /// which returns the stored depth. `@binding(2 * n + 1)` is left
+    /// out of the pass's layout, as it is for [`Sampling::Texel`].
+    Texel,
+    /// A `texture_depth_2d` and a `sampler_comparison` at
+    /// `@binding(2 * n + 1)`, read with `textureSampleCompare` in a
+    /// fragment stage and `textureSampleCompareLevel` in any stage. The
+    /// comparison is `LessEqual`, and the sampler clamps and is linear.
+    Compare,
+}
+
+/// One input slot a program pass samples (ADR-0170, ADR-0246
+/// decision 9). A `Binding`, `PassOutput` or `Transient` input resolves
+/// to a texture the pass binds at group 1 in declaration order: a
+/// binding with the sampler its [`Sampling`] declares, and a transient
+/// with the sampler every transient has. A `Depth` input names a depth
+/// slot under the same numbering.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InputSlot {
     /// The dispatch binding at `index` into `ProgramDispatch.bindings`,
@@ -1164,12 +1214,27 @@ pub enum InputSlot {
     /// `ProgramRegister.transients`. Must be written by an earlier pass
     /// before it is read — the register-time sequence-index check.
     Transient { index: u32 },
+    /// The depth transient at `index` into
+    /// `ProgramRegister.depth_transients`, read as `read` declares.
+    /// Input `n` keeps the numbering every input has: its texture is
+    /// `@binding(2 * n)`, declared `texture_depth_2d`.
+    ///
+    /// Four things are refused at register, each with its own reason:
+    /// an `index` past `depth_transients`; a [`Samples::Four`] slot,
+    /// which can be neither compared nor sampled; a slot the same pass
+    /// attaches; and a slot no earlier pass attaches, since a depth
+    /// slot gets its contents only from the passes that attach it.
+    ///
+    /// The slot holds what the passes before this one drew into it in
+    /// the same dispatch, and the far plane where they drew nothing:
+    /// the first pass of a dispatch to attach a slot clears it.
+    Depth { index: u32, read: DepthRead },
 }
 
-/// The slot a program pass writes (ADR-0170): a dispatch binding (a
-/// writable registry texture) or a transient intermediate. Passes never
-/// write another pass's output alias, so that variant does not exist
-/// here.
+/// The color slot a program pass writes (ADR-0170): a dispatch binding
+/// (a writable registry texture), a transient intermediate, or none.
+/// Passes never write another pass's output alias, so that variant does
+/// not exist here.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum OutputSlot {
     /// The dispatch binding at `index` into `ProgramDispatch.bindings`.
@@ -1181,10 +1246,22 @@ pub enum OutputSlot {
     /// The transient intermediate at `index` into
     /// `ProgramRegister.transients`.
     Transient { index: u32 },
-    /// No texture output. Valid only for a compute pass, whose writes
-    /// land in the resident geometry buffers declared by its stage.
-    /// A later pass cannot name this pass through `PassOutput`, and the
-    /// final pass of a program must still write a dispatch binding.
+    /// No color output. On a compute pass it is the only valid output:
+    /// the pass's writes land in the resident geometry buffers declared
+    /// by its stage. On a `Draw`, `DrawIndexedIndirect` or `DrawSets`
+    /// pass it declares a depth-only pass (ADR-0246 decision 9), which
+    /// attaches its depth slot and no color target. A `Fragment` pass
+    /// attaches no depth slot, so `None` there is refused.
+    ///
+    /// A depth-only pass names a depth slot and writes it, declares
+    /// [`Blend::Replace`] and [`PassLoad::Load`], and names a fragment
+    /// entry point that returns nothing or `@builtin(frag_depth)` alone
+    /// (it may `discard`); anything else is refused at register. It
+    /// rasterizes at its depth slot's sample count.
+    ///
+    /// A later pass cannot name a pass with no color output through
+    /// `PassOutput`, and the final pass of a program must still write a
+    /// dispatch binding.
     None,
 }
 
@@ -1250,9 +1327,15 @@ pub enum Blend {
 /// a pass naming none rasterizes in draw order with no depth at all.
 /// The first pass of a dispatch to name a given slot clears it to the
 /// far plane and later passes naming the same slot load it, so
-/// consecutive draw passes agree on occlusion by naming one slot. The
-/// slot shares the pass's color output's extent and its sample count
-/// ([`DepthSpec`]); one that differs in either is refused at register.
+/// consecutive draw passes agree on occlusion by naming one slot. Under
+/// a color output the slot is [`DepthExtent::Output`] of that output's
+/// extent and has its sample count ([`DepthSpec`]); one that differs in
+/// either, or is [`DepthExtent::Fixed`], is refused at register.
+///
+/// A pass whose [`ProgramPass`] declares [`OutputSlot::None`] is
+/// depth-only (ADR-0246 decision 9): it must name a depth slot, of
+/// either extent and either sample count, and declare `load` as
+/// [`PassLoad::Load`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DrawPass {
     /// Vertex entry point in the program's WGSL module. It consumes the
@@ -1315,9 +1398,16 @@ pub struct DepthUse {
 /// `depth` attaches a `ProgramRegister.depth_transients` slot under a
 /// `LessEqual` test. The first pass of a dispatch to name a slot clears
 /// it to the far plane and later passes load it, whatever their stage
-/// and whatever `write` says. The slot shares the pass's color output's
-/// extent and its sample count ([`DepthSpec`]); one that differs in
-/// either is refused at register.
+/// and whatever `write` says. Under a color output the slot is
+/// [`DepthExtent::Output`] of that output's extent and has its sample
+/// count ([`DepthSpec`]); one that differs in either, or is
+/// [`DepthExtent::Fixed`], is refused at register.
+///
+/// A pass whose [`ProgramPass`] declares [`OutputSlot::None`] is
+/// depth-only (ADR-0246 decision 9): it must name a depth slot, of
+/// either extent and either sample count, under [`DepthWrite::Write`]
+/// (a `TestOnly` depth-only pass would write nothing and is refused),
+/// and declare `load` as [`PassLoad::Load`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DrawSetsPass {
     /// Vertex entry point in the program's WGSL module. It may read the
@@ -1440,7 +1530,8 @@ pub struct PassRepeat {
 /// sequence: a pass may read only slots already written, which makes
 /// the DAG check a single index comparison at register time.
 /// `blend` is how a render stage composes what its fragment entry
-/// returns with what `output` already holds; a compute pass declares
+/// returns with what `output` already holds; a compute pass and a
+/// depth-only pass, which have no color output, declare
 /// [`Blend::Replace`]. `entry_point` names a fragment entry for
 /// fragment, draw and draw-sets stages, or a compute entry for
 /// `PassStage::Compute`. `inputs` bind in order at group 1, input `n`
@@ -1448,7 +1539,9 @@ pub struct PassRepeat {
 /// transient always has one, and a binding has one unless it declares
 /// `Sampling::Texel`; render stages attach `output`, rasterizing at its
 /// sample count, while compute declares `OutputSlot::None` and writes
-/// its group-2 resident buffers. `uniform_offset` /
+/// its group-2 resident buffers. A rasterizing stage that declares
+/// `OutputSlot::None` is depth-only: it attaches its depth slot alone
+/// and rasterizes at that slot's sample count. `uniform_offset` /
 /// `uniform_length` window the dispatch's uniform blob in bytes — the
 /// window binds at `@group(0) @binding(0)` and must cover the uniform
 /// block the entry point declares (checked at register from naga's
@@ -1476,8 +1569,16 @@ pub struct ProgramPass {
 /// every binding a pass writes is a [`SlotShape::Target`],
 /// every pass's entry point exists in its declared stage, every texture
 /// slot is written before it is read (the sequence-index check), no pass reads
-/// its own output, every depth slot a pass names shares its color
-/// output's extent and sample count, every compute pass declares
+/// its own output, every [`DepthExtent::Fixed`] side is at least 1 and
+/// within the device's texture limit, every depth slot a pass names
+/// beside a color output is [`DepthExtent::Output`] of that output's
+/// extent and has its sample count, every rasterizing pass with no
+/// color output is a well-formed depth-only pass (it names a depth slot
+/// and writes it, declares [`Blend::Replace`] and [`PassLoad::Load`],
+/// and its fragment entry point returns no color), every
+/// [`InputSlot::Depth`] names a declared [`Samples::One`] depth slot
+/// that an earlier pass attaches and its own pass does not, every
+/// compute pass declares
 /// [`Blend::Replace`], every uniform window covers the uniform block its
 /// entry point declares, the graph's per-dispatch cost stays inside the
 /// executor's budget (the render passes it encodes and the uniform bytes
@@ -1523,15 +1624,16 @@ pub struct ProgramPass {
 /// it once after the last pass to write it before each pass that reads
 /// it. Every pass writes a binding or a transient and none writes the
 /// frame: a program's output reaches the frame as a texture the quad
-/// and material paths draw.
+/// and material paths draw. The one pass that writes neither is a
+/// depth-only pass, which writes its depth slot alone.
 ///
 /// A `PassStage::Draw` pass (ADR-0171) replaces the fullscreen vertex
 /// stage with an authored one over a bound geometry and states its own
 /// color load semantic instead of following the clear-on-first-write
 /// rule. `geometries` declares the geometry slots a dispatch fills by
 /// id, and `depth_transients` the pooled `Depth32Float` targets draw
-/// passes clear and test against — declared by extent and sample count,
-/// since their format is fixed. Both lists are empty for a fragment-only
+/// passes clear and test against — declared by [`DepthExtent`] and
+/// sample count, since their format is fixed. Both lists are empty for a fragment-only
 /// program, which registers exactly as it did before this arm existed.
 /// A `PassStage::Compute` pass instead binds its uniform at group 0,
 /// sampled inputs at group 1, and the declared resident geometry
@@ -1553,9 +1655,11 @@ pub struct ProgramPass {
 ///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. The headless chassis
-/// composes no render actor, and a register before the render GPU boots
-/// (desktop: before the first window attaches) replies `Err` rather than
-/// parking.
+/// composes no render actor. A register sent before the render device
+/// exists (desktop: before the first window attaches) is answered once
+/// the device is up. Its own chain settles first, so nothing waits on a
+/// window: a `send_mail` over MCP returns with no reply for it, and one
+/// sent after a window is listed is answered inside the call.
 #[aether_data::kind(name = "aether.render.program.register")]
 pub struct ProgramRegister {
     pub wgsl: String,
@@ -1568,9 +1672,9 @@ pub struct ProgramRegister {
     /// (ADR-0171). Empty for a fragment-only program.
     pub geometries: Vec<GeometrySlotSpec>,
     /// Pooled `Depth32Float` targets draw passes clear and test
-    /// against, each declared by its extent against the reference and
-    /// its sample count (ADR-0171, ADR-0246 decision 7). Empty for a
-    /// fragment-only program.
+    /// against, each declared by its extent — against the reference, or
+    /// a fixed square — and its sample count (ADR-0171, ADR-0246
+    /// decisions 7 and 9). Empty for a fragment-only program.
     pub depth_transients: Vec<DepthSpec>,
     pub passes: Vec<ProgramPass>,
 }
@@ -1586,6 +1690,12 @@ pub struct ProgramRegister {
 pub enum ProgramRegisterResult {
     Ok { program_id: u32 },
     Err { error: String },
+}
+
+impl HeldReply for ProgramRegisterResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "render capability closed before the program register request was answered".into() }
+    }
 }
 
 /// `aether.render.program.dispatch` — execute a registered program once
@@ -1681,9 +1791,11 @@ pub enum PassStageKind {
 /// that is what a pass-merging or extent decision keys on: `pass` is the
 /// index into the registered graph's pass list, `label` its WGSL entry
 /// point, `width` / `height` the extent its output slot resolved to on
-/// the most recent dispatch (`0 / 0` for outputless compute), and
-/// `divisor` the declared
-/// [`SlotExtent`] that extent came from (`1` for `Full`). `iterations`
+/// the most recent dispatch (`0 / 0` for compute), and `divisor` the
+/// declared [`SlotExtent`] that extent came from (`1` for `Full`). A
+/// depth-only pass has stage `Draw` and reports the size its depth slot
+/// resolved to, with the divisor of a [`DepthExtent::Output`] extent
+/// and `1` for a [`DepthExtent::Fixed`] one. `iterations`
 /// is the pass's repeat count — one row covers all of a repeated pass's
 /// iterations, so a large mean over a large `iterations` is a chain, not
 /// a single expensive pass.

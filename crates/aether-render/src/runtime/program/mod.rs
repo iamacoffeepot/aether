@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramComputePipelineSpec, ProgramDepthState, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler,
-    ProgramInputView, ProgramPipelineSpec, ProgramTransientSpec, ProgramVertexBuffer, build_fullscreen_vertex_module,
-    build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
-    program_storage_layout, program_uniform_layout,
+    ProgramColorTarget, ProgramComputePipelineSpec, ProgramDepthSampler, ProgramDepthState, ProgramDrawPipelineSpec,
+    ProgramInput, ProgramInputSampler, ProgramInputView, ProgramPipelineSpec, ProgramTransientSpec,
+    ProgramVertexBuffer, build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
+    build_program_pipeline, program_inputs_layout, program_storage_layout, program_uniform_layout,
 };
 use aether_substrate::session_ids::SessionIds;
 
@@ -24,8 +24,8 @@ use super::pipeline::RenderGpu;
 use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
 use crate::{
-    Blend, Cull, DepthWrite, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
-    ProgramTimingsResult, Sampling, SlotShape, SlotSpec, VertexAttribute,
+    Blend, Cull, DepthRead, DepthWrite, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    ProgramTimings, ProgramTimingsResult, Sampling, SlotShape, VertexAttribute,
 };
 
 mod cache;
@@ -40,7 +40,7 @@ use cache::DispatchCache;
 use sampler::ProgramSamplers;
 use submit::FramePasses;
 use timing::{Availability, PassCosts, PassTimingInstrument};
-use validate::{PassPlan, PassPlanStage, ProgramPlan};
+use validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedInput};
 
 /// Minimum bytes a pass binds for its uniform window: a zero-length
 /// window (a uniform-less pass) still binds a 4-byte zeroed dummy so
@@ -375,8 +375,7 @@ fn build_program_passes(
                 PassPlanStage::Compute(_) => wgpu::ShaderStages::COMPUTE,
             };
             let uniform_layout = program_uniform_layout(device, bound_uniform_bytes, visibility);
-            let inputs: Vec<ProgramInput> =
-                pass.inputs.iter().map(|slot| program_input(plan.slot_spec(*slot))).collect();
+            let inputs: Vec<ProgramInput> = pass.inputs.iter().map(|input| program_input(plan, *input)).collect();
             let inputs_layout = program_inputs_layout(device, &inputs, visibility);
             let mut storage_layout = None;
             let pipeline = match &pass.stage {
@@ -458,8 +457,9 @@ struct DrawStage<'a> {
 }
 
 /// Build the draw pipeline of one rasterizing pass: `stage` over the
-/// pass's fragment entry, color output and its `(uniform, inputs)`
-/// bind-group layouts.
+/// pass's fragment entry, its color output when it has one (a
+/// depth-only pass has none, and its pipeline no color target) and its
+/// `(uniform, inputs)` bind-group layouts.
 fn build_draw_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
@@ -468,7 +468,10 @@ fn build_draw_pipeline(
     (uniform_layout, inputs_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
     stage: &DrawStage<'_>,
 ) -> PassPipeline {
-    let output = pass.output.expect("a rasterizing pass has an output");
+    let color = pass.output.map(|output| ProgramColorTarget {
+        format: super::texture::wgpu_texture_format(plan.slot_format(output)),
+        blend: blend_state(pass.blend),
+    });
     PassPipeline::Render(build_program_draw_pipeline(
         device,
         &ProgramDrawPipelineSpec {
@@ -477,9 +480,8 @@ fn build_draw_pipeline(
             fragment_entry_point: &pass.entry_point,
             vertex_buffers: stage.vertex_buffers,
             cull_mode: stage.cull_mode,
-            color_format: super::texture::wgpu_texture_format(plan.slot_format(output)),
-            sample_count: plan.samples(output).count(),
-            blend: blend_state(pass.blend),
+            color,
+            sample_count: plan.pass_samples(pass).count(),
             depth: stage.depth,
             uniform_layout,
             inputs_layout,
@@ -508,11 +510,22 @@ fn vertex_buffer<'a>(
     }
 }
 
-/// What a pass's group-1 layout declares for an input reading `spec`:
-/// the view its shape takes, and the sampler its sampling and format
-/// allow. A `Filtered` input over a format that cannot be filtered
-/// (`R32Float`) gets the non-filtering sampler, as it always has.
-fn program_input(spec: SlotSpec) -> ProgramInput {
+/// What a pass's group-1 layout declares for `input`. A color slot
+/// declares the view its shape takes and the sampler its sampling and
+/// format allow: a `Filtered` input over a format that cannot be
+/// filtered (`R32Float`) gets the non-filtering sampler, as it always
+/// has. A depth read declares a depth texture, with a comparison
+/// sampler for `Compare` and none for `Texel`.
+fn program_input(plan: &ProgramPlan, input: ResolvedInput) -> ProgramInput {
+    let spec = match input {
+        ResolvedInput::Slot(slot) => plan.slot_spec(slot),
+        ResolvedInput::Depth { read: DepthRead::Compare, .. } => {
+            return ProgramInput::Depth { sampler: ProgramDepthSampler::Comparison };
+        }
+        ResolvedInput::Depth { read: DepthRead::Texel, .. } => {
+            return ProgramInput::Depth { sampler: ProgramDepthSampler::None };
+        }
+    };
     let view = match spec.shape {
         SlotShape::Target(_) | SlotShape::Texture => ProgramInputView::Plain,
         SlotShape::TextureArray => ProgramInputView::Array,
@@ -522,7 +535,7 @@ fn program_input(spec: SlotSpec) -> ProgramInput {
         Sampling::Filtered { .. } if spec.format.filterable() => ProgramInputSampler::Filtering,
         Sampling::Filtered { .. } => ProgramInputSampler::NonFiltering,
     };
-    ProgramInput { view, sampler }
+    ProgramInput::Color { view, sampler }
 }
 
 /// The blend state a pass's declaration is (ADR-0246 decision 7),
@@ -555,8 +568,8 @@ mod rebuild_tests {
     use super::*;
     use crate::runtime::surface::boot_offscreen;
     use crate::{
-        CreateTexture, CreateTextureResult, Mips, OutputSlot, PassStage, ProgramPass, SlotExtent, TextureFormat,
-        TextureSampling, TextureUsage, Wrap,
+        CreateTexture, CreateTextureResult, Mips, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec,
+        TextureFormat, TextureSampling, TextureUsage, Wrap,
     };
 
     const SOLID_WGSL: &str = r"

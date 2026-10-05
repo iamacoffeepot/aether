@@ -14,8 +14,8 @@ pub use items::{
     Reasoning, ReasoningId, ReasoningIdError, Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order,
 };
 pub use limits::{
-    Endpoint, EndpointError, InputLimit, InputLimitError, ModelName, ModelNameError, OutputBudget, OutputBudgetError,
-    ReasoningEffort,
+    CacheKey, CacheKeyError, Endpoint, EndpointError, InputLimit, InputLimitError, ModelName, ModelNameError,
+    OutputBudget, OutputBudgetError, ReasoningEffort,
 };
 pub use tools::{
     CallId, CallIdError, FunctionName, FunctionNameError, OfferedTool, OfferedTools, OfferedToolsError, ToolCall,
@@ -24,7 +24,7 @@ pub use tools::{
 
 /// One stateless turn: where it goes, which model answers, the programs it
 /// offers as tools, the whole conversation, the output budget, the reasoning
-/// effort, and the input limit.
+/// effort, the input limit, and the session's cache key.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.turn.input")]
 pub struct TurnInput {
@@ -48,21 +48,16 @@ pub struct TurnInput {
     /// session rests with [`crate::session::RestReason::ContextFull`]. Never
     /// zero.
     input_limit: InputLimit,
+    /// The session's key, sent as `prompt_cache_key`.
+    cache_key: CacheKey,
 }
 
 impl TurnInput {
     /// The one constructor. Each part already holds its own rules.
     #[must_use]
-    pub const fn new(
-        endpoint: Endpoint,
-        model: ModelName,
-        tools: OfferedTools,
-        items: TurnItems,
-        max_output_tokens: OutputBudget,
-        reasoning: ReasoningEffort,
-        input_limit: InputLimit,
-    ) -> Self {
-        Self { endpoint, model, tools, items, max_output_tokens, reasoning, input_limit }
+    pub fn new(settings: TurnSettings, items: TurnItems, cache_key: CacheKey) -> Self {
+        let (endpoint, model, tools, max_output_tokens, reasoning, input_limit) = settings.into_parts();
+        Self { endpoint, model, tools, items, max_output_tokens, reasoning, input_limit, cache_key }
     }
 
     /// The URL the turn posts to.
@@ -108,7 +103,13 @@ impl TurnInput {
         self.input_limit
     }
 
-    /// Every field but the conversation: what a session keeps from turn to turn.
+    /// The session's key, sent as `prompt_cache_key`.
+    #[must_use]
+    pub const fn cache_key(&self) -> &CacheKey {
+        &self.cache_key
+    }
+
+    /// Every field but the conversation and key: what a session keeps from turn to turn.
     #[must_use]
     pub fn settings(&self) -> TurnSettings {
         TurnSettings::new(
@@ -126,7 +127,7 @@ impl TurnInput {
     /// items this one sent.
     pub(crate) fn append(&self, items: impl IntoIterator<Item = TurnItem>) -> Result<Self, TurnItemsError> {
         let items = TurnItems::new(self.items().iter().cloned().chain(items).collect())?;
-        Ok(self.settings().with_items(items))
+        Ok(self.settings().with_items(items, self.cache_key.clone()))
     }
 }
 
@@ -137,9 +138,9 @@ pub mod tests {
     use aether_data::Ref;
 
     use super::{
-        CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName, ModelNameError,
-        OfferedTool, OfferedTools, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall, ToolOutput,
-        TurnInput, TurnItem, TurnItems, TurnItemsError,
+        CacheKey, CacheKeyError, CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName,
+        ModelNameError, OfferedTool, OfferedTools, OutputBudget, OutputBudgetError, ReasoningEffort, Role, ToolCall,
+        ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
     };
     use crate::result::TurnResult;
     use crate::session::MUSE;
@@ -174,16 +175,21 @@ pub mod tests {
     fn an_append_keeps_the_prefix_and_refuses_an_orphan_output() {
         // Catches an append that rewrites an earlier item or a setting, which would change the prompt prefix the
         // next turn resends, and one that skips the conversation rules.
+        use crate::session::TurnSettings;
+
         let user = TurnItem::message(Role::User, Ref::of_text("hello"));
         let tool = offered_tool(ProgramName::new("muse.echo").expect("program"));
         let first = TurnInput::new(
-            Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
-            ModelName::new("muse-spark-1.3").expect("model"),
-            OfferedTools::new(vec![tool]).expect("tools"),
+            TurnSettings::new(
+                Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
+                ModelName::new("muse-spark-1.3").expect("model"),
+                OfferedTools::new(vec![tool]).expect("tools"),
+                OutputBudget::new(64).expect("budget"),
+                ReasoningEffort::Low,
+                InputLimit::new(u64::MAX).expect("limit"),
+            ),
             TurnItems::new(vec![user.clone()]).expect("items"),
-            OutputBudget::new(64).expect("budget"),
-            ReasoningEffort::Low,
-            InputLimit::new(u64::MAX).expect("limit"),
+            CacheKey::new("session-key").expect("key"),
         );
         let output = |id: &str| TurnItem::CallOutput {
             call_id: CallId::new(id).expect("call id"),
@@ -193,6 +199,7 @@ pub mod tests {
 
         let next = first.append(appended.clone()).expect("an answered call appends");
         assert_eq!(next.settings(), first.settings());
+        assert_eq!(next.cache_key(), first.cache_key());
         assert_eq!(next.items(), [user, appended[0].clone(), appended[1].clone()]);
         assert_eq!(first.append([output("b")]), Err(TurnItemsError::OrphanOutput));
     }
@@ -282,5 +289,34 @@ pub mod tests {
             assert_eq!(TurnItems::new(reject), Err(error));
             assert_eq!(TurnItems::new(accept.clone()).expect("accepted neighbour").as_slice(), accept.as_slice());
         }
+    }
+
+    #[test]
+    fn a_cache_key_refuses_what_the_vendor_would_and_draws_hex() {
+        // Catches a key the vendor refuses reaching the wire, and a drawn key
+        // that is not the lowercase hex of its bytes.
+        let longest_key = "a".repeat(CacheKey::MAX_BYTES);
+        let too_long_key = format!("{longest_key}a");
+        let keys = [
+            ("", CacheKeyError::Empty, "a"),
+            (too_long_key.as_str(), CacheKeyError::TooLong, longest_key.as_str()),
+            ("-key", CacheKeyError::BadStart, "0key"),
+            ("Key", CacheKeyError::BadStart, "key"),
+            ("key/Key", CacheKeyError::BadChar, "key-key_1.2"),
+            ("key key", CacheKeyError::BadChar, "key_key"),
+        ];
+        for (reject, error, accept) in keys {
+            assert_eq!(CacheKey::new(reject), Err(error), "reject {reject:?}");
+            assert_eq!(CacheKey::new(accept).expect("accepted neighbour").as_str(), accept, "accept {accept:?}");
+        }
+        let drawn = CacheKey::drawn(&[1, 171, 255, 0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192])
+            .expect("drawn bytes make a key");
+        assert_eq!(drawn.as_str().len(), 32, "16 drawn bytes make a 32-character key");
+        assert!(
+            drawn.as_str().bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+            "a drawn key is lowercase hex: {}",
+            drawn.as_str()
+        );
+        assert_eq!(CacheKey::drawn(&[15]).expect("one byte draws").as_str(), "0f");
     }
 }

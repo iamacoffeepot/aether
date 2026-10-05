@@ -142,6 +142,89 @@ impl ModelName {
     }
 }
 
+/// Why [`CacheKey::new`] or decode refused a cache key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheKeyError {
+    /// The key was empty.
+    Empty,
+    /// Longer than [`CacheKey::MAX_BYTES`].
+    TooLong,
+    /// The first byte was not `[a-z0-9]`.
+    BadStart,
+    /// A later byte was not `[a-z0-9._-]`.
+    BadChar,
+}
+
+impl CacheKeyError {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too-long",
+            Self::BadStart => "bad-start",
+            Self::BadChar => "bad-char",
+        }
+    }
+}
+
+/// The session's prompt cache key: 1 to 64 bytes matching `[a-z0-9][a-z0-9._-]*`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct CacheKey(String);
+
+impl CacheKey {
+    /// Longest accepted key in bytes.
+    pub const MAX_BYTES: usize = 64;
+
+    /// Accept a cache key.
+    ///
+    /// # Errors
+    ///
+    /// The [`CacheKeyError`] naming the rule the key broke.
+    pub fn new(key: impl Into<String>) -> Result<Self, CacheKeyError> {
+        let key = key.into();
+        Self::check(&key)?;
+        Ok(Self(key))
+    }
+
+    /// Borrow the key.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The lowercase hex of `bytes` as a cache key.
+    ///
+    /// # Errors
+    ///
+    /// The [`CacheKeyError`] naming the rule the hex broke: empty for no
+    /// bytes, or too long when the hex passes [`Self::MAX_BYTES`].
+    pub fn drawn(bytes: &[u8]) -> Result<Self, CacheKeyError> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut key = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            key.push(HEX[usize::from(byte >> 4)] as char);
+            key.push(HEX[usize::from(byte & 0xf)] as char);
+        }
+        Self::new(key)
+    }
+
+    fn check(key: &str) -> Result<(), CacheKeyError> {
+        let Some((&first, rest)) = key.as_bytes().split_first() else {
+            return Err(CacheKeyError::Empty);
+        };
+        if key.len() > Self::MAX_BYTES {
+            return Err(CacheKeyError::TooLong);
+        }
+        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+            return Err(CacheKeyError::BadStart);
+        }
+        if !rest.iter().all(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)) {
+            return Err(CacheKeyError::BadChar);
+        }
+        Ok(())
+    }
+}
+
 /// Why [`OutputBudget::new`] or decode refused a token budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputBudgetError {
@@ -270,4 +353,4 @@ pub enum ReasoningEffort {
     Max,
 }
 
-invariant_errors!(EndpointError, ModelNameError, OutputBudgetError, InputLimitError);
+invariant_errors!(EndpointError, ModelNameError, CacheKeyError, OutputBudgetError, InputLimitError);

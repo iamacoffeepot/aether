@@ -14,8 +14,8 @@ use aether_bloomery_kinds::{
     RecordedHeadMove, RequestSource, Requested,
 };
 use aether_bloomery_muse::{
-    Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput, TurnItem,
-    TurnItems, TurnOutcome, TurnResult,
+    CacheKey, Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, Role, Session, TurnInput,
+    TurnItem, TurnItems, TurnOutcome, TurnResult, TurnSettings,
 };
 use aether_chassis_bloomery::BloomeryCli;
 use aether_data::{Digest, Kind, OpaqueBytes, Ref, Schema, SchemaType, artifact_digest, wire};
@@ -54,15 +54,15 @@ fn seed(endpoint: &str) -> Result<Option<MuseSeed>, Box<dyn Error>> {
     batch.push_event(&RecordedHeadMove::new(RecordedHead::from(&MUSE), bundle), None)?;
 
     let items = ITEMS.iter().map(|&(role, text)| TurnItem::message(role, batch.stage_text(text))).collect();
-    let input = TurnInput::new(
+    let settings = TurnSettings::new(
         Endpoint::new(endpoint)?,
         ModelName::new("muse-spark-1.3")?,
         OfferedTools::default(),
-        TurnItems::new(items)?,
         OutputBudget::new(512)?,
         ReasoningEffort::Low,
         InputLimit::new(u64::MAX).expect("limit"),
     );
+    let input = TurnInput::new(settings, TurnItems::new(items)?, CacheKey::new("test-key").expect("key"));
     let input = batch.stage_encoded(&input)?.digest();
     Ok(Some(MuseSeed { batch, bundle, input }))
 }

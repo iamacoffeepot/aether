@@ -275,6 +275,7 @@ fn session(batch: &mut Batch, tree: Ref<Tree>) -> Result<Digest> {
         "items": [message("User", "hi"), message("Assistant", "done")],
         "rested": "Completed",
         "tree": reference(tree.digest()),
+        "cache_key": "test-key",
     });
     Ok(batch.stage_artifact(stored::<Session>(&value)?))
 }
@@ -300,6 +301,19 @@ fn test_env_splits_each_value_at_its_first_equals_and_refuses_a_repeated_key() {
     let repeated = parse_test_env(&["AETHER_A=1", "AETHER_A=2"]).expect_err("a repeated key is refused");
     assert!(repeated.to_string().contains("AETHER_A"), "the error names the key: {repeated}");
     parse_test_env(&["AETHER_A"]).expect_err("a value without `=` is refused");
+}
+
+#[test]
+fn an_invalid_share_cache_key_is_refused_naming_the_flag() {
+    // Catches a shared key the vendor would refuse reaching the open, without
+    // naming the flag that supplied it.
+    use super::open::shared_key;
+
+    let key = shared_key(Some("shared-key")).expect("a valid key shares").expect("a key");
+    assert_eq!(key.as_str(), "shared-key");
+    assert!(shared_key(None).expect("no flag draws fresh").is_none());
+    let refused = shared_key(Some("Shared Key!")).expect_err("an invalid key is refused");
+    assert!(refused.to_string().contains("--share-cache-key"), "the error names the flag: {refused}");
 }
 
 #[test]

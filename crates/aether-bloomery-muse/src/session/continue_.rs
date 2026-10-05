@@ -99,7 +99,7 @@ mod tests {
     use aether_data::Ref;
 
     use super::{ContinueInput, SessionContinue};
-    use crate::input::{OfferedTools, OutputBudget, Role, TurnItem};
+    use crate::input::{CacheKey, OfferedTools, OutputBudget, Role, TurnItem};
     use crate::session::fixture::{run, settings, stored};
     use crate::session::state::{RestReason, Session, SessionItems, SessionKey, TurnLimit};
 
@@ -113,7 +113,8 @@ mod tests {
         ];
         let items = SessionItems::new(items).expect("items");
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
-        let session = Session::new(settings(OfferedTools::default()), items, RestReason::Completed, tree);
+        let key = CacheKey::new("session-key").expect("key");
+        let session = Session::new(settings(OfferedTools::default()), items, RestReason::Completed, tree, key);
         let from = Ref::of_encoded(&session).expect("session");
         let user = Some(Ref::of_text("more"));
         let budget = Some(OutputBudget::new(4096).expect("budget"));
