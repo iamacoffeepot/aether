@@ -70,6 +70,9 @@ mod device;
 // lazily as wgpu buffers at first GPU use (the draw-pass slice records
 // against the realized side).
 mod geometry;
+// The ADR-0246 instance-record registry: fixed-capacity record buffers
+// whose CPU copy is the source of truth, written in place on the GPU.
+mod instances;
 mod material;
 // The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
 // so painter order inside the overlay pass is receipt order across the three.
@@ -107,16 +110,18 @@ pub use self::capture::resolve_reference;
 use self::capture::{AcceptedCapture, PendingCapture};
 use self::device::DeviceRecovery;
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
+pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
 use self::program::ProgramRegistry;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
-    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads,
-    DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
+    CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult, CreateTexture, CreateTextureResult,
+    DRAW_TRIANGLE_BYTES, DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
+    DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability,
+    UpdateGeometry, UpdateInstances, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -144,6 +149,10 @@ pub struct RenderCapabilityState {
     /// here at create/update; the draw-pass record path realizes and
     /// consumes the wgpu buffers.
     geometries: GeometryRegistry,
+    /// ADR-0246 instance records: the session-scoped registry. Its CPU
+    /// copy of each buffer is the source of truth; the draw-set record
+    /// path realizes and reads the wgpu buffers.
+    instances: InstancesRegistry,
     /// ADR-0170 authored render programs: the session-scoped registry.
     programs: ProgramRegistry,
     /// Dispatches queued since the last frame record. Unlike the draw
@@ -540,6 +549,7 @@ impl RenderCapabilityState {
 
         self.textures.invalidate_device_resources();
         self.geometries.invalidate_device_resources();
+        self.instances.invalidate_device_resources();
         self.programs.rebuild_for_device(&gpu);
         self.discard_device_replay_caches();
         self.device_recovery.finish_replacement(ticket, &gpu.device);
@@ -833,6 +843,7 @@ impl NativeActor for RenderCapability {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
+            instances: InstancesRegistry::new(),
             programs: ProgramRegistry::new(config.pass_timings),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
@@ -956,6 +967,39 @@ impl NativeActor for RenderCapability {
             return;
         }
         state.geometries.destroy(mail);
+    }
+
+    /// `CreateInstances` (ADR-0246), on the owned instance registry —
+    /// validation, the record copy and id assignment are CPU-side, so
+    /// the reply needs no booted GPU.
+    #[handler::request]
+    fn on_create_instances(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateInstances,
+    ) -> CreateInstancesResult {
+        if let Err(error) = state.service_device_for_request() {
+            return CreateInstancesResult::Err { error };
+        }
+        state.instances.create(mail)
+    }
+
+    /// `UpdateInstances` (ADR-0246), on the owned instance registry.
+    #[handler::tell]
+    fn on_update_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateInstances) {
+        if state.warn_drop_if_unusable("update_instances") {
+            return;
+        }
+        state.instances.update(mail);
+    }
+
+    /// `DestroyInstances` (ADR-0246), on the owned instance registry.
+    #[handler::tell]
+    fn on_destroy_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyInstances) {
+        if state.warn_drop_if_unusable("destroy_instances") {
+            return;
+        }
+        state.instances.destroy(mail);
     }
 
     /// `ProgramRegister` (ADR-0170): validate the WGSL and pass graph,
@@ -1317,6 +1361,7 @@ mod tests {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
+            instances: InstancesRegistry::new(),
             programs: ProgramRegistry::new(false),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,

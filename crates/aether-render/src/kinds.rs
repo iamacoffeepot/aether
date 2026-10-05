@@ -390,6 +390,64 @@ pub struct DestroyGeometry {
     pub geometry_id: u32,
 }
 
+/// `aether.render.create_instances` — register a buffer of instance
+/// records in the render cap's session-scoped instance registry
+/// (ADR-0246 decision 3). A record is one instance's attributes, packed
+/// as `layout` declares with the stride [`vertex_stride_bytes`] gives;
+/// the engine does not interpret it. `capacity` counts records, never
+/// bytes, and is fixed for the buffer's life. `records` is the initial
+/// contents from record 0: it may hold fewer records than the capacity,
+/// and the rest start zeroed. The cap validates before it assigns an id
+/// — an empty layout, a zero capacity, a capacity whose byte size
+/// exceeds the device's buffer limit, record bytes that are not resident
+/// in this process, a record length off the layout stride, or more
+/// initial records than the capacity each refuse with their own reason —
+/// and copies the bytes into a buffer it owns, so the records survive a
+/// render device replacement. Reply: `CreateInstancesResult`.
+#[aether_data::kind(name = "aether.render.create_instances")]
+pub struct CreateInstances {
+    pub layout: Vec<VertexAttribute>,
+    pub capacity: u32,
+    pub records: Blob,
+}
+
+/// Reply to `CreateInstances`. `Ok` carries the assigned `instances_id`
+/// — thread it into `UpdateInstances.instances_id` and
+/// `DestroyInstances.instances_id`. `Err` carries a human-readable
+/// reason naming its validation class, and a refused create consumes no
+/// id.
+#[aether_data::kind(name = "aether.render.create_instances_result")]
+pub enum CreateInstancesResult {
+    Ok { instances_id: u32 },
+    Err { error: String },
+}
+
+/// `aether.render.update_instances` — overwrite a run of records in a
+/// previously-created instance buffer, in place (ADR-0246 decision 3).
+/// `first` is the index of the first record written, counted in
+/// records; `records` holds whole records under the layout fixed at
+/// create, and the run must end inside the capacity. The buffer's
+/// capacity and identity never change. Fire-and-forget: an unknown
+/// `instances_id`, record bytes that are not resident in this process, a
+/// length off the layout stride, or a run past the capacity logs and
+/// drops, leaving every record as it was. An empty `records` is accepted
+/// and writes nothing.
+#[aether_data::kind(name = "aether.render.update_instances")]
+pub struct UpdateInstances {
+    pub instances_id: u32,
+    pub first: u32,
+    pub records: Blob,
+}
+
+/// `aether.render.destroy_instances` — release a previously-created
+/// instance buffer, mirroring `destroy_geometry`. Fire-and-forget; an
+/// unknown `instances_id` logs and drops. The released id is never
+/// handed out again.
+#[aether_data::kind(name = "aether.render.destroy_instances")]
+pub struct DestroyInstances {
+    pub instances_id: u32,
+}
+
 /// How a textured composite lays its source over what is already in
 /// the target.
 ///
