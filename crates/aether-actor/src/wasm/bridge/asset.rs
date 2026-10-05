@@ -57,7 +57,9 @@ pub(super) fn unpack(packed: u64) -> (u32, u32) {
 /// # Safety
 /// `ptr`/`len` must be a live buffer the host just delivered through
 /// `deliver_bytes_to_guest` (this same allocator, this alignment). A
-/// zero-length delivery carries no live buffer, so it is not freed.
+/// zero-length delivery carries no live buffer, so it is not freed: the
+/// host answers an empty payload with a packed `0` and never calls the
+/// guest allocator for it.
 pub(super) unsafe fn take_delivered(ptr: u32, len: u32) -> Vec<u8> {
     if len == 0 {
         return Vec::new();

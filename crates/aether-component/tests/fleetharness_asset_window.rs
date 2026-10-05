@@ -14,7 +14,9 @@
 mod tests {
     use aether_data::{EngineId, Kind};
     use aether_kinds::{LoadComponent, LogTailResult, Spawn, SpawnResult};
-    use aether_test_fixtures_kinds::{AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult};
+    use aether_test_fixtures_kinds::{
+        AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, EmptyAssetProbe, EmptyAssetProbeResult,
+    };
 
     use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
@@ -115,6 +117,54 @@ mod tests {
             .blob
             .expect("the guest's `wire` took the asset as a blob");
         assert_eq!(blob.contiguous(), Some(ASSET_FIXTURE), "the exact asset bytes reached the session");
+    }
+
+    /// The fixture bundle's bytes with one more custom section appended:
+    /// `aether.asset.asset_empty.bin`, carrying no payload (section id 0, the
+    /// section length, the name length, the name).
+    fn bundle_with_empty_asset() -> Vec<u8> {
+        let name = b"aether.asset.asset_empty.bin";
+        let name_len = u8::try_from(name.len()).expect("the section name fits a one-byte length");
+        let mut wasm = read_component_wasm(BUNDLE);
+        wasm.extend([0, name_len + 1, name_len]);
+        wasm.extend(name);
+        wasm
+    }
+
+    fn empty_probe(harness: &mut FleetHarness, engine: EngineId, wasm: Vec<u8>) -> EmptyAssetProbeResult {
+        let load = LoadComponent { wasm, name: None, config: Vec::new(), export: Some(QUIET_PROBE.to_owned()) };
+        let addr = harness.load(engine, &load).addr;
+
+        let replies = harness.send(engine, &addr, &EmptyAssetProbe);
+
+        let [reply] = replies.as_slice() else {
+            panic!("empty_asset_probe expected exactly one reply event, got {}", replies.len());
+        };
+        assert_eq!(reply.kind, EmptyAssetProbeResult::ID, "the reply should be an EmptyAssetProbeResult");
+        EmptyAssetProbeResult::decode_from_bytes(&reply.payload)
+            .expect("the reply payload decodes as EmptyAssetProbeResult")
+    }
+
+    /// A zero-length asset reads as empty by both verbs, and an asset the
+    /// module does not carry still reads as missing. It catches the host
+    /// trapping on an empty delivery (the load itself fails, because `wire`
+    /// traps), an empty asset answered as missing by either verb, a blob
+    /// path that refuses an empty range, and an absent asset answered as an
+    /// empty one.
+    #[test]
+    fn fleetharness_a_zero_length_asset_reads_as_empty() {
+        if !dist_component_available(BUNDLE) {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+
+        let empty = empty_probe(&mut harness, engine, bundle_with_empty_asset());
+        let other_engine = harness.spawn_headless();
+        let absent = empty_probe(&mut harness, other_engine, read_component_wasm(BUNDLE));
+
+        assert_eq!(empty, EmptyAssetProbeResult { copied_len: Some(0), blob_len: Some(0) });
+        assert_eq!(absent, EmptyAssetProbeResult { copied_len: None, blob_len: None });
     }
 
     /// A module published first keeps no asset payload (ADR-0163 §3), so a
