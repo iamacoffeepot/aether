@@ -250,6 +250,13 @@ fn turn(batch: &mut Batch, usage: Usage) -> Result<Digest> {
     Ok(batch.stage_artifact(stored::<TurnResult>(&result)?))
 }
 
+/// A turn the vendor answered without usage.
+fn unreported_turn(batch: &mut Batch) -> Result<Digest> {
+    let body = reference(Ref::of_bytes(b"{}").digest());
+    let result = json!({ "reply": { "Received": { "status": 200, "body": body, "outcome": "Rejected" } } });
+    Ok(batch.stage_artifact(stored::<TurnResult>(&result)?))
+}
+
 /// A session that completed on `tree`.
 fn session(batch: &mut Batch, tree: Ref<Tree>) -> Result<Digest> {
     let message =
@@ -332,6 +339,7 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
     let (session_a, session_b, session_b2) =
         (session(&mut batch, a1)?, session(&mut batch, b1)?, session(&mut batch, b2)?);
     let a_called = turn(&mut batch, usage(10, 1, 100, 5))?;
+    let a_rejected = unreported_turn(&mut batch)?;
     let a_completed = turn(&mut batch, usage(20, 2, 200, 6))?;
     let b_completed = turn(&mut batch, usage(1_000, 100, 10_000, 500))?;
     let b_resumed = turn(&mut batch, usage(30, 3, 300, 7))?;
@@ -343,12 +351,13 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
     let (a, b) = (SessionKey::new(key_a), SessionKey::new(key_b));
     let sent = Digest::from_bytes([2; 32]);
     let b_turn = reads.run::<MuseTurn>(sent, b_completed, Some(key_b))?;
-    let a_turn = reads.run::<MuseTurn>(sent, a_called, Some(key_a))?;
-    reads.fault::<Echo>(sent, FaultReason::TimedOut, a_turn)?;
-    let a_turn = reads.run::<MuseTurn>(sent, a_completed, Some(a_turn))?;
+    let a_first = reads.run::<MuseTurn>(sent, a_called, Some(key_a))?;
+    let a_middle = reads.run::<MuseTurn>(sent, a_rejected, Some(a_first))?;
+    reads.fault::<Echo>(sent, FaultReason::TimedOut, a_middle)?;
+    let a_last = reads.run::<MuseTurn>(sent, a_completed, Some(a_middle))?;
     let b_record = reads.run::<SessionRecord>(sent, session_b, Some(b_turn))?;
     let b_rested = reads.push(&b.head().move_to(Ref::from_digest(session_b)), Some(b_record))?;
-    let a_record = reads.run::<SessionRecord>(sent, session_a, Some(a_turn))?;
+    let a_record = reads.run::<SessionRecord>(sent, session_a, Some(a_last))?;
     reads.push(&a.head().move_to(Ref::from_digest(session_a)), Some(a_record))?;
 
     let mut batch = Batch::new();
@@ -356,21 +365,29 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
     let resume = batch.stage_encoded(&resume)?;
     reads.commit(&batch)?;
     let continued = reads.run::<SessionContinue>(resume.digest(), sent, None)?;
-    let b_turn = reads.run::<MuseTurn>(sent, b_resumed, Some(continued))?;
-    let b_record = reads.run::<SessionRecord>(sent, session_b2, Some(b_turn))?;
+    let b_resumed_turn = reads.run::<MuseTurn>(sent, b_resumed, Some(continued))?;
+    let b_record = reads.run::<SessionRecord>(sent, session_b2, Some(b_resumed_turn))?;
     reads.push(&b.head().move_to(Ref::from_digest(session_b2)), Some(b_record))?;
 
     let rested = follow(&mut reads, a, 0)?;
-    assert_eq!((rested.turns, rested.usage), (2, usage(30, 3, 300, 11)));
+    let usages = rested.turns.iter().map(|turn| turn.usage).collect::<Vec<_>>();
+    assert_eq!(usages, [Some(usage(10, 1, 100, 5)), None, Some(usage(20, 2, 200, 6))]);
+    let seqs = rested.turns.iter().map(|turn| turn.seq).collect::<Vec<_>>();
+    assert_eq!(seqs, [a_first, a_middle, a_last]);
+    assert_eq!(rested.usage, usage(30, 3, 300, 11));
     assert!(rested.faults.is_empty(), "a tool run the loop retries is no fault of the session");
     assert_eq!((rested.from, rested.session.tree()), (Some(a0.digest()), a1));
 
     let rested = follow(&mut reads, b, 0)?;
-    assert_eq!((rested.turns, rested.usage), (1, usage(1_000, 100, 10_000, 500)), "B stops at its first rest");
+    let usages = rested.turns.iter().map(|turn| turn.usage).collect::<Vec<_>>();
+    assert_eq!(usages, [Some(usage(1_000, 100, 10_000, 500))], "B stops at its first rest");
+    assert_eq!(rested.usage, usage(1_000, 100, 10_000, 500));
     assert_eq!((rested.from, rested.session.tree()), (Some(b0.digest()), b1));
 
     let rested = follow(&mut reads, b, b_rested)?;
-    assert_eq!((rested.turns, rested.usage), (1, usage(30, 3, 300, 7)), "the continue's turns are B's");
+    let usages = rested.turns.iter().map(|turn| turn.usage).collect::<Vec<_>>();
+    assert_eq!(usages, [Some(usage(30, 3, 300, 7))], "the continue's turns are B's");
+    assert_eq!(rested.usage, usage(30, 3, 300, 7));
     assert_eq!((rested.from, rested.session.tree()), (Some(b1.digest()), b2));
     assert!(rested.faults.is_empty());
     Ok(())

@@ -1,4 +1,5 @@
-//! `muse wait`: follow one session from a boundary to its next rest.
+//! `muse wait`: follow one session from a boundary to its next rest, listing
+//! each turn.
 //!
 //! The follow reads events after `--after` and blocks on the journal head
 //! whenever it has read them all. An entry belongs to the session when its
@@ -50,7 +51,19 @@ pub(super) fn run(args: &WaitArgs) -> Result<()> {
     let mut engine = args.engine.connect()?;
     let rested = follow(&mut engine, SessionKey::new(args.session), args.after)?;
 
-    println!("rested {} turns={}", reason(rested.session.rested()), rested.turns);
+    for turn in &rested.turns {
+        let line = turn.usage.map_or_else(
+            || format!("unreported turn={}", turn.seq),
+            |usage| {
+                format!(
+                    "turn={} input={} cached={} output={} reasoning={}",
+                    turn.seq, usage.input, usage.cached, usage.output, usage.reasoning
+                )
+            },
+        );
+        println!("{line}");
+    }
+    println!("rested {} turns={}", reason(rested.session.rested()), rested.turns.len());
     let from = rested.from.map_or_else(|| "unknown".to_owned(), |from| from.to_string());
     println!("from={from} to={}", rested.session.tree().digest());
     let usage = rested.usage;
@@ -79,12 +92,22 @@ pub(super) struct Rested {
     /// The tree the activation started from, when its open or continue run
     /// was read; `None` when the follow began after it.
     pub(super) from: Option<Digest>,
-    /// The `muse.turn` runs of the session read before the rest.
-    pub(super) turns: u32,
+    /// The `muse.turn` runs of the session read before the rest, in journal
+    /// order.
+    pub(super) turns: Vec<Turn>,
     /// The usage those turns reported, summed.
     pub(super) usage: Usage,
     /// Each fault or failed reaction in the session's chain.
     pub(super) faults: Vec<String>,
+}
+
+/// One `muse.turn` run the follow read, and the usage its outcome reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Turn {
+    /// The run's journal seq.
+    pub(super) seq: u64,
+    /// The usage the turn reported, when it reported any.
+    pub(super) usage: Option<Usage>,
 }
 
 /// Token counts summed over a session's turns.
@@ -96,12 +119,23 @@ pub(super) struct Usage {
     pub(super) reasoning: u64,
 }
 
+impl From<&TurnUsage> for Usage {
+    fn from(usage: &TurnUsage) -> Self {
+        Self {
+            input: usage.input_tokens(),
+            cached: usage.cached_input_tokens(),
+            output: usage.output_tokens(),
+            reasoning: usage.reasoning_tokens(),
+        }
+    }
+}
+
 impl Usage {
-    fn add(&mut self, usage: &TurnUsage) {
-        self.input += usage.input_tokens();
-        self.cached += usage.cached_input_tokens();
-        self.output += usage.output_tokens();
-        self.reasoning += usage.reasoning_tokens();
+    fn add(&mut self, usage: Self) {
+        self.input += usage.input;
+        self.cached += usage.cached;
+        self.output += usage.output;
+        self.reasoning += usage.reasoning;
     }
 }
 
@@ -139,7 +173,7 @@ struct Chain {
     /// The seqs of the session's `muse.session.record` runs.
     records: HashSet<u64>,
     from: Option<Digest>,
-    turns: u32,
+    turns: Vec<Turn>,
     usage: Usage,
     faults: Vec<String>,
 }
@@ -152,7 +186,7 @@ impl Chain {
             linked: HashSet::new(),
             records: HashSet::new(),
             from: None,
-            turns: 0,
+            turns: Vec::new(),
             usage: Usage::default(),
             faults: Vec::new(),
         }
@@ -212,10 +246,11 @@ impl Chain {
             }
         } else if self.link(entry) {
             if name == MuseTurn::NAME {
-                self.turns += 1;
-                if let Some(usage) = usage(read_value::<TurnResult>(reads, run.result)?.outcome()) {
+                let usage = usage(read_value::<TurnResult>(reads, run.result)?.outcome()).map(Usage::from);
+                if let Some(usage) = usage {
                     self.usage.add(usage);
                 }
+                self.turns.push(Turn { seq: entry.seq, usage });
             } else if name == SessionRecord::NAME {
                 self.records.insert(entry.seq);
             }
