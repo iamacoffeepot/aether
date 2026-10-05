@@ -87,6 +87,9 @@ Every kind below addresses the `aether.render` mailbox.
 | `aether.render.create_geometry` | `CreateGeometry { layout, vertices, indices }` | validate + stage; reply `aether.render.create_geometry_result` / `CreateGeometryResult` (`Ok { geometry_id }` / `Err { error }`) |
 | `aether.render.update_geometry` | `UpdateGeometry { geometry_id, vertices, indices }` | fire-and-forget in-place replacement against the created layout |
 | `aether.render.destroy_geometry` | `DestroyGeometry { geometry_id }` | fire-and-forget release, mirroring `destroy_texture` |
+| `aether.render.create_instances` | `CreateInstances { layout, capacity, records }` | validate + copy; reply `aether.render.create_instances_result` / `CreateInstancesResult` (`Ok { instances_id }` / `Err { error }`) |
+| `aether.render.update_instances` | `UpdateInstances { instances_id, first, records }` | fire-and-forget in-place write of a run of records |
+| `aether.render.destroy_instances` | `DestroyInstances { instances_id }` | fire-and-forget release, mirroring `destroy_geometry` |
 
 `program_id` and `geometry_id` are session-scoped and assigned like texture and
 instrument identifiers. A rejected register or create consumes no id, so
@@ -176,6 +179,54 @@ to avoid. View-dependent geometry that is small by nature — a handful of
 ribbons regenerated per frame — may ride per-frame `update_geometry` at that
 scale. The measure is size and cadence together: a few kilobytes per frame is
 mail like any other, a character mesh per frame is not.
+
+## The instance resource
+
+An instance buffer holds **records**: one instance's attributes each, packed as
+a `layout: Vec<VertexAttribute>` declares, under the same
+[layout vocabulary](#layout-vocabulary) and stride rule a geometry uses. The
+substrate does not interpret a record — a placement, a table index, a tint are
+the authoring actor's business. The buffer is a vertex buffer stepped once per
+instance rather than once per vertex ([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decision 3). No stage draws from one yet; the draw-set stage is its first
+reader.
+
+`capacity` and `first` count records, never bytes. `create_instances` fixes the
+capacity for the buffer's life: `records` is the initial contents from record
+0, it may hold fewer records than the capacity, and the rest start zeroed.
+`update_instances` overwrites the run of records starting at record `first`,
+in place. Neither the capacity nor the `instances_id` changes, so whatever
+names the buffer keeps naming the same one; a larger buffer is a new
+`create_instances`. An update is the per-frame verb for things that move, and
+its cost is the bytes it carries: write the records that changed, not the
+buffer.
+
+The substrate keeps its own copy of every record, and that copy is the source
+of truth. A create and any number of updates are accepted before a GPU device
+exists; the GPU buffer is created at the first use and afterwards receives only
+the bytes written since the last one. After a render device replacement the
+records come back under the same id with the contents they had, as texture and
+geometry bytes do.
+
+`create_instances` validates before it assigns an id, and each failure class
+replies its own reason:
+
+| Class | Reason shape |
+|---|---|
+| Empty layout | `instance layout declares no attributes` |
+| Zero capacity | `instance capacity is zero records` |
+| Buffer limit | `capacity of N records at stride S exceeds the device limit max_buffer_size = M` |
+| Not resident | `instance record bytes are not resident in this process` |
+| Record stride | `records length N does not divide evenly by the layout stride S` |
+| Capacity | `C records from record F run past the capacity of N records` |
+
+`update_instances` is fire-and-forget. An unknown id, bytes that are not
+resident, a length off the stride, or a run that ends past the capacity logs a
+warning under the `aether_render` target and leaves every record as it was; a
+refused update is never partly applied. An empty `records` is accepted and
+writes nothing. `destroy_instances` releases the entry and its GPU buffer, the
+released id is never handed out again, and an unknown id warn-drops the same
+way.
 
 ## The pass graph
 

@@ -59,11 +59,15 @@ What stays fallible is per dispatch, as a bad binding id is today: an unknown dr
 ```rust
 #[aether_data::kind(name = "aether.render.create_instances")]
 pub struct CreateInstances { pub layout: Vec<VertexAttribute>, pub capacity: u32, pub records: Blob }
+#[aether_data::kind(name = "aether.render.create_instances_result")]
+pub enum CreateInstancesResult { Ok { instances_id: u32 }, Err { error: String } }
 #[aether_data::kind(name = "aether.render.update_instances")]
 pub struct UpdateInstances { pub instances_id: u32, pub first: u32, pub records: Blob }
+#[aether_data::kind(name = "aether.render.destroy_instances")]
+pub struct DestroyInstances { pub instances_id: u32 }
 ```
 
-The engine does not interpret a record. It is a vertex buffer stepped per instance, laid out by the same `VertexAttribute` list a geometry uses.
+The engine does not interpret a record. It is a vertex buffer stepped per instance, laid out by the same `VertexAttribute` list a geometry uses. `capacity` and `first` count records. Creation replies `CreateInstancesResult`; an update and a destroy carry no reply, and a refused update is logged and leaves every record as it was. The engine keeps the records it is given, so they survive a render device replacement under the same id.
 
 **4. `DrawSets` is a program stage.**
 
