@@ -337,8 +337,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// implement [`HeldReply`]; an engine teardown settles it silently.
     ///
     /// # Panics
-    /// Panics on a second `hold` in one dispatch (ADR-0243 §7): two debts
-    /// on one request would send two replies.
+    /// Panics on a second `hold` or `defer` in one dispatch (ADR-0243 §7):
+    /// two debts on one request would send two replies.
     pub fn hold<R: HeldReply>(&mut self) -> (Pending<R>, Held<R>) {
         self.claim_dispatch_debt();
         let (id, ledger) =
