@@ -11,7 +11,13 @@ publish = false
 # decoder reads — rather than re-implementing the byte layout, so xtask
 # depends on the chassis crate that owns `package::{PackageManifest,
 # PackageEntry, Sha256, encode_manifest}`.
+# `Engine::import` builds `Import.source` as a typed `ActorPath`, never
+# hand-assembled bytes.
+aether-actor = { path = "../crates/aether-actor" }
 aether-chassis = { path = "../crates/aether-chassis" }
+# The identity half only: `JournalActor`, which types the path `Import` stages
+# its tree into.
+aether-bloomery-journal = { path = "../crates/aether-bloomery-journal", default-features = false }
 # `import-commit` builds the journal's own `Tree` / `EncodedArtifact` values and
 # speaks its `read_head` / `publish` mail, so it links the kind vocabulary.
 aether-bloomery-kinds = { path = "../crates/aether-bloomery-kinds" }

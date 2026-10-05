@@ -9,6 +9,12 @@
 //!   so `bind` and `open` report a reactor that failed to activate.
 //! - [`bind`] binds the muse bundle and the reactor set that runs its session
 //!   loop, once per engine.
+//! - [`bind_programs`] binds the `workspace-programs` bundle that holds the
+//!   environment merge, the vendor run, and the proofs.
+//! - [`bootstrap`] imports the base and toolchain images, merges them into an
+//!   environment, and moves the environment head to it.
+//! - [`vendor`] runs `cargo vendor` over a source tree's `Cargo.lock` in an
+//!   environment and prints the vendor tree.
 //! - [`open`] stages a tree, instructions, a brief, and seeded reads, and
 //!   opens a session.
 //! - [`continue_`] resumes a rested session with a message, or resends it.
@@ -23,20 +29,23 @@
 
 mod activation;
 mod bind;
+mod bind_programs;
+mod bootstrap;
 mod continue_;
 mod export;
 mod open;
+mod vendor;
 mod wait;
 
 #[cfg(test)]
 mod tests;
 
-use aether_bloomery_kinds::{Call, CallOutcome, NativeOrigin, ProgramName, UnitKey};
+use aether_bloomery_kinds::{Call, CallOutcome, Head, NativeOrigin, ProgramName, UnitKey};
 use aether_bloomery_muse::{
     Endpoint, InputLimit, MUSE, ModelName, OfferedTools, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
 };
 use aether_bloomery_program::Program;
-use aether_data::Ref;
+use aether_data::{Digest, OpaqueBytes, Ref};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -59,6 +68,17 @@ enum Verb {
     /// already name them. Prints `bound` or `unchanged` with both digests, and
     /// fails with the driver's recorded reason when the reactor is not live.
     Bind(bind::BindArgs),
+    /// Bind the `workspace-programs` bundle, unless its head already names it.
+    /// Prints `bound bundle=` or `unchanged bundle=` with the bundle digest.
+    BindPrograms(bind_programs::BindProgramsArgs),
+    /// Import the base and toolchain images, merge them into an environment,
+    /// and move the environment head to it. Prints `platform=` and
+    /// `environment=`, the latter line prefixed `unchanged ` when the head
+    /// already named it.
+    Bootstrap(bootstrap::BootstrapArgs),
+    /// Run `cargo vendor` over a commit's or stored tree's `Cargo.lock` in an
+    /// environment. Prints `vendor=`, or fails with cargo's stderr.
+    Vendor(vendor::VendorArgs),
     /// Open a session on a commit's tree, or a stored tree, with instructions,
     /// a brief, and seeded reads. Prints `tree=`, `session=`, and `after=`.
     /// Refuses when the muse reactor is not live.
@@ -80,6 +100,9 @@ enum Verb {
 pub fn run(args: &MuseArgs) -> Result<()> {
     match &args.verb {
         Verb::Bind(args) => bind::run(args),
+        Verb::BindPrograms(args) => bind_programs::run(args),
+        Verb::Bootstrap(args) => bootstrap::run(args),
+        Verb::Vendor(args) => vendor::run(args),
         Verb::Open(args) => open::run(args),
         Verb::Continue(args) => continue_::run(args),
         Verb::Wait(args) => wait::run(args),
@@ -184,16 +207,27 @@ fn turn_limit(turns: u32) -> Result<TurnLimit> {
 /// Ask the driver to run `P` from the bundle [`MUSE`] resolves to over the
 /// stored `input`, and return the seq of the run's recorded transition.
 ///
+/// # Errors
+/// The driver refused the call, the run faulted, or the transport failed.
+fn call<P: Program>(engine: &mut Engine, input: Ref<P::Input>) -> Result<u64> {
+    let (seq, _) = call_in::<P>(engine, MUSE, input)?;
+    Ok(seq)
+}
+
+/// Ask the driver to run `P` from the bundle `bundle` resolves to over the
+/// stored `input`, and return the seq and result digest of the run's recorded
+/// transition.
+///
 /// The call key is the first eight bytes of the input's digest, so a retried
 /// call with the same input replays the outcome the first one recorded.
 ///
 /// # Errors
 /// The driver refused the call, the run faulted, or the transport failed.
-fn call<P: Program>(engine: &mut Engine, input: Ref<P::Input>) -> Result<u64> {
+fn call_in<P: Program>(engine: &mut Engine, bundle: Head<OpaqueBytes>, input: Ref<P::Input>) -> Result<(u64, Digest)> {
     let digest = input.digest();
     let (key, _) = digest.as_bytes().split_first_chunk::<8>().context("a digest holds 32 bytes")?;
     let call = Call {
-        program: MUSE,
+        program: bundle,
         name: ProgramName::new(P::NAME).map_err(|error| anyhow!("program name {:?}: {error}", P::NAME))?,
         input: digest,
         origin: NativeOrigin::new(ORIGIN).map_err(|error| anyhow!("origin {ORIGIN:?}: {error}"))?,
@@ -201,7 +235,7 @@ fn call<P: Program>(engine: &mut Engine, input: Ref<P::Input>) -> Result<u64> {
     };
 
     match engine.call_program(&call)? {
-        CallOutcome::Transition { seq, .. } => Ok(seq),
+        CallOutcome::Transition { seq, transition, .. } => Ok((seq, transition.result)),
         CallOutcome::Fault { seq, fault, .. } => bail!("{} faulted at seq {seq}: {:?}", P::NAME, fault.reason),
         CallOutcome::Refused { reason, .. } => bail!("the driver refused {}: {reason:?}", P::NAME),
     }
