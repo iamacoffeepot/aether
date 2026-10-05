@@ -7,14 +7,17 @@
 //! else. It holds a clone of the engine blob store and checks bytes in
 //! exactly as `ctx.check_in` does (ADR-0238 decisions 1 and 2), or, through
 //! [`BlobCheckIn::slab`], checks a set of members in as one slab
-//! (ADR-0238 decision 8).
+//! (ADR-0238 decision 8). [`BlobCheckIn::view`] hands out a range of a value
+//! the worker already holds as a value of its own, copying nothing.
 //!
 //! It grants nothing else. It sends no mail, names no position, looks no
-//! entry up by hash, and exposes no mailer or binding, so the worker that
+//! entry up by hash (a view starts from a value in hand), and exposes no
+//! mailer or binding, so the worker that
 //! holds it still sends nothing (ADR-0080 §12). Every value it returns is the
 //! same `Shared` [`Blob`] a handler would get, minted by the store's one mint
 //! site.
 
+use std::ops::Range;
 #[cfg(feature = "wasm")]
 use std::sync::Arc;
 
@@ -22,7 +25,7 @@ use aether_data::Blob;
 #[cfg(feature = "wasm")]
 use aether_data::wire;
 
-use crate::store::{BlobEntry, BlobStore, SlabBuilder};
+use crate::store::{BlobEntry, BlobStore, SlabBuilder, store_entry};
 
 /// Checks bytes into the engine blob store from any thread.
 ///
@@ -53,6 +56,19 @@ impl BlobCheckIn {
     #[cfg(feature = "wasm")]
     pub(crate) fn entry(&self, value: &Blob) -> Result<Arc<BlobEntry>, wire::Error> {
         self.store.entry_of(value)
+    }
+
+    /// `range` of `of`'s bytes as a `Shared` [`Blob`] of its own, with its
+    /// own hash, copying nothing. The value holds `of`'s store entry, so the
+    /// whole of `of`'s bytes stay resident while any clone of it lives, even
+    /// after `of` itself drops. When the bytes in `range` are already
+    /// resident, the value is that resident entry instead.
+    ///
+    /// `None` when `range` runs outside `of`, or when `of` is not a value
+    /// this store holds: `Owned` bytes are checked in first.
+    #[must_use]
+    pub fn view(&self, of: &Blob, range: Range<usize>) -> Option<Blob> {
+        self.store.view(&store_entry(of)?, range).map(BlobEntry::into_blob)
     }
 
     /// Start checking in one member per length in `lens` as a single slab:

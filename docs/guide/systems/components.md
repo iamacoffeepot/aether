@@ -177,9 +177,21 @@ asset's catalog entry and byte range
 A guest's load window (`init` + `wire`) reads its assets from the bytes the
 load or republish brought and lets go of them when `wire` returns
 ([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md) §3).
+The window has two verbs. `asset_blob(name)` hands the asset over as a `Blob`
+the guest holds by handle: a range of the module's bytes where they already
+sit in the engine blob store, so no payload byte enters guest memory, and
+sending it on as a `Blob` field gives an in-process recipient the same bytes
+uncopied. It is the verb for a bundle that is mostly payload and routes an
+asset to the actor that makes it resident. `asset(name)` copies the asset into
+guest memory as a `Vec<u8>`, for an actor that parses or transforms the payload
+itself, or whose asset is small beside its module's code, as the reference
+bundle's tile is. A blob the actor keeps in its state past `wire`, or that its recipient
+keeps, holds the module's bytes resident until it drops; the window itself
+still lets go when `wire` returns, and neither verb is reachable from a
+handler.
 A `spawn` of a published type brings no bytes: its guest sees the catalog, and
-a fetch of a catalogued asset traps naming `load_component`, the door that
-brings them.
+a fetch of a catalogued asset by either verb traps naming `load_component`,
+the door that brings them.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the

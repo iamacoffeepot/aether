@@ -1,5 +1,5 @@
 //! ADR-0163 §3 (#3984) asset load-window FFI bridge — the guest half of
-//! the `asset_fetch_p32` / `asset_catalog_p32` host fns.
+//! the `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host fns.
 //!
 //! `wire` runs guest-side; asset bytes live host-side in the module file.
 //! The bridge is the guest-initiated pull: it hands the host an asset name
@@ -9,6 +9,11 @@
 //! buffer into an owned `Vec` and frees it symmetrically through the same
 //! allocator — the host allocated it via `realloc_p32` (which routes to
 //! [`realloc_bytes`]), so the guest frees it the same way.
+//!
+//! `fetch_asset_blob` is the other pull: the host leaves the bytes where
+//! the module's code already sits in its store, holds the asset for this
+//! instance, and hands back only its hash and length, which the guest's blob
+//! backing wraps (`crate::blob::guest`).
 //!
 //! This is the transport backing [`crate::AssetWindow`] / [`crate::AssetCatalog`]
 //! on the guest ctxs. A payload access after the window closed traps
@@ -20,6 +25,8 @@
 
 use core::slice::from_raw_parts;
 
+#[cfg(target_arch = "wasm32")]
+use aether_data::BlobHash;
 use aether_data::wire;
 use aether_kinds::AssetInfo;
 use alloc::vec::Vec;
@@ -81,6 +88,26 @@ pub fn fetch_asset(name: &str) -> Option<Vec<u8>> {
     let (ptr, len) = unpack(packed);
     // SAFETY: a non-sentinel return is a live host-delivered buffer.
     Some(unsafe { take_delivered(ptr, len) })
+}
+
+/// Take an asset through the load window as a blob the host holds for this
+/// instance (ADR-0163 §3): its hash and length, with one hold on this
+/// instance's blob table that the caller now owns and must give back through
+/// `blob_drop_p32`. `None`, with nothing held, when the component carries no
+/// asset by that name. A call outside the window traps host-side.
+///
+/// wasm32-only, as the blob backing that is its one caller is: it wraps the
+/// hold in a value whose drop releases it.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn fetch_asset_blob(name: &str) -> Option<(BlobHash, u64)> {
+    let mut hash = [0; 32];
+    // SAFETY: FFI import; the host copies the name out before returning and
+    // writes exactly 32 bytes at `hash_out_ptr`, which points at `hash`, a
+    // live exclusive borrow of 32 bytes, only when it returns a length.
+    let len =
+        unsafe { raw::asset_blob(name.as_ptr().addr() as u32, name.len() as u32, hash.as_mut_ptr().addr() as u32) };
+    Some((BlobHash::from_bytes(hash), u64::try_from(len).ok()?))
 }
 
 /// The component's asset catalog, decoded from the host's wire-encoded

@@ -6,7 +6,9 @@ use core::cell::OnceCell;
 use core::marker::PhantomData;
 
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::blob::guest;
 use crate::wasm::bridge::asset;
+use aether_data::Blob;
 use alloc::vec::Vec;
 
 /// Init-only capability handle for FFI guests. Resolved during
@@ -46,5 +48,9 @@ impl AssetCatalog for WasmInitCtx<'_> {
 impl AssetWindow for WasmInitCtx<'_> {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
         asset::fetch_asset(name)
+    }
+
+    fn asset_blob(&mut self, name: &str) -> Option<Blob> {
+        guest::asset_blob(name)
     }
 }

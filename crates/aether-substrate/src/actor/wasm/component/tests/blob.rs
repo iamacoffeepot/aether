@@ -6,7 +6,10 @@
 //! over entries pinned through `BlobTable::pin`. The resolve-on-send tests
 //! drive a WAT guest that forwards, or replies with, the payload it received
 //! through `send_mail_p32` / `reply_mail_p32`, as a guest raw-forwarding a
-//! delivered `Blob` does. Entries come from a fresh `BlobStore`.
+//! delivered `Blob` does. Entries come from a fresh `BlobStore`. The
+//! `asset_blob_p32` tests (ADR-0163 §3) drive a WAT guest that carries an
+//! asset section, takes it as a blob through an installed load window, and
+//! forwards it.
 
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -18,9 +21,14 @@ use super::{
     Component, DISPATCH_DROPPED_OVERSIZE, MAX_DELIVERABLE_MAIL_BYTES, WAT_HOOKS, WAT_REALLOC, ctx, ctx_at, inbound,
     instantiate, instantiate_with_ctx,
 };
+use crate::actor::native::BlobCheckIn;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::ComponentCtx;
-use crate::actor::wasm::host_fns::{self, BLOB_NOT_HELD, BLOB_OUT_OF_BOUNDS, REPLY_OK, SEND_BLOB_REFUSED};
+use crate::actor::wasm::asset_manifest::LoadWindow;
+use crate::actor::wasm::host_fns::{
+    self, ASSET_BLOB_NOT_FOUND, BLOB_NOT_HELD, BLOB_OUT_OF_BOUNDS, REPLY_OK, SEND_BLOB_REFUSED,
+};
+use crate::actor::wasm::module::ModuleCache;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::{OwnedDispatch, Registry};
@@ -504,29 +512,39 @@ fn carrier_registry() -> Arc<Registry> {
     registry
 }
 
+/// Every dispatch a [`recipient_sink`] received.
+type Received = Arc<Mutex<Vec<Envelope>>>;
+
+/// A recipient registered in `registry` that keeps every dispatch it
+/// receives.
+fn recipient_sink(registry: &Registry) -> (MailboxId, Received) {
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    let recipient = registry
+        .try_register_inbox(
+            &boot_authority(),
+            "test.guest_blob.recipient",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                // Terminal test sink (ADR-0094): discharge before keeping.
+                dispatch.discharge();
+                sink.lock().expect("sink lock").push(dispatch);
+            }),
+        )
+        .expect("register the recipient");
+    (recipient, received)
+}
+
 /// A [`forwarding_guest`] whose recipient is a sink that keeps every
 /// dispatch it receives.
 struct Forwarder {
     guest: Component,
-    received: Arc<Mutex<Vec<Envelope>>>,
+    received: Received,
 }
 
 impl Forwarder {
     fn new() -> Self {
         let registry = carrier_registry();
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&received);
-        let recipient = registry
-            .try_register_inbox(
-                &boot_authority(),
-                "test.guest_blob.recipient",
-                Arc::new(move |dispatch: OwnedDispatch| {
-                    // Terminal test sink (ADR-0094): discharge before keeping.
-                    dispatch.discharge();
-                    sink.lock().expect("sink lock").push(dispatch);
-                }),
-            )
-            .expect("register the recipient");
+        let (recipient, received) = recipient_sink(&registry);
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None);
         Self { guest: instantiate_with_ctx(&forwarding_guest(recipient), ctx), received }
@@ -642,4 +660,162 @@ fn a_guest_reply_to_a_session_leaves_as_bytes() {
         .expect("the reply reaches the hub");
     let reply = GuestCarrier::decode_from_bytes(&payload).expect("the plain decoder reads a tag-0 reply");
     assert_eq!(read_all(&reply.blob), entry.bytes());
+}
+
+/// The payload of the asset section [`asset_guest`] carries.
+const ASSET: &[u8] = b"tile-pixels-inside-the-module-file";
+
+/// Where [`asset_guest`] keeps the name it asks its load window for.
+const NAME_AT: usize = 600;
+
+/// Where [`asset_guest`] builds its [`GuestCarrier`]: a tag-1 byte, then the
+/// hash `asset_blob_p32` writes.
+const CARRIER_AT: usize = 640;
+
+/// Where [`asset_guest`] stores `asset_blob_p32`'s result.
+const ASSET_LEN_AT: usize = 700;
+
+/// A guest carrying [`ASSET`] in an `aether.asset.tile` section. On receive
+/// it takes the asset named `name` through `asset_blob_p32`, with the hash
+/// landing one byte into a tag-1 [`GuestCarrier`], stores the result at
+/// [`ASSET_LEN_AT`], and forwards the carrier to `recipient`, storing the
+/// status at [`STATUS_AT`]: what the SDK does for a guest that sends an
+/// asset blob on as a `Blob` field.
+fn asset_guest(recipient: MailboxId, name: &str) -> String {
+    format!(
+        r#"
+        (module
+            (@custom "aether.asset.tile" "{asset}")
+            (import "aether" "asset_blob_p32" (func $asset_blob (param i32 i32 i32) (result i64)))
+            (import "aether" "send_mail_p32"
+                (func $send (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const {NAME_AT}) "{name}")
+            (data (i32.const {CARRIER_AT}) "\01")
+            (data (i32.const {STATUS_AT}) "\ff\ff\ff\ff")
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                (i64.store (i32.const {ASSET_LEN_AT}) (call $asset_blob
+                    (i32.const {NAME_AT})
+                    (i32.const {name_len})
+                    (i32.const {hash_at})))
+                (i32.store (i32.const {STATUS_AT}) (call $send
+                    (i64.const {recipient})
+                    (i64.const {carrier})
+                    (i32.const {CARRIER_AT})
+                    (i32.const 33)
+                    (i32.const 1)
+                    (i32.const 0)
+                    (i64.const 0)))
+                i32.const 0))
+        "#,
+        asset = str::from_utf8(ASSET).expect("the asset is text"),
+        name_len = name.len(),
+        hash_at = CARRIER_AT + 1,
+        recipient = recipient.0,
+        carrier = GuestCarrier::ID.0,
+    )
+}
+
+/// An instantiated [`asset_guest`] with its load window open over its own
+/// module code, as the trampoline leaves a loaded guest during `wire`.
+struct AssetGuest {
+    guest: Component,
+    received: Received,
+    /// The module file's code, the value the load brought.
+    code: Blob,
+    store: BlobStore,
+}
+
+impl AssetGuest {
+    fn new(name: &str) -> Self {
+        let registry = carrier_registry();
+        let (recipient, received) = recipient_sink(&registry);
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let store = mailer.blob_store().clone();
+        let blobs = BlobCheckIn::new(store.clone());
+        let wat = asset_guest(recipient, name);
+
+        let code = blobs.check_in(wat::parse_str(&wat).expect("compile WAT").into_boxed_slice());
+        let module =
+            ModuleCache::new(Arc::new(Engine::default())).check_in(&blobs, &code).expect("check the module in");
+        let mut ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None);
+        ctx.install_load_window(LoadWindow::open(&module, Some(code.clone())));
+
+        Self { guest: instantiate_with_ctx(&wat, ctx), received, code, store }
+    }
+
+    /// Run the guest's receive: one `asset_blob_p32` call, then the forward.
+    fn run(&mut self) -> wasmtime::Result<u32> {
+        self.guest.deliver(&inbound(MailboxId(0), KindId(0), Vec::new(), Source::NONE))
+    }
+
+    fn received(&self) -> Vec<Envelope> {
+        mem::take(&mut *self.received.lock().expect("sink lock"))
+    }
+}
+
+/// A guest that takes an asset as a blob and sends it on attaches the view
+/// entry itself: the recipient's bytes are the asset's, they lie inside the
+/// module code's own buffer, and the store's resident bytes do not grow. The
+/// hold the hostcall took then keeps the code resident on its own until the
+/// instance goes. Catches a hostcall that copies the range into a new entry,
+/// a hash written that the table does not hold (the send refused), and a
+/// hold the table never releases.
+#[test]
+fn a_guest_forwarding_an_asset_blob_attaches_a_view_of_the_module_code() {
+    let mut rig = AssetGuest::new("tile");
+    let code_len = rig.store.resident_bytes();
+
+    rig.run().expect("deliver");
+
+    assert_eq!(stored(&mut rig.guest, ASSET_LEN_AT), i64::try_from(ASSET.len()).expect("fits"));
+    assert_eq!(rig.guest.read_u32(STATUS_AT), 0, "the forward goes through");
+    let received = rig.received();
+    let [attached] = received[0].attachments() else {
+        panic!("the forward attaches exactly the asset, got {}", received[0].attachments().len());
+    };
+    let code_bytes = rig.code.contiguous().expect("a store entry is contiguous").as_ptr_range();
+    assert_eq!(attached.bytes(), ASSET);
+    assert!(code_bytes.contains(&attached.bytes().as_ptr()), "the recipient reads the module code in place");
+    assert_eq!(rig.store.resident_bytes(), code_len, "the asset was never copied into the store");
+
+    let AssetGuest { guest, code, store, .. } = rig;
+    drop(received);
+    drop(code);
+
+    assert_eq!(store.resident_bytes(), code_len, "the guest's hold alone keeps the module code resident");
+
+    drop(guest);
+
+    assert_eq!(store.resident_bytes(), 0, "the code leaves with the instance that held a view of it");
+}
+
+/// A name the module carries no asset under answers the sentinel and holds
+/// nothing, so the carrier the guest forwards names nothing the host
+/// attaches. Catches a missing asset answered as an empty blob, or one that
+/// leaves an entry in the table.
+#[test]
+fn asset_blob_answers_a_sentinel_for_a_name_the_module_does_not_carry() {
+    let mut rig = AssetGuest::new("none");
+
+    rig.run().expect("deliver");
+
+    assert_eq!(stored(&mut rig.guest, ASSET_LEN_AT), ASSET_BLOB_NOT_FOUND);
+    assert!(rig.received()[0].attachments().is_empty(), "nothing was held, so nothing is attached");
+}
+
+/// Once the window has closed, as it has when `wire` returns, the hostcall
+/// traps instead of serving: no payload path to the module file outlives the
+/// window. Catches a handler-time `asset_blob_p32` that still reaches the
+/// module's bytes, or reads as a missing asset.
+#[test]
+fn asset_blob_traps_once_the_load_window_has_closed() {
+    let mut rig = AssetGuest::new("tile");
+    rig.guest.close_load_window();
+
+    let error = rig.run().expect_err("a call outside the window traps");
+
+    assert!(format!("{error:?}").contains("outside the load window"), "error was: {error:?}");
+    assert!(rig.received().is_empty(), "the trapped receive forwarded nothing");
 }

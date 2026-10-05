@@ -93,7 +93,7 @@ impl SlabBuilder {
 
     /// Intern every region: exactly one entry per declared length, in
     /// declared order. A region whose hash is already resident returns the
-    /// resident entry, in either storage form, and stays in the slab unused
+    /// resident entry, in any storage form, and stays in the slab unused
     /// until the slab drops. Every other region becomes a new slab-backed
     /// entry.
     #[must_use]

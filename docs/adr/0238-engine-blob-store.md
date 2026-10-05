@@ -130,11 +130,13 @@ pub struct BlobEntry {
 enum Storage {
     Own(Box<[u8]>),                                // every single check-in
     Slab { slab: Arc<Slab>, range: Range<usize> }, // one region of a producer's slab (section 8)
+    View { of: Arc<BlobEntry>, range: Range<usize> }, // a range of another entry's bytes (section 8)
 }
 
 impl BlobStore {
     pub(crate) fn check_in(&self, bytes: Box<[u8]>) -> Arc<BlobEntry>;
     pub(crate) fn slab(&self, lens: &[usize]) -> SlabBuilder; // regions(), then finish() -> Vec<Arc<BlobEntry>>
+    pub(crate) fn view(&self, of: &Arc<BlobEntry>, range: Range<usize>) -> Option<Arc<BlobEntry>>;
 }
 ```
 
@@ -145,17 +147,18 @@ impl BlobStore {
   it never matches the Bloomery journal's digests, which cover a kind prefix
   plus the payload, so it need not share their sha256. If the hash is already resident, check-in
   returns the existing entry and drops the new bytes (dedup). The slot prefers
-  owned storage: an owned check-in that finds a live slab-backed entry makes a
-  new owned entry and moves the slot to it, so existing holders keep the slab
-  entry and later check-ins get the owned one. Two live entries with one hash
-  are sound, because the hash is the identity. A slab member whose hash is
-  already resident, in either form, reuses the resident entry.
+  owned storage: an owned check-in that finds a live slab-backed entry or view
+  makes a new owned entry and moves the slot to it, so existing holders keep
+  the entry they have and later check-ins get the owned one. Two live entries
+  with one hash are sound, because the hash is the identity. A slab member or
+  a view whose hash is already resident, in any form, reuses the resident
+  entry.
 - An entry is shared as an `Arc`. Reading its bytes takes no lock.
 - The dedup index takes a short lock on check-in only. Reads, sends and
   delivery never touch it.
 
 The entry is `Arc<BlobEntry>` holding a `Box<[u8]>` (or a range of a slab
-that owns one), not a bare `Arc<[u8]>`.
+that owns one, or a range of another entry), not a bare `Arc<[u8]>`.
 The index must hold weak references so that it does not keep bytes alive.
 A `Weak<[u8]>` keeps the whole `Arc<[u8]>` allocation (header and bytes) until
 the last weak reference drops, so a weak index over bare `Arc<[u8]>` would free
@@ -334,13 +337,16 @@ Directions recorded for a later trait rework, none chosen.
 - Large entries do not free on the dropping thread. `BlobEntry::drop` sends
   a `Box<[u8]>` at or above `RECLAIM_THRESHOLD_BYTES` to one reclaim thread,
   which frees it. Small entries free inline. A slab frees as a whole when its
-  last member drops, through the same thread when it is large.
+  last member drops, through the same thread when it is large. A view frees
+  nothing of its own: it lets go of the entry it reads from, and that entry
+  frees as above once its last holder, view or value, is gone.
 - The store never drops a referenced entry. Under memory pressure it grows
   and surfaces the pressure: a resident-byte gauge warns at each new
   high-water mark, like `ReplyTable`. The resident total counts a live slab
   whole, and the gauge reports slab bytes separately from live slab-member
-  bytes, so what slabs retain is visible. Spilling referenced entries to
-  persistent storage is not part of this design.
+  bytes, so what slabs retain is visible. A view adds nothing to the total:
+  the entry it reads from already counts those bytes, once. Spilling
+  referenced entries to persistent storage is not part of this design.
 
 ### 8. Allocation: system allocator plus off-thread reclaim
 
@@ -357,6 +363,16 @@ cost of freeing large blocks.
   its own hash and dedup slot. The producer accepts that one live member
   retains the whole slab, including a region dedup made redundant. Single
   check-ins never use one.
+- A view for part of a buffer that is resident anyway. `BlobStore::view`
+  interns a range of a resident entry as an entry of its own, with its own
+  hash and dedup slot, and copies nothing: the view holds the entry it reads
+  from. A view of a view holds the root entry with the range rebased, so
+  views never chain. The producer accepts the slab's cost in another shape:
+  one live view retains the whole buffer it reads from. A load window hands a
+  guest an asset this way, as a range of the module file's code
+  (ADR-0163 §3), so a bundle routes its payload to its consumer without a
+  copy. The native door is `BlobCheckIn::view`, which starts from a value in
+  hand, so it is not a lookup by hash (section 4).
 - The system allocator serves large allocations as their own mappings. Freeing
   one returns it to the OS without fragmenting the small-object heap.
 - The expensive part of freeing a large block (unmapping) moves off hot
@@ -399,7 +415,7 @@ impl Blob {
   `Owned`, the entry for native `Shared`, the imports for guest `Shared`.
   `BlobReader` stays the only streaming reader. `Blob::contiguous` is the one
   whole-bytes accessor: `Some` for owned bytes and engine store entries (an
-  owned buffer or a slab range), `None` for a guest's FFI-backed hold.
+  owned buffer, a slab range or a view), `None` for a guest's FFI-backed hold.
 - The caller supplies the buffer. The host copies at most `MAX_READ_BYTES` per
   call and returns the length (negative for a hash the guest does not hold).
   `blob_drop_p32` on a hash the guest does not hold logs a warning and does
@@ -461,7 +477,7 @@ meaning.
 | Native send | `crates/aether-substrate/src/actor/native/binding/{outbound,pending,flush,send}.rs` (ring entries are plain bytes, so attachments ride on `PendingMail` beside the ring entry) |
 | Native deliver | `actor/native/slot/dispatcher.rs` (decoded `Blob` fields are the attachments), `actor/native/ctx/{mod,send}.rs` |
 | Armed hand-offs | `actor/native/burst/work.rs:670`, `actor/native/spawn/activation.rs:564`, `mail/mailer.rs` (`route_tail`) |
-| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` resolve on send, `blob_hold_p32`, `blob_read_p32`, `blob_drop_p32`), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
+| Wasm | `actor/wasm/host_fns.rs` (`send_mail_p32` resolve on send, `blob_hold_p32`, `blob_read_p32`, `blob_drop_p32`, and `asset_blob_p32`, which places a view in the table already held), `actor/wasm/component/{ctx,dispatch}.rs`, `actor/wasm/blob_table.rs` (the instance's table) |
 | Guest SDK | `crates/aether-actor/src/wasm/{raw.rs,bridge/mail.rs}` |
 | `Blob` and schema | `crates/aether-data/src/{blob/,schema.rs}` (`Blob`, `BlobBacking`, `BlobReader`, `SchemaType::Blob`), `crates/aether-codec/src/{encode,decode}.rs` (read and write plain bytes) |
 | Egress rewrite | `crates/aether-substrate/src/mail/mailer.rs` (`route_tail` egress), `crates/aether-rpc/src/server/runtime.rs` (reply-out), `crates/aether-codec/src/inline/` |
@@ -475,8 +491,8 @@ meaning.
 - **Memory is the limit.** The store is in memory only, so a `Shared` value's
   bytes are resident while anyone holds it, and a closure's members are
   resident while it runs. The raised ceiling (section 10) bounds that per
-  closure. A slab stays resident whole while any of its members lives
-  (section 8).
+  closure. A slab stays resident whole while any of its members lives, and
+  so does a buffer while any view of it lives (section 8).
 - **One kind for every caller.** A kind with a `Blob` field works in-process
   and over the wire alike, so no reply needs a separate bytes twin for wire
   callers. aether-mcp sends and receives such fields as bytes, and its
