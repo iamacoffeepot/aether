@@ -4,7 +4,7 @@
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
 //! to and binds `NoBound`. [`offered`] is the set every session offers:
-//! `tree.edit` and `tree.write`, which read only the tree nodes and blobs they
+//! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree nodes and blobs they
 //! touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
@@ -29,6 +29,7 @@ mod end;
 mod grep;
 mod list;
 mod read;
+mod remove;
 mod spine;
 mod view;
 mod write;
@@ -47,6 +48,7 @@ pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, ends_run};
 pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
 pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
+pub use remove::{RemoveArgs, TreeRemove};
 pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 
@@ -72,6 +74,7 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
         bound::<Echo>(MUSE, none),
         bound::<TreeEdit>(MUSE, none),
         bound::<TreeWrite>(MUSE, none),
+        bound::<TreeRemove>(MUSE, none),
         bound::<TreeList>(MUSE, none),
         bound::<TreeRead>(MUSE, none),
         bound::<TreeGrep>(MUSE, none),
