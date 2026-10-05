@@ -9,13 +9,13 @@ use aether_bloomery_kinds::{Detail, FaultReason, Head, ProgramName, Tree};
 use aether_data::{Invariant, Ref, Utf8Text};
 
 use crate::input::{
-    Endpoint, InputLimit, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput,
-    TurnItem, TurnItems, TurnItemsError, check_order,
+    CacheKey, Endpoint, InputLimit, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role,
+    TurnInput, TurnItem, TurnItems, TurnItemsError, check_order,
 };
 use crate::result::TurnResult;
 
-/// Every field of a turn but its conversation: what a session sends with each
-/// turn.
+/// Every field of a turn but its conversation and key: what a session sends with
+/// each turn.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub struct TurnSettings {
     /// The absolute `https://` or `http://` URL of the responses endpoint each
@@ -64,10 +64,11 @@ impl TurnSettings {
     }
 
     /// The first turn of a session: these settings with the instructions as
-    /// the leading developer message and one user message citing `user`.
+    /// the leading developer message and one user message citing `user`, sent
+    /// with `cache_key`.
     #[must_use]
-    pub fn open(&self, instructions: Ref<Utf8Text>, user: Ref<Utf8Text>) -> TurnInput {
-        self.clone().with_items(TurnItems::opening(instructions, user))
+    pub fn open(&self, instructions: Ref<Utf8Text>, user: Ref<Utf8Text>, cache_key: CacheKey) -> TurnInput {
+        self.clone().with_items(TurnItems::opening(instructions, user), cache_key)
     }
 
     /// These settings with `max_output_tokens` as the budget.
@@ -76,17 +77,15 @@ impl TurnSettings {
         self
     }
 
-    /// One turn sending `items` with these settings.
-    pub(crate) fn with_items(self, items: TurnItems) -> TurnInput {
-        TurnInput::new(
-            self.endpoint,
-            self.model,
-            self.tools,
-            items,
-            self.max_output_tokens,
-            self.reasoning,
-            self.input_limit,
-        )
+    /// One turn sending `items` with these settings and `cache_key`.
+    pub(crate) fn with_items(self, items: TurnItems, cache_key: CacheKey) -> TurnInput {
+        TurnInput::new(self, items, cache_key)
+    }
+
+    /// The parts of these settings, moved out for a turn.
+    pub(crate) fn into_parts(self) -> (Endpoint, ModelName, OfferedTools, OutputBudget, ReasoningEffort, InputLimit) {
+        let Self { endpoint, model, tools, max_output_tokens, reasoning, input_limit } = self;
+        (endpoint, model, tools, max_output_tokens, reasoning, input_limit)
     }
 }
 
@@ -299,12 +298,12 @@ impl SessionKey {
     }
 }
 
-/// A session at rest: its settings, its whole conversation, why it rests, and
-/// the tree its tools left.
+/// A session at rest: its settings, its whole conversation, why it rests, the
+/// tree its tools left, and the cache key its turns send.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session")]
 pub struct Session {
-    /// What every turn of the session sends besides its conversation.
+    /// What every turn of the session sends besides its conversation and key.
     settings: TurnSettings,
     /// The whole conversation, which may end on the assistant's reply.
     items: SessionItems,
@@ -312,12 +311,20 @@ pub struct Session {
     rested: RestReason,
     /// The tree the session's tools left: the latest tree of the session.
     tree: Ref<Tree>,
+    /// The session's key, sent as `prompt_cache_key`.
+    cache_key: CacheKey,
 }
 
 impl Session {
     /// A session at rest.
-    pub(crate) const fn new(settings: TurnSettings, items: SessionItems, rested: RestReason, tree: Ref<Tree>) -> Self {
-        Self { settings, items, rested, tree }
+    pub(crate) const fn new(
+        settings: TurnSettings,
+        items: SessionItems,
+        rested: RestReason,
+        tree: Ref<Tree>,
+        cache_key: CacheKey,
+    ) -> Self {
+        Self { settings, items, rested, tree, cache_key }
     }
 
     /// What every turn sends besides its conversation.
@@ -344,6 +351,12 @@ impl Session {
         self.tree
     }
 
+    /// The session's key, sent as `prompt_cache_key`.
+    #[must_use]
+    pub const fn cache_key(&self) -> &CacheKey {
+        &self.cache_key
+    }
+
     /// The next turn: the settings, with `max_output_tokens` as the budget
     /// when given, and the conversation, followed by one user message citing
     /// `user` when given. With no message the conversation is resent as it
@@ -364,7 +377,7 @@ impl Session {
         if let Some(budget) = max_output_tokens {
             settings = settings.with_budget(budget);
         }
-        Ok(settings.with_items(TurnItems::new(items)?))
+        Ok(settings.with_items(TurnItems::new(items)?, self.cache_key.clone()))
     }
 }
 
@@ -377,10 +390,14 @@ mod tests {
 
     use super::{RestReason, Session, SessionItems, SessionItemsError, TurnLimit, TurnLimitError};
     use crate::input::tests::call;
-    use crate::input::{CallId, OfferedTools, OutputBudget, Role, ToolOutput, TurnItem, TurnItemsError};
+    use crate::input::{CacheKey, CallId, OfferedTools, OutputBudget, Role, ToolOutput, TurnItem, TurnItemsError};
     use crate::session::fixture::settings;
     use crate::session::gate::RequiredProofs;
     use crate::session::open::OpenInput;
+
+    fn cache_key() -> CacheKey {
+        CacheKey::new("test-key").expect("key")
+    }
 
     fn message(role: Role, text: &str) -> TurnItem {
         TurnItem::message(role, Ref::of_text(text))
@@ -406,6 +423,7 @@ mod tests {
             items: SessionItems(unanswered),
             rested: RestReason::TurnLimit,
             tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
+            cache_key: cache_key(),
         };
         let bytes = Session::encode_storage(&StorageData::from_value(stored)).expect("encode");
         assert!(Session::decode_storage(&bytes).is_err(), "an unanswered call refuses on decode");
@@ -440,10 +458,12 @@ mod tests {
             items: SessionItems::new(items.clone()).expect("items"),
             rested: RestReason::Completed,
             tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
+            cache_key: cache_key(),
         };
 
         let next = session.continue_with(Some(Ref::of_text("more")), None).expect("next turn");
         assert_eq!(next.settings(), *session.settings());
+        assert_eq!(next.cache_key(), session.cache_key());
         assert_eq!(next.items().split_last(), Some((&message(Role::User, "more"), items.as_slice())));
         assert_eq!(session.continue_with(None, None), Err(TurnItemsError::LastNotUser), "a reply is never resent");
     }
@@ -458,12 +478,14 @@ mod tests {
             items: SessionItems::new(items.clone()).expect("items"),
             rested: RestReason::Incomplete,
             tree: Ref::of_encoded(&Tree::empty()).expect("tree"),
+            cache_key: cache_key(),
         };
         let budget = OutputBudget::new(4096).expect("budget");
 
         let next = session.continue_with(None, Some(budget)).expect("a resent turn");
         assert_eq!(next.items(), items.as_slice());
         assert_eq!(next.max_output_tokens(), budget);
+        assert_eq!(next.cache_key(), session.cache_key());
         assert_eq!(next.settings(), session.settings().clone().with_budget(budget));
     }
 }

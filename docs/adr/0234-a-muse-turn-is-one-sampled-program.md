@@ -64,22 +64,26 @@ program is tested without spending money.
 
 2. **Stateless turns over a flat item list.** The input carries the whole
    conversation as a flat, ordered list of cited items, and the tool
-   definitions it offers, and nothing more. The request always sends
-   `store: false`, never a server-side conversation handle, and resends the
-   full `input` array every turn. It also sends `prompt_cache_key`, the hex
-   sha256 of the first `input` item as sent: every turn of a session resends
-   that item unchanged, so every turn shares one key, and the key stays a
-   function of the closure. Because the vendor stores nothing, the request
-   also sends `include: ["reasoning.encrypted_content"]`, so each reply
-   carries its reasoning as encrypted content, and the input resends the
-   reasoning items kept from earlier replies (decisions 3 and 4) ahead of
-   the items they produced, so the model keeps its chain of thought across
-   turns. The recorded closure (the input plus every
-   cited text and definition) is therefore the whole request except the
-   credential. A fork is a
-   different closure that shares its leading text artifacts, which the
-   journal content-addresses and stores once. Any tree, fork, or
-   compaction policy lives above the program.
+   definitions it offers, and the session's cache key, and nothing more. The
+   request always sends `store: false`, never a server-side conversation
+   handle, and resends the full `input` array every turn. It also sends
+   `prompt_cache_key`, the session's cache key: a session draws its key when
+   it opens (`muse.session.open` is `Mode::Sampled` and binds `Entropy`,
+   drawing 16 random bytes and sending their lowercase hex unless the opener
+   named a key to share), the input carries it, and every turn of the session
+   resends it unchanged, so the vendor routes a session's turns to the servers
+   that hold its prefix, and the key stays a function of the turn's closure
+   because it is in the input. Sessions share one only when the opener names
+   it. Because the vendor stores nothing, the request also sends
+   `include: ["reasoning.encrypted_content"]`, so each reply carries its
+   reasoning as encrypted content, and the input resends the reasoning items
+   kept from earlier replies (decisions 3 and 4) ahead of the items they
+   produced, so the model keeps its chain of thought across turns. The
+   recorded closure (the input plus every cited text and definition) is
+   therefore the whole request except the credential. A fork is a different
+   closure that shares its leading text artifacts, which the journal
+   content-addresses and stores once. Any tree, fork, or compaction policy
+   lives above the program.
 
 3. **Input kind `muse.turn.input`, valid by construction.** `TurnInput`
    has private fields and one constructor over already-validated parts.
@@ -499,8 +503,11 @@ program is tested without spending money.
   time.** Rejected: the flat item list already makes a fork a different
   closure, and tree, fork, or compaction policy belongs above the program.
 - **A cache key field on the turn input or its settings, set at session
-  open.** Rejected: it is a kind change and a migration of every stored
-  input, and the first item already identifies the session.
+  open.** Adopted, reversing the earlier rejection: the first item no longer
+  identifies the session once many sessions share its instructions, so the
+  session draws its key when it opens and the input carries it. The kind
+  change and its migration are accepted before 1.0, as for the turn kinds
+  above.
 - **The session key as the cache key.** Rejected: `muse.turn` never sees
   it, threading it in is the same kind change, and a fork would lose cache
   sharing with its parent.
