@@ -2,9 +2,9 @@
 //! path's parent, read on the way down and rebuilt on the way up.
 //!
 //! Both walks are iterative, one frame per segment; a [`TreePath`] has at
-//! most 512. Every entry off the spine keeps its citation, so a placed or
-//! removed node restages only the directories it passes through, and every
-//! artifact it stages is reachable from the root it returns.
+//! most 512. Every entry off the spine keeps its citation, so a placed,
+//! removed, or moved node restages only the directories it passes through,
+//! and every artifact it stages is reachable from the root it returns.
 
 use aether_bloomery_kinds::{Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env};
@@ -38,6 +38,37 @@ impl Blocked {
     pub fn summary(&self) -> String {
         let described = self.describe();
         format!("{}, so nothing changed.", described.strip_suffix('.').unwrap_or(&described))
+    }
+}
+
+/// Why a move names no new tree: the source or the destination cannot be
+/// used, the destination already holds an entry, or the destination is the
+/// source or lies inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Moved {
+    /// The source spine is blocked or names nothing.
+    Source(Blocked),
+    /// The destination spine runs through a file, an executable, or a
+    /// symlink.
+    Destination(Blocked),
+    /// An entry already lives at the destination.
+    Exists { at: String },
+    /// The source and the destination are the same path.
+    Same { at: String },
+    /// The destination lies inside the source.
+    Inside { from: String, to: String },
+}
+
+impl Moved {
+    /// The sentence a tool returns when the move cannot be made and nothing
+    /// changed.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Source(blocked) | Self::Destination(blocked) => blocked.summary(),
+            Self::Exists { at } => format!("{at} already exists, so nothing changed."),
+            Self::Same { at } => format!("{at} is the same path, so nothing changed."),
+            Self::Inside { from, to } => format!("{to} is inside {from}, so nothing changed."),
+        }
     }
 }
 
@@ -178,24 +209,96 @@ pub async fn remove(
     Ok(Ok(rebuild(env, spine, None)?))
 }
 
+/// The root of `root` with the entry at `from` moved to `to`, keeping the
+/// moved node's citation, so nothing below it is restaged. Missing
+/// directories on `to`'s spine are created empty. A directory the move leaves
+/// empty stays. Nothing is staged when the move cannot be made: the source
+/// spine is blocked or names nothing, the destination spine runs through a
+/// file, the destination already holds an entry, or the destination is the
+/// source or lies inside it.
+///
+/// Both spines descend from the one original `root`, so only original
+/// directories are read. The source spine is cut at the deepest directory both
+/// spines share, that lower spine is rebuilt without its leaf to give the
+/// shared directory unstaged, that directory is stored into the destination
+/// spine, and the destination spine is rebuilt with the moved node.
+/// Every directory staged is then on the returned root's spine.
+///
+/// Both walks are iterative, one frame per segment.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory on either spine that the store cannot read,
+/// or of a rebuilt directory that does not encode.
+pub async fn relocate(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    from: &TreePath,
+    to: &TreePath,
+) -> Result<Result<Ref<Tree>, Moved>, Refusal> {
+    if from.as_str() == to.as_str() {
+        return Ok(Err(Moved::Same { at: from.as_str().into() }));
+    }
+
+    let mut from_spine = match descend(env, root, from, false).await? {
+        Ok(spine) => spine,
+        Err(blocked) => return Ok(Err(Moved::Source(blocked))),
+    };
+    let mut to_spine = match descend(env, root, to, true).await? {
+        Ok(spine) => spine,
+        Err(blocked) => return Ok(Err(Moved::Destination(blocked))),
+    };
+    let shared = from_spine.names.iter().zip(&to_spine.names).take_while(|(from, to)| from == to).count();
+    if shared == from_spine.names.len() {
+        return Ok(Err(Moved::Inside { from: from.as_str().into(), to: to.as_str().into() }));
+    }
+
+    let (dir, name) = from_spine.parent();
+    let Some(node) = dir.entries().get(name).cloned() else {
+        return Ok(Err(Moved::Source(Blocked::Missing { at: from.as_str().into() })));
+    };
+    let (dir, name) = to_spine.parent();
+    let present = dir.entries().contains_key(name);
+    if present {
+        return Ok(Err(Moved::Exists { at: to.as_str().into() }));
+    }
+
+    let lower = Spine { names: from_spine.names.split_off(shared), dirs: from_spine.dirs.split_off(shared) };
+    let shared_tree = rebuild_tree(env, lower, None)?;
+    to_spine.dirs[shared] = shared_tree;
+    Ok(Ok(rebuild(env, to_spine, Some(node))?))
+}
+
+/// The top directory of the spine with its last entry set to `last`, or removed
+/// when `last` is `None`, unstaged, staging every directory below it.
+fn rebuild_tree(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Tree, Refusal> {
+    let mut levels = spine.names.into_iter().zip(spine.dirs);
+    let Some((top_name, top_dir)) = levels.next() else {
+        unreachable!("a spine has at least one directory");
+    };
+
+    let mut child = last;
+    for (name, dir) in levels.rev() {
+        child = Some(Node::Directory(env.stage_encoded(&with_entry(&dir, name, child))?));
+    }
+    Ok(with_entry(&top_dir, top_name, child))
+}
+
+/// `dir` with `name` set to `node`, or without it when `node` is `None`.
+fn with_entry(dir: &Tree, name: Name, node: Option<Node>) -> Tree {
+    let mut entries = dir.entries().clone();
+    match node {
+        Some(node) => entries.insert(name, node),
+        None => entries.remove(&name),
+    };
+    Tree::new(entries)
+}
+
 /// The root of the spine with its last entry set to `last`, or removed when
 /// `last` is `None`, staging every directory rebuilt on the way up.
 fn rebuild(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Ref<Tree>, Refusal> {
-    let Spine { names, dirs } = spine;
-    let mut child = last;
-    for (name, dir) in names.into_iter().zip(dirs).rev() {
-        let mut entries = dir.entries().clone();
-        match child {
-            Some(node) => entries.insert(name, node),
-            None => entries.remove(&name),
-        };
-        child = Some(Node::Directory(env.stage_encoded(&Tree::new(entries))?));
-    }
-
-    let Some(Node::Directory(root)) = child else {
-        unreachable!("the last rebuilt node is the root directory");
-    };
-    Ok(root)
+    let tree = rebuild_tree(env, spine, last)?;
+    env.stage_encoded(&tree)
 }
 
 #[cfg(test)]
@@ -208,6 +311,7 @@ mod tests {
 
     use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
     use crate::tools::edit::{EditArgs, TreeEdit};
+    use crate::tools::relocate::{MoveArgs, TreeMove};
     use crate::tools::remove::{RemoveArgs, TreeRemove};
     use crate::tools::write::{TreeWrite, WriteArgs};
 
@@ -282,6 +386,133 @@ mod tests {
             let (input, closure) = small.call(&RemoveArgs::new(path(at)));
             let (edited, _) = run_async::<TreeRemove>(&input, closure).expect("a result");
             assert_eq!(edited, Edited::new(small.tree(), summary, no_detail()), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_move_within_one_directory_keeps_the_moved_citation() {
+        // Catches a rename that restages the file's bytes or drops a sibling.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("README"), path("NOTES")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved README to NOTES.");
+
+        let root: Tree = store.value(edited.tree());
+        let readme = small.root().entries().get(&name("README")).expect("the file");
+        assert_eq!(root.entries().get(&name("NOTES")), Some(readme));
+        assert!(!root.entries().contains_key(&name("README")));
+        for kept in ["run", "link", "blob.bin", "src"] {
+            assert_eq!(root.entries().get(&name(kept)), small.root().entries().get(&name(kept)), "{kept} kept");
+        }
+    }
+
+    #[test]
+    fn a_move_between_sibling_directories_rebuilds_both_spines() {
+        // Catches a move that drops the destination sibling or leaves the source entry behind.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("src/lib.rs"), path("dst/lib.rs")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved src/lib.rs to dst/lib.rs.");
+
+        let root: Tree = store.value(edited.tree());
+        let lib = Node::File(Ref::of_bytes(SmallTree::LIB));
+        let Some(Node::Directory(src)) = root.entries().get(&name("src")) else {
+            panic!("src stays a directory");
+        };
+        let src: Tree = store.value(*src);
+        assert_eq!(src, Tree::new(BTreeMap::new()), "an emptied directory stays");
+        let Some(Node::Directory(dst)) = root.entries().get(&name("dst")) else {
+            panic!("dst is created");
+        };
+        let dst: Tree = store.value(*dst);
+        assert_eq!(dst.entries().get(&name("lib.rs")), Some(&lib), "the moved citation is kept");
+    }
+
+    #[test]
+    fn a_move_out_of_a_nested_directory_to_the_root_rebuilds_both_spines() {
+        // Catches a move that leaves the nested entry behind or drops a root sibling.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("src/lib.rs"), path("lib.rs")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved src/lib.rs to lib.rs.");
+
+        let root: Tree = store.value(edited.tree());
+        let lib = Node::File(Ref::of_bytes(SmallTree::LIB));
+        assert_eq!(root.entries().get(&name("lib.rs")), Some(&lib));
+        let Some(Node::Directory(src)) = root.entries().get(&name("src")) else {
+            panic!("src stays a directory");
+        };
+        let src: Tree = store.value(*src);
+        assert_eq!(src, Tree::new(BTreeMap::new()), "an emptied directory stays");
+    }
+
+    #[test]
+    fn a_move_into_a_new_nested_directory_creates_missing_directories() {
+        // Catches missing directories on the destination spine that are not created, and a moved file whose bytes
+        // are restaged.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("README"), path("new/deep/README")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved README to new/deep/README.");
+
+        let root: Tree = store.value(edited.tree());
+        assert!(!root.entries().contains_key(&name("README")));
+        let readme = small.root().entries().get(&name("README")).expect("the file");
+        let Some(Node::Directory(new)) = root.entries().get(&name("new")) else {
+            panic!("new is created");
+        };
+        let new: Tree = store.value(*new);
+        let Some(Node::Directory(deep)) = new.entries().get(&name("deep")) else {
+            panic!("new/deep is created");
+        };
+        let deep: Tree = store.value(*deep);
+        assert_eq!(deep.entries().get(&name("README")), Some(readme));
+    }
+
+    #[test]
+    fn a_move_below_the_shared_directory_substitutes_it_in_memory() {
+        // Catches a move that loses the removal when the shared directory is deeper than the root.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("src/lib.rs"), path("src/deep/lib.rs")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved src/lib.rs to src/deep/lib.rs.");
+
+        let root: Tree = store.value(edited.tree());
+        let Some(Node::Directory(src)) = root.entries().get(&name("src")) else {
+            panic!("src stays a directory");
+        };
+        let src: Tree = store.value(*src);
+        assert_eq!(src.entries().len(), 1, "src holds only deep");
+        let Some(Node::Directory(deep)) = src.entries().get(&name("deep")) else {
+            panic!("src/deep is created");
+        };
+        let deep: Tree = store.value(*deep);
+        let lib = Node::File(Ref::of_bytes(SmallTree::LIB));
+        assert_eq!(deep.entries().get(&name("lib.rs")), Some(&lib));
+        for kept in ["README", "run", "link", "blob.bin"] {
+            assert_eq!(root.entries().get(&name(kept)), small.root().entries().get(&name(kept)), "{kept} kept");
+        }
+    }
+
+    #[test]
+    fn a_blocked_move_leaves_the_tree_unchanged() {
+        // Catches a move that treats a model's mistake as a fault, changes the tree, or stages a partial rebuild.
+        let small = SmallTree::new();
+        for (from, to, summary) in [
+            ("missing", "dst", "Nothing is at missing, so nothing changed."),
+            ("src/missing", "dst", "Nothing is at src/missing, so nothing changed."),
+            ("README/x", "dst", "README is not a directory, so nothing changed."),
+            ("README", "src/lib.rs", "src/lib.rs already exists, so nothing changed."),
+            ("src", "src/lib.rs", "src/lib.rs is inside src, so nothing changed."),
+            ("README", "README", "README is the same path, so nothing changed."),
+            ("src/lib.rs", "README/x", "README is not a directory, so nothing changed."),
+            ("src", "src/new/lib.rs", "src/new/lib.rs is inside src, so nothing changed."),
+            ("README", "run/x", "run is not a directory, so nothing changed."),
+        ] {
+            let args = MoveArgs::new(path(from), path(to));
+            let (input, closure) = small.call(&args);
+            let edited = run_async::<TreeMove>(&input, closure).map(|(edited, _)| edited);
+            assert_eq!(edited, Ok(Edited::new(small.tree(), summary, no_detail())), "{from} to {to}");
         }
     }
 }
