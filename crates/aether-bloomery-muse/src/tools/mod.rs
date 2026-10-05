@@ -127,7 +127,7 @@ pub fn proof_passed(detail: ErasedRef) -> bool {
 }
 
 /// The proofs `names` require, each with its whole-workspace arguments, and
-/// the arguments to stage: every proof tool [`proof_offers`] offers can be
+/// the arguments to stage: every proof tool [`offered_with_proofs`] offers can be
 /// required.
 ///
 /// # Errors
