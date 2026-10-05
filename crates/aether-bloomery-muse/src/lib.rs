@@ -135,9 +135,10 @@ pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
     Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, GateFailure, GateInput, Gated,
-    MAX_GATE_RUNS, MAX_TOOL_RETRIES, MUSE, MuseSession, OpenInput, Opened, RecordInput, RequiredProof, RequiredProofs,
-    RequiredProofsError, RestReason, Session, SessionContinue, SessionExhausted, SessionGate, SessionItems,
-    SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit, TurnLimitError, TurnSettings,
+    MAX_GATE_RUNS, MAX_TOOL_RETRIES, MUSE, MuseSession, OpenInput, Opened, Reads, RecordInput, RequiredProof,
+    RequiredProofs, RequiredProofsError, RestReason, Session, SessionContinue, SessionExhausted, SessionGate,
+    SessionItems, SessionItemsError, SessionKey, SessionOpen, SessionReads, SessionRecord, TurnEnd, TurnLimit,
+    TurnLimitError, TurnSettings,
 };
 pub use tools::{
     DiffArgs, Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, MoveArgs,

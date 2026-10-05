@@ -38,6 +38,12 @@ impl ReadArgs {
     pub const fn new(path: TreePath, from_line: Option<u32>, lines: Option<u32>) -> Self {
         Self { path, from_line, lines }
     }
+
+    /// The file to read, relative to the tree's root.
+    #[must_use]
+    pub const fn path(&self) -> &TreePath {
+        &self.path
+    }
 }
 
 /// The `tree.read` program.

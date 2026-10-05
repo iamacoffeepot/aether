@@ -24,6 +24,12 @@ impl ListArgs {
     pub const fn new(path: Option<TreePath>) -> Self {
         Self { path }
     }
+
+    /// The directory to list, or `None` for the root.
+    #[must_use]
+    pub const fn path(&self) -> Option<&TreePath> {
+        self.path.as_ref()
+    }
 }
 
 /// The `tree.list` program.
