@@ -61,8 +61,8 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ window, mails, after_mails, checks, similarity }` | atomic "set state, read back a PNG, clean up"; a windowed runtime rejects an omitted `window` rather than guessing one |
-| `aether.render.program.register` | `{ wgsl, bindings, transients, passes }` → `program.register_result` | register an authored render program (ADR-0170); reply carries the `program_id` |
-| `aether.render.program.dispatch` | `{ program_id, bindings, uniforms }` | execute a registered program once at the next frame record; fire-and-forget |
+| `aether.render.program.register` | `{ wgsl, bindings, transients, geometries, depth_transients, passes }` → `program.register_result` | register an authored render program (ADR-0170); reply carries the `program_id` |
+| `aether.render.program.dispatch` | `{ program_id, bindings, geometries, draw_sets, uniforms }` | execute a registered program once at the next frame record; fire-and-forget |
 | `aether.render.program.destroy` | `{ program_id }` | release a registered program; fire-and-forget |
 
 A `Vertex` is `{ x, y, z, r, g, b }` — a world-space position plus a per-vertex

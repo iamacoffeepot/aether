@@ -1165,6 +1165,73 @@ pub struct DrawPass {
     pub load: PassLoad,
 }
 
+/// Which triangles a `PassStage::DrawSets` pass discards before
+/// rasterizing (ADR-0246). The front face is counter-clockwise.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Cull {
+    /// Draw every triangle, whichever way it winds.
+    None,
+    /// Discard clockwise triangles.
+    Back,
+}
+
+/// Whether a depth-testing `PassStage::DrawSets` pass also writes the
+/// depth it passes (ADR-0246).
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DepthWrite {
+    /// Test against the slot and write each fragment that passes.
+    Write,
+    /// Test against the slot and leave it as it was.
+    TestOnly,
+}
+
+/// The depth slot a `PassStage::DrawSets` pass tests against and what
+/// it does to it (ADR-0246). `slot` is an index into
+/// `ProgramRegister.depth_transients`; the test is `LessEqual`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DepthUse {
+    pub slot: u32,
+    pub write: DepthWrite,
+}
+
+/// The `PassStage::DrawSets` declaration (ADR-0246 decision 4): one
+/// render pass that draws every draw of every draw set the dispatch
+/// lists for it, in order. The pass's fragment entry point, input
+/// slots, color output and uniform window stay on [`ProgramPass`].
+///
+/// The pass binds two vertex buffers. Buffer 0 is a draw's geometry,
+/// laid out by `vertex_layout` and stepped per vertex; buffer 1 is the
+/// draw's instance records, laid out by `instance_layout` and stepped
+/// per instance. Each attribute binds at the `@location` its layout
+/// declares, so the two layouts share no location and neither declares
+/// one twice. A draw set is drawn by a pass whose two layouts equal the
+/// set's.
+///
+/// `depth` attaches a `ProgramRegister.depth_transients` slot under a
+/// `LessEqual` test. The first pass of a dispatch to name a slot clears
+/// it to the far plane and later passes load it, whatever their stage
+/// and whatever `write` says.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DrawSetsPass {
+    /// Vertex entry point in the program's WGSL module. It may read the
+    /// pass's uniform window and its group-1 inputs, as a draw pass's
+    /// vertex stage does.
+    pub vertex_entry_point: String,
+    /// The layout of every geometry the pass draws, bound per vertex.
+    pub vertex_layout: Vec<VertexAttribute>,
+    /// The layout of every instance buffer the pass draws, bound per
+    /// instance.
+    pub instance_layout: Vec<VertexAttribute>,
+    /// Index into `ProgramDispatch.draw_sets`: the list of draw sets
+    /// this pass draws. Two passes may name one list.
+    pub draw_sets: u32,
+    pub cull: Cull,
+    /// The depth slot the pass tests against, or `None` for a pass that
+    /// does not depth-test.
+    pub depth: Option<DepthUse>,
+    pub load: PassLoad,
+}
+
 /// Which resident buffer of a declared geometry slot a compute pass
 /// binds at group 2. Vertex and index buffers preserve the created
 /// geometry's capacity; the indirect buffer is the substrate-owned
@@ -1217,9 +1284,10 @@ pub struct ComputePass {
     pub workgroups: [u32; 3],
 }
 
-/// Which GPU stage a program pass runs (ADR-0170, ADR-0171). Compute
-/// adds shared-memory, reductions, and scatter writes over resident
-/// geometry; indexed-indirect draw consumes its derived control block.
+/// Which GPU stage a program pass runs (ADR-0170, ADR-0171, ADR-0246).
+/// Compute adds shared-memory, reductions, and scatter writes over
+/// resident geometry; indexed-indirect draw consumes its derived control
+/// block; a draw-sets pass draws retained lists of instanced draws.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PassStage {
     /// A fullscreen-triangle fragment pipeline over a render attachment.
@@ -1235,6 +1303,11 @@ pub enum PassStage {
     /// no texture render attachment, so its `ProgramPass.output` must
     /// be `OutputSlot::None`.
     Compute(ComputePass),
+    /// One render pass over the draw sets the dispatch lists for it
+    /// (ADR-0246): every draw of every listed set, in order, each an
+    /// indexed draw of one geometry once per record of a run of one
+    /// instance buffer.
+    DrawSets(DrawSetsPass),
 }
 
 /// Repetition of one program pass (ADR-0170): the pass records `count`
@@ -1255,8 +1328,8 @@ pub struct PassRepeat {
 /// One pass in a program's declared graph (ADR-0170). The graph is a
 /// sequence: a pass may read only slots already written, which makes
 /// the DAG check a single index comparison at register time.
-/// `entry_point` names a fragment entry for fragment and draw stages,
-/// or a compute entry for `PassStage::Compute`. `inputs` bind in order
+/// `entry_point` names a fragment entry for fragment, draw and
+/// draw-sets stages, or a compute entry for `PassStage::Compute`. `inputs` bind in order
 /// at group 1, input `n` at `@binding(2 * n)` with its sampler, when
 /// its slot declares one, at `@binding(2 * n + 1)`; render stages attach
 /// `output`, while compute declares `OutputSlot::None` and writes its
@@ -1338,6 +1411,19 @@ pub struct ProgramPass {
 /// buffers at group 2 in list order. It writes no texture attachment;
 /// a later indexed-indirect draw consumes the derived buffers.
 ///
+/// A `PassStage::DrawSets` pass (ADR-0246) names no geometry slot: it
+/// carries its own vertex and instance layouts and draws the draw sets
+/// a dispatch lists for it. Each attribute binds at the `@location` its
+/// layout declares, the vertex layout in vertex buffer 0 and the
+/// instance layout in vertex buffer 1, so a register is refused when
+/// either layout is empty, when one declares a location twice, when the
+/// two share a location, or when the vertex stage reads a location
+/// neither declares or reads one as the wrong type. The list slots a
+/// program's passes name are dense: a dispatch supplies one more list
+/// than the highest `DrawSetsPass.draw_sets` index, and a graph that
+/// leaves a lower index unnamed is refused, so every list a dispatch
+/// supplies is drawn by at least one pass.
+///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. The headless chassis
 /// composes no render actor, and a register before the render GPU boots
@@ -1384,7 +1470,10 @@ pub enum ProgramRegisterResult {
 /// `bindings` names one registry texture id per declared
 /// `ProgramRegister.bindings` slot, in order; `geometries` names one
 /// registry geometry id per declared `ProgramRegister.geometries` slot
-/// (ADR-0171), also in order; `uniforms` is one byte
+/// (ADR-0171), also in order; `draw_sets` gives one list of draw-set
+/// ids per list slot the program's `PassStage::DrawSets` passes name
+/// (ADR-0246), each list the sets that slot's passes draw this frame,
+/// in order; `uniforms` is one byte
 /// blob the passes window into (each window is copied into an aligned
 /// staging arrangement, so windows need no alignment of their own —
 /// pack them tight). Runtime mismatches — an unknown `program_id`, a
@@ -1394,7 +1483,9 @@ pub enum ProgramRegisterResult {
 /// declared extent (a `Texture` binding takes any size), a
 /// `TextureArray` binding whose texture is not an array, a written
 /// binding whose texture is not writable, a geometry
-/// whose layout disagrees with its declared slot, a uniform
+/// whose layout disagrees with its declared slot, a wrong number of
+/// draw-set lists, an unknown draw-set id, a draw set whose layouts are
+/// not the layouts of a pass that draws it, a uniform
 /// window past the blob's end, or a pass whose input and output resolve
 /// to the same texture — warn-drop the dispatch naming the program,
 /// pass, and binding in the render actor's log ring, the same
@@ -1406,6 +1497,11 @@ pub struct ProgramDispatch {
     /// One geometry id per declared `ProgramRegister.geometries` slot,
     /// in order. Empty for a fragment-only program.
     pub geometries: Vec<u32>,
+    /// One list of draw-set ids per list slot the program's
+    /// `PassStage::DrawSets` passes name, in slot order (ADR-0246).
+    /// Empty for a program with no such pass; a list may be empty, and
+    /// its passes then draw nothing.
+    pub draw_sets: Vec<Vec<u32>>,
     #[serde(with = "aether_data::bytes")]
     pub uniforms: Vec<u8>,
 }

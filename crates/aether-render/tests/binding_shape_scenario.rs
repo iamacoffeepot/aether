@@ -237,7 +237,7 @@ fn output_overlay(texture_id: u32, left: u16) -> DrawTexturedQuads {
 }
 
 fn dispatch(program_id: u32, bindings: Vec<u32>, geometries: Vec<u32>) -> ProgramDispatch {
-    ProgramDispatch { program_id, bindings, geometries, uniforms: Vec::new() }
+    ProgramDispatch { program_id, bindings, geometries, draw_sets: Vec::new(), uniforms: Vec::new() }
 }
 
 /// The frame pixel showing output texel `(x, y)` of a quad at `left`.

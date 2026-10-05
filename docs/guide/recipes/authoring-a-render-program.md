@@ -154,12 +154,14 @@ itself.
   "program_id": 0,
   "bindings": [SOURCE_ID, OUTPUT_ID],
   "geometries": [],
+  "draw_sets": [],
   "uniforms": [0, 0, 0, 63, 0, 0, 128, 63]   // 0.5f32, 1.0f32, little-endian
 }
 ```
 
 Every field is required: the codec rejects a missing one rather than
-defaulting it, so a fragment-only program still sends `"geometries": []`.
+defaulting it, so a fragment-only program still sends `"geometries": []` and
+`"draw_sets": []`.
 
 Dispatch is fire-and-forget: the passes record at the next frame, before the
 world, material, and overlay passes, and the result persists in the output
@@ -183,6 +185,7 @@ bundle so the freshly written pixels appear in the captured frame:
   "mails": [
     { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [SOURCE_ID, OUTPUT_ID], "geometries": [],
+                  "draw_sets": [],
                   "uniforms": [0, 0, 0, 63, 0, 0, 128, 63] } },
     { "address": "aether.render", "kind_name": "aether.render.draw_textured_quads",
       "params": { "texture_id": OUTPUT_ID, "space": "Screen", "clip": null, "blend": "Straight",
@@ -350,6 +353,7 @@ drawn pixels land in the captured frame:
   "mails": [
     { "address": "aether.render", "kind_name": "aether.render.program.dispatch",
       "params": { "program_id": 0, "bindings": [TARGET_ID], "geometries": [GEOMETRY_ID],
+                  "draw_sets": [],
                   // color (1,1,1,1) then depth 0.5, padded to 32 bytes
                   "uniforms": [0,0,128,63, 0,0,128,63, 0,0,128,63, 0,0,128,63,
                                0,0,0,63,   0,0,0,0,    0,0,0,0,    0,0,0,0] } },
@@ -404,6 +408,110 @@ pass windows its own 32 bytes of a 64-byte blob, which is how they carry
 different colors and depths. A depth slot must resolve to the same extent as
 the color output of every pass naming it.
 
+## Drawing many instances
+
+A draw pass draws one geometry once. To draw a geometry many times, or many
+geometries, in one render pass, put the draws in a
+[draw set](../systems/render-programs.md#the-draw-set-resource) and draw it with a
+[`DrawSets` pass](../systems/render-programs.md#draw-set-passes). The walkthrough
+draws the triangle from the section above twice, shifted left and right by an
+offset each copy reads from its instance record.
+
+Create the instance records. A record here is one `Float32x3` offset at
+`@location(4)`, so the stride is 12 bytes; the two records are `(-0.4, 0, 0)`
+and `(0.4, 0, 0)`:
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.create_instances)
+{
+  "layout": [ { "location": 4, "format": "Float32x3" } ],
+  "capacity": 2,
+  // -0.4 is [205,204,204,190], 0.4 is [205,204,204,62].
+  "records": [205,204,204,190, 0,0,0,0, 0,0,0,0,
+              205,204,204,62,  0,0,0,0, 0,0,0,0]
+}
+```
+
+The reply is `{ "Ok": { "instances_id": 0 } }` — call it `INSTANCES_ID`. Then
+make the set: one draw of the triangle's three indices, once per record of both
+records. The set's two layouts are the geometry's and the instance buffer's.
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.create_draw_set)
+{
+  "vertex_layout":   [ { "location": 0, "format": "Float32x3" } ],
+  "instance_layout": [ { "location": 4, "format": "Float32x3" } ],
+  "draws": [
+    { "geometry_id": GEOMETRY_ID, "indices":   { "first": 0, "count": 3 },
+      "instances_id": INSTANCES_ID, "instances": { "first": 0, "count": 2 } }
+  ]
+}
+```
+
+The reply is `{ "Ok": { "draw_set_id": 0 } }` — call it `DRAW_SET_ID`. Every
+draw is checked here, so a refusal names the draw and its class and nothing is
+left to fail at frame time.
+
+Register a program whose pass declares the same two layouts. The vertex stage
+reads the corner from vertex buffer 0 and the offset from the instance buffer,
+each at the location its layout declares:
+
+```wgsl
+@vertex
+fn vs_placed(@location(0) corner: vec3<f32>, @location(4) offset: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(corner + offset, 1.0);
+}
+
+@fragment
+fn fs_white() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+}
+```
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.program.register)
+{
+  "wgsl": "<the module above, as one string>",
+  "bindings": [
+    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } }
+  ],
+  "transients": [],
+  "geometries": [],              // a DrawSets pass names no geometry slot
+  "depth_transients": [],
+  "passes": [
+    { "stage": { "DrawSets": {
+        "vertex_entry_point": "vs_placed",
+        "vertex_layout":   [ { "location": 0, "format": "Float32x3" } ],
+        "instance_layout": [ { "location": 4, "format": "Float32x3" } ],
+        "draw_sets": 0,          // this pass draws list 0 of the dispatch
+        "cull": "None", "depth": null, "load": "Clear" } },
+      "entry_point": "fs_white", "inputs": [], "output": { "Binding": { "index": 0 } },
+      "uniform_offset": 0, "uniform_length": 0, "repeat": null }
+  ]
+}
+```
+
+The dispatch lists the sets each list slot draws this frame. The program names
+one list, so `draw_sets` holds one list:
+
+```jsonc
+// send_mail → aether.render  (kind: aether.render.program.dispatch)
+{
+  "program_id": PROGRAM_ID,
+  "bindings": [TARGET_ID],
+  "geometries": [],
+  "draw_sets": [ [DRAW_SET_ID] ],
+  "uniforms": []
+}
+```
+
+Both copies of the triangle land in `TARGET_ID` from one render pass. To move a
+copy, send `aether.render.update_instances` with its record; to add or drop
+draws, patch the set with `aether.render.update_draw_set`; to hide the whole
+set for a frame, leave its id out of the list. None of those re-registers the
+program. A dispatch that lists an unknown set id, or a set whose layouts are
+not the pass's, drops whole with a warning.
+
 ## From a wasm component
 
 The same kinds flow through the flat send verbs. Registration is a
@@ -436,7 +544,7 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The dispatch then rides wherever the repaint cadence lives — a `Tick` or
 `Render` handler, a settle gate — as
-`ctx.send::<RenderCapability>(&ProgramDispatch { program_id, bindings, geometries, uniforms })`.
+`ctx.send::<RenderCapability>(&ProgramDispatch { program_id, bindings, geometries, draw_sets, uniforms })`.
 A component that draws geometry sends its `CreateGeometry` on the same
 reply-driven path as the register, keeping the `geometry_id` from a
 `CreateGeometryResult` handler; the upload belongs to subject load, and every

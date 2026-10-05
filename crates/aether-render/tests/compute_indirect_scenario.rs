@@ -202,6 +202,7 @@ fn dispatch(program_id: u32, output_id: u32, source_id: u32, derived_id: u32) ->
         program_id,
         bindings: vec![output_id],
         geometries: vec![source_id, derived_id],
+        draw_sets: Vec::new(),
         uniforms: Vec::new(),
     }
 }

@@ -163,7 +163,13 @@ fn solid(colour: [u8; 4], texels: usize) -> Vec<u8> {
 
 fn dispatch(program_id: u32, source_id: u32, output_id: u32, layer: Option<u32>) -> ProgramDispatch {
     let uniforms = layer.map(|layer| layer.to_le_bytes().to_vec()).unwrap_or_default();
-    ProgramDispatch { program_id, bindings: vec![source_id, output_id], geometries: Vec::new(), uniforms }
+    ProgramDispatch {
+        program_id,
+        bindings: vec![source_id, output_id],
+        geometries: Vec::new(),
+        draw_sets: Vec::new(),
+        uniforms,
+    }
 }
 
 /// An overlay draw of a program's output as an `OUTPUT_SIDE` square

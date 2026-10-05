@@ -161,6 +161,7 @@ fn dispatch(program_id: u32, output_id: u32, geometry_id: u32) -> ProgramDispatc
         program_id,
         bindings: vec![output_id],
         geometries: vec![geometry_id],
+        draw_sets: Vec::new(),
         uniforms: [1.0f32, 1.0, 1.0, 1.0].iter().flat_map(|value| value.to_le_bytes()).collect(),
     }
 }

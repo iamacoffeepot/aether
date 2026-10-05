@@ -10,22 +10,26 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler, ProgramInputView,
-    ProgramPipelineSpec, build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
-    build_program_pipeline, program_inputs_layout, program_storage_layout, program_uniform_layout,
+    ProgramComputePipelineSpec, ProgramDepthState, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler,
+    ProgramInputView, ProgramPipelineSpec, ProgramVertexBuffer, build_fullscreen_vertex_module,
+    build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
+    program_storage_layout, program_uniform_layout,
 };
 use aether_substrate::session_ids::SessionIds;
 
+use super::draw_set::DrawSetRegistry;
 use super::geometry::{GeometryRegistry, wgpu_vertex_attributes};
+use super::instances::InstancesRegistry;
 use super::pipeline::RenderGpu;
 use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
 use crate::{
-    ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
-    Sampling, SlotShape, SlotSpec, TextureFormat,
+    Cull, DepthWrite, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, Sampling, SlotShape, SlotSpec, TextureFormat, VertexAttribute,
 };
 
 mod cache;
+mod draw_sets;
 mod record;
 mod sampler;
 mod submit;
@@ -36,7 +40,7 @@ use cache::DispatchCache;
 use sampler::ProgramSamplers;
 use submit::FramePasses;
 use timing::{Availability, PassCosts, PassTimingInstrument};
-use validate::{PassPlanStage, ProgramPlan};
+use validate::{PassPlan, PassPlanStage, ProgramPlan};
 
 /// Minimum bytes a pass binds for its uniform window: a zero-length
 /// window (a uniform-less pass) still binds a 4-byte zeroed dummy so
@@ -89,6 +93,17 @@ enum PassPipeline {
 /// resolve to the same texture — `Full` and `Divided { divisor: 1 }`
 /// share allocations, and programs share the pool with each other.
 type TransientKey = (u32, u32, wgpu::TextureFormat);
+
+/// The resource registries a frame's dispatches resolve their ids
+/// against. A dispatch realizes what it binds, so every registry that
+/// uploads on first use is held mutably; a draw set owns no device
+/// resource and is only read.
+pub struct DispatchResources<'a> {
+    pub textures: &'a mut TextureRegistry,
+    pub geometries: &'a mut GeometryRegistry,
+    pub instances: &'a mut InstancesRegistry,
+    pub draw_sets: &'a DrawSetRegistry,
+}
 
 /// Session-scoped registry of authored render programs, plus the shared
 /// transient pool their dispatches allocate intermediates from. Each
@@ -256,8 +271,7 @@ impl ProgramRegistry {
         &mut self,
         gpu: &RenderGpu,
         encoder: &mut wgpu::CommandEncoder,
-        textures: &mut TextureRegistry,
-        geometries: &mut GeometryRegistry,
+        resources: DispatchResources<'_>,
         dispatches: &[ProgramDispatch],
     ) {
         // Fold whatever the device finished mapping since the last frame
@@ -305,8 +319,10 @@ impl ProgramRegistry {
                     program,
                     samplers: samplers.as_ref().expect("registering a program builds the sampler table"),
                     pool: transient_pool,
-                    textures,
-                    geometries,
+                    textures: &mut *resources.textures,
+                    geometries: &mut *resources.geometries,
+                    instances: &mut *resources.instances,
+                    draw_sets: resources.draw_sets,
                     dispatch,
                     queries,
                     passes: &mut passes,
@@ -347,7 +363,9 @@ fn build_program_passes(
             let bound_uniform_bytes = u64::from(pass.uniform_length).max(MIN_BOUND_UNIFORM_BYTES);
             let visibility = match &pass.stage {
                 PassPlanStage::Fragment => wgpu::ShaderStages::FRAGMENT,
-                PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) => wgpu::ShaderStages::VERTEX_FRAGMENT,
+                PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) | PassPlanStage::DrawSets(_) => {
+                    wgpu::ShaderStages::VERTEX_FRAGMENT
+                }
                 PassPlanStage::Compute(_) => wgpu::ShaderStages::COMPUTE,
             };
             let uniform_layout = program_uniform_layout(device, bound_uniform_bytes, visibility);
@@ -372,25 +390,31 @@ fn build_program_passes(
                     ))
                 }
                 PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw) => {
-                    let output_format = plan.slot_format(pass.output.expect("draw pass has an output"));
                     let layout = &plan.geometries[draw.geometry as usize].layout;
                     let attributes = wgpu_vertex_attributes(layout);
-                    PassPipeline::Render(build_program_draw_pipeline(
-                        device,
-                        &ProgramDrawPipelineSpec {
-                            module: &module,
-                            vertex_entry_point: &draw.vertex_entry_point,
-                            fragment_entry_point: &pass.entry_point,
-                            vertex_stride_bytes: u64::try_from(vertex_stride_bytes(layout))
-                                .expect("vertex stride fits u64"),
-                            vertex_attributes: &attributes,
-                            color_format: super::texture::wgpu_texture_format(output_format),
-                            blend: blend_for(output_format),
-                            depth: draw.depth.is_some(),
-                            uniform_layout: &uniform_layout,
-                            inputs_layout: &inputs_layout,
-                        },
-                    ))
+                    let stage = DrawStage {
+                        vertex_entry_point: &draw.vertex_entry_point,
+                        vertex_buffers: &[vertex_buffer(layout, &attributes, wgpu::VertexStepMode::Vertex)],
+                        cull_mode: None,
+                        depth: draw.depth.map(|_| ProgramDepthState { write: true }),
+                    };
+                    build_draw_pipeline(device, &module, plan, pass, (&uniform_layout, &inputs_layout), &stage)
+                }
+                PassPlanStage::DrawSets(draw_sets) => {
+                    let vertices = wgpu_vertex_attributes(&draw_sets.vertex_layout);
+                    let records = wgpu_vertex_attributes(&draw_sets.instance_layout);
+                    let stage = DrawStage {
+                        vertex_entry_point: &draw_sets.vertex_entry_point,
+                        vertex_buffers: &[
+                            vertex_buffer(&draw_sets.vertex_layout, &vertices, wgpu::VertexStepMode::Vertex),
+                            vertex_buffer(&draw_sets.instance_layout, &records, wgpu::VertexStepMode::Instance),
+                        ],
+                        cull_mode: cull_mode(draw_sets.cull),
+                        depth: draw_sets
+                            .depth
+                            .map(|depth| ProgramDepthState { write: depth.write == DepthWrite::Write }),
+                    };
+                    build_draw_pipeline(device, &module, plan, pass, (&uniform_layout, &inputs_layout), &stage)
                 }
                 PassPlanStage::Compute(compute) => {
                     let read_only: Vec<bool> =
@@ -415,6 +439,65 @@ fn build_program_passes(
         .collect();
     pollster::block_on(scope.pop())
         .map_or_else(|| Ok(passes_gpu), |error| Err(format!("pipeline creation failed: {error}")))
+}
+
+/// What a rasterizing stage decides about its draw pipeline; the rest
+/// comes from the pass every stage shares.
+struct DrawStage<'a> {
+    vertex_entry_point: &'a str,
+    vertex_buffers: &'a [ProgramVertexBuffer<'a>],
+    cull_mode: Option<wgpu::Face>,
+    depth: Option<ProgramDepthState>,
+}
+
+/// Build the draw pipeline of one rasterizing pass: `stage` over the
+/// pass's fragment entry, color output and its `(uniform, inputs)`
+/// bind-group layouts.
+fn build_draw_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    plan: &ProgramPlan,
+    pass: &PassPlan,
+    (uniform_layout, inputs_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+    stage: &DrawStage<'_>,
+) -> PassPipeline {
+    let output_format = plan.slot_format(pass.output.expect("a rasterizing pass has an output"));
+    PassPipeline::Render(build_program_draw_pipeline(
+        device,
+        &ProgramDrawPipelineSpec {
+            module,
+            vertex_entry_point: stage.vertex_entry_point,
+            fragment_entry_point: &pass.entry_point,
+            vertex_buffers: stage.vertex_buffers,
+            cull_mode: stage.cull_mode,
+            color_format: super::texture::wgpu_texture_format(output_format),
+            blend: blend_for(output_format),
+            depth: stage.depth,
+            uniform_layout,
+            inputs_layout,
+        },
+    ))
+}
+
+fn cull_mode(cull: Cull) -> Option<wgpu::Face> {
+    match cull {
+        Cull::None => None,
+        Cull::Back => Some(wgpu::Face::Back),
+    }
+}
+
+/// One vertex buffer of a draw pipeline: `layout`'s stride, the
+/// `attributes` it realized as, and how the buffer steps.
+fn vertex_buffer<'a>(
+    layout: &[VertexAttribute],
+    attributes: &'a [wgpu::VertexAttribute],
+    step_mode: wgpu::VertexStepMode,
+) -> ProgramVertexBuffer<'a> {
+    ProgramVertexBuffer {
+        stride_bytes: u64::try_from(vertex_stride_bytes(layout)).expect("vertex stride fits u64"),
+        step_mode,
+        attributes,
+    }
 }
 
 /// What a pass's group-1 layout declares for an input reading `spec`:
@@ -515,6 +598,15 @@ fn fs_solid() -> @location(0) vec4<f32> {
         texture_id
     }
 
+    fn resources<'a>(
+        textures: &'a mut TextureRegistry,
+        geometries: &'a mut GeometryRegistry,
+        instances: &'a mut InstancesRegistry,
+        draw_sets: &'a DrawSetRegistry,
+    ) -> DispatchResources<'a> {
+        DispatchResources { textures, geometries, instances, draw_sets }
+    }
+
     fn encoder(gpu: &RenderGpu) -> wgpu::CommandEncoder {
         gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("program rebuild test") })
     }
@@ -532,6 +624,8 @@ fn fs_solid() -> @location(0) vec4<f32> {
         let healthy_texture_id = writable_texture(&mut textures);
         let quarantined_texture_id = writable_texture(&mut textures);
         let mut geometries = GeometryRegistry::new();
+        let mut instances = InstancesRegistry::new();
+        let draw_sets = DrawSetRegistry::new();
 
         // Warm the healthy program's old-device dispatch cache and output
         // realization. Reusing either on the replacement device is the
@@ -540,12 +634,12 @@ fn fs_solid() -> @location(0) vec4<f32> {
         registry.record(
             &old_gpu,
             &mut old_encoder,
-            &mut textures,
-            &mut geometries,
+            resources(&mut textures, &mut geometries, &mut instances, &draw_sets),
             &[ProgramDispatch {
                 program_id: healthy_id,
                 bindings: vec![healthy_texture_id],
                 geometries: Vec::new(),
+                draw_sets: Vec::new(),
                 uniforms: Vec::new(),
             }],
         );
@@ -581,19 +675,20 @@ fn fs_solid() -> @location(0) vec4<f32> {
         registry.record(
             &replacement_gpu,
             &mut replacement_encoder,
-            &mut textures,
-            &mut geometries,
+            resources(&mut textures, &mut geometries, &mut instances, &draw_sets),
             &[
                 ProgramDispatch {
                     program_id: healthy_id,
                     bindings: vec![healthy_texture_id],
                     geometries: Vec::new(),
+                    draw_sets: Vec::new(),
                     uniforms: Vec::new(),
                 },
                 ProgramDispatch {
                     program_id: quarantined_id,
                     bindings: vec![quarantined_texture_id],
                     geometries: Vec::new(),
+                    draw_sets: Vec::new(),
                     uniforms: Vec::new(),
                 },
             ],
@@ -625,18 +720,35 @@ fn fs_solid() -> @location(0) vec4<f32> {
         let mut textures = TextureRegistry::new();
         let texture_id = writable_texture(&mut textures);
         let mut geometries = GeometryRegistry::new();
-        let dispatch =
-            ProgramDispatch { program_id, bindings: vec![texture_id], geometries: Vec::new(), uniforms: Vec::new() };
+        let mut instances = InstancesRegistry::new();
+        let draw_sets = DrawSetRegistry::new();
+        let dispatch = ProgramDispatch {
+            program_id,
+            bindings: vec![texture_id],
+            geometries: Vec::new(),
+            draw_sets: Vec::new(),
+            uniforms: Vec::new(),
+        };
 
         for _ in 0..3 {
             let mut frame_encoder = encoder(&old_gpu);
-            registry.record(&old_gpu, &mut frame_encoder, &mut textures, &mut geometries, slice::from_ref(&dispatch));
+            registry.record(
+                &old_gpu,
+                &mut frame_encoder,
+                resources(&mut textures, &mut geometries, &mut instances, &draw_sets),
+                slice::from_ref(&dispatch),
+            );
             old_gpu.queue.submit([frame_encoder.finish()]);
             registry.after_frame_submit();
             old_gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("timed frame completes");
 
             let mut harvest_encoder = encoder(&old_gpu);
-            registry.record(&old_gpu, &mut harvest_encoder, &mut textures, &mut geometries, &[]);
+            registry.record(
+                &old_gpu,
+                &mut harvest_encoder,
+                resources(&mut textures, &mut geometries, &mut instances, &draw_sets),
+                &[],
+            );
             if registry.entries[&program_id].timings.rows(&registry.entries[&program_id].plan)[0].samples > 0 {
                 break;
             }

@@ -1,9 +1,9 @@
 //! Draw-set harness scenario (ADR-0246 decisions 1 and 2): the
 //! `aether.render.{create,update,destroy}_draw_set` family driven
-//! end-to-end through an in-process `SubstrateHarness`. No stage draws
-//! a set yet — the draw-set pass stage is its first reader — so the
-//! scenario's surface is the registry over the mail path, and what a
-//! `destroy_geometry` does to a set that names the geometry.
+//! end-to-end through an in-process `SubstrateHarness`. The scenario's
+//! surface is the registry over the mail path, and what a
+//! `destroy_geometry` does to a set that names the geometry; a pass
+//! drawing a set is `draw_sets_pass_scenario.rs`.
 //!
 //! Skipped when no wgpu adapter is available (driverless runners), as
 //! the instance-registry scenario is.

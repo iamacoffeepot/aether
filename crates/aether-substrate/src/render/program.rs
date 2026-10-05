@@ -251,30 +251,49 @@ pub fn build_program_pipeline(device: &wgpu::Device, spec: &ProgramPipelineSpec<
 /// carries an extent alone.
 pub const PROGRAM_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// One draw pass's pipeline shape (ADR-0171): the authored module's
-/// vertex and fragment entry points over a bound geometry, into a color
-/// attachment of `color_format`. `vertex_attributes` and
-/// `vertex_stride_bytes` come from the geometry slot's declared layout,
-/// which the render cap has already checked the vertex stage's
-/// interface against. `depth` builds the `LessEqual` depth-write state
-/// a declared depth transient attaches to; a pass declaring none
-/// rasterizes in draw order.
+/// One vertex buffer a draw pipeline reads: its stride, whether it
+/// steps per vertex or per instance, and the attributes laid out in it.
+/// The attributes come from a layout the render cap has already checked
+/// the vertex stage's interface against.
+pub struct ProgramVertexBuffer<'a> {
+    pub stride_bytes: u64,
+    pub step_mode: wgpu::VertexStepMode,
+    pub attributes: &'a [wgpu::VertexAttribute],
+}
+
+/// The depth state of a draw pipeline that attaches a depth transient:
+/// the test is always `LessEqual`, and `write` says whether a fragment
+/// that passes it is written.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ProgramDepthState {
+    pub write: bool,
+}
+
+/// One draw pass's pipeline shape (ADR-0171, ADR-0246): the authored
+/// module's vertex and fragment entry points over `vertex_buffers`, in
+/// buffer-slot order, into a color attachment of `color_format`. A pass
+/// over one bound geometry has one per-vertex buffer; a draw-sets pass
+/// adds a per-instance buffer at slot 1. `cull_mode` is `None` for a
+/// pass that draws both windings. `depth` is the state a declared depth
+/// transient attaches under; a pass declaring none rasterizes in draw
+/// order.
 pub struct ProgramDrawPipelineSpec<'a> {
     pub module: &'a wgpu::ShaderModule,
     pub vertex_entry_point: &'a str,
     pub fragment_entry_point: &'a str,
-    pub vertex_stride_bytes: u64,
-    pub vertex_attributes: &'a [wgpu::VertexAttribute],
+    pub vertex_buffers: &'a [ProgramVertexBuffer<'a>],
+    pub cull_mode: Option<wgpu::Face>,
     pub color_format: wgpu::TextureFormat,
     pub blend: Option<wgpu::BlendState>,
-    pub depth: bool,
+    pub depth: Option<ProgramDepthState>,
     pub uniform_layout: &'a wgpu::BindGroupLayout,
     pub inputs_layout: &'a wgpu::BindGroupLayout,
 }
 
 /// Build one draw pass pipeline from its [`ProgramDrawPipelineSpec`].
-/// Culling stays off — winding is the authoring actor's business, and
-/// the substrate has no view on which side of a face it is painting.
+/// The front face is counter-clockwise; whether the other side is
+/// culled is the pass's declaration, since the substrate has no view on
+/// which side of a face it is painting.
 #[must_use]
 pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipelineSpec<'_>) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -282,11 +301,15 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
         bind_group_layouts: &[Some(spec.uniform_layout), Some(spec.inputs_layout)],
         immediate_size: 0,
     });
-    let vertex_buffers = [wgpu::VertexBufferLayout {
-        array_stride: spec.vertex_stride_bytes,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: spec.vertex_attributes,
-    }];
+    let vertex_buffers: Vec<wgpu::VertexBufferLayout<'_>> = spec
+        .vertex_buffers
+        .iter()
+        .map(|buffer| wgpu::VertexBufferLayout {
+            array_stride: buffer.stride_bytes,
+            step_mode: buffer.step_mode,
+            attributes: buffer.attributes,
+        })
+        .collect();
     let fragment_targets = [Some(wgpu::ColorTargetState {
         format: spec.color_format,
         blend: spec.blend,
@@ -311,14 +334,14 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
+            cull_mode: spec.cull_mode,
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
         },
-        depth_stencil: spec.depth.then(|| wgpu::DepthStencilState {
+        depth_stencil: spec.depth.map(|depth| wgpu::DepthStencilState {
             format: PROGRAM_DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(depth.write),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -497,11 +520,11 @@ pub struct ProgramDepthAttachment<'a> {
     pub clear: bool,
 }
 
-/// One recorded draw pass iteration (ADR-0171): the pass's pipeline, the
-/// color slot view it renders into under the pass's declared load
-/// semantic, an optional depth attachment, the group-0 uniform window
-/// and group-1 input pairs, and the bound geometry's realized buffers.
-pub struct ProgramDrawPass<'a> {
+/// What every recorded draw pass iteration opens with (ADR-0171,
+/// ADR-0246): the pass's pipeline, the color slot view it renders into
+/// under the pass's declared load semantic, an optional depth
+/// attachment, and the group-0 uniform window and group-1 input pairs.
+pub struct ProgramDrawPassOpen<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub target_view: &'a wgpu::TextureView,
     pub clear_color: bool,
@@ -509,12 +532,64 @@ pub struct ProgramDrawPass<'a> {
     pub uniform_bind_group: &'a wgpu::BindGroup,
     pub uniform_offset: u32,
     pub inputs_bind_group: &'a wgpu::BindGroup,
-    pub vertex_buffer: &'a wgpu::Buffer,
-    pub index_buffer: &'a wgpu::Buffer,
-    pub command: ProgramDrawCommand<'a>,
     /// GPU timestamps to bracket this iteration with, or `None` when the
     /// per-pass timing instrument is not running.
     pub timestamps: Option<PassTimestamps<'a>>,
+}
+
+/// Begin one draw pass iteration in `encoder` and hand the open pass
+/// back with its pipeline and both bind groups set, for the caller to
+/// bind vertex and index buffers and issue draws into. The attachments'
+/// clears happen when the pass ends, whether or not anything is drawn.
+pub fn begin_program_draw_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    open: &ProgramDrawPassOpen<'_>,
+) -> wgpu::RenderPass<'e> {
+    let load = if open.clear_color {
+        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+    } else {
+        wgpu::LoadOp::Load
+    };
+    let depth_attachment = open.depth.as_ref().map(|depth| {
+        let load = if depth.clear {
+            wgpu::LoadOp::Clear(1.0)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        wgpu::RenderPassDepthStencilAttachment {
+            view: depth.view,
+            depth_ops: Some(wgpu::Operations { load, store: wgpu::StoreOp::Store }),
+            stencil_ops: None,
+        }
+    });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aether program draw pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: open.target_view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: depth_attachment,
+        timestamp_writes: open.timestamps.map(PassTimestamps::writes),
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+
+    pass.set_pipeline(open.pipeline);
+    pass.set_bind_group(0, open.uniform_bind_group, &[open.uniform_offset]);
+    pass.set_bind_group(1, open.inputs_bind_group, &[]);
+    pass
+}
+
+/// One recorded draw pass iteration over a bound geometry (ADR-0171):
+/// what the pass opens with, the geometry's realized buffers, and how
+/// its draw obtains its arguments.
+pub struct ProgramDrawPass<'a> {
+    pub open: ProgramDrawPassOpen<'a>,
+    pub vertex_buffer: &'a wgpu::Buffer,
+    pub index_buffer: &'a wgpu::Buffer,
+    pub command: ProgramDrawCommand<'a>,
 }
 
 /// How a recorded authored draw obtains its indexed draw arguments.
@@ -529,42 +604,11 @@ pub enum ProgramDrawCommand<'a> {
 /// no indices still runs the pass — its clears are the caller's
 /// declaration — and issues no draw.
 pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramDrawPass<'_>) {
-    let load = if draw.clear_color {
-        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-    } else {
-        wgpu::LoadOp::Load
-    };
-    let depth_attachment = draw.depth.as_ref().map(|depth| wgpu::RenderPassDepthStencilAttachment {
-        view: depth.view,
-        depth_ops: Some(wgpu::Operations {
-            load: if depth.clear {
-                wgpu::LoadOp::Clear(1.0)
-            } else {
-                wgpu::LoadOp::Load
-            },
-            store: wgpu::StoreOp::Store,
-        }),
-        stencil_ops: None,
-    });
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("aether program draw pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: draw.target_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
-        })],
-        depth_stencil_attachment: depth_attachment,
-        timestamp_writes: draw.timestamps.map(PassTimestamps::writes),
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+    let mut pass = begin_program_draw_pass(encoder, &draw.open);
     if matches!(draw.command, ProgramDrawCommand::Direct { index_count: 0 }) {
         return;
     }
-    pass.set_pipeline(draw.pipeline);
-    pass.set_bind_group(0, draw.uniform_bind_group, &[draw.uniform_offset]);
-    pass.set_bind_group(1, draw.inputs_bind_group, &[]);
+
     pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
     pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
     match draw.command {

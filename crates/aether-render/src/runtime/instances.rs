@@ -81,6 +81,13 @@ impl StagedInstances {
         buffer
     }
 
+    /// The GPU buffer, once [`Self::ensure_realized`] has made it on the
+    /// current device.
+    #[must_use]
+    pub fn realized(&self) -> Option<&wgpu::Buffer> {
+        self.realized.as_ref()
+    }
+
     /// Overwrite the records starting at record `first`, or refuse and
     /// change nothing.
     fn write(&mut self, first: u32, records: &[u8]) -> Result<(), String> {
@@ -220,6 +227,20 @@ impl InstancesRegistry {
             Some(entry) => entry,
             None => self.holds.retired_mut(instances_id).expect("a held instances id is live or retired"),
         }
+    }
+
+    /// [`Self::held_mut`] without the right to change the buffer: the
+    /// lookup a pass draws a set's rows through once they are realized.
+    ///
+    /// # Panics
+    /// Panics on an id that is neither live nor retired, fail-fast per
+    /// ADR-0063: a held id is always in one of the two.
+    #[must_use]
+    pub fn held(&self, instances_id: u32) -> &StagedInstances {
+        self.entries
+            .get(&instances_id)
+            .or_else(|| self.holds.retired(instances_id))
+            .expect("a held instances id is live or retired")
     }
 
     /// Drop every buffer built against the current device while keeping

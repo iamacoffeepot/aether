@@ -12,6 +12,7 @@ use naga::{
 };
 
 use super::super::surface::render_limits;
+use super::draw_sets::validate::{DrawSetsPlan, list_slots, validate_draw_sets};
 use crate::{
     ComputeBufferBinding, ComputePass, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad,
     PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat,
@@ -72,20 +73,39 @@ pub enum PassPlanStage {
     Draw(DrawPlan),
     DrawIndexedIndirect(DrawPlan),
     Compute(ComputePlan),
+    DrawSets(DrawSetsPlan),
 }
 
 impl PassPlanStage {
     pub fn draw(&self) -> Option<&DrawPlan> {
         match self {
             Self::Draw(draw) | Self::DrawIndexedIndirect(draw) => Some(draw),
-            Self::Fragment | Self::Compute(_) => None,
+            Self::Fragment | Self::Compute(_) | Self::DrawSets(_) => None,
         }
     }
 
     pub fn compute(&self) -> Option<&ComputePlan> {
         match self {
             Self::Compute(compute) => Some(compute),
-            Self::Fragment | Self::Draw(_) | Self::DrawIndexedIndirect(_) => None,
+            Self::Fragment | Self::Draw(_) | Self::DrawIndexedIndirect(_) | Self::DrawSets(_) => None,
+        }
+    }
+
+    pub fn draw_sets(&self) -> Option<&DrawSetsPlan> {
+        match self {
+            Self::DrawSets(draw_sets) => Some(draw_sets),
+            Self::Fragment | Self::Draw(_) | Self::DrawIndexedIndirect(_) | Self::Compute(_) => None,
+        }
+    }
+
+    /// The depth transient a rasterizing stage attaches, whichever
+    /// stage declares it: the slot the pool assigns a texture to and
+    /// the first-reference clear is sequenced by.
+    pub fn depth_slot(&self) -> Option<u32> {
+        match self {
+            Self::Draw(draw) | Self::DrawIndexedIndirect(draw) => draw.depth,
+            Self::DrawSets(draw_sets) => draw_sets.depth.map(|depth| depth.slot),
+            Self::Fragment | Self::Compute(_) => None,
         }
     }
 }
@@ -140,6 +160,10 @@ pub struct ProgramPlan {
     /// Deduplicated binding indices any pass writes; each must resolve
     /// to a `Writable` registry texture at dispatch.
     pub written_bindings: Vec<u32>,
+    /// How many draw-set lists a dispatch supplies (ADR-0246): one more
+    /// than the highest list index a `DrawSets` pass names, every index
+    /// below it named by at least one pass.
+    pub draw_set_lists: u32,
 }
 
 impl ProgramPlan {
@@ -250,6 +274,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     }
 
     check_encode_budget(&passes)?;
+    let draw_set_lists = list_slots(&passes)?;
 
     let final_output = passes.last().expect("passes checked non-empty").output;
     let Some(ResolvedSlot::Binding(output_binding)) = final_output else {
@@ -270,6 +295,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         passes,
         output_binding,
         written_bindings,
+        draw_set_lists,
     })
 }
 
@@ -396,14 +422,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             (PassPlanStage::Fragment, None)
         }
         PassStage::Draw(draw) | PassStage::DrawIndexedIndirect(draw) => {
-            let Some(output) = output else {
-                return Err(format!("pass {index}: a draw pass must declare a texture output"));
-            };
-            let output_spec = match output {
-                ResolvedSlot::Binding(binding) => mail.bindings[binding as usize],
-                ResolvedSlot::Transient(transient) => mail.transients[transient as usize],
-            };
-            let output_extent = target_extent(output_spec).expect("outputs and transients were checked to be Targets");
+            let output_extent = attached_extent(mail, index, output, "draw")?;
             let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), output_extent)?;
             if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
                 check_indirect_writer(earlier, index, draw.geometry)?;
@@ -421,6 +440,12 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
                 return Err(format!("pass {index}: a compute pass must declare OutputSlot::None"));
             }
             (PassPlanStage::Compute(validate_compute(mail, module, info, index, entry_index, compute)?), None)
+        }
+        PassStage::DrawSets(draw_sets) => {
+            let output_extent = attached_extent(mail, index, output, "draw-sets")?;
+            let fragment_entry = (entry_index, pass.entry_point.as_str());
+            let validated = validate_draw_sets(mail, module, index, draw_sets, fragment_entry, output_extent)?;
+            (PassPlanStage::DrawSets(validated.plan), Some(validated.vertex_entry_index))
         }
     };
 
@@ -465,6 +490,25 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
         repeat_count,
         uniform_stride,
     })
+}
+
+/// The extent of the color output a rasterizing pass attaches, which
+/// its depth attachment has to share. `stage` names the stage in the
+/// refusal of a pass that declares no texture output.
+fn attached_extent(
+    mail: &ProgramRegister,
+    index: usize,
+    output: Option<ResolvedSlot>,
+    stage: &str,
+) -> Result<SlotExtent, String> {
+    let Some(output) = output else {
+        return Err(format!("pass {index}: a {stage} pass must declare a texture output"));
+    };
+    let output_spec = match output {
+        ResolvedSlot::Binding(binding) => mail.bindings[binding as usize],
+        ResolvedSlot::Transient(transient) => mail.transients[transient as usize],
+    };
+    Ok(target_extent(output_spec).expect("outputs and transients were checked to be Targets"))
 }
 
 /// A validated draw declaration plus the naga entry index of its vertex
@@ -598,13 +642,8 @@ fn check_indirect_writer(earlier: &[PassPlan], index: usize, geometry: u32) -> R
 /// The `PassStage::Draw` half of pass validation (ADR-0171), in check
 /// order: the vertex entry exists, the geometry slot the dispatch fills
 /// is declared, the vertex stage's interface agrees with that slot's
-/// layout, and the depth declaration is coherent with the pass.
-///
-/// The depth rule: a pass depth-tests exactly when it names a depth
-/// slot, so the only two ways to be wrong are naming a slot that does
-/// not exist or resolve to the color output's extent (wgpu requires
-/// attachments of one size), and writing `@builtin(frag_depth)` from
-/// the fragment stage with no depth attachment to write it into.
+/// layout, and the depth declaration is coherent with the pass
+/// ([`check_depth`]).
 fn validate_draw(
     mail: &ProgramRegister,
     module: &Module,
@@ -613,37 +652,14 @@ fn validate_draw(
     fragment_entry: (usize, &str),
     output_extent: SlotExtent,
 ) -> Result<ValidatedDraw, String> {
-    let (fragment_entry_index, fragment_entry_point) = fragment_entry;
-    let vertex_entry_index = module
-        .entry_points
-        .iter()
-        .position(|entry| entry.stage == ShaderStage::Vertex && entry.name == draw.vertex_entry_point)
-        .ok_or_else(|| {
-            format!("pass {index}: no vertex entry point named `{}` in the module", draw.vertex_entry_point)
-        })?;
+    let vertex_entry_index = vertex_entry(module, index, &draw.vertex_entry_point)?;
 
     let slot = mail.geometries.get(draw.geometry as usize).ok_or_else(|| {
         format!("pass {index}: geometry slot {} is out of range ({} declared)", draw.geometry, mail.geometries.len())
     })?;
-    check_vertex_interface(module, index, vertex_entry_index, draw.geometry, &slot.layout)?;
-
-    if let Some(depth) = draw.depth {
-        let extent = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
-            format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len())
-        })?;
-        if extent != output_extent {
-            return Err(format!(
-                "pass {index}: depth transient {depth} declares extent {extent:?}, which does not match its color \
-                 output's extent {output_extent:?} — a depth attachment must be the size of the color attachment \
-                 it tests for",
-            ));
-        }
-    } else if writes_frag_depth(module, fragment_entry_index) {
-        return Err(format!(
-            "pass {index}: entry point `{fragment_entry_point}` writes @builtin(frag_depth), so the pass must \
-             declare a depth transient to write it into",
-        ));
-    }
+    let declared_by = format!("geometry slot {}'s layout", draw.geometry);
+    check_vertex_interface(module, index, vertex_entry_index, &slot.layout, &declared_by)?;
+    check_depth(mail, module, index, draw.depth, fragment_entry, output_extent)?;
 
     Ok(ValidatedDraw {
         plan: DrawPlan {
@@ -656,30 +672,77 @@ fn validate_draw(
     })
 }
 
-/// Check the vertex stage's declared interface against the geometry
-/// slot's layout through naga's reflection: every `@location` the stage
-/// reads must be declared by the layout, and its WGSL type must be the
-/// one that location's format is consumed as. A layout attribute the
-/// stage ignores is fine — the vertex buffer supplies it, and nothing
-/// reads it.
-fn check_vertex_interface(
+/// The naga index of the vertex entry point a rasterizing pass names.
+pub(super) fn vertex_entry(module: &Module, index: usize, name: &str) -> Result<usize, String> {
+    module
+        .entry_points
+        .iter()
+        .position(|entry| entry.stage == ShaderStage::Vertex && entry.name == name)
+        .ok_or_else(|| format!("pass {index}: no vertex entry point named `{name}` in the module"))
+}
+
+/// The depth rule every rasterizing pass shares: a pass depth-tests
+/// exactly when it names a depth slot, so the only two ways to be wrong
+/// are naming a slot that does not exist or resolve to the color
+/// output's extent (wgpu requires attachments of one size), and writing
+/// `@builtin(frag_depth)` from the fragment stage with no depth
+/// attachment to write it into.
+pub(super) fn check_depth(
+    mail: &ProgramRegister,
+    module: &Module,
+    index: usize,
+    depth: Option<u32>,
+    fragment_entry: (usize, &str),
+    output_extent: SlotExtent,
+) -> Result<(), String> {
+    let (fragment_entry_index, fragment_entry_point) = fragment_entry;
+    let Some(depth) = depth else {
+        if writes_frag_depth(module, fragment_entry_index) {
+            return Err(format!(
+                "pass {index}: entry point `{fragment_entry_point}` writes @builtin(frag_depth), so the pass must \
+                 declare a depth transient to write it into",
+            ));
+        }
+        return Ok(());
+    };
+
+    let extent = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
+        format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len())
+    })?;
+    if extent != output_extent {
+        return Err(format!(
+            "pass {index}: depth transient {depth} declares extent {extent:?}, which does not match its color \
+             output's extent {output_extent:?} — a depth attachment must be the size of the color attachment it \
+             tests for",
+        ));
+    }
+    Ok(())
+}
+
+/// Check the vertex stage's declared interface against the attributes
+/// its vertex buffers supply, through naga's reflection: every
+/// `@location` the stage reads must be declared by `attributes`, and its
+/// WGSL type must be the one that location's format is consumed as. An
+/// attribute the stage ignores is fine — a vertex buffer supplies it,
+/// and nothing reads it. `declared_by` names where the attributes come
+/// from, for the refusal.
+pub(super) fn check_vertex_interface(
     module: &Module,
     index: usize,
     vertex_entry_index: usize,
-    geometry: u32,
-    layout: &[VertexAttribute],
+    attributes: &[VertexAttribute],
+    declared_by: &str,
 ) -> Result<(), String> {
     for (location, ty) in entry_input_locations(module, vertex_entry_index) {
-        let Some(attribute) = layout.iter().find(|attribute| attribute.location == location) else {
+        let Some(attribute) = attributes.iter().find(|attribute| attribute.location == location) else {
             return Err(format!(
-                "pass {index}: the vertex stage reads @location({location}), which geometry slot {geometry}'s layout \
-                 does not declare",
+                "pass {index}: the vertex stage reads @location({location}), which {declared_by} does not declare",
             ));
         };
         if !consumes_format(&module.types[ty].inner, attribute.format) {
             return Err(format!(
-                "pass {index}: the vertex stage reads @location({location}) as {}, but geometry slot {geometry} \
-                 declares it {:?}, which is consumed as {}",
+                "pass {index}: the vertex stage reads @location({location}) as {}, but {declared_by} declares it \
+                 {:?}, which is consumed as {}",
                 describe_type(module, ty),
                 attribute.format,
                 wgsl_type_name(attribute.format),

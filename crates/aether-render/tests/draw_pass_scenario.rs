@@ -284,6 +284,7 @@ fn draw_pass_rasterizes_a_triangle_into_its_output() {
                 program_id,
                 bindings: vec![output_id],
                 geometries: vec![geometry_id],
+                draw_sets: Vec::new(),
                 uniforms: draw_params([1.0, 1.0, 1.0, 1.0], 0.5),
             },
         ),
@@ -356,6 +357,7 @@ fn one_program_dispatched_twice_in_a_frame_draws_with_each_dispatchs_uniforms() 
                     program_id,
                     bindings: vec![output_id],
                     geometries: vec![geometry_id],
+                    draw_sets: Vec::new(),
                     uniforms: draw_params(color, 0.5),
                 },
             )
@@ -446,7 +448,13 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
     let pre = vec![
         envelope(
             "aether.render",
-            &ProgramDispatch { program_id, bindings: vec![output_id], geometries: vec![near_id, far_id], uniforms },
+            &ProgramDispatch {
+                program_id,
+                bindings: vec![output_id],
+                geometries: vec![near_id, far_id],
+                draw_sets: Vec::new(),
+                uniforms,
+            },
         ),
         envelope("aether.render", &output_overlay(output_id)),
     ];
@@ -579,6 +587,7 @@ fn unknown_geometry_id_drops_and_frame_survives() {
                 program_id,
                 bindings: vec![output_id],
                 geometries: vec![4242],
+                draw_sets: Vec::new(),
                 uniforms: draw_params([1.0, 1.0, 1.0, 1.0], 0.5),
             },
         ),
@@ -651,6 +660,7 @@ fn a_frame_of_thousands_of_program_passes_draws_on_both_sides_of_a_submission() 
                 program_id,
                 bindings: vec![output_id],
                 geometries: vec![geometry_id],
+                draw_sets: Vec::new(),
                 uniforms: draw_params(color, 0.5),
             },
         )
