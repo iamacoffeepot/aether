@@ -46,6 +46,15 @@ fn same_entry(left: &Module, right: &Module) -> bool {
     Arc::ptr_eq(&left.entry, &right.entry)
 }
 
+fn same_compile(left: &Module, right: &Module) -> bool {
+    Arc::ptr_eq(&left.entry.code, &right.entry.code)
+}
+
+/// A bundle over one fixed code carrying `payload` as its `sprite` asset.
+fn bundle(payload: &str) -> String {
+    format!(r#"(module (@custom "aether.asset.sprite" "{payload}") (func (export "noop")))"#)
+}
+
 /// Every hash currently held live must answer with its own module, even when
 /// another hash's check-in interleaves. A key that collapsed two artifacts
 /// together would hand a load the wrong module's code and instantiate the
@@ -184,4 +193,80 @@ fn the_manifest_answers_each_exported_namespaces_cardinality() {
 
     let single = module_with(&[InputsRecord::Instanced], r#"(@custom "aether.namespace" "m.single")"#);
     assert_eq!(single.manifest().instanced("m.single"), Some(true));
+}
+
+/// Two bundles packed from one build differ only in an asset section. They
+/// must stay two modules, each with its own hash and its own catalog, over
+/// one compile. It catches a compile key that still covers the assets (one
+/// compile per bundle, the cost this sharing removes), and a key so wide
+/// that the second bundle answers the first's entry and so the first's
+/// catalog and identity.
+#[test]
+fn bundles_that_differ_only_in_assets_are_two_modules_over_one_compile() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let slime = check_in(&cache, &blobs, &bundle("slime"));
+    let dragon = check_in(&cache, &blobs, &bundle("a-much-longer-dragon"));
+
+    assert!(same_compile(&slime, &dragon), "one code is one compile");
+    assert_eq!(cache.compiled_len(), 1);
+    assert!(!same_entry(&slime, &dragon), "two files are two modules");
+    assert_ne!(slime.hash(), dragon.hash());
+    assert_eq!(slime.manifest().asset_catalog()[0].len, 5);
+    assert_eq!(dragon.manifest().asset_catalog()[0].len, 20);
+}
+
+/// A bundle and the same build with no asset at all share one compile too:
+/// the assetless file's code hash is its file hash, and the bundle's is the
+/// hash of those same bytes. It catches a stripped bundle hashed or compiled
+/// from bytes other than the file an assetless build is.
+#[test]
+fn a_bundle_shares_the_compile_of_its_assetless_build() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let bare = check_in(&cache, &blobs, r#"(module (func (export "noop")))"#);
+    let bundled = check_in(&cache, &blobs, &bundle("slime"));
+
+    assert!(same_compile(&bare, &bundled), "a bundle's code is the build it was packed from");
+}
+
+/// Modules whose code differs must not share a compile, whatever assets they
+/// carry in common. It catches a compile key that covers too little, which
+/// would instantiate one module's code under another module's name.
+#[test]
+fn modules_that_differ_in_code_do_not_share_a_compile() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let with_sprite = |export: &str| {
+        let wat = format!(r#"(module (@custom "aether.asset.sprite" "slime") (func (export "{export}")))"#);
+        check_in(&cache, &blobs, &wat)
+    };
+
+    let alpha = with_sprite("alpha");
+    let beta = with_sprite("beta");
+
+    assert!(!same_compile(&alpha, &beta), "different code is different compiles");
+    assert!(alpha.compiled().get_export("alpha").is_some(), "alpha runs its own code");
+    assert!(beta.compiled().get_export("beta").is_some(), "beta runs its own code");
+}
+
+/// Compiled code lives exactly as long as a module over it does: one bundle
+/// dropping leaves it for the other, the last one dropping frees it, and its
+/// dead slot is pruned. It catches a strong reference in the compiled-code
+/// map, which would keep every bundle's megabyte of code for the engine's
+/// life, and a slot that outlives its code.
+#[test]
+fn compiled_code_is_freed_once_the_last_module_over_it_drops() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let slime = check_in(&cache, &blobs, &bundle("slime"));
+    let dragon = check_in(&cache, &blobs, &bundle("dragon"));
+    let weak_code = Arc::downgrade(&slime.entry.code);
+
+    drop(slime);
+    assert!(weak_code.upgrade().is_some(), "the remaining bundle still holds the shared code");
+
+    drop(dragon);
+    assert!(weak_code.upgrade().is_none(), "the map must hold no strong reference of its own");
+
+    let _alpha = check_in(&cache, &blobs, ALPHA);
+    assert_eq!(cache.compiled_len(), 1, "the freed code's slot is pruned rather than left to accumulate");
 }

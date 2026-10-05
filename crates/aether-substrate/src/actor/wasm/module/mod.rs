@@ -2,13 +2,15 @@
 //! from a [`Blob`](aether_data::Blob) of wasm bytes.
 //!
 //! Checking code in through the engine's one [`ModuleCache`] derives
-//! everything the engine needs from the bytes once per content hash:
+//! everything the engine needs from the bytes once:
 //!
-//! - the compiled `wasmtime::Module`;
+//! - the compiled `wasmtime::Module`, once per code: the bytes without their
+//!   asset sections, so modules that differ only in their assets share one
+//!   compile;
 //! - the [`ModuleManifest`], every custom section the host reads (kinds,
 //!   exported and private actor groups, lineage, boot, namespace, the
 //!   no-default and content-addressed markers, and the asset catalog with
-//!   each asset's byte range), parsed once.
+//!   each asset's byte range), parsed once per content hash.
 //!
 //! The wasm bytes are used to compile and to parse, and are then let go:
 //! nothing here holds the code blob or any asset's payload, so the bytes
@@ -35,6 +37,7 @@ use aether_data::BlobHash;
 use crate::actor::wasm::kind_manifest::ActorInputs;
 
 mod cache;
+mod code;
 mod manifest;
 #[cfg(test)]
 mod tests;
@@ -56,8 +59,11 @@ pub struct Module {
 /// What a module's bytes are checked in as. Built only by
 /// [`ModuleCache::check_in`].
 struct ModuleEntry {
+    /// The hash of the whole file: the module's identity.
     hash: BlobHash,
-    compiled: wasmtime::Module,
+    /// The compile of the file's code, shared with every module whose file
+    /// differs from this one only in its asset sections.
+    code: Arc<cache::CompiledCode>,
     manifest: ModuleManifest,
 }
 
@@ -69,10 +75,12 @@ impl Module {
         self.entry.hash
     }
 
-    /// The compiled code, compiled once per hash per engine.
+    /// The compiled code, compiled once per engine for the bytes without
+    /// their asset sections, so modules that differ only in their assets
+    /// answer the same one.
     #[must_use]
     pub fn compiled(&self) -> &wasmtime::Module {
-        &self.entry.compiled
+        self.entry.code.module()
     }
 
     /// The module's custom sections, parsed once per hash.
