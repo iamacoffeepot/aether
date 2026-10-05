@@ -6,7 +6,7 @@
 //! to and binds `NoBound`, except the vendor view below, which binds its
 //! `ProofBound`, and `tree.diff`, which binds the tree the session opened on.
 //! [`offered`] is the set every session offers:
-//! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree
+//! `tree.edit`, `tree.write`, `tree.remove`, and `tree.move`, which read only the tree
 //! nodes and blobs they touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, `tree.grep`, and `tree.diff`, which only read the
 //! tree and return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with
@@ -39,6 +39,7 @@ mod edit;
 mod end;
 mod grep;
 mod list;
+mod move_;
 mod read;
 mod remove;
 mod spine;
@@ -62,6 +63,7 @@ pub use edit::{EditArgs, TreeEdit};
 pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, ends_run};
 pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
+pub use move_::{MoveArgs, TreeMove};
 pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
 pub use remove::{RemoveArgs, TreeRemove};
 pub use vendor::{VendorGrep, VendorList, VendorRead};
@@ -95,6 +97,7 @@ pub fn offered(base: Ref<Tree>) -> (OfferedTools, Vec<EncodedArtifact>) {
         bound::<TreeEdit>(MUSE, none),
         bound::<TreeWrite>(MUSE, none),
         bound::<TreeRemove>(MUSE, none),
+        bound::<TreeMove>(MUSE, none),
         bound::<TreeList>(MUSE, none),
         bound::<TreeRead>(MUSE, none),
         bound::<TreeGrep>(MUSE, none),
