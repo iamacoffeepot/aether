@@ -28,6 +28,7 @@ pub fn has_wgpu_adapter() -> bool {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .is_ok()
 }

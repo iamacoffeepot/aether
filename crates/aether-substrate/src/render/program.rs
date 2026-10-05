@@ -307,13 +307,15 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
         bind_group_layouts: &[Some(spec.uniform_layout), Some(spec.inputs_layout)],
         immediate_size: 0,
     });
-    let vertex_buffers: Vec<wgpu::VertexBufferLayout<'_>> = spec
+    let vertex_buffers: Vec<Option<wgpu::VertexBufferLayout<'_>>> = spec
         .vertex_buffers
         .iter()
-        .map(|buffer| wgpu::VertexBufferLayout {
-            array_stride: buffer.stride_bytes,
-            step_mode: buffer.step_mode,
-            attributes: buffer.attributes,
+        .map(|buffer| {
+            Some(wgpu::VertexBufferLayout {
+                array_stride: buffer.stride_bytes,
+                step_mode: buffer.step_mode,
+                attributes: buffer.attributes,
+            })
         })
         .collect();
     let fragment_targets = [Some(wgpu::ColorTargetState {

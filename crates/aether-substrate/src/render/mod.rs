@@ -19,8 +19,6 @@
 //! wgpu a second way through `aether-text` -> `aether-render`, so hub
 //! and headless link it too. Decoupling them is future work.
 
-use std::slice;
-
 mod capture;
 mod material;
 mod pipeline;
@@ -170,7 +168,7 @@ fn render_pipeline(device: &wgpu::Device, spec: RenderPipelineSpec<'_>) -> wgpu:
             module: spec.shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(spec.vertex_layout),
+            buffers: &[Some(spec.vertex_layout.clone())],
         },
         fragment: Some(fragment_state(spec.shader, spec.fragment_entry, &fragment_targets)),
         primitive: wgpu::PrimitiveState {

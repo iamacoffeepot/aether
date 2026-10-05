@@ -124,7 +124,7 @@ pub fn map_capture_rgba(device: &wgpu::Device, targets: &Targets, meta: &Capture
     device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("device poll: {e:?}"))?;
     rx.recv().map_err(|e| format!("map channel dropped: {e}"))?.map_err(|e| format!("buffer map failed: {e:?}"))?;
 
-    let mapped = slice.get_mapped_range();
+    let mapped = slice.get_mapped_range().map_err(|e| format!("buffer mapped range failed: {e:?}"))?;
     let mut rgba = Vec::with_capacity((meta.unpadded_row_bytes as usize) * (meta.height as usize));
     let swizzle_bgra = matches!(meta.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
     for row in 0..meta.height {
