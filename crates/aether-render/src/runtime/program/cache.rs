@@ -105,7 +105,7 @@ impl PlanLayout {
             .passes
             .iter()
             .map(|pass| {
-                pass.stage.draw().and_then(|draw| draw.depth).is_some_and(|slot| {
+                pass.stage.depth_slot().is_some_and(|slot| {
                     let first = !depth_seen.contains(&slot);
                     if first {
                         depth_seen.push(slot);
@@ -451,7 +451,7 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
         .enumerate()
         .map(|(slot, extent)| {
             let slot = u32::try_from(slot).expect("depth slot index fits u32");
-            let named = plan.passes.iter().any(|pass| pass.stage.draw().is_some_and(|draw| draw.depth == Some(slot)));
+            let named = plan.passes.iter().any(|pass| pass.stage.depth_slot() == Some(slot));
             named.then(|| {
                 let (width, height) = resolve_extent(*extent, reference);
                 let key = (width, height, PROGRAM_DEPTH_FORMAT);
@@ -468,8 +468,9 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
 mod tests {
     use super::*;
     use crate::{
-        DrawPass, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister,
-        Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, VertexAttribute, VertexFormat, Wrap,
+        Cull, DepthUse, DepthWrite, DrawPass, DrawSetsPass, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad,
+        PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat,
+        VertexAttribute, VertexFormat, Wrap,
     };
 
     const MODULE: &str = r"
@@ -568,11 +569,33 @@ fn vs_flat(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
     return vec4<f32>(position, 1.0);
 }
 
+@vertex
+fn vs_placed(@location(0) position: vec3<f32>, @location(1) offset: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position + offset, 1.0);
+}
+
 @fragment
 fn fs_opaque() -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 1.0, 1.0, 1.0);
 }
 ";
+
+    /// A draw-sets pass testing against depth slot `slot` without
+    /// writing it.
+    fn draw_sets_pass(slot: u32) -> ProgramPass {
+        ProgramPass {
+            stage: PassStage::DrawSets(DrawSetsPass {
+                vertex_entry_point: "vs_placed".to_owned(),
+                vertex_layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+                instance_layout: vec![VertexAttribute { location: 1, format: VertexFormat::Float32x3 }],
+                draw_sets: 0,
+                cull: Cull::None,
+                depth: Some(DepthUse { slot, write: DepthWrite::TestOnly }),
+                load: PassLoad::Load,
+            }),
+            ..draw_pass(None)
+        }
+    }
 
     fn draw_pass(depth: Option<u32>) -> ProgramPass {
         ProgramPass {
@@ -594,10 +617,12 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     /// ADR-0171 depth pooling: two passes naming one depth slot share
     /// one physical texture (that sharing is what makes their occlusion
     /// agree), two *distinct* slots never do however disjoint their use
-    /// looks, and a declared slot no pass names allocates nothing. The
-    /// named bugs: liveness-packing depth the way color transients are
-    /// packed, which would alias two slots onto one buffer and let one
-    /// pass's depth occlude another's geometry; and a named slot left
+    /// looks, and a declared slot no pass names allocates nothing. A
+    /// slot counts as named whichever stage names it: slot 2 here is
+    /// named by a draw-sets pass alone. The named bugs:
+    /// liveness-packing depth the way color transients are packed,
+    /// which would alias two slots onto one buffer and let one pass's
+    /// depth occlude another's geometry; and a named slot left
     /// unassigned, which panics the encode path that resolves its view.
     #[test]
     fn depth_slots_share_by_name_and_never_alias() {
@@ -613,15 +638,15 @@ fn fs_opaque() -> @location(0) vec4<f32> {
             geometries: vec![GeometrySlotSpec {
                 layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
             }],
-            depth_transients: vec![SlotExtent::Full; 3],
-            passes: vec![draw_pass(Some(0)), draw_pass(Some(0)), draw_pass(Some(1))],
+            depth_transients: vec![SlotExtent::Full; 4],
+            passes: vec![draw_pass(Some(0)), draw_pass(Some(0)), draw_pass(Some(1)), draw_sets_pass(2)],
         };
         let plan = super::super::validate::validate(&mail).expect("draw graph validates");
 
         let assignments = assign_depth_transients(&plan, (64, 48));
         let physicals: Vec<Option<usize>> =
             assignments.iter().map(|slot| slot.as_ref().map(|assigned| assigned.physical)).collect();
-        assert_eq!(physicals, vec![Some(0), Some(1), None]);
+        assert_eq!(physicals, vec![Some(0), Some(1), Some(2), None]);
         assert_eq!(
             assignments[0].as_ref().expect("slot 0 named").key,
             assignments[1].as_ref().expect("slot 1 named").key,
@@ -649,17 +674,26 @@ fn fs_opaque() -> @location(0) vec4<f32> {
             geometries: vec![GeometrySlotSpec {
                 layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
             }],
-            depth_transients: vec![SlotExtent::Full; 2],
-            passes: vec![draw_pass(Some(0)), draw_pass(Some(0)), draw_pass(Some(1))],
+            depth_transients: vec![SlotExtent::Full; 3],
+            passes: vec![
+                draw_pass(Some(0)),
+                draw_pass(Some(0)),
+                draw_pass(Some(1)),
+                draw_sets_pass(2),
+                draw_sets_pass(0),
+            ],
         };
         let plan = super::super::validate::validate(&mail).expect("draw graph validates");
         // No pass GPU resources: the staging arrangement needs them, the
         // clear sequencing this pins is a function of the plan alone.
         let layout = PlanLayout::build(&plan, &[], 256);
 
-        // All three passes write binding 0, so only the first clears it.
-        assert_eq!(layout.clears_output, vec![true, false, false]);
+        // Every pass writes binding 0, so only the first clears it.
+        assert_eq!(layout.clears_output, vec![true, false, false, false, false]);
         // Passes 0 and 1 share depth slot 0; pass 2 names slot 1 first.
-        assert_eq!(layout.clears_depth, vec![true, false, true]);
+        // A draw-sets pass follows the same rule whatever its write:
+        // pass 3 is the first to name slot 2, and pass 4 names slot 0
+        // after a draw pass did.
+        assert_eq!(layout.clears_depth, vec![true, false, true, true, false]);
     }
 }

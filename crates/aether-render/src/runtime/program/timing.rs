@@ -158,7 +158,9 @@ impl PassCosts {
                     label: pass.entry_point.clone(),
                     stage: match &pass.stage {
                         PassPlanStage::Fragment => PassStageKind::Fragment,
-                        PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) => PassStageKind::Draw,
+                        PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) | PassPlanStage::DrawSets(_) => {
+                            PassStageKind::Draw
+                        }
                         PassPlanStage::Compute(_) => PassStageKind::Compute,
                     },
                     width,
@@ -507,6 +509,7 @@ mod tests {
             }],
             output_binding: 0,
             written_bindings: Vec::new(),
+            draw_set_lists: 0,
         };
         let mut costs = PassCosts::new(&plan);
         costs.observe_reference((128, 96));

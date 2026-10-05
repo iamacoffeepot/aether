@@ -16,15 +16,19 @@ use std::collections::HashMap;
 
 use aether_substrate::render::{
     PROGRAM_DEPTH_FORMAT, ProgramComputePass, ProgramDepthAttachment, ProgramDrawCommand, ProgramDrawPass,
-    ProgramPassDraw, create_program_depth_transient, create_program_transient, record_program_compute_pass,
-    record_program_draw_pass, record_program_pass,
+    ProgramDrawPassOpen, ProgramPassDraw, begin_program_draw_pass, create_program_depth_transient,
+    create_program_transient, record_program_compute_pass, record_program_draw_pass, record_program_pass,
 };
 
+use super::super::draw_set::DrawSetRegistry;
 use super::super::geometry::{GeometryRegistry, INDIRECT_CONTROL_BYTES};
+use super::super::instances::InstancesRegistry;
 use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
 use super::super::texture::{BoundTexture, TextureRegistry};
 use super::cache::{BoundInput, BoundStorage, CacheParts};
+use super::draw_sets::encode::{DrawSetSources, RowBuffers};
+use super::draw_sets::{dispatch as draw_sets_dispatch, encode as draw_sets_encode};
 use super::sampler::{Filter, ProgramSamplers};
 use super::submit::FramePasses;
 use super::timing::FrameQueries;
@@ -33,15 +37,17 @@ use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, Transi
 use crate::{GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureUsage};
 
 /// What [`record_dispatch`] realizes, pools, and encodes against: the
-/// program, the sampler table, the transient pool, the two registries,
-/// the dispatch, and the frame's timing queries when this frame
-/// measures.
+/// program, the sampler table, the transient pool, the resource
+/// registries, the dispatch, and the frame's timing queries when this
+/// frame measures.
 pub(super) struct DispatchRecord<'a> {
     pub(super) program: &'a mut RegisteredProgram,
     pub(super) samplers: &'a ProgramSamplers,
     pub(super) pool: &'a mut HashMap<TransientKey, Vec<wgpu::TextureView>>,
     pub(super) textures: &'a mut TextureRegistry,
     pub(super) geometries: &'a mut GeometryRegistry,
+    pub(super) instances: &'a mut InstancesRegistry,
+    pub(super) draw_sets: &'a DrawSetRegistry,
     pub(super) dispatch: &'a ProgramDispatch,
     pub(super) queries: Option<FrameQueries<'a>>,
     pub(super) passes: &'a mut FramePasses,
@@ -51,7 +57,18 @@ pub(super) struct DispatchRecord<'a> {
 /// checks run first, so a rejected dispatch records nothing and the
 /// frame survives untouched.
 pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, record: DispatchRecord<'_>) {
-    let DispatchRecord { program, samplers, pool, textures, geometries, dispatch, queries, passes } = record;
+    let DispatchRecord {
+        program,
+        samplers,
+        pool,
+        textures,
+        geometries,
+        instances,
+        draw_sets,
+        dispatch,
+        queries,
+        passes,
+    } = record;
     let RegisteredProgram { plan, state, timings, .. } = program;
     let ProgramDeviceState::Ready { passes_gpu, cache } = state else {
         let ProgramDeviceState::Quarantined { reason } = state else {
@@ -65,7 +82,7 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
         );
         return;
     };
-    let Some(reference) = check_dispatch(plan, textures, geometries, dispatch) else {
+    let Some(reference) = check_dispatch(plan, textures, geometries, draw_sets, dispatch) else {
         return;
     };
     timings.observe_reference(reference);
@@ -101,6 +118,7 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
             }
         }
     }
+    draw_sets_dispatch::realize(gpu, draw_sets, geometries, instances, dispatch);
 
     let align = usize::try_from(gpu.device.limits().min_uniform_buffer_offset_alignment)
         .expect("uniform offset alignment fits usize")
@@ -138,7 +156,7 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
             samplers,
             pool,
             textures,
-            geometries,
+            sources: DrawSetSources { draw_sets, geometries, instances },
             dispatch,
             queries,
             passes,
@@ -196,6 +214,7 @@ fn report_setup_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch) -> boo
             phase = "setup",
             bindings = ?dispatch.bindings,
             geometries = ?dispatch.geometries,
+            draw_sets = ?dispatch.draw_sets,
             error_class,
             %error,
             "program dispatch gpu setup failed; dropping its pass recording",
@@ -218,6 +237,7 @@ fn report_pass_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch, pass: u
             stage = ?pass_plan.stage,
             bindings = ?dispatch.bindings,
             geometries = ?dispatch.geometries,
+            draw_sets = ?dispatch.draw_sets,
             error_class,
             %error,
             "program dispatch gpu pass failed; dropping its remaining pass recording",
@@ -237,6 +257,7 @@ fn check_dispatch(
     plan: &ProgramPlan,
     textures: &TextureRegistry,
     geometries: &GeometryRegistry,
+    draw_sets: &DrawSetRegistry,
     dispatch: &ProgramDispatch,
 ) -> Option<(u32, u32)> {
     let program_id = dispatch.program_id;
@@ -258,6 +279,9 @@ fn check_dispatch(
             supplied = dispatch.geometries.len(),
             "program dispatch geometry count disagrees with the registered graph; dropping the dispatch",
         );
+        return None;
+    }
+    if !draw_sets_dispatch::check(plan, draw_sets, dispatch) {
         return None;
     }
 
@@ -476,8 +500,9 @@ fn check_dispatch(
 
 /// The checked dispatch and its derived state [`encode_passes`] records
 /// from: the validated plan and its per-pass GPU state, the split
-/// dispatch cache, the realized transient pool and registries, and the
-/// frame's timing queries when this frame measures.
+/// dispatch cache, the realized transient pool and registries (the
+/// three a draw-sets pass walks together as `sources`), and the frame's
+/// timing queries when this frame measures.
 struct PassEncoding<'a, 'c> {
     plan: &'a ProgramPlan,
     passes_gpu: &'a [PassGpu],
@@ -485,7 +510,7 @@ struct PassEncoding<'a, 'c> {
     samplers: &'a ProgramSamplers,
     pool: &'a HashMap<TransientKey, Vec<wgpu::TextureView>>,
     textures: &'a TextureRegistry,
-    geometries: &'a GeometryRegistry,
+    sources: DrawSetSources<'a>,
     dispatch: &'a ProgramDispatch,
     queries: Option<FrameQueries<'a>>,
     passes: &'a mut FramePasses,
@@ -501,8 +526,9 @@ struct PassEncoding<'a, 'c> {
 // arguments — the same shape `record_overlay_batches` keeps.
 #[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: PassEncoding<'_, '_>) {
-    let PassEncoding { plan, passes_gpu, cache, samplers, pool, textures, geometries, dispatch, mut queries, passes } =
+    let PassEncoding { plan, passes_gpu, cache, samplers, pool, textures, sources, dispatch, mut queries, passes } =
         encoding;
+    let geometries = sources.geometries;
     let layout = cache.layout;
     let extent = cache.extent;
     let transient_view = |transient: u32| {
@@ -533,6 +559,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
     let mut input_entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::new();
     let mut storage_key: Vec<BoundStorage> = Vec::new();
     let mut storage_entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::new();
+    let mut rows = RowBuffers::default();
     for (pass, ((pass_plan, pass_gpu), offsets)) in
         plan.passes.iter().zip(passes_gpu).zip(&layout.iteration_offsets).enumerate()
     {
@@ -672,19 +699,47 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     record_program_draw_pass(
                         encoder,
                         &ProgramDrawPass {
+                            open: ProgramDrawPassOpen {
+                                pipeline,
+                                target_view,
+                                clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                                depth,
+                                uniform_bind_group,
+                                uniform_offset,
+                                inputs_bind_group,
+                                timestamps,
+                            },
+                            vertex_buffer: &realized.vertex_buffer,
+                            index_buffer: &realized.index_buffer,
+                            command,
+                        },
+                    );
+                }
+                (PassPlanStage::DrawSets(draw_sets), PassPipeline::Render(pipeline)) => {
+                    let target_view = match pass_plan.output.expect("draw-sets pass has an output") {
+                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
+                        ResolvedSlot::Transient(transient) => transient_view(transient),
+                    };
+                    let depth = draw_sets.depth.map(|depth| ProgramDepthAttachment {
+                        view: depth_view(depth.slot),
+                        clear: layout.clears_depth[pass] && iteration == 0,
+                    });
+                    passes.admit(gpu, encoder);
+                    let mut render_pass = begin_program_draw_pass(
+                        encoder,
+                        &ProgramDrawPassOpen {
                             pipeline,
                             target_view,
-                            clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                            clear_color: draw_sets.load == PassLoad::Clear && iteration == 0,
                             depth,
                             uniform_bind_group,
                             uniform_offset,
                             inputs_bind_group,
-                            vertex_buffer: &realized.vertex_buffer,
-                            index_buffer: &realized.index_buffer,
-                            command,
                             timestamps,
                         },
                     );
+                    let list = &dispatch.draw_sets[draw_sets.list as usize];
+                    draw_sets_encode::draw_list(&mut render_pass, &sources, list, &mut rows);
                 }
                 (PassPlanStage::Compute(compute), PassPipeline::Compute(pipeline)) => {
                     passes.admit(gpu, encoder);

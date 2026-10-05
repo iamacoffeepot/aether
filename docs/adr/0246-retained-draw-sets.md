@@ -60,7 +60,7 @@ A set is validated against layouts, not against a program, so one set can be dra
 - When a geometry is created, every index is checked against the vertex count.
 - When a set is created or patched, each draw's ids exist, their layouts match the set's, the index range is inside the geometry and the instance range inside the buffer's capacity.
 
-Four rules keep those checks true afterwards. A set holds the buffers it draws: destroying a geometry or instance buffer a set names retires the id, and the GPU resource lives until the last such set is gone. A geometry a set names may have its vertex contents written in place but not its vertex count or its indices changed; `UpdateGeometry` with different sizes is refused with an error while a set names it. An instance buffer's capacity is fixed at creation. Growing either means creating a new one and patching the set.
+Four rules keep those checks true afterwards. A set holds the buffers it draws: destroying a geometry or instance buffer a set names retires the id, and the GPU resource lives until the last such set is gone. A geometry a set names may have its vertex contents written in place but not its vertex count or its indices changed; `UpdateGeometry` carries no reply, so a replacement that would change the vertex count or the indices of a geometry a set names is dropped with a warning and leaves the geometry as it was. An instance buffer's capacity is fixed at creation. Growing either means creating a new one and patching the set.
 
 What stays fallible is per dispatch, as a bad binding id is today: an unknown draw-set id, a set whose layouts are not the pass's, wrong bindings or uniforms.
 
@@ -112,6 +112,14 @@ pub struct ProgramDispatch {
 ```
 
 The pass draws its list's sets in order and each set's draws in order; nothing is sorted. The frame chooses what is drawn by which set ids it lists, so showing or hiding a whole set costs nothing but the dispatch. A scene pass and the post-processing that reads it are one program, under the one set of rules ADR-0170 already has for targets, transients, uniforms, timing and order.
+
+The pass binds a draw's geometry as vertex buffer 0, stepped per vertex, and its instance records as vertex buffer 1, stepped per instance. An attribute binds at the `@location` its layout declares, as a geometry slot's attributes do, so the two layouts share no location and a set's layouts compare equal to the layouts of a pass that draws it.
+
+`DrawSetsPass.draw_sets` indexes the dispatch's lists. A program's list count is one more than the highest index a pass names, and every index below it is named by some pass, so a dispatch carries no list that nothing draws. Two passes may name one list.
+
+`depth` attaches a `depth_transients` slot under a `LessEqual` test; `Write` writes the depth of each fragment that passes and `TestOnly` leaves the slot as it was. The first pass of a dispatch to name a depth slot clears it to the far plane, whatever its stage and whatever its `write`. `Cull::Back` discards clockwise triangles.
+
+A `DrawSets` pass is timed as a draw pass: `PassStageKind` gains no variant.
 
 **5. A binding says what it takes and how it is sampled.**
 
@@ -170,7 +178,7 @@ A pass that reads a `Four` transient reads its resolved image; the pass graph is
 
 - A static scene is a set per streamed region built at load, plus small sets for what moves. Per frame the engine receives a few hundred bytes and walks retained lists.
 - A consumer that varies placements of one mesh (colour, texture layer, anything a table can hold) does it with an index in the instance record and a `Texel` table read in the vertex stage. The engine knows nothing of the scheme.
-- `UpdateGeometry` gains a refusal. Callers that resize a geometry no set names are unaffected.
+- `UpdateGeometry` gains a drop class: a replacement that would change the vertex count or the indices of a geometry a set names is dropped with a warning and leaves the geometry as it was, since the kind carries no reply. Callers that resize a geometry no set names are unaffected.
 - The program model grows in six places at once (stage, binding shape, sampling, samples, blend, dispatch lists). Each is a registration-time shape with validation there, in keeping with ADR-0170; the work is several issues, not one.
 - `PassStage::Draw` and `DrawIndexedIndirect` stay. Whether `DrawSets` should replace them is left until it has a second consumer.
 - Depth stays attachment-only. Sampling depth is wanted for fog and soft edges and is not designed here because nothing measured needs it.

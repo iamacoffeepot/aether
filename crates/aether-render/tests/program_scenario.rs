@@ -302,7 +302,13 @@ fn ping_pong_program_writes_expected_pixels_into_output() {
     let pre = vec![
         envelope(
             "aether.render",
-            &ProgramDispatch { program_id, bindings: vec![source_id, output_id], geometries: Vec::new(), uniforms },
+            &ProgramDispatch {
+                program_id,
+                bindings: vec![source_id, output_id],
+                geometries: Vec::new(),
+                draw_sets: Vec::new(),
+                uniforms,
+            },
         ),
         envelope("aether.render", &output_overlay(output_id)),
     ];
@@ -378,6 +384,7 @@ fn mismatched_binding_dispatch_drops_and_frame_survives() {
                 program_id,
                 bindings: vec![wrong_format_id, output_id],
                 geometries: Vec::new(),
+                draw_sets: Vec::new(),
                 uniforms,
             },
         ),
@@ -459,6 +466,7 @@ fn cached_pass_setup_follows_an_updated_texture_and_a_rebind() {
         program_id,
         bindings: vec![source, output_id],
         geometries: Vec::new(),
+        draw_sets: Vec::new(),
         uniforms: uniforms.clone(),
     };
 

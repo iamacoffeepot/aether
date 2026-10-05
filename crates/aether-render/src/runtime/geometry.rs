@@ -263,6 +263,20 @@ impl GeometryRegistry {
         }
     }
 
+    /// [`Self::held_mut`] without the right to change the geometry: the
+    /// lookup a pass draws a set's rows through once they are realized.
+    ///
+    /// # Panics
+    /// Panics on an id that is neither live nor retired, fail-fast per
+    /// ADR-0063: a held id is always in one of the two.
+    #[must_use]
+    pub fn held(&self, geometry_id: u32) -> &StagedGeometry {
+        self.entries
+            .get(&geometry_id)
+            .or_else(|| self.holds.retired(geometry_id))
+            .expect("a held geometry id is live or retired")
+    }
+
     /// Drop every buffer realization built against the current device
     /// while preserving ids, layouts, and CPU-authored bytes. Each entry
     /// becomes upload-ready for lazy realization on the replacement

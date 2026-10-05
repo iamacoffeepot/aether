@@ -124,7 +124,7 @@ pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
-use self::program::ProgramRegistry;
+use self::program::{DispatchResources, ProgramRegistry};
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
@@ -661,7 +661,13 @@ impl RenderCapabilityState {
         // registry textures the material and overlay passes below sample,
         // so a dispatch and a draw over its output land in one frame.
         let dispatches = mem::take(&mut self.pending_program_dispatches);
-        self.programs.record(gpu, encoder, &mut self.textures, &mut self.geometries, &dispatches);
+        let resources = DispatchResources {
+            textures: &mut self.textures,
+            geometries: &mut self.geometries,
+            instances: &mut self.instances,
+            draw_sets: &self.draw_sets,
+        };
+        self.programs.record(gpu, encoder, resources, &dispatches);
         let extras_storage: [&wgpu::RenderPipeline; 1];
         let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
             Some(pipeline) => {
@@ -1578,6 +1584,7 @@ mod tests {
             program_id: 9,
             bindings: Vec::new(),
             geometries: Vec::new(),
+            draw_sets: Vec::new(),
             uniforms: Vec::new(),
         });
 

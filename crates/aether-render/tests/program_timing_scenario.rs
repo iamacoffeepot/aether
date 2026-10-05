@@ -168,6 +168,7 @@ fn timings_after_dispatches(harness: &mut SubstrateHarness) -> (u32, ProgramTimi
             texture(harness, "sink", TextureUsage::Writable),
         ],
         geometries: Vec::new(),
+        draw_sets: Vec::new(),
         uniforms: 0.5f32.to_le_bytes().into_iter().chain(0.25f32.to_le_bytes()).collect(),
     };
 

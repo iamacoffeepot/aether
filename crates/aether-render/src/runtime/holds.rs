@@ -57,6 +57,11 @@ impl<T> Holds<T> {
 
     /// The entry destroyed under `id` while a set named it, if it is
     /// still held.
+    pub(super) fn retired(&self, id: u32) -> Option<&T> {
+        self.retired.get(&id)
+    }
+
+    /// [`Self::retired`], to change the entry.
     pub(super) fn retired_mut(&mut self, id: u32) -> Option<&mut T> {
         self.retired.get_mut(&id)
     }

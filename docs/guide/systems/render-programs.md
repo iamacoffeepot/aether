@@ -82,7 +82,7 @@ Every kind below addresses the `aether.render` mailbox.
 | Mail kind | Rust payload | Contract |
 |---|---|---|
 | `aether.render.program.register` | `ProgramRegister { wgsl, bindings, transients, geometries, depth_transients, passes }` | validate + compile; reply `aether.render.program.register_result` / `ProgramRegisterResult` (`Ok { program_id }` / `Err { error }`) |
-| `aether.render.program.dispatch` | `ProgramDispatch { program_id, bindings, geometries, uniforms }` | fire-and-forget; execute once at the next frame record |
+| `aether.render.program.dispatch` | `ProgramDispatch { program_id, bindings, geometries, draw_sets, uniforms }` | fire-and-forget; execute once at the next frame record |
 | `aether.render.program.destroy` | `ProgramDestroy { program_id }` | fire-and-forget release, mirroring `destroy_texture` |
 | `aether.render.create_geometry` | `CreateGeometry { layout, vertices, indices }` | validate + stage; reply `aether.render.create_geometry_result` / `CreateGeometryResult` (`Ok { geometry_id }` / `Err { error }`) |
 | `aether.render.update_geometry` | `UpdateGeometry { geometry_id, vertices, indices }` | fire-and-forget in-place replacement against the created layout |
@@ -108,7 +108,8 @@ the geometry, in which case they live until the last such set lets go.
 A fragment-only program leaves `geometries` and `depth_transients` empty and
 registers exactly as it does with no draw pass anywhere in the graph. Both
 remain required fields on the mail — the codec rejects a missing field rather
-than defaulting it — so send `[]`.
+than defaulting it — so send `[]`. A dispatch is the same: `geometries` and
+`draw_sets` are required, and a program with no pass that uses one sends `[]`.
 
 ## The geometry resource
 
@@ -318,8 +319,8 @@ A draw carries no texture and no per-draw constant; what varies between draws
 rides in the instance records. The set fixes two layouts at create,
 `vertex_layout` and `instance_layout`, and every draw's geometry and instance
 buffer must have been created with them. A set is checked against layouts, not
-against a program, so any pass with the same two layouts may draw it. No stage
-draws a set yet; the draw-set pass stage is its first reader.
+against a program, so any pass with the same two layouts may draw it. The
+stage that draws a set is a [draw-set pass](#draw-set-passes).
 
 Every check runs when the set is made or patched, where the sender gets a
 reply, so that a pass walking the set has nothing left to check. The first
@@ -706,6 +707,119 @@ filtering: a pass can carry them through separate channels without quantizing
 them to eight bits. Choose per plane: labels and tone can pack into `Rgba8`;
 quantities that later math amplifies get a float target.
 
+## Draw-set passes
+
+A pass draws retained [draw sets](#the-draw-set-resource) by declaring
+`stage: PassStage::DrawSets(DrawSetsPass { … })`
+([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decision 4). One such pass is one render pass that issues every draw of every
+set the dispatch lists for it: the sets in list order and each set's draws in
+order, with nothing sorted. As for a draw pass, everything else on the pass
+entry keeps its meaning: the fragment `entry_point`, the `inputs`, the
+`output`, the uniform window, and `repeat`.
+
+### The draw-sets declaration
+
+```rust
+DrawSetsPass {
+    vertex_entry_point: String,           // a @vertex entry in the program's module
+    vertex_layout: Vec<VertexAttribute>,  // every drawn geometry's layout
+    instance_layout: Vec<VertexAttribute>, // every drawn instance buffer's layout
+    draw_sets: u32,                       // index into ProgramDispatch.draw_sets
+    cull: Cull,                           // None or Back
+    depth: Option<DepthUse>,              // { slot, write: Write | TestOnly }
+    load: PassLoad,                       // Clear or Load, on the color output
+}
+```
+
+Over mail the stage reads:
+
+```json
+{ "DrawSets": {
+    "vertex_entry_point": "vs_placed",
+    "vertex_layout":   [{ "location": 0, "format": "Float32x3" }],
+    "instance_layout": [{ "location": 4, "format": "Float32x3" },
+                        { "location": 5, "format": "Unorm8x4" }],
+    "draw_sets": 0,
+    "cull": "Back",
+    "depth": { "slot": 0, "write": "Write" },
+    "load": "Clear" } }
+```
+
+with `depth` as `null` for a pass that does not depth-test. The pass names no
+geometry slot and `ProgramRegister.geometries` does not grow for it: the two
+layouts are the pass's own, and a set is drawn by a pass whose two layouts
+equal the set's.
+
+### The two-buffer shader contract
+
+The pass binds two vertex buffers for each draw. Buffer 0 is the draw's
+geometry, laid out by `vertex_layout` and stepped once per vertex. Buffer 1 is
+the draw's instance records, laid out by `instance_layout` and stepped once per
+instance, so the vertex stage runs once per vertex per record of the draw's
+record run. Each attribute binds at the `@location` its layout declares, which
+is the rule a geometry slot already follows; nothing is renumbered. The two
+layouts therefore share no location, and neither declares one twice.
+
+```wgsl
+struct Placed {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_placed(
+    @location(0) corner: vec3<f32>,   // vertex_layout, per vertex
+    @location(4) offset: vec3<f32>,   // instance_layout, per instance
+    @location(5) color: vec4<f32>,    // instance_layout, per instance
+) -> Placed {
+    return Placed(vec4<f32>(corner + offset, 1.0), color);
+}
+```
+
+The vertex stage's `@location` inputs are checked at register against the two
+layouts together, each with the type its format is consumed as, the way a draw
+pass is checked against its geometry slot. An attribute the stage does not read
+is fine. The uniform window and the group-1 inputs are visible to the vertex
+stage, so a record can carry an index into a `Texel` table the stage reads with
+`textureLoad`.
+
+### Cull and depth
+
+`Cull::None` draws both windings. `Cull::Back` discards clockwise triangles;
+the front face is counter-clockwise, as it is for a draw pass.
+
+`depth: Some(DepthUse { slot, write })` attaches
+`ProgramRegister.depth_transients[slot]` under a `LessEqual` test.
+`DepthWrite::Write` writes each fragment that passes and `DepthWrite::TestOnly`
+tests and leaves the slot as it was, which is what a pass drawing transparent
+surfaces over an opaque scene wants. The [depth rules of a draw
+pass](#depth) hold unchanged: the slot must have the color output's extent, a
+fragment entry that writes `@builtin(frag_depth)` needs a slot, and the first
+pass of a dispatch to name a slot clears it to the far plane whatever its stage
+and whatever its `write`. A `TestOnly` pass that is the first to name its slot
+tests against the far plane, so everything it draws passes.
+
+### List slots
+
+`DrawSetsPass.draw_sets` is an index into `ProgramDispatch.draw_sets`, which is
+a list of draw-set ids per slot. The program's list count is one more than the
+highest index any pass names, and every index below it must be named by some
+pass, so a dispatch never carries a list nothing draws. Two passes may name one
+list: a colour pass and a depth-only pass draw the same sets that way.
+
+The frame chooses what is drawn by which set ids it lists, so showing or hiding
+a whole set costs nothing but the dispatch. A list may be empty; its passes
+then clear or load their output as declared and draw nothing. A draw with a
+zero index count or a zero record count is skipped.
+
+Each frame, a dispatch pays one layout comparison per listed set per pass that
+draws its list and one lookup per distinct buffer per listed set, and nothing
+per draw: a draw was checked when its set was made, and a set holds the buffers
+it draws, so a geometry or instance buffer destroyed under a listed set is
+still drawn. An `aether.render.program.timings` row reports a draw-sets pass
+with stage `Draw`.
+
 ## Register-time validation
 
 Validation happens at register, once, and every failure class replies a
@@ -737,14 +851,28 @@ The draw-pass classes, checked for every pass that declares `stage: Draw`:
 | Vertex entry | ``pass N: no vertex entry point named `X` in the module`` |
 | Geometry range | `pass N: geometry slot G is out of range (M declared)` |
 | Unbound location | `pass N: the vertex stage reads @location(L), which geometry slot G's layout does not declare` |
-| Attribute type | `pass N: the vertex stage reads @location(L) as vec2<f32>, but geometry slot G declares it Float32x3, which is consumed as vec3<f32>` |
+| Attribute type | `pass N: the vertex stage reads @location(L) as vec2<f32>, but geometry slot G's layout declares it Float32x3, which is consumed as vec3<f32>` |
 | Depth range | `pass N: depth transient D is out of range (M declared)` |
 | Depth extent | `pass N: depth transient D declares extent E, which does not match its color output's extent O — a depth attachment must be the size of the color attachment it tests for` |
 | Undeclared depth | ``pass N: entry point `X` writes @builtin(frag_depth), so the pass must declare a depth transient to write it into`` |
 
-The uniform-window class covers both stages of a draw pass: the window must
-cover the block whichever stage reads it, so a pass whose vertex stage is the
-only reader of group 0 still needs a window long enough for that block.
+The draw-sets classes, checked for every pass that declares `stage: DrawSets`.
+The vertex-entry, depth-range, depth-extent and undeclared-depth classes above
+apply to it with the same reasons:
+
+| Class | Reason shape |
+|---|---|
+| Empty layout | `pass N: the vertex layout declares no attributes` (also for the instance layout) |
+| Repeated location | `pass N: the vertex layout declares location L twice` (also for the instance layout) |
+| Shared location | `pass N: the vertex layout and the instance layout both declare location L — the two vertex buffers of a draw-sets pass share no location` |
+| Unbound location | `pass N: the vertex stage reads @location(L), which the pass's vertex or instance layout does not declare` |
+| Attribute type | `pass N: the vertex stage reads @location(L) as vec4<f32>, but the pass's vertex or instance layout declares it Uint8x4, which is consumed as vec4<u32>` |
+| Unnamed list | `a pass names draw-set list L, but no pass names list M — the lists a program's passes name are numbered from 0 with none left out` |
+
+The uniform-window class covers both stages of a draw or draw-sets pass: the
+window must cover the block whichever stage reads it, so a pass whose vertex
+stage is the only reader of group 0 still needs a window long enough for that
+block.
 
 The validation source is
 [`runtime/program/validate.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/src/runtime/program/validate.rs).
@@ -802,6 +930,10 @@ drop classes:
 - a non-`Writable` texture bound where the graph writes;
 - a geometry slot naming an unknown geometry id;
 - a geometry whose created layout disagrees with the slot's declared layout;
+- a draw-set list count that disagrees with the registered graph;
+- a list naming an unknown draw-set id;
+- a listed draw set whose layouts are not the layouts of a pass that draws its
+  list;
 - a uniform blob shorter than a pass's window reach
   (`uniform_offset + (count - 1) * uniform_stride + uniform_length`);
 - one texture bound as both a pass's input and its output.
@@ -817,7 +949,7 @@ GPU errors raised after those CPU checks retain the same address. Resource
 setup is wrapped in validation, internal, and out-of-memory error scopes; each
 pass is wrapped in a fresh set around its bind-group and command recording.
 The resulting `aether_render` error includes the program id, error class,
-supplied texture and geometry bindings, and either `phase = "setup"` or the
+supplied texture and geometry bindings and draw-set lists, and either `phase = "setup"` or the
 pass index, entry point, resolved input/output slots, and draw plan. A setup
 error drops that dispatch's pass recording; a pass error stops its remaining
 passes. Errors outside authored-program dispatches still reach the device's
@@ -875,6 +1007,10 @@ lifecycle over mail has its own scenario in
 [`geometry_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/geometry_scenario.rs),
 and the draw-set lifecycle in
 [`draw_set_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/draw_set_scenario.rs).
+[`draw_sets_pass_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/draw_sets_pass_scenario.rs)
+covers the draw-sets stage in rasterized pixels: two sets sharing a geometry,
+a dispatch listing an unknown set, a geometry destroyed under its set, a
+`TestOnly` pass, and back-face culling.
 
 ## Chassis behavior
 
