@@ -10,6 +10,7 @@
 //! `captures/` and reports each picture's difference from the static batch.
 
 mod model;
+mod round2;
 mod scene;
 mod shaders;
 
@@ -301,6 +302,11 @@ fn refusal(approach: Approach, models: usize, instances: usize) -> Option<String
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "round2") {
+        round2::main(&args[1..]);
+        return;
+    }
     let options = options();
     let selected: Vec<Approach> = Approach::ALL
         .into_iter()

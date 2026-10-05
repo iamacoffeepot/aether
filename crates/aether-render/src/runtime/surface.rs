@@ -77,7 +77,11 @@ const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Un
 /// admits.
 #[must_use]
 pub fn render_limits() -> wgpu::Limits {
-    wgpu::Limits::default()
+    // SPIKE-ONLY: the array-layer ceiling is a probe knob (default 256).
+    wgpu::Limits {
+        max_texture_array_layers: crate::spike_probe::ARRAY_LAYER_LIMIT.load(std::sync::atomic::Ordering::Relaxed),
+        ..wgpu::Limits::default()
+    }
 }
 
 /// Route wgpu errors that escape every error scope into the render log
@@ -151,7 +155,8 @@ fn resolve_wireframe(
 /// consults it, so a device that grants it and an operator who leaves
 /// the instrument off costs the same as one that never had it.
 fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+    // SPIKE-ONLY: INDIRECT_FIRST_INSTANCE for the multi-draw-indirect probe.
+    adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::INDIRECT_FIRST_INSTANCE)
 }
 
 /// Fallibly acquire a surfaceless wgpu device for an offscreen replacement

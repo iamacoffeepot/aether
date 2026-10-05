@@ -36,7 +36,7 @@ fn hash(mut x: u32) -> u32 {
     x ^ (x >> 16)
 }
 
-fn unit(seed: u32) -> f32 {
+pub fn unit(seed: u32) -> f32 {
     (hash(seed) & 0xffff) as f32 / 65535.0
 }
 

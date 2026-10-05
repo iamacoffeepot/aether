@@ -36,6 +36,10 @@
 pub mod kinds;
 pub use kinds::*;
 
+// SPIKE-ONLY (branch `spike/mesh-draw-path`).
+pub mod spike_kinds;
+pub use spike_kinds::*;
+
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. The seams (`capture`, `pipeline`, `overlay`, `texture`,
 // `surface`, `config`) live under the `runtime` directory, covered by the one
@@ -90,6 +94,31 @@ pub mod spike_probe {
     pub static FRAME_NANOS: AtomicU64 = AtomicU64::new(0);
     /// Dispatches handed to `ProgramRegistry::record`.
     pub static DISPATCHES: AtomicU64 = AtomicU64::new(0);
+
+    // Round two: the draw-list prototype.
+    /// `max_texture_array_layers` the next device is requested with.
+    pub static ARRAY_LAYER_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(256);
+    /// Nanos resolving + validating a draw list at record time (inline
+    /// lists; a retained list pays a map lookup only).
+    pub static RESOLVE_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos from `begin_render_pass` to the pass being dropped.
+    pub static ENCODE_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos creating retained draw lists (resolve + validate + insert).
+    pub static LIST_CREATE_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos patching retained draw lists.
+    pub static LIST_PATCH_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos in instance sub-range updates.
+    pub static UPDATE_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos of the whole spike draw-pass record (both phases).
+    pub static DRAW_PASS_NANOS: AtomicU64 = AtomicU64::new(0);
+    pub static DRAWS: AtomicU64 = AtomicU64::new(0);
+    pub static STATE_SETS: AtomicU64 = AtomicU64::new(0);
+    pub static PASSES: AtomicU64 = AtomicU64::new(0);
+    pub static DROPPED_PASSES: AtomicU64 = AtomicU64::new(0);
+    pub static BIND_GROUPS_CREATED: AtomicU64 = AtomicU64::new(0);
+    /// Wait for the previous frame by polling instead of wgpu's sleeping
+    /// fence wait.
+    pub static SPIN_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 }
 
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A

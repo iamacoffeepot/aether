@@ -120,6 +120,12 @@ impl Targets {
         &self.msaa.view
     }
 
+    /// SPIKE-ONLY: the multisampled depth view paired with `msaa_view`.
+    #[must_use]
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth.view
+    }
+
     /// The offscreen color texture itself. Desktop reaches for this
     /// to encode a `copy_texture_to_texture` blit onto the swapchain.
     #[must_use]

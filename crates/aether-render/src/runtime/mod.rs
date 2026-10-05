@@ -79,6 +79,7 @@ mod pipeline;
 // validation and pipeline construction, dispatch-time resolution and pass
 // recording into the frame encoder ahead of the sampling passes.
 mod program;
+mod spike_drawlist;
 // Shared desktop-surface GPU helpers (ADR-0161): the wireframe overlay
 // pipeline builder, swapchain acquisition, and the surface / offscreen
 // device boot, called by the pumped render runtime.
@@ -199,6 +200,10 @@ pub struct RenderCapabilityState {
     pending_capture: Option<PendingCapture>,
 
     assets_dir: Option<PathBuf>,
+
+    /// SPIKE-ONLY draw-list prototype state.
+    spike: spike_drawlist::SpikeDrawLists,
+    spike_passes: Vec<crate::SpikeDrawPass>,
 }
 
 struct BuiltReplacement {
@@ -634,6 +639,12 @@ impl RenderCapabilityState {
         // registry textures the material and overlay passes below sample,
         // so a dispatch and a draw over its output land in one frame.
         let dispatches = mem::take(&mut self.pending_program_dispatches);
+        // SPIKE-ONLY: draw-list passes into texture targets, ahead of the
+        // programs that read them.
+        let spike_passes = mem::take(&mut self.spike_passes);
+        let spike_started = Instant::now();
+        self.spike.record(gpu, encoder, &mut self.textures, &mut self.geometries, &spike_passes, None);
+        spike_add(&crate::spike_probe::DRAW_PASS_NANOS, spike_started);
         let spike_started = Instant::now();
         self.programs.record(gpu, encoder, &mut self.textures, &mut self.geometries, &dispatches);
         spike_add(&crate::spike_probe::PROGRAM_RECORD_NANOS, spike_started);
@@ -661,6 +672,14 @@ impl RenderCapabilityState {
                     clear: self.clear_color,
                 },
             )?;
+        }
+        // SPIKE-ONLY: draw-list passes straight into the frame's
+        // multisampled colour + depth pair, after the world pass cleared it.
+        {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            let spike_started = Instant::now();
+            self.spike.record(gpu, encoder, &mut self.textures, &mut self.geometries, &spike_passes, Some(&targets));
+            spike_add(&crate::spike_probe::DRAW_PASS_NANOS, spike_started);
         }
         // Material pass (depth-tested world-space rects), then the screen /
         // world overlay pass.
@@ -875,6 +894,8 @@ impl NativeActor for RenderCapability {
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
             assets_dir: params.assets_dir,
+            spike: spike_drawlist::SpikeDrawLists::default(),
+            spike_passes: Vec::new(),
         })
     }
 
@@ -1014,6 +1035,98 @@ impl NativeActor for RenderCapability {
             return;
         }
         state.pending_program_dispatches.push(mail);
+    }
+
+    /// SPIKE-ONLY handlers (draw-list prototype).
+    #[handler::request]
+    fn on_spike_create_instances(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: crate::SpikeCreateInstances,
+    ) -> crate::SpikeCreated {
+        state.ensure_offscreen_gpu_booted();
+        let Some(gpu) = state.gpu.as_ref() else {
+            return crate::SpikeCreated::Err { error: "gpu not booted".to_owned() };
+        };
+        state.spike.create_instances(gpu, mail)
+    }
+
+    #[handler::tell]
+    fn on_spike_update_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: crate::SpikeUpdateInstances) {
+        if let Some(gpu) = state.gpu.as_ref() {
+            state.spike.update_instances(gpu, &mail);
+        }
+    }
+
+    #[handler::request]
+    fn on_spike_create_texture_array(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: crate::SpikeCreateTextureArray,
+    ) -> crate::SpikeCreated {
+        state.ensure_offscreen_gpu_booted();
+        let Some(gpu) = state.gpu.as_ref() else {
+            return crate::SpikeCreated::Err { error: "gpu not booted".to_owned() };
+        };
+        state.spike.create_texture_array(gpu, mail)
+    }
+
+    #[handler::request]
+    fn on_spike_create_pipeline(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: crate::SpikeCreatePipeline,
+    ) -> crate::SpikeCreated {
+        state.ensure_offscreen_gpu_booted();
+        let Some(gpu) = state.gpu.as_ref() else {
+            return crate::SpikeCreated::Err { error: "gpu not booted".to_owned() };
+        };
+        state.spike.create_pipeline(gpu, mail)
+    }
+
+    #[handler::request]
+    fn on_spike_create_draw_list(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: crate::SpikeCreateDrawList,
+    ) -> crate::SpikeCreated {
+        state.ensure_offscreen_gpu_booted();
+        let Some(gpu) = state.gpu.as_ref() else {
+            return crate::SpikeCreated::Err { error: "gpu not booted".to_owned() };
+        };
+        state.spike.create_draw_list(gpu, &mut state.textures, &mut state.geometries, &mail)
+    }
+
+    #[handler::tell]
+    fn on_spike_patch_draw_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: crate::SpikePatchDrawList) {
+        if let Some(gpu) = state.gpu.as_ref() {
+            state.spike.patch_draw_list(gpu, &mut state.textures, &mut state.geometries, &mail);
+        }
+    }
+
+    #[handler::tell]
+    fn on_spike_destroy_draw_list(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: crate::SpikeDestroyDrawList,
+    ) {
+        state.spike.destroy_draw_list(mail.list_id);
+    }
+
+    #[handler::tell]
+    fn on_spike_draw_pass(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: crate::SpikeDrawPass) {
+        state.spike_passes.push(mail);
+    }
+
+    #[handler::request]
+    fn on_spike_limits(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: crate::SpikeLimits,
+    ) -> crate::SpikeLimitsResult {
+        state.ensure_offscreen_gpu_booted();
+        let text = state.gpu.as_ref().map_or_else(|| "gpu not booted".to_owned(), spike_drawlist::SpikeDrawLists::limits);
+        crate::SpikeLimitsResult { text }
     }
 
     /// `ProgramDestroy` (ADR-0170), on the owned program registry —
@@ -1180,6 +1293,16 @@ impl NativeActor for RenderCapability {
         // One-frame-in-flight: drain the prior submission before recording
         // any target in the next global frame (issue 1312).
         let spike_started = Instant::now();
+        // SPIKE-ONLY: wgpu-hal's Metal fence wait sleeps in 1 ms steps
+        // (wgpu-hal 29.0.1 `metal/device.rs:1907`), which quantises every
+        // frame time. `SPIN_WAIT` polls without sleeping instead, so the
+        // wait measures the GPU.
+        let spin = crate::spike_probe::SPIN_WAIT.load(std::sync::atomic::Ordering::Relaxed);
+        if spin && state.last_submission.take().is_some() {
+            while !device.poll(wgpu::PollType::Poll).is_ok_and(|status| status.is_queue_empty()) {
+                std::hint::spin_loop();
+            }
+        }
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
