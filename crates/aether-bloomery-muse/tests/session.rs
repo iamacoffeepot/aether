@@ -518,7 +518,7 @@ fn open_proving(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>),
 fn open_gated(driver: &mut Driver, max_turns: u32, required: &[&str]) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     let (tools, artifacts) = offered_with_proofs(&proofs());
     let names = required.iter().map(|name| ProgramName::new(*name)).collect::<Result<Vec<_>, _>>()?;
-    let (required, args) = required_proofs(&names)?;
+    let (required, args) = required_proofs(&proofs(), &names)?;
     driver.stage(artifacts.into_iter().chain(args));
     let settings = TurnSettings::new(
         Endpoint::new(URL)?,

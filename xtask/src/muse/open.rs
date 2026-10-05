@@ -81,12 +81,12 @@ pub(super) struct OpenArgs {
 /// `after=<seq>`, the boundary `wait` reads from; refuse when the muse reactor
 /// is not live.
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
-    let ((tools, mut artifacts), preface) =
-        proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?.map_or_else(
-            || (offered(), PREFACE.to_owned()),
-            |proofs| (offered_with_proofs(&proofs), [PREFACE, PROOFS].concat()),
-        );
-    let (required, required_args) = required(&args.require)?;
+    let proofs = proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?;
+    let ((tools, mut artifacts), preface) = proofs.as_ref().map_or_else(
+        || (offered(), PREFACE.to_owned()),
+        |proofs| (offered_with_proofs(proofs), [PREFACE, PROOFS].concat()),
+    );
+    let (required, required_args) = required(proofs.as_ref(), &args.require)?;
     artifacts.extend(required_args);
     let preface = format!("{preface}{}", gate_preface(&required)?);
     let brief =
@@ -137,13 +137,18 @@ fn proofs(environment: Option<&str>, vendor: Option<&str>, test_env: &[String]) 
     }
 }
 
-/// The proofs each `--require` value names, with the arguments to stage.
-fn required(names: &[String]) -> Result<(RequiredProofs, Vec<EncodedArtifact>)> {
+/// The proofs each `--require` value names among those offered over
+/// `proofs`, with the arguments to stage; none when no proof is offered,
+/// which `--require` needing `--environment` leaves only with no value.
+fn required(proofs: Option<&ProofBound>, names: &[String]) -> Result<(RequiredProofs, Vec<EncodedArtifact>)> {
+    let Some(proofs) = proofs else {
+        return Ok((RequiredProofs::default(), Vec::new()));
+    };
     let names = names
         .iter()
         .map(|name| ProgramName::new(name.as_str()).map_err(|error| anyhow!("--require {name:?}: {error}")))
         .collect::<Result<Vec<_>>>()?;
-    required_proofs(&names).map_err(|error| anyhow!("--require: {error}"))
+    required_proofs(proofs, &names).map_err(|error| anyhow!("--require: {error}"))
 }
 
 /// What a session whose `Done` end must pass `required` is told after

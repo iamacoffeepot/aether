@@ -103,17 +103,49 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
 pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArtifact>) {
     let (tools, mut artifacts) = offered();
     let bound = EncodedArtifact::new(proofs).expect("the proof bound encodes");
-    let (proofs, cited): (Vec<_>, Vec<_>) = proof_offers(Ref::from_digest(bound.digest())).into_iter().unzip();
+    let (proofs, cited): (Vec<_>, Vec<_>) =
+        proof_offers(Ref::from_digest(bound.digest())).into_iter().map(|offer| (offer.tool, offer.cited)).unzip();
     artifacts.extend(cited.into_iter().flatten().chain([bound]).chain(cargo_config_artifacts()));
     let tools = tools.as_slice().iter().cloned().chain(proofs).collect();
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
 
+/// One proof tool offered over a session's `ProofBound`: the offer, the
+/// artifacts it cites besides the bound, and the whole-workspace arguments
+/// the gate calls it with when a session requires it. A proof tool is
+/// offered and required from this one row.
+pub struct ProofOffer {
+    /// The proof tool as a turn offers it.
+    pub tool: OfferedTool,
+    /// The artifacts the offer cites besides the bound.
+    pub cited: Vec<EncodedArtifact>,
+    /// The staged whole-workspace arguments a required run of the proof is
+    /// called with.
+    pub workspace: EncodedArtifact,
+}
+
 /// Every proof tool from the bundle [`WORKSPACE_PROGRAMS`] resolves to,
-/// binding `proofs` into every call, and the artifacts each offer cites
-/// besides `proofs`.
-pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<(OfferedTool, Vec<EncodedArtifact>)> {
-    vec![bound::<ClippyProof>(WORKSPACE_PROGRAMS, proofs), bound::<TestProof>(WORKSPACE_PROGRAMS, proofs)]
+/// binding `proofs` into every call, each with what its offer cites besides
+/// `proofs` and its whole-workspace arguments.
+pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<ProofOffer> {
+    vec![proof::<ClippyProof>(proofs, &ClippyArgs), proof::<TestProof>(proofs, &TestArgs)]
+}
+
+/// `P` offered over `proofs`, required with the arguments `workspace`.
+///
+/// # Panics
+///
+/// As [`bound`] does, or when `workspace` does not encode, which holds or
+/// fails the same way on every call.
+fn proof<P>(proofs: Ref<ProofBound>, workspace: &<P::Input as ToolArguments>::Arguments) -> ProofOffer
+where
+    P: Program,
+    P::Input: ToolArguments<Bound = ProofBound>,
+    P::Result: Schema,
+{
+    let (tool, cited) = bound::<P>(WORKSPACE_PROGRAMS, proofs);
+    let workspace = EncodedArtifact::new(workspace).expect("the arguments encode");
+    ProofOffer { tool, cited, workspace }
 }
 
 /// Whether a proof's `Edited` `detail` says it passed: it cites exactly
@@ -129,9 +161,9 @@ pub fn proof_passed(detail: ErasedRef) -> bool {
     detail == Ref::of_encoded(&ProofVerdict::Passed).expect("the verdict encodes").erase()
 }
 
-/// The proofs `names` require, each with its whole-workspace arguments, and
-/// the arguments to stage: every proof tool [`offered_with_proofs`] offers can be
-/// required.
+/// The proofs `names` require of a session offered the proof tools bound to
+/// `proofs`, each with the whole-workspace arguments its offer carries, and
+/// the arguments to stage: every offered proof tool can be required.
 ///
 /// # Errors
 ///
@@ -139,20 +171,21 @@ pub fn proof_passed(detail: ErasedRef) -> bool {
 ///
 /// # Panics
 ///
-/// When a proof's arguments do not encode, which holds or fails the same
-/// way on every call.
-pub fn required_proofs(names: &[ProgramName]) -> Result<(RequiredProofs, Vec<EncodedArtifact>), String> {
-    let rows = [
-        (program_name::<ClippyProof>(), EncodedArtifact::new(&ClippyArgs).expect("the arguments encode")),
-        (program_name::<TestProof>(), EncodedArtifact::new(&TestArgs).expect("the arguments encode")),
-    ];
+/// When `proofs` does not encode, which holds or fails the same way on every
+/// call.
+pub fn required_proofs(
+    proofs: &ProofBound,
+    names: &[ProgramName],
+) -> Result<(RequiredProofs, Vec<EncodedArtifact>), String> {
+    let offers = proof_offers(Ref::of_encoded(proofs).expect("the proof bound encodes"));
     let (proofs, artifacts): (Vec<_>, Vec<_>) = names
         .iter()
         .map(|name| {
-            let (_, args) = rows
+            let offer = offers
                 .iter()
-                .find(|(program, _)| program == name)
+                .find(|offer| offer.tool.program() == name)
                 .ok_or_else(|| format!("{} is not a proof tool", name.as_str()))?;
+            let args = &offer.workspace;
             let cited = ErasedRef::new(args.kind(), args.digest());
             Ok((RequiredProof::new(name.clone(), cited), args.clone()))
         })

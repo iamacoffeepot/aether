@@ -183,7 +183,7 @@ fn binds(own: &OfferedTools, tool: &OfferedTool) -> bool {
 /// value.
 fn proves(tool: &OfferedTool) -> bool {
     let proof = tool.bound().cast::<ProofBound>().map(proof_offers).unwrap_or_default();
-    proof.iter().any(|(offer, _)| offer.same_tool(tool))
+    proof.iter().any(|offer| offer.tool.same_tool(tool))
 }
 
 /// Refuses `proof` unless `input` offers its program as a proof tool and its
@@ -318,8 +318,8 @@ mod tests {
         let (tools, _) = offered_with_proofs(&proofs);
         run_stored::<SessionOpen>(&open(tools.clone(), Vec::new())).expect("bound proof tools open");
 
-        for (offer, _) in proof_offers(Ref::from_digest(digest(1))) {
-            let single = OfferedTools::new(vec![offer]).expect("tools");
+        for offer in proof_offers(Ref::from_digest(digest(1))) {
+            let single = OfferedTools::new(vec![offer.tool]).expect("tools");
             run_stored::<SessionOpen>(&open(single, Vec::new())).expect("every proof offer opens");
         }
 
