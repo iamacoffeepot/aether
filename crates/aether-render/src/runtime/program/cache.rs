@@ -7,10 +7,11 @@
 //!
 //! Each piece is invalidated by exactly the event that can change it:
 //!
-//! - [`PlanLayout`] — the uniform staging arrangement and the
-//!   clear/load sequencing — depends only on the plan and the device's
-//!   uniform offset alignment, so it is built once per program and
-//!   outlives every dispatch.
+//! - [`PlanLayout`] — the uniform staging arrangement, the clear/load
+//!   sequencing and which passes resolve a multisampled output —
+//!   depends only on the plan and the device's uniform offset
+//!   alignment, so it is built once per program and outlives every
+//!   dispatch.
 //! - [`ExtentLayout`] — the transient and depth-slot pool assignments —
 //!   depends additionally on the reference extent, so it is keyed on it
 //!   and rebuilt when the output binding's size changes (a resize).
@@ -22,8 +23,9 @@
 //!   `write_texture_layer` uploads into the texture it was realized as.
 //! - A pass's input bind group is keyed on the resolved identity of every
 //!   slot it samples — the texture id for a binding, the pool class and
-//!   physical index for a transient — so rebinding, a resize, or a pool
-//!   class change rebuilds it and nothing else does.
+//!   physical index of the texture a transient is read from — so
+//!   rebinding, a resize, or a pool class change rebuilds it and nothing
+//!   else does.
 //! - The uniform bind groups name a staging buffer, and a queued write
 //!   lands before any pass of the frame runs, so each dispatch of a
 //!   program within a frame stages into its own buffer. The slots are
@@ -41,17 +43,19 @@ use aether_substrate::render::PROGRAM_DEPTH_FORMAT;
 use super::super::texture::{TextureRegistry, wgpu_texture_format};
 use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, TransientKey};
-use crate::{GeometryBuffer, StorageAccess};
+use crate::{GeometryBuffer, Samples, StorageAccess};
 
 /// One transient's physical allocation for a dispatch: which pool class
 /// it draws from and which slot within that class it occupies.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) struct TransientAssignment {
     pub key: TransientKey,
     pub physical: usize,
 }
 
-/// The staging arrangement and clear sequencing for one program: a pure
-/// function of its plan and the device's uniform offset alignment.
+/// The staging arrangement and the clear and resolve sequencing for one
+/// program: a pure function of its plan and the device's uniform offset
+/// alignment.
 pub(super) struct PlanLayout {
     /// Total bytes one dispatch stages, copy-alignment padding included.
     pub staging_bytes: usize,
@@ -63,6 +67,10 @@ pub(super) struct PlanLayout {
     /// Per pass, whether it is the dispatch's first reference to the
     /// depth slot it names, and so clears it.
     pub clears_depth: Vec<bool>,
+    /// Per pass, whether its last iteration resolves the multisampled
+    /// transient it writes into the texture readers bind
+    /// (`resolves_output`).
+    pub resolves_output: Vec<bool>,
 }
 
 impl PlanLayout {
@@ -115,8 +123,30 @@ impl PlanLayout {
             })
             .collect();
 
-        Self { staging_bytes, iteration_offsets, clears_output, clears_depth }
+        let resolves_output = (0..plan.passes.len()).map(|pass| resolves_output(plan, pass)).collect();
+
+        Self { staging_bytes, iteration_offsets, clears_output, clears_depth, resolves_output }
     }
+}
+
+/// Whether the pass at `index` is the last writer of a multisampled
+/// transient before a reader (ADR-0246 decision 7): its output is a
+/// `Four` transient, and the next later pass to name that transient,
+/// as an input or as its output, reads it. A writer followed by another
+/// writer does not resolve, since nothing reads what it left; and two
+/// readers with no writer between them are served by the one resolve
+/// the writer before them made. A single-sample output never resolves.
+fn resolves_output(plan: &ProgramPlan, index: usize) -> bool {
+    let Some(output) = plan.passes[index].output else {
+        return false;
+    };
+    if plan.samples(output) == Samples::One {
+        return false;
+    }
+    plan.passes[index + 1..]
+        .iter()
+        .find(|later| later.reads(output) || later.writes(output))
+        .is_some_and(|next| next.reads(output))
 }
 
 /// The pool assignments for one reference extent. Every declared extent
@@ -124,25 +154,51 @@ impl PlanLayout {
 /// event that moves a transient to a different pool class.
 pub(super) struct ExtentLayout {
     pub reference: (u32, u32),
+    /// Per transient, the texture a pass that writes it attaches.
     pub assignments: Vec<Option<TransientAssignment>>,
+    /// Per transient, the single-sample texture a `Four` transient some
+    /// pass reads is resolved into. `None` for a `One` transient, which
+    /// is read from the texture it is written to, and for a `Four` one
+    /// no pass reads.
+    pub resolve_assignments: Vec<Option<TransientAssignment>>,
     pub depth_assignments: Vec<Option<TransientAssignment>>,
 }
 
 impl ExtentLayout {
     pub fn build(plan: &ProgramPlan, reference: (u32, u32)) -> Self {
+        let TransientAssignments { attached, resolved } = assign_transients(plan, reference);
         Self {
             reference,
-            assignments: assign_transients(plan, reference),
+            assignments: attached,
+            resolve_assignments: resolved,
             depth_assignments: assign_depth_transients(plan, reference),
         }
+    }
+
+    /// The texture a pass that writes `transient` attaches.
+    pub fn attached(&self, transient: u32) -> TransientAssignment {
+        self.assignments[transient as usize].expect("read/written transients were assigned physical slots")
+    }
+
+    /// The single-sample texture `transient` is resolved into, when it
+    /// is a `Four` transient some pass reads.
+    pub fn resolved(&self, transient: u32) -> Option<TransientAssignment> {
+        self.resolve_assignments[transient as usize]
+    }
+
+    /// The texture a pass that reads `transient` binds: the one a
+    /// `Four` transient is resolved into, and otherwise the one it is
+    /// written to.
+    pub fn read(&self, transient: u32) -> TransientAssignment {
+        self.resolved(transient).unwrap_or_else(|| self.attached(transient))
     }
 }
 
 /// What one input slot resolved to, at the granularity that decides
 /// which GPU view a bind group entry names. A binding resolves to a
 /// texture id — never recycled, and realized once — and a transient to
-/// its pool class and physical index, which name a view the pool only
-/// ever appends to.
+/// the pool class and physical index of the texture it is read from,
+/// which name a view the pool only ever appends to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BoundInput {
     Binding(u32),
@@ -396,29 +452,30 @@ impl<'a> CacheParts<'a> {
     }
 }
 
-/// Assign each live transient a physical texture in its resolved
-/// (extent, format) class, reusing a physical slot once its previous
-/// holder's live range has ended — strictly before the next holder's
-/// first write, so a pass never samples a transient the same physical
-/// texture is attached to. A ping-pong chain of any length settles on
-/// two allocations per class.
-fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<TransientAssignment>> {
-    let mut order: Vec<usize> =
-        (0..plan.transients.len()).filter(|&t| plan.transients[t].first_write.is_some()).collect();
-    order.sort_by_key(|&t| plan.transients[t].first_write.expect("filtered to written transients"));
+/// What [`assign_transients`] assigns, both lists indexed by transient:
+/// the texture a writer attaches, and the single-sample texture a read
+/// `Four` transient resolves into.
+pub(super) struct TransientAssignments {
+    pub attached: Vec<Option<TransientAssignment>>,
+    pub resolved: Vec<Option<TransientAssignment>>,
+}
 
-    let mut free: HashMap<TransientKey, BinaryHeap<Reverse<(u32, usize)>>> = HashMap::new();
-    let mut allocated: HashMap<TransientKey, usize> = HashMap::new();
-    let mut assignments: Vec<Option<TransientAssignment>> = (0..plan.transients.len()).map(|_| None).collect();
-    for t in order {
-        let live = &plan.transients[t];
-        let slot = ResolvedSlot::Transient(u32::try_from(t).expect("transient index fits u32"));
-        let first_write = live.first_write.expect("filtered to written transients");
-        let last_use = live.last_use.expect("a written transient has a live range");
-        let (width, height) = resolve_extent(plan.target_extent(slot), reference);
-        let key = (width, height, wgpu_texture_format(live.spec.format));
+/// The physical slots of every pool class handed out so far in one
+/// assignment walk, and when each becomes free again.
+#[derive(Default)]
+struct ClassSlots {
+    free: HashMap<TransientKey, BinaryHeap<Reverse<(u32, usize)>>>,
+    allocated: HashMap<TransientKey, usize>,
+}
 
-        let heap = free.entry(key).or_default();
+impl ClassSlots {
+    /// Take a physical slot of class `key` for the pass range
+    /// `first_write..=last_use`: one whose previous holder's range ended
+    /// before `first_write`, or a new one. The walk calls this in
+    /// `first_write` order, which is what makes the earliest-free slot
+    /// the right one to offer.
+    fn take(&mut self, key: TransientKey, first_write: u32, last_use: u32) -> TransientAssignment {
+        let heap = self.free.entry(key).or_default();
         let physical = match heap.peek() {
             Some(Reverse((available_from, physical))) if *available_from <= first_write => {
                 let physical = *physical;
@@ -426,35 +483,75 @@ fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<Tr
                 physical
             }
             _ => {
-                let count = allocated.entry(key).or_insert(0);
+                let count = self.allocated.entry(key).or_insert(0);
                 let physical = *count;
                 *count += 1;
                 physical
             }
         };
-        free.entry(key).or_default().push(Reverse((last_use + 1, physical)));
-        assignments[t] = Some(TransientAssignment { key, physical });
+        heap.push(Reverse((last_use + 1, physical)));
+        TransientAssignment { key, physical }
     }
-    assignments
+}
+
+/// Assign each live transient a physical texture in its resolved
+/// (extent, format, sample count) class, reusing a physical slot once
+/// its previous holder's live range has ended — strictly before the
+/// next holder's first write, so a pass never samples a transient the
+/// same physical texture is attached to. A ping-pong chain of any
+/// length settles on two allocations per class.
+///
+/// A `Four` transient some pass reads also takes a texture of the
+/// single-sample class of its size and format, for the same live range
+/// and from the same slots `One` transients take: a resolve texture and
+/// a `One` transient reuse each other's allocations and never overlap.
+fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> TransientAssignments {
+    let mut order: Vec<usize> =
+        (0..plan.transients.len()).filter(|&t| plan.transients[t].first_write.is_some()).collect();
+    order.sort_by_key(|&t| plan.transients[t].first_write.expect("filtered to written transients"));
+
+    let mut slots = ClassSlots::default();
+    let mut attached: Vec<Option<TransientAssignment>> = vec![None; plan.transients.len()];
+    let mut resolved: Vec<Option<TransientAssignment>> = vec![None; plan.transients.len()];
+    for t in order {
+        let live = &plan.transients[t];
+        let slot = ResolvedSlot::Transient(u32::try_from(t).expect("transient index fits u32"));
+        let first_write = live.first_write.expect("filtered to written transients");
+        let last_use = live.last_use.expect("a written transient has a live range");
+        let (width, height) = resolve_extent(live.spec.extent, reference);
+        let single_sample =
+            TransientKey { width, height, format: wgpu_texture_format(live.spec.format), sample_count: 1 };
+        let multisampled = TransientKey { sample_count: live.spec.samples.count(), ..single_sample };
+        attached[t] = Some(slots.take(multisampled, first_write, last_use));
+
+        let read = plan.passes.iter().any(|pass| pass.reads(slot));
+        let read_resolved = live.spec.samples == Samples::Four && read;
+        if read_resolved {
+            resolved[t] = Some(slots.take(single_sample, first_write, last_use));
+        }
+    }
+    TransientAssignments { attached, resolved }
 }
 
 /// Assign each depth slot a physical `Depth32Float` texture in its
-/// resolved-extent class, skipping slots no pass names. Unlike color
-/// transients these are not liveness-packed: sharing a depth buffer is
-/// the declaration's whole point (two passes naming one slot is how
-/// occlusion agrees between them), so two *distinct* slots must never
-/// land on one physical texture however disjoint their use looks.
+/// resolved (extent, sample count) class, skipping slots no pass names.
+/// Unlike color transients these are not liveness-packed: sharing a
+/// depth buffer is the declaration's whole point (two passes naming one
+/// slot is how occlusion agrees between them), so two *distinct* slots
+/// must never land on one physical texture however disjoint their use
+/// looks.
 fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<TransientAssignment>> {
     let mut allocated: HashMap<TransientKey, usize> = HashMap::new();
     plan.depth_transients
         .iter()
         .enumerate()
-        .map(|(slot, extent)| {
+        .map(|(slot, spec)| {
             let slot = u32::try_from(slot).expect("depth slot index fits u32");
             let named = plan.passes.iter().any(|pass| pass.stage.depth_slot() == Some(slot));
             named.then(|| {
-                let (width, height) = resolve_extent(*extent, reference);
-                let key = (width, height, PROGRAM_DEPTH_FORMAT);
+                let (width, height) = resolve_extent(spec.extent, reference);
+                let key =
+                    TransientKey { width, height, format: PROGRAM_DEPTH_FORMAT, sample_count: spec.samples.count() };
                 let physical = allocated.entry(key).or_insert(0);
                 let assigned = *physical;
                 *physical += 1;
@@ -468,9 +565,9 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
 mod tests {
     use super::*;
     use crate::{
-        Cull, DepthUse, DepthWrite, DrawPass, DrawSetsPass, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad,
-        PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat,
-        VertexAttribute, VertexFormat, Wrap,
+        Blend, Cull, DepthSpec, DepthUse, DepthWrite, DrawPass, DrawSetsPass, GeometrySlotSpec, InputSlot, Mips,
+        OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
+        TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
     };
 
     const MODULE: &str = r"
@@ -486,6 +583,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     fn copy_pass(input: InputSlot, output: OutputSlot) -> ProgramPass {
         ProgramPass {
             stage: PassStage::Fragment,
+            blend: Blend::Alpha,
             entry_point: "fs_copy".to_owned(),
             inputs: vec![input],
             output,
@@ -493,6 +591,34 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             uniform_length: 0,
             repeat: None,
         }
+    }
+
+    /// A full-extent `Rgba8` binding.
+    fn full_binding() -> SlotSpec {
+        SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }
+    }
+
+    /// A full-extent `Rgba8` transient of `samples` samples per texel.
+    fn full_transient(samples: Samples) -> TransientSpec {
+        TransientSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full, samples }
+    }
+
+    /// A fragment-only program over `MODULE`, with as many full-extent
+    /// `Rgba8` bindings as `bindings`.
+    fn copy_plan(bindings: usize, transients: Vec<TransientSpec>, passes: Vec<ProgramPass>) -> ProgramPlan {
+        let mail = ProgramRegister {
+            wgsl: MODULE.to_owned(),
+            bindings: vec![full_binding(); bindings],
+            transients,
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes,
+        };
+        super::super::validate::validate(&mail).expect("the copy graph validates")
     }
 
     /// The interval reuse behind the ADR's pooling claim: a chain of
@@ -504,27 +630,18 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// reuses and allocates one texture per hop.
     #[test]
     fn ping_pong_chain_settles_on_two_physical_allocations() {
-        let full = SlotSpec {
-            format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Full),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-        };
-        let mail = ProgramRegister {
-            wgsl: MODULE.to_owned(),
-            bindings: vec![full, full],
-            transients: vec![full; 3],
-            geometries: Vec::new(),
-            depth_transients: Vec::new(),
-            passes: vec![
+        let plan = copy_plan(
+            2,
+            vec![full_transient(Samples::One); 3],
+            vec![
                 copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }),
                 copy_pass(InputSlot::Transient { index: 0 }, OutputSlot::Transient { index: 1 }),
                 copy_pass(InputSlot::Transient { index: 1 }, OutputSlot::Transient { index: 2 }),
                 copy_pass(InputSlot::Transient { index: 2 }, OutputSlot::Binding { index: 1 }),
             ],
-        };
-        let plan = super::super::validate::validate(&mail).expect("chain validates");
+        );
 
-        let assignments = assign_transients(&plan, (64, 48));
+        let assignments = assign_transients(&plan, (64, 48)).attached;
         let physicals: Vec<usize> =
             assignments.iter().map(|a| a.as_ref().expect("all transients live").physical).collect();
         // Transient 0 is read at pass 1 while transient 1 is written, so
@@ -539,28 +656,72 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// a resized dispatch keeps sampling the previous size's textures.
     #[test]
     fn transient_pool_class_follows_the_reference_extent() {
-        let full = SlotSpec {
-            format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Full),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-        };
-        let mail = ProgramRegister {
-            wgsl: MODULE.to_owned(),
-            bindings: vec![full, full],
-            transients: vec![full],
-            geometries: Vec::new(),
-            depth_transients: Vec::new(),
-            passes: vec![
+        let plan = copy_plan(
+            2,
+            vec![full_transient(Samples::One)],
+            vec![
                 copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }),
                 copy_pass(InputSlot::Transient { index: 0 }, OutputSlot::Binding { index: 1 }),
             ],
-        };
-        let plan = super::super::validate::validate(&mail).expect("chain validates");
+        );
 
         let small = ExtentLayout::build(&plan, (64, 48));
         let large = ExtentLayout::build(&plan, (128, 96));
         let class = |layout: &ExtentLayout| layout.assignments[0].as_ref().expect("transient live").key;
         assert_ne!(class(&small), class(&large), "a resized dispatch must not reuse the previous size's pool class");
+    }
+
+    /// Transient 0 written twice, read, written again and read again.
+    fn written_twice_between_reads(samples: Samples) -> ProgramPlan {
+        let write = || copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 });
+        let read = |binding: u32| copy_pass(InputSlot::Transient { index: 0 }, OutputSlot::Binding { index: binding });
+        copy_plan(3, vec![full_transient(samples)], vec![write(), write(), read(1), write(), read(2)])
+    }
+
+    /// The resolve happens once, after the last writer before each
+    /// reader: of three writers, the second and the third. The named
+    /// bugs: resolving at every writer, a resolve per pass that no
+    /// picture shows; and resolving only at the graph's last writer,
+    /// which leaves the first reader bound to a texture nothing wrote.
+    /// A single-sample transient resolves nowhere — a resolve target on
+    /// a single-sample pass is refused by wgpu.
+    #[test]
+    fn a_four_transient_resolves_at_the_last_writer_before_each_reader() {
+        let resolves =
+            |samples: Samples| PlanLayout::build(&written_twice_between_reads(samples), &[], 256).resolves_output;
+
+        assert_eq!(resolves(Samples::Four), vec![false, true, false, true, false]);
+        assert_eq!(resolves(Samples::One), vec![false; 5]);
+    }
+
+    /// A `Four` transient and a `One` transient of one size and format,
+    /// live at once: transient 0 is `Four` and live over passes 0 to 2,
+    /// transient 1 is `One` and live over passes 1 to 3. The named
+    /// bugs: the two sharing a pool class for what they attach, which
+    /// hands a single-sample texture to a multisampled pass; and the
+    /// `Four` transient resolving into the texture the `One` transient
+    /// holds, which overwrites what pass 3 is still to read.
+    #[test]
+    fn a_resolve_texture_shares_the_single_sample_class_without_aliasing() {
+        let plan = copy_plan(
+            3,
+            vec![full_transient(Samples::Four), full_transient(Samples::One)],
+            vec![
+                copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }),
+                copy_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 1 }),
+                copy_pass(InputSlot::Transient { index: 0 }, OutputSlot::Binding { index: 1 }),
+                copy_pass(InputSlot::Transient { index: 1 }, OutputSlot::Binding { index: 2 }),
+            ],
+        );
+
+        let layout = ExtentLayout::build(&plan, (64, 48));
+        let (four, one) = (layout.attached(0), layout.attached(1));
+        let resolve = layout.resolved(0).expect("a read Four transient has a resolve texture");
+
+        assert_ne!(four.key, one.key, "a multisampled attachment and a single-sample one are different classes");
+        assert_eq!(resolve.key, one.key, "a resolve texture is an ordinary single-sample target");
+        assert_ne!(resolve.physical, one.physical, "the resolve must not land on the live One transient's texture");
+        assert_eq!(layout.resolved(1), None, "a One transient is read from the texture it is written to");
     }
 
     const DRAW_MODULE: &str = r"
@@ -579,6 +740,11 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 1.0, 1.0, 1.0);
 }
 ";
+
+    /// A full-extent single-sample depth slot.
+    fn full_depth() -> DepthSpec {
+        DepthSpec { extent: SlotExtent::Full, samples: Samples::One }
+    }
 
     /// A draw-sets pass testing against depth slot `slot` without
     /// writing it.
@@ -605,6 +771,7 @@ fn fs_opaque() -> @location(0) vec4<f32> {
                 depth,
                 load: PassLoad::Clear,
             }),
+            blend: Blend::Alpha,
             entry_point: "fs_opaque".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },
@@ -626,19 +793,14 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     /// unassigned, which panics the encode path that resolves its view.
     #[test]
     fn depth_slots_share_by_name_and_never_alias() {
-        let full = SlotSpec {
-            format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Full),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-        };
         let mail = ProgramRegister {
             wgsl: DRAW_MODULE.to_owned(),
-            bindings: vec![full],
+            bindings: vec![full_binding()],
             transients: Vec::new(),
             geometries: vec![GeometrySlotSpec {
                 layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
             }],
-            depth_transients: vec![SlotExtent::Full; 4],
+            depth_transients: vec![full_depth(); 4],
             passes: vec![draw_pass(Some(0)), draw_pass(Some(0)), draw_pass(Some(1)), draw_sets_pass(2)],
         };
         let plan = super::super::validate::validate(&mail).expect("draw graph validates");
@@ -662,19 +824,14 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     /// which wipes the accumulation a chain is built on.
     #[test]
     fn clear_sequencing_marks_only_the_first_write_of_each_slot() {
-        let full = SlotSpec {
-            format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Full),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-        };
         let mail = ProgramRegister {
             wgsl: DRAW_MODULE.to_owned(),
-            bindings: vec![full],
+            bindings: vec![full_binding()],
             transients: Vec::new(),
             geometries: vec![GeometrySlotSpec {
                 layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
             }],
-            depth_transients: vec![SlotExtent::Full; 3],
+            depth_transients: vec![full_depth(); 3],
             passes: vec![
                 draw_pass(Some(0)),
                 draw_pass(Some(0)),

@@ -181,15 +181,17 @@ pub fn program_storage_layout(device: &wgpu::Device, read_only: &[bool]) -> wgpu
 
 /// One program pass's pipeline shape: the shared fullscreen vertex stage
 /// (`vertex_module`) over the authored module's fragment `entry_point`,
-/// rendering into a color attachment of `color_format`. `blend` is
-/// `Some` for blendable color formats (alpha over the target) and `None`
-/// for `R32Float`, which core WebGPU cannot blend — the pass replaces
-/// instead.
+/// rendering into a color attachment of `color_format` that holds
+/// `sample_count` samples per texel. `blend` is the state the pass
+/// declared: `None` replaces the attachment, which every format
+/// allows, and `Some` is refused by pipeline creation on a format the
+/// device cannot blend.
 pub struct ProgramPipelineSpec<'a> {
     pub vertex_module: &'a wgpu::ShaderModule,
     pub fragment_module: &'a wgpu::ShaderModule,
     pub entry_point: &'a str,
     pub color_format: wgpu::TextureFormat,
+    pub sample_count: u32,
     pub blend: Option<wgpu::BlendState>,
     pub uniform_layout: &'a wgpu::BindGroupLayout,
     pub inputs_layout: &'a wgpu::BindGroupLayout,
@@ -204,6 +206,7 @@ pub fn build_program_pipeline(device: &wgpu::Device, spec: &ProgramPipelineSpec<
         fragment_module,
         entry_point,
         color_format,
+        sample_count,
         blend,
         uniform_layout,
         inputs_layout,
@@ -240,7 +243,7 @@ pub fn build_program_pipeline(device: &wgpu::Device, spec: &ProgramPipelineSpec<
             conservative: false,
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: multisample(sample_count),
         multiview_mask: None,
         cache: None,
     })
@@ -271,12 +274,14 @@ pub struct ProgramDepthState {
 
 /// One draw pass's pipeline shape (ADR-0171, ADR-0246): the authored
 /// module's vertex and fragment entry points over `vertex_buffers`, in
-/// buffer-slot order, into a color attachment of `color_format`. A pass
-/// over one bound geometry has one per-vertex buffer; a draw-sets pass
-/// adds a per-instance buffer at slot 1. `cull_mode` is `None` for a
-/// pass that draws both windings. `depth` is the state a declared depth
-/// transient attaches under; a pass declaring none rasterizes in draw
-/// order.
+/// buffer-slot order, into a color attachment of `color_format` that
+/// holds `sample_count` samples per texel. A pass over one bound
+/// geometry has one per-vertex buffer; a draw-sets pass adds a
+/// per-instance buffer at slot 1. `cull_mode` is `None` for a pass that
+/// draws both windings. `blend` is the state the pass declared, as on
+/// [`ProgramPipelineSpec`]. `depth` is the state a declared depth
+/// transient attaches under, at the same sample count; a pass declaring
+/// none rasterizes in draw order.
 pub struct ProgramDrawPipelineSpec<'a> {
     pub module: &'a wgpu::ShaderModule,
     pub vertex_entry_point: &'a str,
@@ -284,6 +289,7 @@ pub struct ProgramDrawPipelineSpec<'a> {
     pub vertex_buffers: &'a [ProgramVertexBuffer<'a>],
     pub cull_mode: Option<wgpu::Face>,
     pub color_format: wgpu::TextureFormat,
+    pub sample_count: u32,
     pub blend: Option<wgpu::BlendState>,
     pub depth: Option<ProgramDepthState>,
     pub uniform_layout: &'a wgpu::BindGroupLayout,
@@ -346,10 +352,17 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: multisample(spec.sample_count),
         multiview_mask: None,
         cache: None,
     })
+}
+
+/// The multisample state of a pipeline whose attachments hold
+/// `sample_count` samples per texel: every sample written, and no
+/// alpha-to-coverage.
+fn multisample(sample_count: u32) -> wgpu::MultisampleState {
+    wgpu::MultisampleState { count: sample_count, ..wgpu::MultisampleState::default() }
 }
 
 /// One authored compute pipeline: the authored entry point over the
@@ -384,16 +397,22 @@ pub fn build_program_compute_pipeline(
 }
 
 /// Create one depth transient for the program transient pool
-/// (ADR-0171): a `Depth32Float` attachment draw passes clear and test
-/// against. Render-attachment only — nothing samples it, and the pass
-/// that shares it does so by attaching it again.
+/// (ADR-0171): a `Depth32Float` attachment of `sample_count` samples
+/// per texel that draw passes clear and test against. Render-attachment
+/// only — nothing samples it or resolves it, and the pass that shares
+/// it does so by attaching it again.
 #[must_use]
-pub fn create_program_depth_transient(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+pub fn create_program_depth_transient(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    sample_count: u32,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("aether program depth transient"),
         size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: PROGRAM_DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -401,26 +420,41 @@ pub fn create_program_depth_transient(device: &wgpu::Device, width: u32, height:
     })
 }
 
+/// What one pooled transient texture is created as: its size, its
+/// format, and how many samples each texel holds. Two textures of one
+/// spec are interchangeable, which is what lets a pool key on it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct ProgramTransientSpec {
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+    pub sample_count: u32,
+}
+
 /// Create one transient intermediate texture for the program transient
-/// pool (ADR-0170): a render target program passes write and later
-/// passes sample — `RENDER_ATTACHMENT | TEXTURE_BINDING`, no CPU
-/// staging. Content is defined by the executor's clear-on-first-write
-/// policy, so no clear pass is recorded here.
+/// pool (ADR-0170), with no CPU staging. A single-sample transient is a
+/// render target program passes write and later passes sample —
+/// `RENDER_ATTACHMENT | TEXTURE_BINDING` — and is also what a
+/// multisampled one resolves into. A multisampled transient is a render
+/// attachment only: passes attach it, and a pass reads the
+/// single-sample texture it was resolved into. Content is defined by
+/// the executor's clear-on-first-write policy, so no clear pass is
+/// recorded here.
 #[must_use]
-pub fn create_program_transient(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-) -> wgpu::Texture {
+pub fn create_program_transient(device: &wgpu::Device, spec: ProgramTransientSpec) -> wgpu::Texture {
+    let usage = if spec.sample_count > 1 {
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+    } else {
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+    };
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("aether program transient"),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: spec.width.max(1), height: spec.height.max(1), depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: spec.sample_count,
         dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        format: spec.format,
+        usage,
         view_formats: &[],
     })
 }
@@ -467,14 +501,18 @@ impl<'a> PassTimestamps<'a> {
 }
 
 /// One recorded program pass iteration: the pass's pipeline, the slot
-/// view it renders into, whether this is the dispatch's first write to
-/// that slot (clear to transparent black) or a later one (load), and
-/// the two bind groups — the uniform window at group 0 (bound at
+/// view it renders into, the single-sample view a multisampled target
+/// resolves into when this iteration ends (`None` for a single-sample
+/// target, and for a multisampled one nothing reads before it is
+/// written again), whether this is the dispatch's first write to that
+/// slot (clear to transparent black) or a later one (load), and the two
+/// bind groups — the uniform window at group 0 (bound at
 /// `uniform_offset` into the dispatch's staged uniform buffer) and the
 /// input pairs at group 1.
 pub struct ProgramPassDraw<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub target_view: &'a wgpu::TextureView,
+    pub resolve_target: Option<&'a wgpu::TextureView>,
     pub clear: bool,
     pub uniform_bind_group: &'a wgpu::BindGroup,
     pub uniform_offset: u32,
@@ -496,7 +534,7 @@ pub fn record_program_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramPas
         label: Some("aether program pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: draw.target_view,
-            resolve_target: None,
+            resolve_target: draw.resolve_target,
             depth_slice: None,
             ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
         })],
@@ -522,11 +560,15 @@ pub struct ProgramDepthAttachment<'a> {
 
 /// What every recorded draw pass iteration opens with (ADR-0171,
 /// ADR-0246): the pass's pipeline, the color slot view it renders into
-/// under the pass's declared load semantic, an optional depth
-/// attachment, and the group-0 uniform window and group-1 input pairs.
+/// under the pass's declared load semantic, the single-sample view a
+/// multisampled color slot resolves into when this iteration ends
+/// (`None` when it does not resolve), an optional depth attachment of
+/// the color slot's sample count, and the group-0 uniform window and
+/// group-1 input pairs.
 pub struct ProgramDrawPassOpen<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub target_view: &'a wgpu::TextureView,
+    pub resolve_target: Option<&'a wgpu::TextureView>,
     pub clear_color: bool,
     pub depth: Option<ProgramDepthAttachment<'a>>,
     pub uniform_bind_group: &'a wgpu::BindGroup,
@@ -566,7 +608,7 @@ pub fn begin_program_draw_pass<'e>(
         label: Some("aether program draw pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: open.target_view,
-            resolve_target: None,
+            resolve_target: open.resolve_target,
             depth_slice: None,
             ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
         })],

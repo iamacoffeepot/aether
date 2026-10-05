@@ -21,10 +21,11 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
-    GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
-    ProgramRegisterResult, QuadBlend, RenderCapability, Sampling, Shape, SlotExtent, SlotShape, SlotSpec,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes,
+    DrawTexturedQuads, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch,
+    ProgramPass, ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability, Sampling, Shape, SlotExtent,
+    SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat,
+    Wrap,
 };
 
 /// Side of every program output texture and of the overlay quad that
@@ -125,6 +126,7 @@ fn sampling_program(wgsl: &str, entry: &str, source: SlotSpec) -> ProgramRegiste
         depth_transients: Vec::new(),
         passes: vec![ProgramPass {
             stage: PassStage::Fragment,
+            blend: Blend::Alpha,
             entry_point: entry.to_owned(),
             inputs: vec![InputSlot::Binding { index: 0 }],
             output: OutputSlot::Binding { index: 1 },
@@ -402,6 +404,7 @@ fn a_vertex_stage_reads_a_texel_table_ahead_of_a_filtered_input() {
                     depth: None,
                     load: PassLoad::Clear,
                 }),
+                blend: Blend::Alpha,
                 entry_point: "fs_tinted".to_owned(),
                 inputs: vec![InputSlot::Binding { index: 0 }, InputSlot::Binding { index: 1 }],
                 output: OutputSlot::Binding { index: 2 },

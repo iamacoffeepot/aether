@@ -168,8 +168,15 @@ fn resolve_wireframe(
 /// absent-with-reason instead of failing. Nothing else in the runtime
 /// consults it, so a device that grants it and an operator who leaves
 /// the instrument off costs the same as one that never had it.
+///
+/// `FLOAT32_BLENDABLE` is what lets a program pass declare
+/// `Blend::Alpha` or `Blend::Additive` onto an `R32Float` output
+/// (ADR-0246 decision 7); core WebGPU blends every other format a
+/// program writes. On a device without it such a pass fails pipeline
+/// creation inside the register reply, naming the format, and a pass
+/// that replaces an `R32Float` output registers as it does everywhere.
 fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+    adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::FLOAT32_BLENDABLE)
 }
 
 /// The adapter a surfaceless device is requested from.

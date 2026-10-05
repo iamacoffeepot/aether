@@ -4,8 +4,8 @@
 
 use naga::Module;
 
-use crate::runtime::program::validate::{PassPlan, check_depth, check_vertex_interface, vertex_entry};
-use crate::{Cull, DepthUse, DrawSetsPass, PassLoad, ProgramRegister, SlotExtent, VertexAttribute};
+use crate::runtime::program::validate::{Attached, PassPlan, check_depth, check_vertex_interface, vertex_entry};
+use crate::{Cull, DepthUse, DrawSetsPass, PassLoad, ProgramRegister, VertexAttribute};
 
 /// One validated draw-sets pass: the authored vertex entry, the two
 /// layouts its vertex buffers are built from and a drawn set must have,
@@ -41,7 +41,7 @@ pub fn validate_draw_sets(
     index: usize,
     pass: &DrawSetsPass,
     fragment_entry: (usize, &str),
-    output_extent: SlotExtent,
+    attached: Attached,
 ) -> Result<ValidatedDrawSets, String> {
     let vertex_entry_index = vertex_entry(module, index, &pass.vertex_entry_point)?;
     check_layouts(index, &pass.vertex_layout, &pass.instance_layout)?;
@@ -49,7 +49,7 @@ pub fn validate_draw_sets(
     let attributes: Vec<VertexAttribute> = pass.vertex_layout.iter().chain(&pass.instance_layout).copied().collect();
     let declared_by = "the pass's vertex or instance layout";
     check_vertex_interface(module, index, vertex_entry_index, &attributes, declared_by)?;
-    check_depth(mail, module, index, pass.depth.map(|depth| depth.slot), fragment_entry, output_extent)?;
+    check_depth(mail, module, index, pass.depth.map(|depth| depth.slot), fragment_entry, attached)?;
 
     Ok(ValidatedDrawSets {
         plan: DrawSetsPlan {
@@ -133,8 +133,9 @@ pub fn list_slots(passes: &[PassPlan]) -> Result<u32, String> {
 mod tests {
     use crate::runtime::program::validate::validate;
     use crate::{
-        Cull, DepthUse, DepthWrite, DrawSetsPass, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister,
-        Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, VertexAttribute, VertexFormat, Wrap,
+        Blend, Cull, DepthSpec, DepthUse, DepthWrite, DrawSetsPass, Mips, OutputSlot, PassLoad, PassStage, ProgramPass,
+        ProgramRegister, Samples, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, VertexAttribute,
+        VertexFormat, Wrap,
     };
 
     /// A vertex stage reading one per-vertex location (0) and two
@@ -182,6 +183,7 @@ fn fs_color(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
     fn pass(stage: DrawSetsPass) -> ProgramPass {
         ProgramPass {
             stage: PassStage::DrawSets(stage),
+            blend: Blend::Alpha,
             entry_point: "fs_color".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },
@@ -201,7 +203,7 @@ fn fs_color(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
             }],
             transients: Vec::new(),
             geometries: Vec::new(),
-            depth_transients: vec![SlotExtent::Divided { divisor: 2 }],
+            depth_transients: vec![DepthSpec { extent: SlotExtent::Divided { divisor: 2 }, samples: Samples::One }],
             passes,
         }
     }

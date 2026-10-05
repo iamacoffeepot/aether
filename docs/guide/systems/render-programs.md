@@ -398,8 +398,8 @@ exist:
 
 - `bindings: Vec<SlotSpec>` — textures the dispatch supplies. Each dispatch
   names one registry texture id per declared binding, in order.
-- `transients: Vec<SlotSpec>` — intermediates the executor owns and pools.
-  A dispatch never names them; they exist so a chain of operations has
+- `transients: Vec<TransientSpec>` — intermediates the executor owns and
+  pools. A dispatch never names them; they exist so a chain of operations has
   scratch surfaces without the actor creating textures for them.
 
 Two further lists declare what draw passes need, and both stay empty for a
@@ -410,12 +410,15 @@ graph with no draw pass in it:
   the vertex layout the slot's geometry must have been created with; the
   register builds the pass's vertex buffer layout from it and checks the
   authored vertex stage against it.
-- `depth_transients: Vec<SlotExtent>` — pooled `Depth32Float` targets draw
-  passes clear and test against. These carry an extent alone, since their
-  format is fixed.
+- `depth_transients: Vec<DepthSpec>` — pooled `Depth32Float` targets draw
+  passes clear and test against. A `DepthSpec` is an `extent` and a `samples`,
+  since the format is fixed.
 
-A `SlotSpec` is a `format` (`Rgba8`, `R8`, `R32Float`, `R16Float`, or
-`Rgba16Float`), a `shape`, and a `sampling`. The float formats are data planes — texels carrying
+A `SlotSpec` is a binding's declaration: a `format` (`Rgba8`, `R8`, `R32Float`,
+`R16Float`, or `Rgba16Float`), a `shape`, and a `sampling`. A `TransientSpec`
+is a `format` from the same five, an `extent`, and a `samples`; a transient is
+always sized from the program's output and is always read the same way, so it
+declares neither a shape nor a sampling. The float formats are data planes — texels carrying
 quantities rather than colours — and choosing between them is a question about
 what the texel holds and who reads it. `R32Float` keeps a full 24-bit mantissa
 and cannot be linear-filtered in core WebGPU, so it is what a label, an index,
@@ -427,12 +430,11 @@ into filtered reads halves its texture fetches. `Rgba16Float` gives the same
 filterability and per-lane precision to four quantities in one target, so
 same-kernel scalar operations can travel independently through its channels.
 
-The `shape` says what the slot takes and whether a pass may write it:
+A binding's `shape` says what it takes and whether a pass may write it:
 
 - `SlotShape::Target(SlotExtent)` — a texture sized from the program's output.
   A pass may write it or read it, and the texture bound there must be exactly
-  the resolved size. Every transient is a `Target`, and so is every binding a
-  pass writes.
+  the resolved size. Every binding a pass writes is a `Target`.
 - `SlotShape::Texture` — a texture of any size, read only: a lookup table, a
   tile sheet, a table of per-instance data. A pass naming it as its output
   rejects at register.
@@ -442,7 +444,8 @@ The `shape` says what the slot takes and whether a pass may write it:
   directions: a dispatch that binds a plain texture here is dropped, and so is
   one that binds an array at a `Target` or `Texture` binding.
 
-A `Target` carries one of two extents:
+A `Target` binding, a transient and a depth transient each carry one of two
+extents:
 
 - `SlotExtent::Full` — the reference size.
 - `SlotExtent::Divided { divisor }` — the reference size floor-divided by
@@ -451,20 +454,23 @@ A `Target` carries one of two extents:
 
 The **reference extent** is the size of the texture bound at the program's
 output binding — the dispatch binding the final pass writes, which must be
-declared `Target(Full)`. Every other `Target` scales from it, which is what
+declared `Target(Full)`. Every other extent scales from it, which is what
 lets one registered program dispatch at any canvas size: the graph carries no
 pixel dimensions, only ratios. A `Texture` or `TextureArray` binding stands
 outside that rule and keeps the size it was created with.
 
-The `sampling` says how a pass that reads the slot does so:
+A binding's `sampling` says how a pass that reads it does so:
 
-- `Sampling::Filtered { wrap, mips }` — the slot binds with a sampler. `wrap`
+- `Sampling::Filtered { wrap, mips }` — the binding binds with a sampler. `wrap`
   is `Wrap::Clamp` (the edge texel extends outward) or `Wrap::Repeat` (the
   texture tiles). `mips` is `Mips::Base` (the base level only) or `Mips::Chain`
   (the whole mip chain, where the texture has one).
-- `Sampling::Texel` — the slot binds with no sampler, and the shader reads it
-  texel by texel with `textureLoad`. This is what a table of exact values
+- `Sampling::Texel` — the binding binds with no sampler, and the shader reads
+  it texel by texel with `textureLoad`. This is what a table of exact values
   declares.
+
+A transient is read as a `Filtered { wrap: Clamp, mips: Base }` binding is: a
+texture and a sampler that clamps and reads the base level.
 
 Each pass reads through `InputSlot` values and writes one `OutputSlot`:
 
@@ -476,6 +482,70 @@ Each pass reads through `InputSlot` values and writes one `OutputSlot`:
 - `OutputSlot::Binding { index }` / `OutputSlot::Transient { index }` — a
   dispatch binding (which must be declared a `Target` and resolve to a
   `Writable` registry texture at dispatch) or a transient.
+
+Every pass writes a texture, and none writes the frame: a program's output
+reaches the frame as a registry texture the quad and material paths draw.
+
+### Samples
+
+A transient and a depth transient declare `samples`: `Samples::One` or
+`Samples::Four`, the number of samples each texel holds.
+
+A pass rasterizes at the sample count of its color output. A binding is a
+registry texture and always has one sample, and a transient has what it
+declares, so a pass that writes a `Four` transient rasterizes at four samples
+per texel and the edge of a triangle covers a texel by quarters. The rule is
+the same for every render stage. Since the final pass writes a binding, an
+antialiased scene is drawn into a `Four` transient and a later pass carries it
+to the output.
+
+A pass that reads a `Four` transient reads its resolved image: one value per
+texel, the average of the four samples. A `Four` transient is two textures. The
+multisampled one is what passes attach, and it keeps its samples between
+passes, so a second pass drawing into it under `PassLoad::Load` draws over the
+first pass's samples. The single-sample one is what readers bind. The executor
+resolves the first into the second once, in the last iteration of the last pass
+to write the transient before each pass that reads it: a writer followed by
+another writer does not resolve, and two readers with no writer between them
+share one resolve. A `Four` transient no pass reads has no single-sample
+texture and is never resolved.
+
+Two declarations are refused at register:
+
+- A depth slot whose `samples` is not that of the color output of a pass that
+  names it. The attachments of one pass share one sample count, so a pass
+  writing a `Four` transient names a `Four` depth slot. A depth slot is never
+  resolved.
+- A `Four` transient whose format cannot be resolved. Of the five formats that
+  is `R32Float`, which a device can multisample and cannot resolve; it is
+  refused whether or not a pass reads it.
+
+### Blend
+
+Every pass declares `blend`, how what its fragment entry returns composes with
+what its output already holds:
+
+| `blend` | Color | Alpha |
+|---|---|---|
+| `Blend::Replace` | `source` | `source.a` |
+| `Blend::Alpha` | `source * source.a + destination * (1 - source.a)` | `source.a + destination.a * (1 - source.a)` |
+| `Blend::Additive` | `source + destination` | `source.a + destination.a` |
+
+The declaration applies whatever the output's format. `Alpha` is straight-alpha
+source over, what a pass painting colour onto a canvas wants. `Replace` is what
+a pass writing a quantity means by writing it, and it is how a pass erases: a
+source of alpha zero overwrites what the output held. `Additive` accumulates,
+which is what a bloom chain adding its levels onto a float target wants.
+
+A compute pass has no color output, so it declares `Blend::Replace`; any other
+value is refused at register.
+
+`Rgba8`, `R8`, `R16Float` and `Rgba16Float` blend on every device. `R32Float`
+blends where the device offers `float32-blendable`, which the render device
+takes whenever its adapter has it. On a device without it, a register whose
+pass declares `Alpha` or `Additive` onto an `R32Float` output replies
+`pipeline creation failed`, naming the format; a pass that replaces an
+`R32Float` output registers everywhere.
 
 ### Sequence order
 
@@ -516,15 +586,15 @@ first write a dispatch makes to each output slot clears it to transparent
 black; later writes — a repeat's iterations, a second pass onto the same
 slot — load the existing content. A draw pass states its own color load
 semantic instead, described under [draw passes](#color-load-semantics) below.
-What "load" composes is the pass's blend, and the blend is
-fixed by the output format: `Rgba8` and `R8` outputs alpha-blend onto the
-target, while a float data plane replaces it — which is what a pass writing a
-quantity rather than a colour means by writing it. So a repeated pass accumulates on a blendable target, and on a float
-target each iteration overwrites the last — a repeat there keeps only its
-final iteration. A multi-step chain over float planes is therefore laid
-structurally — each step its own pass entry with its own window — rather than
-as one repeated pass; the [wash program](#the-worked-consumer-the-wash) below
-is the worked example of that shape.
+What "load" composes is the pass's declared [blend](#blend). Under `Alpha` or
+`Additive` a repeated pass accumulates, each iteration composing with the ones
+before it, on a float target as on any other. Under `Replace` each iteration
+overwrites the last, so a repeat keeps only its final iteration. A multi-step
+chain whose steps each replace a plane is therefore laid structurally — each
+step its own pass entry with its own window — rather than as one repeated
+pass; the [wash program](#the-worked-consumer-the-wash) below is the worked
+example of that shape. A repeated pass writing a `Four` transient resolves
+after its last iteration, never between iterations.
 
 ### The shader contract
 
@@ -540,11 +610,12 @@ Bindings inside the shader, identical for both pass classes:
 
 - `@group(0) @binding(0) var<uniform>` — the pass's uniform window.
 - Group 1 — the pass's input slots, in declaration order. Input `n` is the
-  texture at `@binding(2 * n)` and, for a `Filtered` slot, the `sampler` at
-  `@binding(2 * n + 1)`. The texture is `texture_2d<f32>` for a `Target` or
-  `Texture` slot and `texture_2d_array<f32>` for a `TextureArray`.
+  texture at `@binding(2 * n)` and, for a transient or a `Filtered` binding,
+  the `sampler` at `@binding(2 * n + 1)`. The texture is `texture_2d<f32>` for
+  a transient or a `Target` or `Texture` binding and `texture_2d_array<f32>`
+  for a `TextureArray`.
 
-A `Texel` slot has no sampler. Its input still takes the texture at
+A `Texel` binding has no sampler. Its input still takes the texture at
 `@binding(2 * n)` and leaves `@binding(2 * n + 1)` unused, so the inputs after
 it keep their numbers whatever the inputs before them declare:
 
@@ -559,13 +630,15 @@ Group 1 is visible to the fragment stage of every pass, to the authored vertex
 stage of a draw pass, and to a compute pass. A vertex stage has no implicit
 derivatives, so it reads an input with `textureLoad` or `textureSampleLevel`.
 
-The slot and the bound texture each decide part of how an input is read. The
-slot's `sampling` decides whether there is a sampler, how it addresses a
+The binding and the bound texture each decide part of how an input is read. The
+binding's `sampling` decides whether there is a sampler, how it addresses a
 coordinate outside the texture, and which mip levels it reads. The bound
 texture decides linear or nearest: nearest when the registry texture was
 created with `Nearest` sampling or its format cannot be linear-filtered
-(`R32Float`), linear otherwise. Transients filter by their declared format the
-same way. So a pass that wants a filtered read has to be handed a plane
+(`R32Float`), linear otherwise. A transient always has a sampler, which clamps
+and reads the base level, and filters by its declared format the same way; a
+shader may still read one with `textureLoad` and leave the sampler unused. A
+`Four` transient is read resolved, as a `texture_2d<f32>` like any other. So a pass that wants a filtered read has to be handed a plane
 standing at a filterable format — filtering is a property of the texture, not
 of the pass, and a plane another program wrote stands at whatever format that
 program declared.
@@ -665,7 +738,9 @@ never merges them however disjoint their use looks.
 
 A depth slot must resolve to the same extent as the color output of every pass
 naming it, since a depth attachment has to match the size of the color
-attachment it tests for. A fragment entry point that writes
+attachment it tests for, and it must declare that output's
+[`samples`](#samples): `One` beside a binding or a `One` transient, `Four`
+beside a `Four` transient. A fragment entry point that writes
 `@builtin(frag_depth)` needs a depth slot to write it into, and a pass that
 writes it without declaring one rejects at register.
 
@@ -687,8 +762,8 @@ accumulating onto retained pixels is the intent.
 Repeats compose with the declaration directly: under `Clear` the first
 iteration clears and every later iteration loads, so a repeated draw pass
 accumulates through its blend; under `Load` no iteration clears.
-The blend is fixed by the output format, as it is for fragment passes —
-`Rgba8` and `R8` alpha-blend; every float data-plane format replaces.
+The blend is the one the pass declares, as it is for fragment passes — see
+[Blend](#blend).
 
 ### Channel-packed outputs
 
@@ -794,8 +869,8 @@ the front face is counter-clockwise, as it is for a draw pass.
 `DepthWrite::Write` writes each fragment that passes and `DepthWrite::TestOnly`
 tests and leaves the slot as it was, which is what a pass drawing transparent
 surfaces over an opaque scene wants. The [depth rules of a draw
-pass](#depth) hold unchanged: the slot must have the color output's extent, a
-fragment entry that writes `@builtin(frag_depth)` needs a slot, and the first
+pass](#depth) hold unchanged: the slot must have the color output's extent
+and its sample count, a fragment entry that writes `@builtin(frag_depth)` needs a slot, and the first
 pass of a dispatch to name a slot clears it to the far plane whatever its stage
 and whatever its `write`. A `TestOnly` pass that is the first to name its slot
 tests against the far plane, so everything it draws passes.
@@ -832,7 +907,7 @@ The classes, in check order:
 | WGSL | `invalid wgsl: …` — naga parse or validation failure |
 | Empty graph | `program declares no passes` |
 | Extent | `binding N: extent divisor must be at least 1` (also for transients and depth transients) |
-| Transient shape | `transient N: a transient must declare a Target shape, not Texture …` |
+| Unresolvable transient | `transient N: a Four transient is read resolved, and R32Float cannot be resolved — declare it One, or in a format that resolves` |
 | Read-only output | `pass N: binding B is declared Texture, which is read only — a pass writes only a Target binding` |
 | Geometry slot | `geometry slot N: layout declares no attributes`; `geometry slot N: layout declares location L twice` |
 | Entry point | ``pass N: no fragment entry point named `X` in the module`` |
@@ -842,7 +917,7 @@ The classes, in check order:
 | Uniform window | `pass N: uniform window (L bytes) is shorter than the shader's uniform block (B bytes)` |
 | Repeat | `pass N: repeat count must be at least 1`; `pass N: repeat count C exceeds the supported maximum 4096` |
 | Final output | `the final pass must write a dispatch binding (the program's result texture)`; `binding N: the program's output binding must declare Target(Full) …` |
-| Pipeline | `pipeline creation failed: …` — a wgpu validation error caught by the register's error scope (for example an array-typed input against a `Texture` slot, or a sampler used on a `Texel` input, neither of which naga alone can see) |
+| Pipeline | `pipeline creation failed: …` — a wgpu validation error caught by the register's error scope (for example an array-typed input against a `Texture` slot, a sampler used on a `Texel` input, or an `Alpha` or `Additive` pass onto an `R32Float` output on a device that cannot blend it, none of which naga alone can see) |
 
 The draw-pass classes, checked for every pass that declares `stage: Draw`:
 
@@ -854,11 +929,20 @@ The draw-pass classes, checked for every pass that declares `stage: Draw`:
 | Attribute type | `pass N: the vertex stage reads @location(L) as vec2<f32>, but geometry slot G's layout declares it Float32x3, which is consumed as vec3<f32>` |
 | Depth range | `pass N: depth transient D is out of range (M declared)` |
 | Depth extent | `pass N: depth transient D declares extent E, which does not match its color output's extent O — a depth attachment must be the size of the color attachment it tests for` |
+| Depth samples | `pass N: depth transient D declares samples S, which does not match its color output's samples T — the attachments of one pass share one sample count` |
 | Undeclared depth | ``pass N: entry point `X` writes @builtin(frag_depth), so the pass must declare a depth transient to write it into`` |
 
+The compute class, checked for every pass that declares `stage: Compute`
+beside the compute-output class (`pass N: a compute pass must declare
+OutputSlot::None`):
+
+| Class | Reason shape |
+|---|---|
+| Compute blend | `pass N: a compute pass has no color output to blend onto, so it declares Blend::Replace, not Additive` |
+
 The draw-sets classes, checked for every pass that declares `stage: DrawSets`.
-The vertex-entry, depth-range, depth-extent and undeclared-depth classes above
-apply to it with the same reasons:
+The vertex-entry, depth-range, depth-extent, depth-samples and undeclared-depth
+classes above apply to it with the same reasons:
 
 | Class | Reason shape |
 |---|---|
@@ -969,18 +1053,24 @@ instrument for the per-setup/per-pass CPU cost.
 
 ## Transient pooling
 
-Transients are pooled by resolved size and realized format, and the pool is
-shared across programs and persistent across dispatches — a repaint reuses
-its allocations. Within one dispatch, the executor assigns physical textures
+Transients are pooled by resolved size, realized format and sample count, and
+the pool is shared across programs and persistent across dispatches — a
+repaint reuses its allocations. Within one dispatch, the executor assigns physical textures
 by live range: a transient's texture is reusable once the last pass reading
 it has recorded, strictly before the next holder's first write, so a pass
 never samples a texture it is simultaneously attached to. A ping-pong chain
-of any length settles on two physical allocations per size-and-format class
-— declaring one fresh transient per intermediate is cheap, and the graph
-author never manages reuse by hand.
+of any length settles on two physical allocations per class — declaring one
+fresh transient per intermediate is cheap, and the graph author never manages
+reuse by hand.
 
-Depth transients pool by resolved extent alongside color transients, with one
-difference in policy: they are not packed by live range. Sharing a depth buffer
+A `Four` transient takes a texture of its four-sample class, and one that some
+pass reads also takes the single-sample texture it resolves into. That texture
+comes from the class `One` transients of its size and format use and is packed
+by the same live range, so a resolve texture and a `One` transient reuse each
+other's allocations and never overlap.
+
+Depth transients pool by resolved extent and sample count alongside color
+transients, with one difference in policy: they are not packed by live range. Sharing a depth buffer
 is what the declaration is for, so each declared depth slot that some pass
 names gets its own physical texture, and two distinct slots never land on the
 same one however disjoint their use looks. A declared depth slot no pass names
@@ -1011,6 +1101,10 @@ and the draw-set lifecycle in
 covers the draw-sets stage in rasterized pixels: two sets sharing a geometry,
 a dispatch listing an unknown set, a geometry destroyed under its set, a
 `TestOnly` pass, and back-face culling.
+[`samples_blend_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/samples_blend_scenario.rs)
+covers samples and blend: a half-covered texel of a `Four` transient, a `Four`
+transient read between two writers, an additive accumulation on a float
+transient, and a `Replace` pass erasing what an `Rgba8` output held.
 
 ## Chassis behavior
 

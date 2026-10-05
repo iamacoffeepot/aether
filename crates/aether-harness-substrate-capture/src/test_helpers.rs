@@ -13,8 +13,8 @@ pub use aether_harness_substrate::test_helpers::{
     envelope, init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
 use aether_render::{
-    InputSlot, Mips, OutputSlot, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
-    TextureFormat, Wrap,
+    Blend, InputSlot, Mips, OutputSlot, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape,
+    SlotSpec, TextureFormat, Wrap,
 };
 
 use crate::visual::Image;
@@ -155,6 +155,7 @@ pub fn append_capture_probe(
     });
     register.passes.push(ProgramPass {
         stage: PassStage::Fragment,
+        blend: Blend::Alpha,
         entry_point: "fs_probe".to_owned(),
         inputs,
         output: OutputSlot::Binding { index: output },
@@ -196,6 +197,7 @@ mod tests {
             register.passes,
             vec![ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_probe".to_owned(),
                 inputs,
                 output: OutputSlot::Binding { index: output },

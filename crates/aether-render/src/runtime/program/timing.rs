@@ -481,7 +481,7 @@ fn nanos_of(ticks: u64, period_nanos: f32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Mips, Sampling, SlotShape, SlotSpec, TextureFormat, Wrap};
+    use crate::{Blend, Mips, Sampling, SlotShape, SlotSpec, TextureFormat, Wrap};
 
     #[test]
     fn compute_timing_row_has_stage_and_no_texture_extent() {
@@ -500,6 +500,7 @@ mod tests {
                     buffers: Vec::new(),
                     workgroups: [4, 2, 1],
                 }),
+                blend: Blend::Replace,
                 inputs: Vec::new(),
                 output: None,
                 uniform_offset: 0,

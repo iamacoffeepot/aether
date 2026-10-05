@@ -166,6 +166,19 @@ impl TextureFormat {
             Self::R32Float => false,
         }
     }
+
+    /// Whether a multisampled texture of this format can be resolved to
+    /// a single-sample one, which is what a pass reading a
+    /// [`Samples::Four`] transient reads. Core WebGPU resolves every
+    /// format here but `R32Float`, which it can multisample and cannot
+    /// resolve.
+    #[must_use]
+    pub const fn resolvable(self) -> bool {
+        match self {
+            Self::Rgba8 | Self::R8 | Self::R16Float | Self::Rgba16Float => true,
+            Self::R32Float => false,
+        }
+    }
 }
 
 /// How a registered texture's texels are filtered when sampled.
@@ -975,15 +988,44 @@ pub enum SlotExtent {
     Divided { divisor: u32 },
 }
 
+/// How many samples each texel of a transient or a depth transient
+/// holds (ADR-0246 decision 7).
+///
+/// A pass that writes a `Four` transient rasterizes at four samples per
+/// texel, so the edge of a triangle covers a texel by quarters. A pass
+/// that reads it reads the resolved image: one value per texel, the
+/// average of its four samples. The executor keeps the four-sample
+/// texture between passes and resolves it once after the last pass to
+/// write it before each pass that reads it, so a `Four` transient some
+/// pass reads costs a four-sample texture and a single-sample one, and
+/// one that no pass reads costs the four-sample texture alone.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Samples {
+    /// One sample per texel.
+    One,
+    /// Four samples per texel.
+    Four,
+}
+
+impl Samples {
+    /// The sample count a texture or a pipeline is created with.
+    #[must_use]
+    pub const fn count(self) -> u32 {
+        match self {
+            Self::One => 1,
+            Self::Four => 4,
+        }
+    }
+}
+
 /// What one program binding takes (ADR-0246 decision 5): a texture
 /// sized from the program's output, or one of a size of its own.
 ///
 /// Only a `Target` has an extent, so only a `Target` can be a pass
-/// output or a transient: the executor has to know the size of what it
-/// attaches and pools. The other two shapes are read-only, take a
-/// texture of any size, and are sampled by the fragment stage of any
-/// pass, by the authored vertex stage of a draw pass, and by a compute
-/// pass.
+/// output: the executor has to know the size of what it attaches. The
+/// other two shapes are read-only, take a texture of any size, and are
+/// sampled by the fragment stage of any pass, by the authored vertex
+/// stage of a draw pass, and by a compute pass.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SlotShape {
     /// A texture the size of the program's reference extent scaled by
@@ -1047,16 +1089,14 @@ pub enum Sampling {
     Texel,
 }
 
-/// One program texture slot: an entry in `ProgramRegister.bindings` (a
-/// registry texture supplied at dispatch) or `ProgramRegister.transients`
-/// (an executor-owned intermediate).
+/// One program binding: an entry in `ProgramRegister.bindings`, a
+/// registry texture supplied at dispatch.
 ///
-/// `format` fixes the slot's pixel format at register time, which is
+/// `format` fixes the binding's pixel format at register time, which is
 /// what lets every pass pipeline build (and fail) inside the register
-/// reply rather than at first dispatch. `shape` says what the slot takes
-/// and whether a pass may write it; `sampling` says how a pass that
-/// reads it does so. A transient is always a [`SlotShape::Target`]; one
-/// declared otherwise is refused at register.
+/// reply rather than at first dispatch. `shape` says what the binding
+/// takes and whether a pass may write it; `sampling` says how a pass
+/// that reads it does so. A binding is always single-sample.
 ///
 /// At dispatch a binding's registry texture must have the declared
 /// format, and for a `Target` the resolved size; a `Texture` takes any
@@ -1069,9 +1109,47 @@ pub struct SlotSpec {
     pub sampling: Sampling,
 }
 
+/// One transient: an entry in `ProgramRegister.transients`, an
+/// intermediate texture the executor owns and pools (ADR-0246
+/// decision 7).
+///
+/// A transient is sized from the program's output by `extent` and holds
+/// `samples` samples per texel. A pass that reads it declares a
+/// `texture_2d<f32>` at `@binding(2 * n)` and a `sampler` at
+/// `@binding(2 * n + 1)`: the sampler clamps, reads the base level, and
+/// is linear, or nearest for a format that cannot be filtered
+/// (`R32Float`). A shader may read it with `textureLoad` and leave the
+/// sampler unused.
+///
+/// A [`Samples::Four`] transient is read resolved, so its format must
+/// be one that can be resolved: a `Four` `R32Float` transient is
+/// refused at register.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct TransientSpec {
+    pub format: TextureFormat,
+    pub extent: SlotExtent,
+    pub samples: Samples,
+}
+
+/// One depth transient: an entry in `ProgramRegister.depth_transients`,
+/// a pooled `Depth32Float` target rasterizing passes clear and test
+/// against (ADR-0171, ADR-0246 decision 7).
+///
+/// A pass attaches its depth slot beside its color output, so the slot
+/// declares that output's `extent` and its `samples`: a pass writing a
+/// [`Samples::Four`] transient names a `Four` depth slot, and a pass
+/// writing a binding or a `One` transient names a `One` depth slot. A
+/// depth slot is never resolved and no pass reads one.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DepthSpec {
+    pub extent: SlotExtent,
+    pub samples: Samples,
+}
+
 /// One input slot a program pass samples (ADR-0170). Every variant
 /// resolves to a texture the pass binds at group 1 in declaration
-/// order, with the sampler its slot's [`Sampling`] declares.
+/// order: a binding with the sampler its [`Sampling`] declares, and a
+/// transient with the sampler every transient has.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InputSlot {
     /// The dispatch binding at `index` into `ProgramDispatch.bindings`,
@@ -1125,7 +1203,9 @@ pub struct GeometrySlotSpec {
 /// What a draw pass does to its color output before drawing (ADR-0171).
 /// Unlike a fragment pass — whose first write in a dispatch always
 /// clears and whose later writes load — a draw pass declares this
-/// outright, so a layered bake states its own composition.
+/// outright, so a layered bake states its own composition. What the
+/// pass then draws composes with the loaded content through the pass's
+/// declared [`Blend`].
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PassLoad {
     /// Clear the output to transparent black, then draw.
@@ -1134,6 +1214,29 @@ pub enum PassLoad {
     /// retained pixels of a writable binding across dispatches, or an
     /// earlier pass's work within one.
     Load,
+}
+
+/// How a pass composes what its fragment stage returns with what its
+/// color output already holds (ADR-0246 decision 7). The pass declares
+/// it and it applies whatever the output's format.
+///
+/// A compute pass has no color output and declares `Replace`; any other
+/// value there is refused at register. An `Alpha` or `Additive` pass
+/// onto an `R32Float` output needs a device that can blend 32-bit
+/// floats (`float32-blendable`); on a device without it the register
+/// replies `Err` with `pipeline creation failed`, naming the format.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Blend {
+    /// The returned value overwrites the output on all four channels,
+    /// alpha included.
+    Replace,
+    /// Straight-alpha source over: color is
+    /// `source * source.a + destination * (1 - source.a)` and alpha is
+    /// `source.a + destination.a * (1 - source.a)`.
+    Alpha,
+    /// The returned value is added to the output on all four channels:
+    /// `source + destination`.
+    Additive,
 }
 
 /// The `PassStage::Draw` declaration (ADR-0171): what a rasterizing pass
@@ -1147,7 +1250,9 @@ pub enum PassLoad {
 /// a pass naming none rasterizes in draw order with no depth at all.
 /// The first pass of a dispatch to name a given slot clears it to the
 /// far plane and later passes naming the same slot load it, so
-/// consecutive draw passes agree on occlusion by naming one slot.
+/// consecutive draw passes agree on occlusion by naming one slot. The
+/// slot shares the pass's color output's extent and its sample count
+/// ([`DepthSpec`]); one that differs in either is refused at register.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DrawPass {
     /// Vertex entry point in the program's WGSL module. It consumes the
@@ -1210,7 +1315,9 @@ pub struct DepthUse {
 /// `depth` attaches a `ProgramRegister.depth_transients` slot under a
 /// `LessEqual` test. The first pass of a dispatch to name a slot clears
 /// it to the far plane and later passes load it, whatever their stage
-/// and whatever `write` says.
+/// and whatever `write` says. The slot shares the pass's color output's
+/// extent and its sample count ([`DepthSpec`]); one that differs in
+/// either is refused at register.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DrawSetsPass {
     /// Vertex entry point in the program's WGSL module. It may read the
@@ -1316,7 +1423,11 @@ pub enum PassStage {
 /// pass entry over a strided parameter table rather than many entries.
 /// The first iteration clears the output slot (if nothing wrote it
 /// earlier in the dispatch); later iterations load it, so iterations
-/// accumulate through the pass's blend. `count` must be at least 1 and
+/// accumulate through the [`Blend`] the pass declares: under `Alpha`
+/// or `Additive` each iteration composes with the ones before it, and
+/// under `Replace` the last iteration is what remains. A multisampled
+/// output is resolved after the last iteration, never between
+/// iterations. `count` must be at least 1 and
 /// at most 4096; `uniform_stride` may be 0 to rebind the same window
 /// every iteration.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
@@ -1328,12 +1439,16 @@ pub struct PassRepeat {
 /// One pass in a program's declared graph (ADR-0170). The graph is a
 /// sequence: a pass may read only slots already written, which makes
 /// the DAG check a single index comparison at register time.
-/// `entry_point` names a fragment entry for fragment, draw and
-/// draw-sets stages, or a compute entry for `PassStage::Compute`. `inputs` bind in order
-/// at group 1, input `n` at `@binding(2 * n)` with its sampler, when
-/// its slot declares one, at `@binding(2 * n + 1)`; render stages attach
-/// `output`, while compute declares `OutputSlot::None` and writes its
-/// group-2 resident buffers. `uniform_offset` /
+/// `blend` is how a render stage composes what its fragment entry
+/// returns with what `output` already holds; a compute pass declares
+/// [`Blend::Replace`]. `entry_point` names a fragment entry for
+/// fragment, draw and draw-sets stages, or a compute entry for
+/// `PassStage::Compute`. `inputs` bind in order at group 1, input `n`
+/// at `@binding(2 * n)` with its sampler at `@binding(2 * n + 1)` — a
+/// transient always has one, and a binding has one unless it declares
+/// `Sampling::Texel`; render stages attach `output`, rasterizing at its
+/// sample count, while compute declares `OutputSlot::None` and writes
+/// its group-2 resident buffers. `uniform_offset` /
 /// `uniform_length` window the dispatch's uniform blob in bytes — the
 /// window binds at `@group(0) @binding(0)` and must cover the uniform
 /// block the entry point declares (checked at register from naga's
@@ -1342,6 +1457,7 @@ pub struct PassRepeat {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProgramPass {
     pub stage: PassStage,
+    pub blend: Blend,
     pub entry_point: String,
     pub inputs: Vec<InputSlot>,
     pub output: OutputSlot,
@@ -1356,11 +1472,13 @@ pub struct ProgramPass {
 /// paints. Validation happens here, once, each failure class with a
 /// distinguishable `Err` reason: the WGSL through naga (`invalid
 /// wgsl`), then the graph — every declared extent divisor is nonzero,
-/// every transient and every binding a pass writes is a
-/// [`SlotShape::Target`],
+/// every [`Samples::Four`] transient has a format that can be resolved,
+/// every binding a pass writes is a [`SlotShape::Target`],
 /// every pass's entry point exists in its declared stage, every texture
 /// slot is written before it is read (the sequence-index check), no pass reads
-/// its own output, every uniform window covers the uniform block its
+/// its own output, every depth slot a pass names shares its color
+/// output's extent and sample count, every compute pass declares
+/// [`Blend::Replace`], every uniform window covers the uniform block its
 /// entry point declares, the graph's per-dispatch cost stays inside the
 /// executor's budget (the render passes it encodes and the uniform bytes
 /// it stages, both summed over the whole pass list — a per-pass repeat
@@ -1381,30 +1499,39 @@ pub struct ProgramPass {
 /// `@location(0) vec4<f32>`. Its uniform window binds at
 /// `@group(0) @binding(0) var<uniform>`; its input slots bind in
 /// declaration order at group 1 — input `n` is the texture at
-/// `@binding(2 * n)`, `texture_2d<f32>` for a `Target` or `Texture`
-/// slot and `texture_2d_array<f32>` for a `TextureArray`, plus the
-/// `sampler` at `@binding(2 * n + 1)` when the slot's sampling is
-/// `Filtered`. A `Texel` slot has no sampler and leaves
+/// `@binding(2 * n)`, `texture_2d<f32>` for a transient or a `Target`
+/// or `Texture` binding and `texture_2d_array<f32>` for a
+/// `TextureArray`, plus the `sampler` at `@binding(2 * n + 1)` for a
+/// transient or a binding whose sampling is `Filtered`. A `Texel`
+/// binding has no sampler and leaves
 /// `@binding(2 * n + 1)` unused, so the numbering of the inputs after
 /// it does not move; the shader reads it with `textureLoad`. A module
 /// whose entry point disagrees with the slots — it reads an array where
 /// a plain texture is declared, or uses a sampler on a `Texel` input —
 /// fails pipeline creation and replies `Err`. Group 1 is visible to the fragment stage
 /// of every pass, to the authored vertex stage of a draw pass and to a
-/// compute pass. Blendable-format outputs (`Rgba8`, `R8`) alpha-blend
-/// onto the target; `R32Float` outputs replace it (core WebGPU cannot
-/// blend 32-bit floats). The first write a dispatch makes to each
+/// compute pass. What a pass's fragment entry returns composes with its
+/// output through the [`Blend`] the pass declares, whatever the
+/// output's format. The first write a dispatch makes to each
 /// output slot clears it to transparent black; later writes — a
 /// repeat's iterations, a second pass onto the same slot — load the
 /// existing content.
+///
+/// A pass rasterizes at the sample count of its output: one for a
+/// binding, and what a transient declares ([`Samples`]). A pass that
+/// reads a `Four` transient reads it resolved, the executor resolving
+/// it once after the last pass to write it before each pass that reads
+/// it. Every pass writes a binding or a transient and none writes the
+/// frame: a program's output reaches the frame as a texture the quad
+/// and material paths draw.
 ///
 /// A `PassStage::Draw` pass (ADR-0171) replaces the fullscreen vertex
 /// stage with an authored one over a bound geometry and states its own
 /// color load semantic instead of following the clear-on-first-write
 /// rule. `geometries` declares the geometry slots a dispatch fills by
 /// id, and `depth_transients` the pooled `Depth32Float` targets draw
-/// passes clear and test against — declared as extents alone, since
-/// their format is fixed. Both lists are empty for a fragment-only
+/// passes clear and test against — declared by extent and sample count,
+/// since their format is fixed. Both lists are empty for a fragment-only
 /// program, which registers exactly as it did before this arm existed.
 /// A `PassStage::Compute` pass instead binds its uniform at group 0,
 /// sampled inputs at group 1, and the declared resident geometry
@@ -1433,14 +1560,18 @@ pub struct ProgramPass {
 pub struct ProgramRegister {
     pub wgsl: String,
     pub bindings: Vec<SlotSpec>,
-    pub transients: Vec<SlotSpec>,
+    /// Intermediate textures the executor owns and pools, each sized
+    /// from the program's output and holding one or four samples per
+    /// texel (ADR-0246 decision 7).
+    pub transients: Vec<TransientSpec>,
     /// Geometry slots draw passes bind, filled by id per dispatch
     /// (ADR-0171). Empty for a fragment-only program.
     pub geometries: Vec<GeometrySlotSpec>,
     /// Pooled `Depth32Float` targets draw passes clear and test
-    /// against, declared as extents against the reference (ADR-0171).
-    /// Empty for a fragment-only program.
-    pub depth_transients: Vec<SlotExtent>,
+    /// against, each declared by its extent against the reference and
+    /// its sample count (ADR-0171, ADR-0246 decision 7). Empty for a
+    /// fragment-only program.
+    pub depth_transients: Vec<DepthSpec>,
     pub passes: Vec<ProgramPass>,
 }
 

@@ -78,12 +78,17 @@ fn fs_invert(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 ```
 
 Register it with the declared graph: two bindings (source, output), one
-transient for the ping-pong hop, and two passes. Each slot declares a `shape`
-and a `sampling`: all three here are `Target(Full)`, sized from the output,
+transient for the ping-pong hop, and two passes. Each binding declares a
+`shape` and a `sampling`: both here are `Target(Full)`, sized from the output,
 and `Filtered`, read through a clamped sampler. A source of a size of its own
 would declare `"shape": "Texture"`, and a table read with `textureLoad` would
 declare `"sampling": "Texel"`
-([slots and extents](../systems/render-programs.md#slots-and-extents)). Pass 0 reads binding 0 and
+([slots and extents](../systems/render-programs.md#slots-and-extents)). The
+transient declares an `extent` and a `samples`: it is always sized from the
+output and always read through a clamped sampler, and `"One"` is one sample
+per texel ([samples](../systems/render-programs.md#samples)). Each pass
+declares a `blend`; `"Alpha"` composes what the pass returns over what its
+output holds ([blend](../systems/render-programs.md#blend)). Pass 0 reads binding 0 and
 writes the transient, windowing bytes 0..4 of the dispatch blob; pass 1 reads
 pass 0's output through the `PassOutput` alias and writes binding 1, windowing
 bytes 4..8.
@@ -100,13 +105,14 @@ bytes 4..8.
   ],
   "transients": [
     // 0: the ping-pong hop
-    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } }
+    { "format": "Rgba8", "extent": "Full", "samples": "One" }
   ],
   "geometries": [],                            // no draw pass in this graph
   "depth_transients": [],                      // and so no depth targets
   "passes": [
     {
       "stage": "Fragment",
+      "blend": "Alpha",
       "entry_point": "fs_threshold",
       "inputs": [ { "Binding": { "index": 0 } } ],
       "output": { "Transient": { "index": 0 } },
@@ -115,6 +121,7 @@ bytes 4..8.
     },
     {
       "stage": "Fragment",
+      "blend": "Alpha",
       "entry_point": "fs_invert",
       "inputs": [ { "PassOutput": { "pass": 0 } } ],
       "output": { "Binding": { "index": 1 } },
@@ -319,6 +326,7 @@ cover.
     {
       "stage": { "Draw": { "vertex_entry_point": "vs_flat",
                            "geometry": 0, "depth": null, "load": "Clear" } },
+      "blend": "Alpha",
       "entry_point": "fs_flat",
       "inputs": [],
       "output": { "Binding": { "index": 0 } },
@@ -386,14 +394,18 @@ to make them agree on occlusion:
     { "layout": [ { "location": 0, "format": "Float32x3" } ] },
     { "layout": [ { "location": 0, "format": "Float32x3" } ] }
   ],
-  "depth_transients": [ "Full" ],
+  // The depth slot shares its passes' output's extent and sample count; the
+  // output is a binding, which has one sample.
+  "depth_transients": [ { "extent": "Full", "samples": "One" } ],
   "passes": [
     { "stage": { "Draw": { "vertex_entry_point": "vs_flat", "geometry": 0,
                            "depth": 0, "load": "Clear" } },
+      "blend": "Alpha",
       "entry_point": "fs_flat", "inputs": [], "output": { "Binding": { "index": 0 } },
       "uniform_offset": 0, "uniform_length": 32, "repeat": null },
     { "stage": { "Draw": { "vertex_entry_point": "vs_flat", "geometry": 1,
                            "depth": 0, "load": "Load" } },
+      "blend": "Alpha",
       "entry_point": "fs_flat", "inputs": [], "output": { "Binding": { "index": 0 } },
       "uniform_offset": 32, "uniform_length": 32, "repeat": null }
   ]
@@ -485,6 +497,7 @@ fn fs_white() -> @location(0) vec4<f32> {
         "instance_layout": [ { "location": 4, "format": "Float32x3" } ],
         "draw_sets": 0,          // this pass draws list 0 of the dispatch
         "cull": "None", "depth": null, "load": "Clear" } },
+      "blend": "Alpha",
       "entry_point": "fs_white", "inputs": [], "output": { "Binding": { "index": 0 } },
       "uniform_offset": 0, "uniform_length": 0, "repeat": null }
   ]

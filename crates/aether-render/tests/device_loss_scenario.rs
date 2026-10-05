@@ -20,7 +20,7 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawTexturedQuads,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawTexturedQuads,
     GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
     ProgramRegisterResult, QuadBlend, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling,
     TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
@@ -131,6 +131,7 @@ fn draw_program() -> ProgramRegister {
                 depth: None,
                 load: PassLoad::Clear,
             }),
+            blend: Blend::Alpha,
             entry_point: "fs_main".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },

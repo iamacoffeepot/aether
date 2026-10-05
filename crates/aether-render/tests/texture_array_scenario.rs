@@ -19,10 +19,10 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::{
-    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, DrawShapes, DrawTexturedQuads,
-    InputSlot, Mips, OutputSlot, PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult,
-    QuadBlend, RenderCapability, Sampling, Shape, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad, Wrap, WriteTextureLayer,
+    Blend, CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, DrawShapes,
+    DrawTexturedQuads, InputSlot, Mips, OutputSlot, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
+    ProgramRegisterResult, QuadBlend, RenderCapability, Sampling, Shape, SlotExtent, SlotShape, SlotSpec,
+    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, Wrap, WriteTextureLayer,
 };
 
 /// Side of every program output texture and of the overlay quad that
@@ -92,6 +92,7 @@ fn program(wgsl: &str, entry: &str, shape: SlotShape, mips: Mips, uniform_length
         depth_transients: Vec::new(),
         passes: vec![ProgramPass {
             stage: PassStage::Fragment,
+            blend: Blend::Alpha,
             entry_point: entry.to_owned(),
             inputs: vec![InputSlot::Binding { index: 0 }],
             output: OutputSlot::Binding { index: 1 },

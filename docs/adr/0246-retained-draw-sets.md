@@ -172,6 +172,14 @@ pub enum Blend { Replace, Alpha, Additive }
 
 A pass that reads a `Four` transient reads its resolved image; the pass graph is fixed at registration, so the engine resolves once, after the last writer before each reader. Blend is the pass's, on every colour format including float.
 
+A transient declares no sampling. A pass reads one as a texture with a sampler that clamps and reads the base level, linear where the format can be filtered and nearest where it cannot.
+
+A pass's sample count is its colour output's. A binding is a registry texture and is single-sample, so a multisampled scene is drawn into a `Four` transient and a later pass carries the resolved image to a binding. The rule covers every render stage. A pass's depth slot declares the same count as its colour output, and one that differs is refused at registration, as a depth slot of another extent is.
+
+The multisampled texture keeps its samples between passes, so a second writer under a load draws over the first writer's samples. The resolve happens in the last iteration of the last pass to write the transient before each pass that reads it: a writer followed by another writer does not resolve, and two readers with no writer between them share one resolve. A depth slot is never resolved. A `Four` transient of a format that cannot be resolved is refused at registration, whether or not a pass reads it; of the five formats that is `R32Float`.
+
+`Replace` overwrites the output on every channel. `Alpha` is straight-alpha source over. `Additive` adds source to destination on every channel, alpha included. A compute pass has no colour output and declares `Replace`; any other value is refused at registration. The engine keeps no format rule for blend: `R32Float` blends where the device offers `float32-blendable`, which the engine requests whenever the adapter has it, and on a device without it an `Alpha` or `Additive` pass onto `R32Float` is refused in the register reply.
+
 **8. A program never writes the frame.** Every pass writes a texture, and the frame shows a program's output through the composite path that exists today. One fullscreen quad costs about 0.3 ms at 1280×720 on an otherwise empty frame and was cheaper than drawing the scene into the always-multisampled frame.
 
 ## Consequences
