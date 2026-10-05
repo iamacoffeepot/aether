@@ -27,8 +27,9 @@
 //!   another's writes, and the bottom layer is never written again. The
 //!   run's tree is uploaded with every file that differs from the layer's
 //!   recorded tree stamped with the run's start, so cargo rebuilds exactly
-//!   what changed since the layer was built; a pointer that records no tree
-//!   stamps every file.
+//!   what changed since the layer was built; a pointer that records no tree,
+//!   or one whose tree the run's source does not store (a journal replaced at
+//!   the same path), stamps every file.
 //!
 //! Every layer byte is written and removed by the daemon: the steps write as
 //! uid 0, and the actor may not share the daemon's host. A layer that does
@@ -45,9 +46,10 @@ use aether_data::{Digest, Ref, hash_bytes};
 
 use super::cleanup::Cleanup;
 use super::volumes::{RUN_LABEL, Volumes};
-use super::{RunError, Stop, engine_failed};
+use super::{RunError, Stop, engine_failed, storage_stop};
 use crate::runtime::engine::{Engine, EngineError, Volume, VolumeName};
 use crate::runtime::provision::RunKey;
+use crate::runtime::storage::{SourceReader, StorageError};
 use crate::{EnvVar, RunRequest};
 
 /// The label a layer's data volume and its pointer carry with the layer's
@@ -172,14 +174,43 @@ impl Layer {
         }
     }
 
-    /// How the run's tree is uploaded over this layer: canonical over a fresh
-    /// layer, which holds no build output a stale mtime could fool, and
-    /// stamped with `mtime_secs` against the layer's base over a complete one.
-    pub fn stamp(&self, mtime_secs: u64) -> Option<Stamp> {
-        match self {
-            Self::Writing { .. } => None,
-            Self::Over { base, .. } => Some(Stamp { base: *base, mtime_secs }),
+    /// How the run's tree `tree` is uploaded over this layer: canonical over
+    /// a fresh layer, which holds no build output a stale mtime could fool,
+    /// and stamped with `mtime_secs` against the layer's base over a complete
+    /// one. A recorded base the `source` does not store, or stores as another
+    /// kind, is dropped with a warning, so every file is stamped: the layer
+    /// outlives a journal fork, and the run's answer never depends on it.
+    pub fn stamp_over(
+        &self,
+        source: &mut SourceReader<'_>,
+        tree: &Ref<Tree>,
+        mtime_secs: u64,
+    ) -> Result<Option<Stamp>, Stop> {
+        let Self::Over { wanted, base, .. } = self else {
+            return Ok(None);
+        };
+        let Some(recorded) = *base else {
+            return Ok(Some(Stamp { base: None, mtime_secs }));
+        };
+        let is_run_tree = recorded == *tree;
+        if is_run_tree {
+            return Ok(Some(Stamp { base: Some(recorded), mtime_secs }));
         }
+
+        let base = match source.load::<Tree>(&recorded) {
+            Ok(_) => Some(recorded),
+            Err(StorageError::Missing(digest) | StorageError::OtherKind(digest)) if digest == recorded.digest() => {
+                tracing::warn!(
+                    target: "aether_bloomery_workspace",
+                    layer = %wanted.hex,
+                    base = %digest,
+                    "the layer's recorded tree is not in the run's source: every file is stamped"
+                );
+                None
+            }
+            Err(error) => return Err(storage_stop("reading the layer's recorded tree", error)),
+        };
+        Ok(Some(Stamp { base, mtime_secs }))
     }
 }
 

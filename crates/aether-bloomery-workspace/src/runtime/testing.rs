@@ -721,9 +721,9 @@ impl RunScript<'_> {
                 });
                 usize::from(!completes)
             }
-            LayerScript::Hit { hex, data_volume } => {
+            LayerScript::Hit { hex, data_volume, tree } => {
                 replies.extend([
-                    layer_pointer_reply(hex, data_volume),
+                    layer_pointer_reply(hex, data_volume, tree),
                     volume_reply(data_volume, &[("aether.workspace.layer", hex)]),
                     volume_reply(LAYER_UPPER, &[]),
                     volume_reply(LAYER_WORK, &[]),
@@ -782,8 +782,10 @@ pub enum LayerScript<'a> {
     /// pointer, or loses the pointer race with 409 when `completes` is false,
     /// leaving `data_volume` to its removal.
     Miss { data_volume: &'a str, completes: bool },
-    /// A pointer labelled `hex` names `data_volume`, which carries `hex` too.
-    Hit { hex: &'a str, data_volume: &'a str },
+    /// A pointer labelled `hex` names `data_volume`, which carries `hex` too,
+    /// and records `tree` (a digest in hex) as the tree the layer was built
+    /// over, when it records one.
+    Hit { hex: &'a str, data_volume: &'a str, tree: Option<&'a str> },
 }
 
 /// The container id a scripted warm run's output collector gets.
@@ -812,13 +814,13 @@ pub fn volume_reply(name: &str, labels: &[(&str, &str)]) -> StubReply {
 }
 
 /// The inspect answer for the layer pointer labelled `hex`, naming
-/// `data_volume`.
+/// `data_volume` and recording `tree` as the tree the layer was built over,
+/// when it records one.
 #[must_use]
-pub fn layer_pointer_reply(hex: &str, data_volume: &str) -> StubReply {
-    volume_reply(
-        &format!("aether-workspace-layer-{hex}"),
-        &[("aether.workspace.layer", hex), ("aether.workspace.layer.data", data_volume)],
-    )
+pub fn layer_pointer_reply(hex: &str, data_volume: &str, tree: Option<&str>) -> StubReply {
+    let recorded = tree.map(|tree| ("aether.workspace.layer.tree", tree));
+    let labels = [("aether.workspace.layer", hex), ("aether.workspace.layer.data", data_volume)];
+    volume_reply(&format!("aether-workspace-layer-{hex}"), &[&labels[..], recorded.as_slice()].concat())
 }
 
 /// The inspect answer for `hex`'s mount pointer, its mount label `labelled`
