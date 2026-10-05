@@ -631,9 +631,9 @@ impl<C: Chassis> PassiveChassis<C> {
     ///
     /// # Panics
     /// Panics when `actor` is neither a pooled instanced actor that is still
-    /// open nor one that has closed (a singleton or a pumped slot has no
-    /// close-done signal here), or when the close does not apply within the
-    /// settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+    /// open nor an actor that has closed (a singleton or a pumped slot that
+    /// is still open has no close-done signal here), or when the close does
+    /// not apply within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
     #[cfg(any(test, feature = "test-support"))]
     pub fn await_closed(&self, actor: ErasedActorRef) {
         self.booted.spawner.await_closed(actor.id(), "testing.await_closed");

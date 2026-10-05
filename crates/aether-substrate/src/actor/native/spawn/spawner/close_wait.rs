@@ -39,9 +39,9 @@ impl Spawner {
     ///
     /// # Panics
     /// Panics when `id` is neither a pooled instanced actor this spawner
-    /// holds nor one that has closed (a singleton or a pumped slot has no
-    /// close-done signal here), or when either wait passes the settlement
-    /// cap.
+    /// holds nor an actor that has closed (a singleton or a pumped slot
+    /// that is still open has no close-done signal here), or when either
+    /// wait passes the settlement cap.
     pub(crate) fn await_closed(&self, id: MailboxId, gate: &str) {
         let retained = self
             .instanced_slots

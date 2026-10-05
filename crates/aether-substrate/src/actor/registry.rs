@@ -167,10 +167,11 @@ impl ActorRegistry {
 
     /// Has the actor at `id` run its registry close? True only for a
     /// `Dead` slot, which [`Self::close_actor`] leaves before the route
-    /// drop is queued. An id that never owned a slot (a singleton that is
-    /// still up, an inline-child alias, a name nothing was born at) answers
-    /// `false`, which is what lets the test-support close wait tell an
-    /// actor that closed and was released from one it never covered.
+    /// drop is queued. An actor that is still up answers `false`, and so
+    /// does an id that never owned a slot (an inline-child alias, a name
+    /// nothing was born at), which is what lets the test-support close wait
+    /// tell an actor that closed and was released from one it does not
+    /// cover.
     ///
     /// # Panics
     /// Panics if the `actors` `RwLock` is poisoned (see [`Self::is_live`]).
