@@ -98,6 +98,9 @@ mod surface;
 #[cfg(feature = "desktop")]
 mod target;
 mod texture;
+// Texture arrays in the texture registry (ADR-0246 decision 6): fixed
+// side and layer count, each layer written in place.
+mod texture_array;
 
 // The cap-root re-exports source these names through `runtime`. The
 // `RenderTuning*` trio is the derive-Config surface (ADR-0090) the chassis
@@ -126,11 +129,12 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
-    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances,
-    DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads,
-    DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
-    UpdateInstances, UpdateTexture, ViewProjection,
+    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, DRAW_TRIANGLE_BYTES,
+    DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
+    DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability,
+    UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances, UpdateTexture, ViewProjection,
+    WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -947,6 +951,38 @@ impl NativeActor for RenderCapability {
             return;
         }
         state.textures.destroy(mail);
+    }
+
+    /// `CreateTextureArray` (ADR-0246 decision 6), on the owned texture
+    /// registry. The layer ceiling is the granted device's, so the
+    /// offscreen GPU boots here if configured; on desktop a create before
+    /// the first window attaches replies `Err` rather than parking.
+    #[handler::request]
+    fn on_create_texture_array(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateTextureArray,
+    ) -> CreateTextureArrayResult {
+        state.ensure_offscreen_gpu_booted();
+        if let Err(error) = state.service_device_for_request() {
+            return CreateTextureArrayResult::Err { error };
+        }
+        let Some(gpu) = state.gpu.as_ref() else {
+            return CreateTextureArrayResult::Err {
+                error: "the render GPU is not booted; create texture arrays after the first window attaches".to_owned(),
+            };
+        };
+        state.textures.create_array(mail, gpu.device.limits().max_texture_array_layers)
+    }
+
+    /// `WriteTextureLayer` (ADR-0246 decision 6), on the owned texture
+    /// registry.
+    #[handler::tell]
+    fn on_write_texture_layer(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: WriteTextureLayer) {
+        if state.warn_drop_if_unusable("write_texture_layer") {
+            return;
+        }
+        state.textures.write_layer(mail);
     }
 
     /// `CreateGeometry` (ADR-0171), on the owned geometry registry —

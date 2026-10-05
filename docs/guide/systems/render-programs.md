@@ -93,6 +93,8 @@ Every kind below addresses the `aether.render` mailbox.
 | `aether.render.create_draw_set` | `CreateDrawSet { vertex_layout, instance_layout, draws }` | check every draw + hold its buffers; reply `aether.render.create_draw_set_result` / `CreateDrawSetResult` (`Ok { draw_set_id }` / `Err { error }`) |
 | `aether.render.update_draw_set` | `UpdateDrawSet { draw_set_id, first, draws }` | check + patch in place, all or nothing; reply `aether.render.update_draw_set_result` / `UpdateDrawSetResult` (`Ok` / `Err { error }`) |
 | `aether.render.destroy_draw_set` | `DestroyDrawSet { draw_set_id }` | fire-and-forget release of the set and what it holds |
+| `aether.render.create_texture_array` | `CreateTextureArray { format, side, layers, mips }` | validate against the device's limits; reply `aether.render.create_texture_array_result` / `CreateTextureArrayResult` (`Ok { texture_id }` / `Err { error }`) |
+| `aether.render.write_texture_layer` | `WriteTextureLayer { texture_id, layer, pixels }` | fire-and-forget in-place write of every level of one layer |
 
 `program_id` and `geometry_id` are session-scoped and assigned like texture and
 instrument identifiers. A rejected register or create consumes no id, so
@@ -236,6 +238,64 @@ id warn-drops the same way. The records and the GPU buffer are released with
 it, unless a draw set names the buffer, in which case they live, with the
 contents they had, until the last such set lets go.
 
+## The texture array resource
+
+A texture array is `layers` square layers of `side` texels in one `format`,
+bound whole at a `SlotShape::TextureArray` binding so a program picks a layer
+per fragment ([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decision 6). It is how a scene binds many surface textures at once.
+
+`create_texture_array` fixes the side and the layer count for the array's
+life; a larger array is a new `create_texture_array`. The array is created
+with no pixels, and **a layer that was never written reads as zero in every
+channel**. It has no sampling setting of its own: it is read linear when its
+format can be filtered and nearest when it cannot (`R32Float`). All five
+texture formats are accepted.
+
+`mips` says which levels the array has. `Mips::Base` is the base level alone.
+`Mips::Chain` is `floor(log2(side)) + 1` levels, level `n` having side
+`max(1, side >> n)`, so side 5 has levels of side 5, 2 and 1. The substrate
+generates no level. `write_texture_layer` supplies them: `pixels` carries
+every level the array has for that layer, base level first, each level
+row-major and top-down, with nothing between levels. Its length is the sum
+over the levels of `level_side * level_side * format.bytes_per_pixel()`. A
+write is all of a layer's levels or none of them, so a layer never holds part
+of a chain. A `Filtered` binding reads past the base level only when it
+declares `Mips::Chain`.
+
+An array's id comes from the sequence `create_texture` draws from. One
+`texture_id` names a texture or an array and never both, and
+`destroy_texture` releases either; there is no second destroy kind. Every
+path that takes a plain texture (`update_texture`, the quad, shape and
+material draws) treats an array's id as unknown and warn-drops.
+
+The layer ceiling is the render device's, so creation needs a device. On the
+SubstrateHarness the first create boots it; **on desktop a create sent before
+the first window attaches replies `Err`**, as a program `register` does.
+`create_texture_array` validates before it assigns an id, and each failure
+class replies its own reason:
+
+| Class | Reason shape |
+|---|---|
+| Zero side | `texture array side is zero` |
+| Zero layers | `texture array has zero layers` |
+| Side limit | `texture array side N exceeds the device limit max_texture_dimension_2d = M` |
+| Layer limit | `texture array layer count N exceeds the device limit max_texture_array_layers = M` |
+| Byte size | `a F layer of side N overflows the addressable byte count` |
+
+`write_texture_layer` is fire-and-forget. An unknown id, an id that names a
+plain texture, a layer at or past the layer count, bytes that are not
+resident in this process, or a length that is not every level of one layer
+logs a warning under the `aether_render` target and leaves the layer as it
+was. An accepted write replaces the layer in place: the id does not change,
+and only that layer is uploaded.
+
+The substrate keeps the blob of each written layer, and those blobs are the
+source of truth. Writes are accepted at any time after creation; the GPU
+texture is created at the first dispatch that binds the array. After a render
+device replacement the array comes back under the same id with every written
+layer as it was.
+
 ## The draw set resource
 
 A draw set is a retained list of draws
@@ -375,9 +435,11 @@ The `shape` says what the slot takes and whether a pass may write it:
 - `SlotShape::Texture` — a texture of any size, read only: a lookup table, a
   tile sheet, a table of per-instance data. A pass naming it as its output
   rejects at register.
-- `SlotShape::TextureArray` — an array texture of any size and layer count,
-  read only. The shader declares it `texture_2d_array<f32>`. A dispatch that
-  binds a texture that is not an array there is dropped.
+- `SlotShape::TextureArray` — a [texture array](#the-texture-array-resource)
+  of any size and layer count, read only. The shader declares it
+  `texture_2d_array<f32>`. The kind of texture has to match in both
+  directions: a dispatch that binds a plain texture here is dropped, and so is
+  one that binds an array at a `Target` or `Texture` binding.
 
 A `Target` carries one of two extents:
 
@@ -736,6 +798,7 @@ drop classes:
 - a `Target` binding whose size disagrees with its extent resolved against the
   reference (a `Texture` binding takes any size);
 - a `TextureArray` binding whose texture is not an array;
+- a `Target` or `Texture` binding whose texture is an array;
 - a non-`Writable` texture bound where the graph writes;
 - a geometry slot naming an unknown geometry id;
 - a geometry whose created layout disagrees with the slot's declared layout;
@@ -826,6 +889,10 @@ and the draw-set lifecycle in
   machines skip such tests cleanly.
 - The minimal hub chassis installs no `aether.render` mailbox, so program
   mail cannot resolve there.
+- Every render device is requested with the adapter's own
+  `max_texture_array_layers` and `max_buffer_size` in place of the defaults
+  of 256 layers and 256 MiB; every other limit stays at its default. The
+  layer count a `create_texture_array` admits is therefore the adapter's.
 
 ## The worked consumer: the wash
 

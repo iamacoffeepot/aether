@@ -258,13 +258,79 @@ pub struct UpdateTexture {
 }
 
 /// `aether.render.destroy_texture` — release a previously-created
-/// texture from the render cap's session-scoped texture registry.
-/// Fire-and-forget; an unknown `texture_id` or the reserved internal
-/// white-texture id logs and drops. Dropping the registry entry releases
-/// staged pixels and any realized GPU resources.
+/// texture or texture array from the render cap's session-scoped texture
+/// registry; the two share one id space, so this is the destroy path of
+/// both. Fire-and-forget; an unknown `texture_id` or the reserved
+/// internal white-texture id logs and drops. Dropping the registry entry
+/// releases staged pixels and any realized GPU resources.
 #[aether_data::kind(name = "aether.render.destroy_texture")]
 pub struct DestroyTexture {
     pub texture_id: u32,
+}
+
+/// `aether.render.create_texture_array` — register an array texture
+/// (ADR-0246 decision 6): `layers` square layers of `side` texels in
+/// `format`, the resource a `SlotShape::TextureArray` program binding
+/// takes. Side and layer count are fixed at creation; growing either
+/// means creating a new array.
+///
+/// `mips` says which levels the array has. `Mips::Base` is the base
+/// level alone. `Mips::Chain` is `floor(log2(side)) + 1` levels, level
+/// `n` having side `max(1, side >> n)`. The engine generates no level:
+/// every one is supplied by `WriteTextureLayer`.
+///
+/// The array is created with no pixels. A layer that was never written
+/// reads as zero in every channel. It is read linear when `format` can
+/// be filtered and nearest when it cannot (`R32Float`).
+///
+/// The id comes from the sequence `CreateTexture` draws from, so one
+/// `texture_id` names a texture or an array and never both, and
+/// `DestroyTexture` releases either. The layer ceiling is the render
+/// device's, so creation needs a device: on desktop a create sent
+/// before the first window attaches replies `Err`. Reply:
+/// `CreateTextureArrayResult`.
+#[aether_data::kind(name = "aether.render.create_texture_array")]
+pub struct CreateTextureArray {
+    pub format: TextureFormat,
+    pub side: u32,
+    pub layers: u32,
+    pub mips: Mips,
+}
+
+/// Reply to `CreateTextureArray`. `Ok` carries the assigned
+/// `texture_id` — thread it into `WriteTextureLayer.texture_id` and a
+/// `TextureArray` entry of `ProgramDispatch.bindings`. `Err` carries a
+/// human-readable reason, one per class: a zero `side`, zero `layers`, a
+/// `side` past the device's `max_texture_dimension_2d`, `layers` past
+/// the device's `max_texture_array_layers`, or a layer whose byte size
+/// overflows. A refused create consumes no id.
+#[aether_data::kind(name = "aether.render.create_texture_array_result")]
+pub enum CreateTextureArrayResult {
+    Ok { texture_id: u32 },
+    Err { error: String },
+}
+
+/// `aether.render.write_texture_layer` — replace the contents of one
+/// layer of a texture array, in place (ADR-0246 decision 6).
+///
+/// `pixels` carries every level the array has for that layer, base
+/// level first, each level row-major and top-down, with nothing between
+/// levels. Its length is the sum over the levels of
+/// `level_side * level_side * format.bytes_per_pixel()`: one level for a
+/// `Mips::Base` array, the whole chain for a `Mips::Chain` one. A write
+/// is all of a layer's levels or none of them.
+///
+/// Fire-and-forget. An unknown `texture_id`, an id that names a plain
+/// texture, a `layer` at or past the array's layer count, pixel bytes
+/// that are not resident in this process, or a wrong `pixels` length
+/// logs a warning and leaves the layer as it was. The engine keeps the
+/// pixels it is given, so a written layer survives a render device
+/// replacement under the same id.
+#[aether_data::kind(name = "aether.render.write_texture_layer")]
+pub struct WriteTextureLayer {
+    pub texture_id: u32,
+    pub layer: u32,
+    pub pixels: Blob,
 }
 
 /// Storage format of one vertex attribute in a geometry layout
@@ -946,13 +1012,17 @@ pub enum Wrap {
     Repeat,
 }
 
-/// Which mip levels a `Filtered` binding reads.
+/// Mip levels, in its two uses: on a `Filtered` binding it says which
+/// levels are read, and on `CreateTextureArray` it says which levels
+/// exist.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Mips {
-    /// The base level only, whatever the bound texture holds.
+    /// The base level only. A binding reads it whatever the bound
+    /// texture holds; an array has that one level.
     Base,
-    /// The whole chain, blended between levels when the texture is
-    /// linear-filtered. A texture with no chain reads as `Base` does.
+    /// The whole chain. A binding blends between levels when the
+    /// texture is linear-filtered, and a texture with no chain reads as
+    /// `Base` does; an array has every level down to one texel.
     Chain,
 }
 

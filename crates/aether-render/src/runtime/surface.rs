@@ -65,19 +65,37 @@ pub struct BootedOffscreen {
 /// commits to RGBA at boot so the capture readback stays swizzle-free.
 const OFFSCREEN_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-/// The limits every aether render device is created with. Both boot paths
-/// request exactly these, so the ceilings actor-supplied dimensions are
-/// validated against (`max_texture_dimension_2d`) and the alignment the
+/// The floor under every aether render device's limits: what mail-time
+/// validation may assume before any device exists. Both boot paths
+/// request [`device_limits`], which is never below these, so a ceiling
+/// checked here (`max_texture_dimension_2d`) and the alignment the
 /// program executor stages uniform windows at
-/// (`min_uniform_buffer_offset_alignment`) are known before any device
-/// exists — which is what lets `create_texture` reject an oversized
-/// request at mail time even though the GPU boots lazily. Sourcing both
-/// the request and the validation here is what keeps them from drifting:
-/// raising the requested limits automatically raises what validation
-/// admits.
+/// (`min_uniform_buffer_offset_alignment`) hold on whatever device is
+/// granted — which is what lets `create_texture` reject an oversized
+/// request at mail time even though the GPU boots lazily.
+///
+/// Two limits are raised past this floor, `max_texture_array_layers` and
+/// `max_buffer_size`. A check that wants the raised value reads it from
+/// the live device (`create_texture_array` does); one that reads it here
+/// stays sound and admits only the floor.
 #[must_use]
 pub fn render_limits() -> wgpu::Limits {
     wgpu::Limits::default()
+}
+
+/// The limits a render device is requested with: [`render_limits`], with
+/// the array-layer and buffer-size ceilings taken from the adapter
+/// (ADR-0246 decision 6), whose defaults of 256 layers and 256 MiB a
+/// scene reaches first. Neither is requested below the floor, so an
+/// adapter that offers less fails device creation as it did before.
+fn device_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let floor = render_limits();
+    let offered = adapter.limits();
+    wgpu::Limits {
+        max_texture_array_layers: offered.max_texture_array_layers.max(floor.max_texture_array_layers),
+        max_buffer_size: offered.max_buffer_size.max(floor.max_buffer_size),
+        ..floor
+    }
 }
 
 /// Route wgpu errors that escape every error scope into the render log
@@ -154,6 +172,17 @@ fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     adapter.features() & wgpu::Features::TIMESTAMP_QUERY
 }
 
+/// The adapter a surfaceless device is requested from.
+fn request_offscreen_adapter() -> Result<wgpu::Adapter, String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::default(),
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .map_err(|error| format!("request offscreen adapter: {error}"))
+}
+
 /// Fallibly acquire a surfaceless wgpu device for an offscreen replacement
 /// transaction (ADR-0173). No surface, no swapchain — the substrate harness
 /// owns no window, so the runtime records into the offscreen targets
@@ -161,20 +190,14 @@ fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
 /// `wireframe` is the resolved `AETHER_WIREFRAME` value, honored the same way
 /// [`boot_surface`] honors it.
 pub fn try_boot_offscreen(wireframe: Option<&str>) -> Result<BootedOffscreen, String> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .map_err(|error| format!("request offscreen adapter: {error}"))?;
+    let adapter = request_offscreen_adapter()?;
     let adapter_info = adapter.get_info();
     let (polygon_mode, build_overlay, required_features) = resolve_wireframe(&adapter, &adapter_info.name, wireframe);
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-render offscreen device"),
         required_features: required_features | opportunistic_features(&adapter),
-        required_limits: render_limits(),
+        required_limits: device_limits(&adapter),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
@@ -270,7 +293,6 @@ pub fn boot_surface(
     }))
     .map_err(|error| format!("request compatible render adapter: {error}"))?;
     let adapter_info = adapter.get_info();
-    let limits = render_limits();
     let (config, format) = surface_configuration(&surface, &adapter, size, None)?;
 
     // Wireframe rendering is opt-in via `AETHER_WIREFRAME`; the line modes
@@ -281,7 +303,7 @@ pub fn boot_surface(
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-substrate device"),
         required_features: required_features | opportunistic_features(&adapter),
-        required_limits: limits,
+        required_limits: device_limits(&adapter),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
@@ -445,7 +467,30 @@ pub fn acquire_surface_texture(
 
 #[cfg(test)]
 mod tests {
-    use super::wireframe_flags;
+    use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+
+    use super::{boot_offscreen, render_limits, request_offscreen_adapter, wireframe_flags};
+
+    /// The offscreen device is granted the adapter's array-layer and
+    /// buffer-size limits (ADR-0246 decision 6). The named bug: a device
+    /// descriptor still passing the defaults, which caps an array at 256
+    /// layers whatever the adapter offers.
+    #[test]
+    fn the_offscreen_device_takes_the_adapters_layer_and_buffer_limits() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let offered = request_offscreen_adapter().expect("the adapter the gate found").limits();
+        let granted = boot_offscreen(None).device.limits();
+
+        assert_eq!(granted.max_texture_array_layers, offered.max_texture_array_layers);
+        assert_eq!(granted.max_buffer_size, offered.max_buffer_size);
+        assert_eq!(
+            granted.max_texture_dimension_2d,
+            render_limits().max_texture_dimension_2d,
+            "a limit mail-time validation reads stays at the floor",
+        );
+    }
 
     // Tripwire: pins the `AETHER_WIREFRAME` tri-state parse (threaded from
     // `WindowConfig::wireframe`) that `boot_surface` keys the main polygon

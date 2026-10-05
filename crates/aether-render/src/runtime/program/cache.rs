@@ -18,7 +18,8 @@
 //!   from. Ids are never recycled by [`super::super::texture::TextureRegistry`],
 //!   so a given id names one texture for the session; `ensure_realized`
 //!   uploads a dirtied `update_texture` into that same texture, which the
-//!   cached view already names.
+//!   cached view already names. A texture array is the same: a
+//!   `write_texture_layer` uploads into the texture it was realized as.
 //! - A pass's input bind group is keyed on the resolved identity of every
 //!   slot it samples — the texture id for a binding, the pool class and
 //!   physical index for a transient — so rebinding, a resize, or a pool
@@ -253,13 +254,7 @@ impl DispatchCache {
             if slot.as_ref().is_some_and(|(held, _)| *held == texture_id) {
                 continue;
             }
-            let view = textures.entries[&texture_id]
-                .realized
-                .as_ref()
-                .expect("realized before encode")
-                .texture()
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            *slot = Some((texture_id, view));
+            *slot = Some((texture_id, textures.binding_view(texture_id)));
         }
     }
 

@@ -140,11 +140,17 @@ Only a `Target` has an extent, so a transient and every binding a pass writes is
 ```rust
 #[aether_data::kind(name = "aether.render.create_texture_array")]
 pub struct CreateTextureArray { pub format: TextureFormat, pub side: u32, pub layers: u32, pub mips: Mips }
+#[aether_data::kind(name = "aether.render.create_texture_array_result")]
+pub enum CreateTextureArrayResult { Ok { texture_id: u32 }, Err { error: String } }
 #[aether_data::kind(name = "aether.render.write_texture_layer")]
 pub struct WriteTextureLayer { pub texture_id: u32, pub layer: u32, pub pixels: Blob }
 ```
 
 Side and layer capacity are fixed at creation and a layer's contents are written in place. The device requests the adapter's array-layer and buffer-size limits rather than the defaults of 256 layers and 256 MiB, which the measurements hit first.
+
+Creation replies `CreateTextureArrayResult`, and a refused creation consumes no id. A write carries no reply; a refused write is logged and leaves the layer as it was. An array's id comes from the sequence a plain texture's does, so one id names a texture or an array and never both, and `aether.render.destroy_texture` is the destroy path of both.
+
+Mips are supplied, not generated. A `Mips::Base` array has one level. A `Mips::Chain` array has `floor(log2(side)) + 1` levels, level `n` having side `max(1, side >> n)`, and `WriteTextureLayer.pixels` carries every level of the layer, base level first. A write is all of a layer's levels or none of them. A layer that was never written reads as zero in every channel. The engine keeps the pixels of each written layer, so they survive a render device replacement under the same id.
 
 **7. Targets gain samples and passes gain blend.**
 
