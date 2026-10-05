@@ -15,10 +15,11 @@
 use std::mem::replace;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoke, Invoked, Program, ReadClosure,
+    ClosureArtifact, Detail, DriverRecord, EncodedArtifact, FaultReason, Invoke, Invoked, Program, ReadClosure,
     ReadClosureResult, Transition,
 };
 use aether_bloomery_program::unreachable_staged;
+use aether_data::Digest;
 
 use super::api::provided;
 use super::queue::Step;

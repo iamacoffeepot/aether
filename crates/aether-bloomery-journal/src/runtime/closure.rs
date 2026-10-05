@@ -16,11 +16,10 @@
 use std::collections::{HashSet, VecDeque};
 
 use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
-use aether_data::{Blob, KindId};
+use aether_data::{Blob, Digest, KindId};
 use aether_substrate::actor::native::BlobCheckIn;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::Digest;
 use crate::runtime::blobs::{self, BlobDir};
 use crate::runtime::journal::JournalError;
 

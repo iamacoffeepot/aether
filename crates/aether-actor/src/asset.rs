@@ -18,8 +18,10 @@
 //! The catalog is indexed host-side from the custom sections without
 //! instantiating the component (`aether-substrate`'s asset section
 //! indexer, #3969). Payload bytes are read from the recorded range in
-//! the module file for the duration of the window; nothing payload-sized
-//! outlives it.
+//! the module bytes the load (or republish) brought, for the duration of
+//! the window; nothing payload-sized outlives it. An instance spawned from
+//! its publication brought no bytes, so its fetch of a catalogued asset
+//! traps, naming `load_component` (ADR-0163 §4).
 
 use alloc::vec::Vec;
 
@@ -41,8 +43,8 @@ pub trait AssetCatalog {
 /// window — `init` plus `wire` (ADR-0163 §3). Implemented by the
 /// window-bearing ctxs alone, so a post-window fetch does not typecheck.
 /// [`asset`](AssetWindow::asset) reads the recorded byte range straight
-/// from the module file; the returned bytes are the actor's to keep or
-/// drop. When the window closes the index is released, so a later call
+/// from the module bytes its load brought; the returned bytes are the
+/// actor's to keep or drop. When the window closes the index is released, so a later call
 /// (were one reachable) yields `None`.
 pub trait AssetWindow: AssetCatalog {
     /// The bytes of the asset named `name` (the `aether.asset.` section

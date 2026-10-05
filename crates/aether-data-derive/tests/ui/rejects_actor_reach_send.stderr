@@ -14,9 +14,9 @@ error[E0277]: `aether_data::Source` has actor reach: it does not cross actors
              Box<T>
              Context
              DagId
+             Digest
              EngineId
              ErasedActorPath
-             KindId
            and $N others
    = note: required for `std::option::Option<aether_data::Source>` to implement `CrossesActors`
    = note: 1 redundant requirement hidden
@@ -51,9 +51,9 @@ error[E0277]: `aether_data::Source` has actor reach: it does not cross actors
              Box<T>
              Context
              DagId
+             Digest
              EngineId
              ErasedActorPath
-             KindId
            and $N others
 note: required for `Pending` to implement `CrossesActors`
   --> tests/ui/rejects_actor_reach_send.rs:20:6

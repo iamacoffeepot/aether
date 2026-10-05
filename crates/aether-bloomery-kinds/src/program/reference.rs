@@ -1,7 +1,7 @@
 //! Identity of a program inside a WASM bundle.
 
-use crate::Digest;
 use crate::program::name::ProgramName;
+use aether_data::Digest;
 
 /// A program recorded by its bundle digest and name within that bundle.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]

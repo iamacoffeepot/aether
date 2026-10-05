@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 
-use aether_bloomery_kinds::{Digest, ErasedRef, Ref, Utf8Text};
 use aether_bloomery_program::ToolSchema;
+use aether_data::{Digest, ErasedRef, Ref, Utf8Text};
 
 use super::tools::{CallId, ToolCall};
 
@@ -276,8 +276,8 @@ invariant_errors!(TurnItemsError, ReasoningIdError);
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref, Utf8Text};
-    use aether_data::{Storage, StorageData};
+    use aether_bloomery_kinds::ProgramName;
+    use aether_data::{Ref, Storage, StorageData, Utf8Text};
 
     use super::{Role, ToolOutput, TurnItem, TurnItems};
     use crate::input::tests::offered_tool;

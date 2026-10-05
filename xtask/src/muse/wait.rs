@@ -18,15 +18,13 @@
 
 use std::collections::HashSet;
 
-use aether_bloomery_kinds::{
-    Digest, Fault, JournalEntry, ReactionFailed, RecordedHead, RecordedHeadMove, Transition, Utf8Text,
-};
+use aether_bloomery_kinds::{Fault, JournalEntry, ReactionFailed, RecordedHead, RecordedHeadMove, Transition};
 use aether_bloomery_muse::{
     ContinueInput, Exhaustion, Failure, MuseTurn, OpenInput, RestReason, Role, Session, SessionContinue,
     SessionExhausted, SessionKey, SessionOpen, SessionRecord, TurnItem, TurnOutcome, TurnResult, TurnUsage,
 };
 use aether_bloomery_program::Program;
-use aether_data::Kind;
+use aether_data::{Digest, Kind, Utf8Text};
 use anyhow::{Result, bail};
 use clap::Args;
 

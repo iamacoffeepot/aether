@@ -6,12 +6,9 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery_journal::{
-    AppendError, Batch, Digest, Journal, JournalError, JournalReader, OpaqueBytes, Ref, Seq, artifact_blob,
-    artifact_digest,
-};
+use aether_bloomery_journal::{AppendError, Batch, Journal, JournalError, JournalReader, Seq};
 use aether_bloomery_kinds::Tree;
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, artifact_blob, artifact_digest};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.root.pointer")]

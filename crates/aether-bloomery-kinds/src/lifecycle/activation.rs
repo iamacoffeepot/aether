@@ -3,7 +3,9 @@
 use core::error::Error as StdError;
 use core::fmt;
 
-use crate::{Detail, Digest, Head, OpaqueBytes, Seq};
+use aether_data::{Digest, OpaqueBytes};
+
+use crate::{Detail, Head, Seq};
 
 /// Why a live-from seq was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

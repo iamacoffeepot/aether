@@ -7,10 +7,11 @@
 //! it asserts the boot that never produces a harness.
 
 use aether_bloomery_journal::{Batch, ReadCacheBudget};
-use aether_bloomery_kinds::{ClosureLimit, Head, RecordedHead, RecordedHeadMove, Seq, Utf8Text};
+use aether_bloomery_kinds::{ClosureLimit, Head, RecordedHead, RecordedHeadMove, Seq};
 use aether_chassis::boot::{ChassisBase, RuntimeConfig};
 use aether_chassis_bloomery::BloomeryConfig;
 use aether_chassis_bloomery::chassis::{BloomeryChassis, BloomeryEnv};
+use aether_data::Utf8Text;
 use aether_harness_bloomery::{BloomeryHarness, SeededJournal, UNIT};
 use aether_substrate::Chassis;
 use aether_substrate::config::ConfigSources;

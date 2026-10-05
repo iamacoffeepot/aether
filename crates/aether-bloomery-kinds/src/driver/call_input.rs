@@ -1,8 +1,8 @@
 //! Compatibility decoding for the first `CallProgram` wire generation.
 
-use aether_data::{Kind, KindId};
+use aether_data::{Digest, Kind, KindId, OpaqueBytes};
 
-use crate::{CallInput, CallProgram, Digest, Head, OpaqueBytes, ProgramName};
+use crate::{CallInput, CallProgram, Head, ProgramName};
 
 #[aether_data::kind(name = "aether.bloomery.driver.call_program", eq, no_serde)]
 struct LegacyCallProgram {

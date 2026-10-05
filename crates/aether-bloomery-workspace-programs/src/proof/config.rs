@@ -8,7 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{EncodedArtifact, Name, Node, Ref, Tree};
+use aether_bloomery_kinds::{EncodedArtifact, Name, Node, Tree};
+use aether_data::Ref;
 
 use super::run::VENDOR;
 
@@ -45,7 +46,8 @@ pub fn cargo_config_artifacts() -> [EncodedArtifact; 2] {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Digest, Node, Ref};
+    use aether_bloomery_kinds::Node;
+    use aether_data::{Digest, Ref};
 
     use super::{FILE, cargo_config_artifacts, tree};
     use crate::proof::{ProofBound, TestEnv};

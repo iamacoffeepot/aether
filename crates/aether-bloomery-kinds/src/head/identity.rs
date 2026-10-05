@@ -8,9 +8,7 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use aether_data::{Kind, KindId, StorageError};
-
-use crate::Ref;
+use aether_data::{Kind, KindId, Ref, StorageError};
 
 use super::HeadMoved;
 
@@ -164,7 +162,8 @@ impl<K: Kind> Head<K> {
     /// A mismatched target kind is rejected at compile time:
     ///
     /// ```compile_fail
-    /// use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
+    /// use aether_bloomery_kinds::{Head, Program, Tree};
+    /// use aether_data::{Digest, Ref};
     ///
     /// const MAIN: Head<Tree> = Head::new("main");
     /// let program = Ref::<Program>::from_digest(Digest::from_bytes([0; 32]));
@@ -174,7 +173,8 @@ impl<K: Kind> Head<K> {
     /// The same-kind call compiles:
     ///
     /// ```
-    /// use aether_bloomery_kinds::{Digest, Head, Ref, Tree};
+    /// use aether_bloomery_kinds::{Head, Tree};
+    /// use aether_data::{Digest, Ref};
     ///
     /// const MAIN: Head<Tree> = Head::new("main");
     /// let tree = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));

@@ -24,10 +24,10 @@ use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    AwaitProcessed, Call, CallOutcome, Digest, Fault, FaultReason, Head, NativeOrigin, OpaqueBytes, Processed,
-    ProgramName, ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Utf8Text,
+    AwaitProcessed, Call, CallOutcome, Fault, FaultReason, Head, NativeOrigin, Processed, ProgramName, ProgramRef,
+    RecordedHead, RecordedHeadMove, RequestSource, Requested,
 };
-use aether_data::{EngineId, Kind};
+use aether_data::{Digest, EngineId, Kind, OpaqueBytes, Ref, Utf8Text};
 use aether_fleet::RestartPolicy;
 use aether_harness_bloomery::{Record, SeededJournal, UNIT};
 use aether_harness_fleet::{FleetHarness, poll_until};

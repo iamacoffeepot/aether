@@ -8,7 +8,9 @@ use core::fmt;
 
 use aether_actor::HeldReply;
 
-use crate::{ClosureArtifact, Digest};
+use aether_data::Digest;
+
+use crate::ClosureArtifact;
 
 /// Byte budget for one closure read: at least one stored blob's kind prefix, at most 4 GiB.
 ///
@@ -160,7 +162,7 @@ mod tests {
     use aether_data::wire::encode_to_vec;
 
     use super::{ClosureLimit, ClosureLimitError, ReadClosure};
-    use crate::Digest;
+    use aether_data::Digest;
 
     #[test]
     fn limit_bounds_are_inclusive() {

@@ -33,9 +33,10 @@ mod report;
 mod result;
 mod run;
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
 use aether_bloomery_program::{Async, Edited, Env, Program, Tooled, Workspace, program};
 use aether_bloomery_workspace::StepOutcome;
+use aether_data::Ref;
 
 pub use config::cargo_config_artifacts;
 pub use input::{ClippyArgs, MAX_TEST_ENV, ProofBound, TestArgs, TestEnv, TestEnvError};

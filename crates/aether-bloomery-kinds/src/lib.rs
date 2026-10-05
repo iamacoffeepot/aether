@@ -1,4 +1,4 @@
-//! Shared vocabulary of bloomery kinds: digests, unit keys, typed citations, leaf kinds, the tree, programs, heads, driver records, driver mail, reactor mail, journal entry envelopes, and bundle constants.
+//! Shared vocabulary of bloomery kinds: unit keys, the tree, programs, heads, driver records, driver mail, reactor mail, journal entry envelopes, and bundle constants.
 //!
 //! `#![no_std]` + `alloc`. The journal, the Git projection, and WASM programs
 //! cite these types without linking `SQLite`.
@@ -10,7 +10,6 @@ extern crate alloc;
 
 mod artifact;
 mod bundle;
-mod digest;
 mod driver;
 mod entry;
 mod head;
@@ -18,15 +17,10 @@ mod journal;
 mod lifecycle;
 mod program;
 mod reactor;
-mod reference;
 mod tree;
 mod unit;
 
-pub use artifact::{
-    ArtifactHasher, OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes,
-};
 pub use bundle::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
-pub use digest::Digest;
 pub use driver::{
     AwaitProcessed, BundleDeclarations, Call, CallInput, CallOutcome, CallProgram, CallRefusal, Declarations,
     DeclarationsResult, HeadChange, LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID, Processed, ProgramDeclaration,
@@ -55,6 +49,5 @@ pub use reactor::{
     UncitedArtifact, Warm, WarmEntries, WarmEntriesError, Warmed, reactor_declarations, reactor_record_len,
     write_reactor_record,
 };
-pub use reference::{ErasedRef, Ref};
 pub use tree::{Name, NameError, Node, Path, PathError, Tree};
 pub use unit::{UnitKey, UnitKeyError};

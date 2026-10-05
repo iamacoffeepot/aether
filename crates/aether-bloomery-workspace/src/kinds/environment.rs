@@ -4,7 +4,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_bloomery_kinds::{Ref, Tree};
+use aether_bloomery_kinds::Tree;
+use aether_data::Ref;
 
 use crate::kinds::order::{self, OrderError};
 use crate::kinds::path::TreePath;
@@ -357,9 +358,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use aether_bloomery_kinds::{Digest, Ref};
     use aether_data::wire::{Error as WireError, decode_from_slice, encode_to_vec};
-    use aether_data::{Storage, StorageData};
+    use aether_data::{Digest, Ref, Storage, StorageData};
 
     use super::{
         Environment, Platform, PlatformError, Provides, RustToolchain, RustToolchainError, TOOL_NAME_MAX_BYTES, Tool,

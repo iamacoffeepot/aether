@@ -3,10 +3,10 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ProgramName, Ref, Tree};
+use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Invoke, Invoked, ProgramName, Tree};
 use aether_bloomery_program::{AsyncProgram, Pending, PollResult, Started, start_async};
 use aether_bloomery_workspace::{Outcome, RunResult, StepOutcome, ToolName, ToolRecord, TreePath};
-use aether_data::{Cites, Kind, Storage};
+use aether_data::{Cites, Digest, Kind, Ref, Storage};
 
 /// Start `P` over `input`, answer its one captured run with `reply`, and poll to the invocation's end.
 ///

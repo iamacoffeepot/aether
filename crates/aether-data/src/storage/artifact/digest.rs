@@ -3,9 +3,9 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
-use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{Citations, Cites, LabelNode, Schema, SchemaType, StorageLeaves};
+use crate::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
+use crate::wire::{Error as WireError, WireDecode, WireEncode};
+use crate::{Citations, Cites, LabelNode, Schema, SchemaType, StorageLeaves};
 
 /// 32-byte sha256 of a stored blob.
 ///
@@ -48,8 +48,8 @@ impl Schema for Digest {
     const LABEL_NODE: LabelNode = <[u8; 32] as Schema>::LABEL_NODE;
 }
 
-impl aether_data::CrossesActors for Digest {}
-impl aether_data::CrossesWire for Digest {}
+impl crate::CrossesActors for Digest {}
+impl crate::CrossesWire for Digest {}
 
 impl StorageLeaves for Digest {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {

@@ -4,8 +4,8 @@
 //! finished read or load wakes the digest's program request, then drives
 //! routing, which reclaims the digest for the reactor role.
 
-use aether_bloomery_kinds::{Detail, Digest, OpaqueBytes, ReadArtifact, ReadArtifactResult};
-use aether_data::Kind;
+use aether_bloomery_kinds::{Detail, ReadArtifact, ReadArtifactResult};
+use aether_data::{Digest, Kind, OpaqueBytes};
 
 use super::{OutOfStep, declared_roles};
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, LoadOutcome, LoadTicket, ProgramCore};

@@ -34,8 +34,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use aether_bloomery_kinds::ClosureArtifact;
 
-use crate::Digest;
 use crate::runtime::closure::Stored;
+use aether_data::Digest;
 
 /// The journal actor's read-cache budget in bytes, charged per check-in
 /// allocation rather than per member.
@@ -239,12 +239,12 @@ impl State {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use aether_bloomery_kinds::artifact_digest;
+    use aether_data::artifact_digest;
     use aether_data::{Blob, KindId};
 
     use super::{ReadCache, ReadCacheBudget};
-    use crate::Digest;
     use crate::runtime::closure::Stored;
+    use aether_data::Digest;
 
     const KIND: KindId = KindId(1);
 

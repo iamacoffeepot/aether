@@ -6,14 +6,14 @@ use core::error::Error as StdError;
 use core::fmt;
 
 use aether_actor::HeldReply;
-use aether_data::{Blob, BlobReader, KindId};
+use aether_data::{ArtifactHasher, Blob, BlobReader, Digest, KindId};
 
-use crate::artifact::{ArtifactHasher, Sink, blob_digest, stream};
+use crate::EncodedArtifact;
+use crate::artifact::{Sink, blob_digest, stream};
 use crate::program::executor::ExecutorFault;
 use crate::program::fault::Detail;
 use crate::program::name::ProgramName;
 use crate::program::refusal::Refusal;
-use crate::{Digest, EncodedArtifact};
 
 /// The digest a sender claims for the bytes beside it. Nothing checked it on
 /// decode, and it cannot be read as a proven [`Digest`].
@@ -305,10 +305,9 @@ mod tests {
     use alloc::vec::Vec;
 
     use aether_data::wire::{decode_from_slice, encode_to_vec};
-    use aether_data::{Kind, MAX_READ_BYTES};
+    use aether_data::{Digest, Kind, MAX_READ_BYTES, Utf8Text, artifact_digest};
 
     use super::{ClosureArtifact, DigestMismatch, VerifiedRead};
-    use crate::{Digest, Utf8Text, artifact_digest};
 
     /// `artifact` decoded again after one byte of its claimed digest was flipped: the member a
     /// sender that lies about its digest carries.

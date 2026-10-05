@@ -5,7 +5,7 @@ use std::fs;
 use std::thread;
 
 use aether_bloomery_journal::Batch;
-use aether_bloomery_kinds::{Digest, Node, OpaqueBytes, ReadArtifacts, Ref, Tree, artifact_blob};
+use aether_bloomery_kinds::{Node, ReadArtifacts, Tree};
 use aether_bloomery_workspace::testing::{
     MountScript, RUN_CONTAINER, RUN_HELPER, RUN_VOLUME, RunScript, StubDaemon, StubReply, StubRequest, TarWriter,
     pointer_reply,
@@ -15,8 +15,8 @@ use aether_bloomery_workspace::{
     Resource, Run, RunError, RunRequest, RunResult, RustToolchain, Scratch, Step, Steps, Tool, ToolName, Tools,
     TreePath,
 };
-use aether_data::Kind;
 use aether_data::wire::encode_to_vec;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, artifact_blob};
 use aether_harness_bloomery::BloomeryHarness;
 
 use crate::support::{

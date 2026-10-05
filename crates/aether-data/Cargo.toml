@@ -15,6 +15,9 @@ derive = ["dep:aether-data-derive"]
 aether-data-derive = { path = "../aether-data-derive", optional = true }
 bytemuck = { workspace = true, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# The artifact digest (`storage::artifact`): sha256 over a kind-prefixed blob.
+# The workspace pins it `default-features = false`, which is no_std.
+sha2 = { workspace = true }
 # ADR-0070 phase 4 follow-up (ADR-0071 phase 7c): identity types
 # `EngineId` / `SessionToken` are UUIDs at the wire boundary. Default
 # features off keeps `aether-data` no_std + alloc; the `serde` feature

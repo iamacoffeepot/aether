@@ -1,8 +1,8 @@
 //! `Ran<P>`: one recorded run of a program, typed by the program.
 
-use aether_bloomery_kinds::{Digest, Entry, Mode, ProgramName, ProgramRef, Seq, Transition};
+use aether_bloomery_kinds::{Entry, Mode, ProgramName, ProgramRef, Seq, Transition};
 use aether_bloomery_program::{Program, Ran};
-use aether_data::{Citations, Cites, Kind, Storage, StorageData};
+use aether_data::{Citations, Cites, Digest, Kind, Storage, StorageData};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.ran.input")]

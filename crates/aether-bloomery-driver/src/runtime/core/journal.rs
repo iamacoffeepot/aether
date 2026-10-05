@@ -13,8 +13,9 @@
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHeads};
+use aether_bloomery_kinds::{Call, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHeads};
 use aether_bloomery_program::{Activations, HeadHistory, Heads, Requests};
+use aether_data::Digest;
 
 use super::ticket::{AppendTicket, CallerId, EventsTicket};
 use crate::runtime::clock::Due;

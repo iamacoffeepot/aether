@@ -107,8 +107,9 @@ mod retry;
 mod state;
 mod tools;
 
-use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, Ref, SetHeads, Transition};
+use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, SetHeads, Transition};
 use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
+use aether_data::Ref;
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;

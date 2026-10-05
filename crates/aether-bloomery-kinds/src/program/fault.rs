@@ -19,8 +19,8 @@ use alloc::string::String;
 use core::error::Error as StdError;
 use core::fmt;
 
-use crate::Digest;
 use crate::program::reference::ProgramRef;
+use aether_data::Digest;
 
 /// Why [`Detail`] decode refused a stored blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

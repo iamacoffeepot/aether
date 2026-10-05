@@ -2,8 +2,8 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Head, OpaqueBytes, ReactorSet, ReactorSetError};
-use aether_data::{Storage, StorageData, StorageError};
+use aether_bloomery_kinds::{Head, ReactorSet, ReactorSetError};
+use aether_data::{OpaqueBytes, Storage, StorageData, StorageError};
 
 const KERNEL: Head<OpaqueBytes> = Head::new("core.kernel");
 const WORKER: Head<OpaqueBytes> = Head::new("worker");

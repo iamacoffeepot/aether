@@ -6,10 +6,11 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 
 use aether_actor::{ActorRef, ErasedActorRef};
-use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Ref, Seq};
+use aether_bloomery_journal::{Batch, Journal, JournalActor, JournalReader, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, Publish, PublishResult, RecordedHeadMove,
+    EncodedArtifact, Head, MoveHead, MoveHeadResult, Publish, PublishResult, RecordedHeadMove,
 };
+use aether_data::{Digest, Ref};
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};

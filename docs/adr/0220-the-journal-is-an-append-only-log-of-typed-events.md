@@ -221,10 +221,13 @@ Owner, timestamps, and the other permission bits are dropped on purpose,
 as Git drops them. Build outputs are never entries in any tree; that is a
 rule of the snapshot brick.
 
-The vocabulary (`Digest`, `Ref`, leaf kinds, `Name`, `Path`, `Node`,
-`Tree`) lives in `aether-bloomery-kinds` so the journal's SQLite store is
-not on the cite path for the reactor, the Git projection, or WASM
-programs.
+The content-addressing vocabulary (`Digest`, `Ref`, `ErasedRef`, the leaf
+kinds `aether.artifact.bytes` and `aether.artifact.text`, and the artifact
+framing) lives in `aether-data` beside `Cites`, so a content-addressed user
+outside the journal cites with the same types. The tree vocabulary (`Name`,
+`Path`, `Node`, `Tree`) lives in `aether-bloomery-kinds`. Neither puts the
+journal's SQLite store on the cite path for the reactor, the Git projection,
+or WASM programs.
 
 ## Programs
 

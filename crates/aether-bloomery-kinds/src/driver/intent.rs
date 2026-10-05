@@ -2,9 +2,9 @@
 
 use alloc::vec::Vec;
 
-use aether_data::{Cites, Kind, Storage, StorageError};
+use aether_data::{Cites, Digest, Kind, OpaqueBytes, Ref, Storage, StorageError};
 
-use crate::{Digest, EncodedArtifact, Head, OpaqueBytes, ProgramName, RecordedHead, RecordedHeadMove, Ref};
+use crate::{EncodedArtifact, Head, ProgramName, RecordedHead, RecordedHeadMove};
 
 /// Input submitted by a reactor call intent.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
@@ -59,7 +59,8 @@ impl HeadChange {
     /// The head and both digests must share one kind:
     ///
     /// ```compile_fail
-    /// use aether_bloomery_kinds::{Digest, Head, HeadChange, Program, Ref, Tree};
+    /// use aether_bloomery_kinds::{Head, HeadChange, Program, Tree};
+    /// use aether_data::{Digest, Ref};
     ///
     /// let head = Head::<Program>::new("main");
     /// let to = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));
@@ -69,7 +70,8 @@ impl HeadChange {
     /// The same-kind call compiles:
     ///
     /// ```
-    /// use aether_bloomery_kinds::{Digest, Head, HeadChange, Ref, Tree};
+    /// use aether_bloomery_kinds::{Head, HeadChange, Tree};
+    /// use aether_data::{Digest, Ref};
     ///
     /// let head = Head::<Tree>::new("main");
     /// let to = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));

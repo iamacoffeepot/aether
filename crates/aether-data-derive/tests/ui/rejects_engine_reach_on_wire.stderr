@@ -17,10 +17,10 @@ help: the trait `CrossesWire` is not implemented for `EngineLeaf`
              BTreeMap<K, V>
              Box<T>
              DagId
+             Digest
              EngineId
              ErasedActorPath
-             KindId
-             LoadName
+             ErasedRef
            and $N others
    = note: required for `std::vec::Vec<EngineLeaf>` to implement `CrossesWire`
    = note: 1 redundant requirement hidden

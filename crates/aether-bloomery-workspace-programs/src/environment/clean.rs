@@ -7,8 +7,9 @@
 //! a run gains nothing from them: the runtime supplies `/dev`, and every
 //! container gets its own `.dockerenv`.
 
-use aether_bloomery_kinds::{Node, OpaqueBytes, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Node, Refusal, Tree};
 use aether_bloomery_program::{Env, Sync};
+use aether_data::{OpaqueBytes, Ref};
 
 use super::{name, refused};
 

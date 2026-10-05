@@ -12,8 +12,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest};
-use aether_data::KindId;
+use aether_bloomery_kinds::ClosureArtifact;
+use aether_data::{Digest, KindId};
 
 /// Byte budget of the driver's artifact cache: 64 MiB of cached payloads.
 pub const ARTIFACT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
@@ -107,8 +107,8 @@ impl fmt::Debug for ArtifactCache {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ClosureArtifact, Digest};
-    use aether_data::KindId;
+    use aether_bloomery_kinds::ClosureArtifact;
+    use aether_data::{Digest, KindId};
 
     use super::ArtifactCache;
 

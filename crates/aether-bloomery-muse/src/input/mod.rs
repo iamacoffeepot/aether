@@ -132,8 +132,9 @@ impl TurnInput {
 
 #[cfg(test)]
 pub mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref};
+    use aether_bloomery_kinds::ProgramName;
     use aether_bloomery_program::{NoBound, ToolSchema, function_name};
+    use aether_data::Ref;
 
     use super::{
         CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName, ModelNameError,

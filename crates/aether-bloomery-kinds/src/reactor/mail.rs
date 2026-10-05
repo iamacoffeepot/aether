@@ -6,9 +6,9 @@ use core::error::Error as StdError;
 use core::fmt;
 
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{CastEligible, Citations, Cites, LabelNode, Schema, SchemaType};
+use aether_data::{CastEligible, Citations, Cites, Digest, LabelNode, Schema, SchemaType};
 
-use crate::{ClosureArtifact, Detail, Digest, JournalEntry, ReactorName};
+use crate::{ClosureArtifact, Detail, JournalEntry, ReactorName};
 
 use super::ReactorIntent;
 

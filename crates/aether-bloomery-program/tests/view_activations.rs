@@ -2,9 +2,9 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Activated, ActivationRejected, Detail, Digest, Entry, Head, OpaqueBytes, Seq};
+use aether_bloomery_kinds::{Activated, ActivationRejected, Detail, Entry, Head, Seq};
 use aether_bloomery_program::{ActivationFoldError, Activations, HeadActivation, SequenceError};
-use aether_data::{Storage, StorageData};
+use aether_data::{Digest, OpaqueBytes, Storage, StorageData};
 
 fn entry_for<K: Storage + Clone>(seq: u64, cause: Option<u64>, event: &K) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {

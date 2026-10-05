@@ -21,10 +21,10 @@ mod restart;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
-    ActivationRejected, ClosureArtifact, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName,
-    ReactorSet, SetHeads,
+    ActivationRejected, ClosureArtifact, Detail, DriverRecord, Head, JournalEntry, ReactorName, ReactorSet, SetHeads,
 };
 use aether_bloomery_program::Heads;
+use aether_data::{Digest, OpaqueBytes};
 
 use self::instance::Instance;
 use self::intents::PlannedIntent;

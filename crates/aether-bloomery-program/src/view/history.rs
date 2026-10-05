@@ -4,7 +4,8 @@ use alloc::collections::BTreeMap;
 
 use crate::view::heads::{HeadFoldError, Heads, binding_from};
 use crate::view::sequence::check_next;
-use aether_bloomery_kinds::{Digest, Entry, RecordedHead, Seq};
+use aether_bloomery_kinds::{Entry, RecordedHead, Seq};
+use aether_data::Digest;
 
 /// Every move per recorded `(target KindId, name)` over a contiguous log prefix.
 ///

@@ -14,9 +14,10 @@
 //!   suffix, then without a trailing `-preview`, which reverses rustup's
 //!   renames (`clippy-preview` is `clippy`).
 
-use aether_bloomery_kinds::{Name, Node, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Env, Sync};
 use aether_bloomery_workspace::{EnvVar, Platform, RustToolchain, Tool, ToolName, Tools, TreePath};
+use aether_data::Ref;
 
 use super::{names, refused};
 

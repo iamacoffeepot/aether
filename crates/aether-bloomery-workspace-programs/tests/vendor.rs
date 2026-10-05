@@ -6,9 +6,10 @@ mod support;
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Invoked, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Invoked, Refusal, Tree};
 use aether_bloomery_workspace::{Outcome, RunError, RunResult};
 use aether_bloomery_workspace_programs::vendor::{CargoVendor, VendorInput, VendorResult};
+use aether_data::{Digest, Ref};
 
 use support::{completed_with, one_step, output_tree};
 

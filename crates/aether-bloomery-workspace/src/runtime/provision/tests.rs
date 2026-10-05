@@ -7,7 +7,8 @@ use std::iter;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::time::{Duration, Instant};
 
-use aether_bloomery_kinds::{Detail, Digest, Ref};
+use aether_bloomery_kinds::Detail;
+use aether_data::{Digest, Ref};
 
 use super::budget::Budget;
 use super::cores::CoreRange;

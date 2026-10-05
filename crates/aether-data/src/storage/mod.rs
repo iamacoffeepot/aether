@@ -4,6 +4,7 @@
 //! Mail kinds keep the positional cast / structured codecs. A type
 //! derives [`Storage`] *instead of* [`crate::Kind`], never alongside it.
 
+mod artifact;
 mod cites;
 mod element;
 mod hash;
@@ -14,6 +15,10 @@ mod record;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;
 
+pub use artifact::{
+    ArtifactHasher, Digest, ErasedRef, OpaqueBytes, Ref, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
+    hash_bytes,
+};
 pub use cites::{Citation, Citations, Cites};
 pub use element::{
     ELEMENTS_LEAF, StorageElement, assemble_positional_element, assemble_tagged_element, container_hash,

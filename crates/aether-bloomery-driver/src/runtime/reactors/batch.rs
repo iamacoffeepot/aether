@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{AppendRecords, Detail, Digest, DriverRecord, EncodedArtifact, RecordedHead, Seq};
+use aether_bloomery_kinds::{AppendRecords, Detail, DriverRecord, EncodedArtifact, RecordedHead, Seq};
 use aether_bloomery_program::Heads;
+use aether_data::Digest;
 
 use crate::runtime::core::{AppendTicket, Command, PendingWrite, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::CommittedRouting;

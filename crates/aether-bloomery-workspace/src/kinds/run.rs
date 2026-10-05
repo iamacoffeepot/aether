@@ -5,7 +5,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::ProtocolPath;
-use aether_bloomery_kinds::{ArtifactStorage, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{ArtifactStorage, Tree};
+use aether_data::{OpaqueBytes, Ref};
 
 use crate::kinds::environment::{Environment, ToolName};
 use crate::kinds::order::{self, OrderError};
@@ -347,7 +348,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use aether_bloomery_kinds::{Digest, Ref, Tree};
+    use aether_bloomery_kinds::Tree;
+    use aether_data::{Digest, Ref};
 
     use super::{
         ENV_KEY_MAX_BYTES, ENV_VALUE_MAX_BYTES, EnvEntry, EnvVar, EnvVarError, MAX_STEPS, Mount, Mounts, MountsError,

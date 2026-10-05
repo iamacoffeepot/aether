@@ -5,9 +5,10 @@ use std::thread;
 
 use aether_actor::{ActorPath, PathRefusal, PathRefused};
 use aether_bloomery_journal::{JournalActor, JournalReader};
-use aether_bloomery_kinds::{Node, Path, Ref, Tree, UnitKey};
+use aether_bloomery_kinds::{Node, Path, Tree, UnitKey};
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest, TarWriter};
 use aether_bloomery_workspace::{ImageRef, Import, ImportError, ImportResult};
+use aether_data::Ref;
 use aether_harness_bloomery::BloomeryHarness;
 
 use crate::support::{CONTAINER, IMAGE, TestResult, boot, child, large_payload, lines, serving, stored, tree_of};

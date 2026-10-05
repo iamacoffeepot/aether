@@ -6,9 +6,10 @@
 //! restages only the directories it passes through, and every artifact it
 //! stages is reachable from the root it returns.
 
-use aether_bloomery_kinds::{Name, Node, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 
 /// Why a path names no entry the tool can use: the first prefix of the path
 /// that is missing or is not a directory.
@@ -157,8 +158,9 @@ pub async fn place(
 mod tests {
     use std::collections::BTreeMap;
 
-    use aether_bloomery_kinds::{Node, OpaqueBytes, Ref, Tree};
+    use aether_bloomery_kinds::{Node, Tree};
     use aether_bloomery_program::Edited;
+    use aether_data::{OpaqueBytes, Ref};
 
     use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
     use crate::tools::edit::{EditArgs, TreeEdit};

@@ -11,8 +11,9 @@
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, OpaqueBytes, Seq};
+use aether_bloomery_kinds::{ActivationRejected, Detail, DriverRecord, Head, Seq};
 use aether_bloomery_program::HeadActivation;
+use aether_data::{Digest, OpaqueBytes};
 
 use crate::runtime::core::{Command, PendingWrite, PlannedRecord, ProgramCore};
 use crate::runtime::reactors::claim::Claim;

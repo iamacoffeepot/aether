@@ -19,8 +19,9 @@ mod fire;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use aether_bloomery_kinds::{CLOCK, CLOCK_BUNDLE, Digest, Head, OpaqueBytes};
+use aether_bloomery_kinds::{CLOCK, CLOCK_BUNDLE, Head};
 use aether_bloomery_program::Heads;
+use aether_data::{Digest, OpaqueBytes};
 
 /// The bundle digest `program` names at `heads`.
 ///

@@ -1,10 +1,9 @@
 //! Reactor protocol mail: `WarmEntries` validation and pinned kind ids.
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Evaluated, Event, JournalEntry, Status, StatusQuery, Utf8Text, Warm, WarmEntries,
-    WarmEntriesError, Warmed,
+    ClosureArtifact, Evaluated, Event, JournalEntry, Status, StatusQuery, Warm, WarmEntries, WarmEntriesError, Warmed,
 };
-use aether_data::{Kind, KindId};
+use aether_data::{Kind, KindId, Utf8Text};
 
 fn entry(seq: u64) -> JournalEntry {
     JournalEntry { seq, kind: KindId(1), cause: None, recorded_at_millis: 0, bytes: Vec::new(), cites: Vec::new() }

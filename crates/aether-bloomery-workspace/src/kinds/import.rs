@@ -2,7 +2,8 @@
 //! decision 3, amended 2026-09-25).
 
 use aether_actor::{HeldReply, PathRefused, ProtocolPath};
-use aether_bloomery_kinds::{ArtifactStorage, Detail, Ref, Tree};
+use aether_bloomery_kinds::{ArtifactStorage, Detail, Tree};
+use aether_data::Ref;
 
 use crate::kinds::image::ImageRef;
 

@@ -5,7 +5,8 @@
 //! the batch is resent at the actual sequence: staging is idempotent, so a
 //! resend can only store what the first attempt did not.
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, Publish, PublishResult};
+use aether_bloomery_kinds::{EncodedArtifact, Publish, PublishResult};
+use aether_data::Digest;
 use anyhow::{Result, bail};
 
 pub(super) use crate::bloomery::Stage;

@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use aether_bloomery_kinds::{Name, Node, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::Ref;
 
 use super::entry::EntryPath;
 use super::{DecodeError, Refusal};

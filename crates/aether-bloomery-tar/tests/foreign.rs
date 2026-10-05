@@ -46,7 +46,8 @@
 
 mod common;
 
-use aether_bloomery_kinds::{Node, Path, Ref, Tree};
+use aether_bloomery_kinds::{Node, Path, Tree};
+use aether_data::Ref;
 use common::MemoryStore;
 
 const GNU: &[u8] = include_bytes!("fixtures/gnu.tar");

@@ -1,6 +1,8 @@
 //! A reactor reaction that produced no records for its trigger.
 
-use crate::{Detail, Digest, ReactorName};
+use aether_data::Digest;
+
+use crate::{Detail, ReactorName};
 
 /// A reactor reaction that failed. Written only by the driver, caused by
 /// the trigger seq. `reactor: None` is a poisoned or protocol-level

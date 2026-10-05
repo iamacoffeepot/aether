@@ -6,7 +6,7 @@ use wasmtime::Engine;
 
 use super::{Module, ModuleCache};
 use crate::actor::native::BlobCheckIn;
-use crate::store::{BlobStore, read_all};
+use crate::store::BlobStore;
 
 const ALPHA: &str = r#"(module (func (export "alpha")))"#;
 const BETA: &str = r#"(module (func (export "beta")))"#;
@@ -89,15 +89,15 @@ fn a_module_leaves_the_map_once_its_last_holder_drops() {
     assert!(alpha_again.compiled().get_export("alpha").is_some(), "a dead entry compiles again rather than failing");
 }
 
-/// The module must not hold its code: once the caller drops the code blob,
-/// the store holds only the asset slab, and the asset blob reads back exactly
-/// its section's payload. It catches a module that retains the wasm bytes, or
-/// an asset served from the wrong range.
+/// The module holds neither its code nor any asset's payload: once the
+/// caller drops the code blob, nothing of the module is resident in the
+/// store, while the manifest still catalogues the asset. It catches a module
+/// entry that keeps a bundle's payload (or its wasm bytes) resident for as
+/// long as any instance or publication holds the module.
 #[test]
-fn the_code_bytes_leave_the_store_once_the_code_blob_drops() {
+fn a_module_holds_neither_its_code_nor_its_asset_payloads() {
     let store = store();
     let (cache, blobs) = (cache(), BlobCheckIn::new(store.clone()));
-    let payload: &[u8] = b"slime-sprite-bytes";
     let code = blobs.check_in(wasm(
         r#"(module (@custom "aether.asset.sprites/slime.png" "slime-sprite-bytes") (func (export "noop")))"#,
     ));
@@ -105,12 +105,12 @@ fn the_code_bytes_leave_the_store_once_the_code_blob_drops() {
     let module = cache.check_in(&blobs, &code).expect("check the module in");
     drop(code);
 
-    assert_eq!(store.resident_bytes(), payload.len(), "only the asset slab stays resident");
-    let [(name, asset)] = module.assets() else {
-        panic!("one asset section is one asset blob, got {:?}", module.assets());
+    assert_eq!(store.resident_bytes(), 0, "a held module keeps no bytes resident");
+    let [asset] = module.manifest().asset_catalog() else {
+        panic!("one asset section is one catalog entry");
     };
-    assert_eq!(name.as_str(), "sprites/slime.png");
-    assert_eq!(&*read_all(asset).expect("read the asset blob"), payload);
+    assert_eq!(asset.name, "sprites/slime.png");
+    assert_eq!(asset.len, b"slime-sprite-bytes".len() as u64);
 }
 
 /// `Owned` code bytes and the same bytes already checked in must answer one

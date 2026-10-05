@@ -5,7 +5,8 @@
 
 use std::iter::once;
 
-use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Evaluated, Event, Status};
+use aether_bloomery_kinds::{ActivationRejected, Detail, DriverRecord, Evaluated, Event, Status};
+use aether_data::Digest;
 
 use crate::runtime::core::{Command, EvaluateTicket, ProgramCore, StatusTicket};
 use crate::runtime::reactors::instance::Health;

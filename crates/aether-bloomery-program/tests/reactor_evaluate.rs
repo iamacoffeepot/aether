@@ -2,11 +2,11 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, SetHeads, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHeads, Tree};
 use aether_bloomery_program::{
     ArmVisitor, At, Guard, Heads, Output, Owner, Params, PrepareError, Reactor, Trigger, reactor,
 };
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, Ref, Storage, StorageData};
 
 const CURRENT: Head<Program> = Head::new("current");
 const SOURCE: Head<Tree> = Head::new("source");

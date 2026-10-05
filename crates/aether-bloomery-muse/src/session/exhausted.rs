@@ -7,8 +7,9 @@
 //! times. After that it answers the call with the text this program stages,
 //! and the session goes on.
 
-use aether_bloomery_kinds::{FaultReason, Mode, ProgramName, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{FaultReason, Mode, ProgramName, Refusal};
 use aether_bloomery_program::{Env, Program, Sync, program};
+use aether_data::{Ref, Utf8Text};
 
 /// The most times the loop requests a tool run again after it ran out of
 /// time or memory: three attempts in all.
@@ -103,7 +104,8 @@ impl Program for SessionExhausted {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref};
+    use aether_bloomery_kinds::ProgramName;
+    use aether_data::Ref;
 
     use super::{ExhaustedInput, Exhaustion, SessionExhausted};
     use crate::session::fixture::run;

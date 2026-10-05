@@ -1,8 +1,9 @@
 //! `muse.session.open`: the one way a session starts.
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree, Utf8Text};
+use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
 use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::{Ref, Utf8Text};
 use serde_json::Value;
 
 use aether_bloomery_workspace_programs::proof::ProofBound;
@@ -182,12 +183,12 @@ fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> 
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Digest, ErasedRef, Head, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Head, ProgramName, Refusal, Tree};
     use aether_bloomery_program::Program;
     use aether_bloomery_workspace::TreePath;
     use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
     use aether_bloomery_workspace_programs::proof::ProofBound;
-    use aether_data::Kind;
+    use aether_data::{Digest, ErasedRef, Kind, Ref};
 
     use super::{OpenInput, SessionOpen};
     use crate::input::tests::offered_tool;
