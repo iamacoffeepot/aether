@@ -161,8 +161,8 @@ impl Program for SessionOpen {
             let reason = format!("{} is not offered as a tool the session binds", tool.program().as_str());
             return Err(Refusal::Refused { reason: Detail::new(reason) });
         }
-        let rebased = input.settings.tools().iter().find(|tool| diffs_another_tree(tool, input.tree()));
-        if rebased.is_some() {
+        let rebased = input.settings.tools().iter().any(|tool| diffs_another_tree(tool, input.tree()));
+        if rebased {
             return Err(refused(String::from("tree.diff is bound to a tree other than the session's")));
         }
         for proof in input.required.as_slice() {

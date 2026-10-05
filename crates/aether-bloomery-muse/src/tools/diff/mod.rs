@@ -22,7 +22,8 @@ use walk::{Pair, changes};
 /// different to show.
 pub const DIFF_MAX_EDITS: usize = 1000;
 
-/// The most bytes of one side of a file one diff reads: 1 MiB.
+/// The most bytes one side of a file may hold for its line diff to be shown;
+/// a longer file is named as too large.
 pub const DIFF_MAX_FILE_BYTES: usize = MAX_TEXT_BYTES;
 
 /// The most entries one diff compares, directories included.
@@ -106,6 +107,7 @@ async fn diff(
         Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
     };
     let scope = args.path.as_ref().map_or("the tree", TreePath::as_str).to_owned();
+
     let start = match &args.path {
         None => Pair { path: String::new(), old: Some(Node::Directory(base)), new: Some(Node::Directory(current)) },
         Some(path) => {
@@ -117,6 +119,7 @@ async fn diff(
             }
         }
     };
+
     let walked = changes(env, start, budget.entries).await?;
     let empty = walked.changed.is_empty();
     let settled = !walked.stopped;
@@ -124,6 +127,7 @@ async fn diff(
     if no_change {
         return Ok(Viewed::new(format!("No change in {scope} since the session opened.")));
     }
+
     let total = walked.changed.len();
     let mut lines = Lines::new(budget.output);
     let mut stop: Option<Stop> = None;
@@ -147,6 +151,7 @@ async fn diff(
             stop = Some(Stop::Output { shown: 0, changed: total });
         }
     }
+
     let mut scanned = 0;
     let mut shown = 0;
     let blocks_open = stop.is_none();
@@ -167,12 +172,14 @@ async fn diff(
             shown += 1;
         }
     }
+
     let walk_stopped = walked.stopped;
     let stop = match stop {
         Some(marked) => Some(marked),
         None if walk_stopped => Some(Stop::Entries(walked.visited)),
         None => None,
     };
+
     match stop {
         None => Ok(lines.finish(String::new)),
         Some(marked) => {
@@ -363,6 +370,36 @@ mod tests {
         assert_eq!(
             viewed.text(),
             "D README\nM blob.bin\nA docs/notes.md\nM link\nM run\n\n--- a/README\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-# Bloomery\n--- a/blob.bin\n+++ b/blob.bin\nBinary files a/blob.bin and b/blob.bin differ\n--- /dev/null\n+++ b/docs/notes.md\n@@ -0,0 +1,1 @@\n+Iron blooms.\n--- a/link\n+++ b/link\n@@ -1,1 +1,1 @@\n-README\n+src/lib.rs\nold mode 100755\nnew mode 100644\n--- a/run\n+++ b/run"
+        );
+    }
+
+    #[test]
+    fn replaced_symlink_and_directory_show_as_removal_then_addition() {
+        // Catches a file-for-symlink swap shown as one `M` with the target diffed against file text, and a directory
+        // replaced by a file that drops the removed children or the new file.
+        let small = SmallTree::new();
+
+        let link_text = b"file text\n";
+        let link_blob = stored_bytes(link_text);
+        let link_ref = Ref::<OpaqueBytes>::of_bytes(link_text);
+        let (current, root_artifact) =
+            small.changed(|entries| drop(entries.insert(name("link"), Node::File(link_ref))));
+        let (input, closure) = small.diff_call(current, &DiffArgs::new(None), vec![link_blob, root_artifact]);
+        let (viewed, _) = run_async::<TreeDiff>(&input, closure).expect("a diff is a result");
+        assert_eq!(
+            viewed.text(),
+            "D link\nA link\n\n--- a/link\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-README\n--- /dev/null\n+++ b/link\n@@ -0,0 +1,1 @@\n+file text"
+        );
+
+        let src_text = b"src file\n";
+        let src_blob = stored_bytes(src_text);
+        let src_ref = Ref::<OpaqueBytes>::of_bytes(src_text);
+        let (current, root_artifact) = small.changed(|entries| drop(entries.insert(name("src"), Node::File(src_ref))));
+        let (input, closure) = small.diff_call(current, &DiffArgs::new(None), vec![src_blob, root_artifact]);
+        let (viewed, _) = run_async::<TreeDiff>(&input, closure).expect("a diff is a result");
+        assert_eq!(
+            viewed.text(),
+            "A src\nD src/lib.rs\n\n--- /dev/null\n+++ b/src\n@@ -0,0 +1,1 @@\n+src file\n--- a/src/lib.rs\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-pub fn smelt() {}"
         );
     }
 

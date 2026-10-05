@@ -52,10 +52,13 @@ pub(super) async fn changes(env: &mut Env<Async>, start: Pair, max_entries: usiz
             stopped = true;
             break;
         }
+
         visited += 1;
+
         if pair.old == pair.new {
             continue;
         }
+
         match (&pair.old, &pair.new) {
             (Some(Node::Directory(old_dir)), Some(Node::Directory(new_dir))) => {
                 let old_tree = env.read(*old_dir).await?;
@@ -72,30 +75,26 @@ pub(super) async fn changes(env: &mut Env<Async>, start: Pair, max_entries: usiz
             }
             (Some(Node::Directory(dir)), other) => {
                 let tree = env.read(*dir).await?;
+
                 for (name, node) in tree.entries().iter().rev() {
                     let child = child_path(&pair.path, name);
                     stack.push(Pair { path: child, old: Some(node.clone()), new: None });
                 }
-                let other_is_leaf = matches!(other, Some(Node::File(_) | Node::Executable(_) | Node::Symlink(_)));
-                if other_is_leaf {
-                    let Some(node) = other.clone() else {
-                        continue;
-                    };
+
+                if let Some(node) = other.clone() {
                     let leaf = leaf_of(node);
                     changed.push(Changed { path: pair.path.clone(), old: None, new: Some(leaf) });
                 }
             }
             (other, Some(Node::Directory(dir))) => {
                 let tree = env.read(*dir).await?;
+
                 for (name, node) in tree.entries().iter().rev() {
                     let child = child_path(&pair.path, name);
                     stack.push(Pair { path: child, old: None, new: Some(node.clone()) });
                 }
-                let other_is_leaf = matches!(other, Some(Node::File(_) | Node::Executable(_) | Node::Symlink(_)));
-                if other_is_leaf {
-                    let Some(node) = other.clone() else {
-                        continue;
-                    };
+
+                if let Some(node) = other.clone() {
                     let leaf = leaf_of(node);
                     changed.push(Changed { path: pair.path.clone(), old: Some(leaf), new: None });
                 }
@@ -103,23 +102,14 @@ pub(super) async fn changes(env: &mut Env<Async>, start: Pair, max_entries: usiz
             _ => {
                 let old = pair.old.clone().map(leaf_of);
                 let new = pair.new.clone().map(leaf_of);
-                let old_is_symlink = matches!(old, Some(Leaf::Symlink(_)));
-                let new_is_symlink = matches!(new, Some(Leaf::Symlink(_)));
-                let old_is_file = matches!(old, Some(Leaf::File { .. }));
-                let new_is_file = matches!(new, Some(Leaf::File { .. }));
-                let first_swap = old_is_symlink && new_is_file;
-                let second_swap = old_is_file && new_is_symlink;
-                let swaps_kind = first_swap || second_swap;
-                let old_present = old.is_some();
-                let new_present = new.is_some();
-                let both_present = old_present && new_present;
-                let swaps = swaps_kind && both_present;
-                if swaps {
-                    changed.push(Changed { path: pair.path.clone(), old, new: None });
-                    changed.push(Changed { path: pair.path, old: None, new });
-                } else {
-                    let either_present = old_present || new_present;
-                    if either_present {
+
+                match (old, new) {
+                    (old @ Some(Leaf::Symlink(_)), new @ Some(Leaf::File { .. }))
+                    | (old @ Some(Leaf::File { .. }), new @ Some(Leaf::Symlink(_))) => {
+                        changed.push(Changed { path: pair.path.clone(), old, new: None });
+                        changed.push(Changed { path: pair.path, old: None, new });
+                    }
+                    (old, new) => {
                         changed.push(Changed { path: pair.path, old, new });
                     }
                 }

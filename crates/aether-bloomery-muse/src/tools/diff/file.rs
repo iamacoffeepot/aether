@@ -38,6 +38,7 @@ pub(super) async fn block(
     if !fits_header {
         return Ok(Shown { fit: false, read_bytes: 0 });
     }
+
     if let (Some(Leaf::File { blob: old_blob, .. }), Some(Leaf::File { blob: new_blob, .. })) =
         (&change.old, &change.new)
     {
@@ -46,25 +47,11 @@ pub(super) async fn block(
             return Ok(Shown { fit: true, read_bytes: 0 });
         }
     }
-    let mut read_bytes = 0;
-    let old_bytes = match &change.old {
-        None => Vec::new(),
-        Some(Leaf::File { blob, .. }) => {
-            let payload = env.read_payload(blob.erase()).await?;
-            read_bytes += payload.len();
-            payload
-        }
-        Some(Leaf::Symlink(target)) => target.as_str().as_bytes().to_vec(),
-    };
-    let new_bytes = match &change.new {
-        None => Vec::new(),
-        Some(Leaf::File { blob, .. }) => {
-            let payload = env.read_payload(blob.erase()).await?;
-            read_bytes += payload.len();
-            payload
-        }
-        Some(Leaf::Symlink(target)) => target.as_str().as_bytes().to_vec(),
-    };
+
+    let (old_bytes, old_read) = side_bytes(env, change.old.as_ref()).await?;
+    let (new_bytes, new_read) = side_bytes(env, change.new.as_ref()).await?;
+    let read_bytes = old_read + new_read;
+
     let old_too_large = old_bytes.len() > DIFF_MAX_FILE_BYTES;
     let new_too_large = new_bytes.len() > DIFF_MAX_FILE_BYTES;
     let over_cap = old_too_large || new_too_large;
@@ -72,6 +59,7 @@ pub(super) async fn block(
         let fit = too_large(lines);
         return Ok(Shown { fit, read_bytes });
     }
+
     let Ok(old_text) = str::from_utf8(&old_bytes) else {
         let fit = binary(&change.path, lines);
         return Ok(Shown { fit, read_bytes });
@@ -80,18 +68,21 @@ pub(super) async fn block(
         let fit = binary(&change.path, lines);
         return Ok(Shown { fit, read_bytes });
     };
+
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
     let Some(script) = edits(&old_lines, &new_lines, max_edits) else {
         let fit = too_different(old_lines.len(), new_lines.len(), lines);
         return Ok(Shown { fit, read_bytes });
     };
+
     let grouped = hunks(&script);
     let empty = grouped.is_empty();
     if empty {
         let fit = lines.push("@@ only line endings or the final newline differ @@");
         return Ok(Shown { fit, read_bytes });
     }
+
     let mut fit = true;
     for hunk in &grouped {
         let pushed = render_hunk(hunk, &script, &old_lines, &new_lines, lines);
@@ -101,4 +92,18 @@ pub(super) async fn block(
         }
     }
     Ok(Shown { fit, read_bytes })
+}
+
+/// One side's bytes and how many blob bytes reading it took: an absent side
+/// is empty, a file is its payload, and a symlink is its target.
+async fn side_bytes(env: &mut Env<Async>, side: Option<&Leaf>) -> Result<(Vec<u8>, usize), Refusal> {
+    match side {
+        None => Ok((Vec::new(), 0)),
+        Some(Leaf::File { blob, .. }) => {
+            let payload = env.read_payload(blob.erase()).await?;
+            let count = payload.len();
+            Ok((payload, count))
+        }
+        Some(Leaf::Symlink(target)) => Ok((target.as_str().as_bytes().to_vec(), 0)),
+    }
 }
