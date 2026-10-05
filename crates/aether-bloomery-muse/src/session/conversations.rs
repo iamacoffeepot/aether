@@ -853,7 +853,8 @@ mod tests {
     fn a_call_runs_in_the_bundle_its_offer_names() {
         // Catches a loop that calls every tool in the muse bundle, or reads the head of another offer than the one
         // the call names.
-        let (muse, _) = offered();
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (muse, _) = offered(tree);
         let echo = &muse.as_slice()[0];
         let proofs = Head::new("proofs");
         let program = ProgramName::new("proof.check").expect("program");

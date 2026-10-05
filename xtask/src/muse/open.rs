@@ -19,7 +19,7 @@ use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
 
 /// What every session is told ahead of the instructions file.
-const PREFACE: &str = "You work only through the offered tools, and end your run only by calling `muse-end`: `Done` with a summary once every briefed change is in the tree, `Blocked` with what stopped you when the work cannot be finished, or `Asked` with the one question you cannot go on without. A reply without a tool call does not end the session. A plan's open questions still go in its Questions section; `Asked` is for work that cannot go on without an answer. Make every independent tool call in the same turn: reads, searches, and edits to different files go together, not one per turn. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
+const PREFACE: &str = "You work only through the offered tools, and end your run only by calling `muse-end`: `Done` with a summary once every briefed change is in the tree, `Blocked` with what stopped you when the work cannot be finished, or `Asked` with the one question you cannot go on without. A reply without a tool call does not end the session. A plan's open questions still go in its Questions section; `Asked` is for work that cannot go on without an answer. Before you end `Done`, run `tree-diff` and read your own changes. Make every independent tool call in the same turn: reads, searches, and edits to different files go together, not one per turn. The sections below on Commands, the MCP harness, Local checks and CI, and the branch, pull-request, and landing steps of Workflow describe how other agents work; every rule about the code itself applies to you.\n\n";
 
 /// What a session offered the proof tools is told after [`PREFACE`].
 const PROOFS: &str = "`proof-clippy` formats the whole workspace with `cargo fmt` and checks it with `cargo clippy`, as CI does. `proof-test` formats the whole workspace and runs its tests with the session's test env. Run each once your changes are in, fix what it reports, and run it again until it passes before you end `Done`. Each returns the formatted tree, so read a file it rewrote again before you edit it. `vendor-list`, `vendor-read`, and `vendor-grep` read the vendored crate sources as `tree-list`, `tree-read`, and `tree-grep` read your tree, so read a dependency's API there before you call it.\n\n";
@@ -82,12 +82,8 @@ pub(super) struct OpenArgs {
 /// is not live.
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
     let proofs = proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?;
-    let ((tools, mut artifacts), preface) = proofs.as_ref().map_or_else(
-        || (offered(), PREFACE.to_owned()),
-        |proofs| (offered_with_proofs(proofs), [PREFACE, PROOFS].concat()),
-    );
+    let preface = proofs.as_ref().map_or_else(|| PREFACE.to_owned(), |_| [PREFACE, PROOFS].concat());
     let (required, required_args) = required(proofs.as_ref(), &args.require)?;
-    artifacts.extend(required_args);
     let preface = format!("{preface}{}", gate_preface(&required)?);
     let brief =
         fs::read_to_string(&args.brief).with_context(|| format!("reading the brief {}", args.brief.display()))?;
@@ -103,6 +99,10 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         (None, Some(tree)) => parse_digest(tree)?,
         (None, None) => return Err(anyhow!("name the session's tree with --commit or --tree")),
     };
+    let (tools, mut artifacts) = proofs
+        .as_ref()
+        .map_or_else(|| offered(Ref::from_digest(tree)), |proofs| offered_with_proofs(Ref::from_digest(tree), proofs));
+    artifacts.extend(required_args);
 
     let input = OpenInput::new(
         args.settings.settings(tools)?,
