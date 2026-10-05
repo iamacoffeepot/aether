@@ -14,7 +14,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
 use super::activation::muse_activation;
-use super::{EngineArgs, SettingsArgs, call, turn_limit};
+use super::call::call;
+use super::{EngineArgs, SettingsArgs, turn_limit};
 use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
 

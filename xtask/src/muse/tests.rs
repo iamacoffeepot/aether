@@ -1,19 +1,20 @@
-//! The export walk and the wait's session attribution, over a scratch
-//! journal read through the same [`Reads`] seam the engine connection
-//! implements.
+//! The export walk, the wait's session attribution, and the call retry walk:
+//! the first two read a scratch journal through the same [`Reads`] seam the
+//! engine connection implements, and the last drives `settle` without one.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::iter::once;
 use std::path::{Path as HostPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, process};
 
 use aether_bloomery_journal::{Batch, Journal};
 use aether_bloomery_kinds::{
-    Activated, ActivationRejected, ClosureArtifact, Detail, EncodedArtifact, Fault, FaultReason, JournalEntry, Name,
-    NativeOrigin, Node, Path, ProgramName, ProgramRef, ReactorName, ReactorSet, ReadArtifacts, ReadArtifactsResult,
-    ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, RequestSource, Requested, RuleName, Seq, Transition,
-    Tree, WatchHead, WatchHeadResult,
+    Activated, ActivationRejected, CallOutcome, ClosureArtifact, Detail, EncodedArtifact, Fault, FaultReason,
+    JournalEntry, Name, NativeOrigin, Node, Path, ProgramName, ProgramRef, ReactorName, ReactorSet, ReadArtifacts,
+    ReadArtifactsResult, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, RequestSource, Requested,
+    RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_muse::{
     ContinueInput, Echo, Endpoint, InputLimit, MUSE, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
@@ -30,6 +31,7 @@ use serde_json::{Value, json};
 
 use super::activation::{MuseActivation, muse_activation, verdict_after};
 use super::bind_programs::programs_publish;
+use super::call::{MAX_ATTEMPTS, settle};
 use super::export::{Action, Change, export};
 use super::open::parse_test_env;
 use super::wait::{Usage, follow};
@@ -488,5 +490,91 @@ fn binding_programs_moves_only_their_head_and_is_unchanged_on_a_rebind() -> Resu
     bound(&mut reads, RecordedHead::from(&WORKSPACE_PROGRAMS), EncodedArtifact::opaque_bytes(b"programs"))?;
     let rebind = programs_publish(&mut reads, programs, fence + 1)?;
     assert!(rebind.is_none(), "a head that names the bundle owes no move");
+    Ok(())
+}
+
+/// The input the call retry outcomes name.
+const TEST_INPUT: Digest = Digest::from_bytes([0x01; 32]);
+
+/// The program the call retry outcomes name.
+fn test_program() -> Result<ProgramRef> {
+    Ok(ProgramRef::new(BUNDLE, ProgramName::new("test.program")?))
+}
+
+/// A fault outcome recorded at `seq`.
+fn fault_outcome(seq: u64) -> Result<CallOutcome> {
+    Ok(CallOutcome::Fault {
+        key: 0,
+        seq,
+        fault: Fault { program: test_program()?, input: TEST_INPUT, reason: FaultReason::TimedOut },
+    })
+}
+
+/// A transition outcome recorded at `seq`.
+fn transition_outcome(seq: u64) -> Result<CallOutcome> {
+    Ok(CallOutcome::Transition {
+        key: 0,
+        seq,
+        transition: Transition { program: test_program()?, input: TEST_INPUT, result: Digest::from_bytes([0x02; 32]) },
+    })
+}
+
+#[test]
+fn a_replayed_fault_is_asked_again_and_returns_the_transition() -> Result<()> {
+    // Catches returning the replayed fault instead of asking again under the next key.
+    let mut scripted = [fault_outcome(5)?, transition_outcome(12)?].into_iter();
+    let mut asked = Vec::new();
+    let outcome = settle(10, |attempt| {
+        asked.push(attempt);
+        Ok(scripted.next().expect("asked past the script"))
+    })?;
+
+    assert!(matches!(outcome, CallOutcome::Transition { seq: 12, .. }), "the walk returns the fresh transition");
+    assert_eq!(asked, vec![0, 1]);
+    Ok(())
+}
+
+#[test]
+fn a_fresh_fault_returns_without_another_ask() -> Result<()> {
+    // Catches re-asking a fresh fault in one command.
+    let mut scripted = once(fault_outcome(11)?);
+    let mut asked = Vec::new();
+    let outcome = settle(10, |attempt| {
+        asked.push(attempt);
+        Ok(scripted.next().expect("asked past the script"))
+    })?;
+
+    assert!(matches!(outcome, CallOutcome::Fault { seq: 11, .. }), "the fresh fault is this command's outcome");
+    assert_eq!(asked, vec![0]);
+    Ok(())
+}
+
+#[test]
+fn a_recorded_transition_returns_after_the_first_ask() -> Result<()> {
+    // Catches breaking the replay of a recorded success by asking again.
+    let mut scripted = once(transition_outcome(5)?);
+    let mut asked = Vec::new();
+    let outcome = settle(10, |attempt| {
+        asked.push(attempt);
+        Ok(scripted.next().expect("asked past the script"))
+    })?;
+
+    assert!(matches!(outcome, CallOutcome::Transition { seq: 5, .. }), "the recorded transition is replayed");
+    assert_eq!(asked, vec![0]);
+    Ok(())
+}
+
+#[test]
+fn replayed_faults_on_every_attempt_fail_after_the_cap() -> Result<()> {
+    // Catches an unbounded walk over replayed faults.
+    let mut asked = Vec::new();
+    let error = settle(10, |attempt| {
+        asked.push(attempt);
+        fault_outcome(5)
+    })
+    .expect_err("replayed faults on every attempt fail");
+
+    assert_eq!(asked.len(), usize::try_from(MAX_ATTEMPTS)?);
+    assert!(error.to_string().contains(&MAX_ATTEMPTS.to_string()), "the error names the count: {error}");
     Ok(())
 }

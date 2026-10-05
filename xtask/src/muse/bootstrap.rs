@@ -18,7 +18,7 @@ use clap::Args;
 
 use super::EngineArgs;
 use super::bind_programs::{commit, named_move};
-use super::call_in;
+use super::call::call_in;
 use crate::bloomery::read_value;
 
 /// Arguments for `cargo xtask muse bootstrap`.

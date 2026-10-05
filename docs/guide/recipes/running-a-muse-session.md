@@ -155,8 +155,10 @@ after=<seq>
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of
-opening a second one. The digest covers the instructions with the tree, brief,
-seeds, settings, and required proofs. Keep `session=` and `after=` for the next step.
+opening a second one. A recorded fault is asked again under the next attempt's
+key, so rerunning after a fault outside the input makes a fresh call. The
+digest covers the instructions with the tree, brief, seeds, settings, and
+required proofs. Keep `session=` and `after=` for the next step.
 
 ## 4. Wait for it to rest
 

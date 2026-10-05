@@ -24,13 +24,17 @@
 //!
 //! `open` and `continue` call their program under a key derived from the
 //! input's digest, so a retry after a lost reply replays the recorded outcome
-//! instead of opening or continuing twice. Two opens with the same tree,
-//! instructions, brief, seeds, and settings therefore name the same session.
+//! instead of opening or continuing twice. A recorded transition is replayed;
+//! a recorded fault is asked again under the next attempt's key, so a rerun
+//! after a fault outside the input makes a fresh call. Two opens with the same
+//! tree, instructions, brief, seeds, and settings therefore name the same
+//! session.
 
 mod activation;
 mod bind;
 mod bind_programs;
 mod bootstrap;
+mod call;
 mod continue_;
 mod export;
 mod open;
@@ -40,20 +44,14 @@ mod wait;
 #[cfg(test)]
 mod tests;
 
-use aether_bloomery_kinds::{Call, CallOutcome, Head, NativeOrigin, ProgramName, UnitKey};
+use aether_bloomery_kinds::UnitKey;
 use aether_bloomery_muse::{
-    Endpoint, InputLimit, MUSE, ModelName, OfferedTools, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
+    Endpoint, InputLimit, ModelName, OfferedTools, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings,
 };
-use aether_bloomery_program::Program;
-use aether_data::{Digest, OpaqueBytes, Ref};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::bloomery::{self, Engine};
-
-/// The origin every call these verbs make names; the driver keys replays by
-/// it and the call key together.
-const ORIGIN: &str = "xtask.muse";
 
 /// Arguments for `cargo xtask muse`.
 #[derive(Args, Debug)]
@@ -202,41 +200,4 @@ fn input_limit(tokens: u64) -> Result<InputLimit> {
 /// `--max-turns` as a limit.
 fn turn_limit(turns: u32) -> Result<TurnLimit> {
     TurnLimit::new(turns).map_err(|error| anyhow!("--max-turns: {error}"))
-}
-
-/// Ask the driver to run `P` from the bundle [`MUSE`] resolves to over the
-/// stored `input`, and return the seq of the run's recorded transition.
-///
-/// # Errors
-/// The driver refused the call, the run faulted, or the transport failed.
-fn call<P: Program>(engine: &mut Engine, input: Ref<P::Input>) -> Result<u64> {
-    let (seq, _) = call_in::<P>(engine, MUSE, input)?;
-    Ok(seq)
-}
-
-/// Ask the driver to run `P` from the bundle `bundle` resolves to over the
-/// stored `input`, and return the seq and result digest of the run's recorded
-/// transition.
-///
-/// The call key is the first eight bytes of the input's digest, so a retried
-/// call with the same input replays the outcome the first one recorded.
-///
-/// # Errors
-/// The driver refused the call, the run faulted, or the transport failed.
-fn call_in<P: Program>(engine: &mut Engine, bundle: Head<OpaqueBytes>, input: Ref<P::Input>) -> Result<(u64, Digest)> {
-    let digest = input.digest();
-    let (key, _) = digest.as_bytes().split_first_chunk::<8>().context("a digest holds 32 bytes")?;
-    let call = Call {
-        program: bundle,
-        name: ProgramName::new(P::NAME).map_err(|error| anyhow!("program name {:?}: {error}", P::NAME))?,
-        input: digest,
-        origin: NativeOrigin::new(ORIGIN).map_err(|error| anyhow!("origin {ORIGIN:?}: {error}"))?,
-        key: u64::from_le_bytes(*key),
-    };
-
-    match engine.call_program(&call)? {
-        CallOutcome::Transition { seq, transition, .. } => Ok((seq, transition.result)),
-        CallOutcome::Fault { seq, fault, .. } => bail!("{} faulted at seq {seq}: {:?}", P::NAME, fault.reason),
-        CallOutcome::Refused { reason, .. } => bail!("the driver refused {}: {reason:?}", P::NAME),
-    }
 }
