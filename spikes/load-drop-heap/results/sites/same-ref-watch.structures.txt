@@ -1,0 +1,18 @@
+== same-ref-watch: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     200.6      133.1     0.00  settled-root memory (SettlementRegistry cells)
+     264.0      264.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+      30.0       38.4    -0.00  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+      13.4       17.9     0.00  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+      46.3       14.8     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:157)
+       6.7        5.3     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+      38.9        2.0     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+       1.2        0.5     0.01  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+       2.4        0.1     0.00  OTHER (no workspace frame) clone3 (linux/x86_64/clone3.S:78)
+      84.0        0.0     0.00  OTHER prepare (src/mail/cost.rs:259) <- prepare (mail/registry/effect.rs:138) <- apply_batch_locked (registry/mailbox/apply.rs:153)
+       1.0        0.0     0.00  OTHER (no workspace frame) __rust_begin_short_backtrace (src/sys/backtrace.rs:166)
+    1281.9     1066.9           sum of LINEAR and FILLING sites
+      -2.3      193.7           NOISE sites (live at one exit, not at another)

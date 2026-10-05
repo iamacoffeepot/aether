@@ -1,0 +1,139 @@
+== same-ref: counts [1000, 2000, 4000]
+dhat live bytes at exit: [70463035, 70442749, 73853425]  blocks: [29581, 33507, 41576]
+heap slope bytes/cycle: (N,2N) -20.3  (2N,4N) 1705.3   blocks/cycle: 3.93 4.03
+-- dhat: exit readings across runs (bytes), then slope per cycle over (N,2N) and (2N,4N)
+   rss            [173301760, 171384832, 179023872]  slope   -1916.9    3819.5   after malloc_trim slope   -6332.4    5140.5
+   in_use         [108696416, 107692192, 112585584]  slope   -1004.2    2446.7   after malloc_trim slope    -985.2    2454.5
+   free           [64347296, 71466848, 63661200]  slope    7119.6   -3902.8   after malloc_trim slope    8345.7   -4533.2
+   heap_rss       [3375104, 2240512, 3366912]  slope   -1134.6     563.2   after malloc_trim slope       0.0      12.3
+   anon_rw_rss    [148987904, 148992000, 156000256]  slope       4.1    3504.1   after malloc_trim slope   -4804.6    5007.4
+   anon_rw_maps   [316, 317, 318]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_exec_rss  [229376, 229376, 229376]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_ro_rss    [352256, 352256, 352256]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   file_rss       [18251776, 17465344, 16973824]  slope    -786.4    -245.8   after malloc_trim slope    -786.4    -245.8
+   memfd_rss      [2048000, 2048000, 2048000]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   maps           [654, 655, 656]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   dhat           [70491359, 70456320, 73840545]  slope     -35.0    1692.1   after malloc_trim slope     -20.3    1705.3
+   within the 4000-cycle run (cycles: rss, malloc in_use+mmapped, dhat live), slope from the previous sample:
+        0 rss    137392128 in_use    107288640 dhat     69860651
+      500 rss    169308160 in_use    108899024 dhat     70320817   d_rss    63832.1 d_in_use    3220.8 d_dhat     920.3
+     1000 rss    176562176 in_use    109453968 dhat     70832805   d_rss    14508.0 d_in_use    1109.9 d_dhat    1024.0
+     1500 rss    176467968 in_use    109769392 dhat     71120005   d_rss     -188.4 d_in_use     630.8 d_dhat     574.4
+     2000 rss    179175424 in_use    110544928 dhat     71889514   d_rss     5414.9 d_in_use    1551.1 d_dhat    1539.0
+     2500 rss    180760576 in_use    110871456 dhat     72180885   d_rss     3170.3 d_in_use     653.1 d_dhat     582.7
+     3000 rss    180715520 in_use    111185520 dhat     72466597   d_rss      -90.1 d_in_use     628.1 d_dhat     571.4
+     3500 rss    178913280 in_use    112418096 dhat     73679781   d_rss    -3604.5 d_in_use    2465.2 d_dhat    2426.4
+     4000 rss    179023872 in_use    112585584 dhat     73840545   d_rss      221.2 d_in_use     335.0 d_dhat     321.5
+-- plain: exit readings across runs (bytes), then slope per cycle over (N,2N) and (2N,4N)
+   rss            [122765312, 128471040, 141606912]  slope    5705.7    6567.9   after malloc_trim slope   -1720.3   -1073.2
+   in_use         [74962832, 77079888, 78673552]  slope    2117.1     796.8   after malloc_trim slope    2115.4     797.7
+   free           [48285808, 55655088, 77629808]  slope    7369.3   10987.4   after malloc_trim slope    8648.8   10363.9
+   heap_rss       [3497984, 2256896, 3514368]  slope   -1241.1     628.7   after malloc_trim slope       4.1       2.0
+   anon_rw_rss    [100524032, 107515904, 119422976]  slope    6991.9    5953.5   after malloc_trim slope   -1679.4    -696.3
+   anon_rw_maps   [314, 314, 315]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_exec_rss  [229376, 229376, 229376]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_ro_rss    [352256, 352256, 352256]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   file_rss       [16056320, 16011264, 15982592]  slope     -45.1     -14.3   after malloc_trim slope     -45.1     -14.3
+   memfd_rss      [2048000, 2048000, 2048000]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   maps           [652, 652, 653]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   dhat           [0, 0, 0]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   within the 4000-cycle run (cycles: rss, malloc in_use+mmapped, dhat live), slope from the previous sample:
+        0 rss    106090496 in_use     74284672 dhat            0
+      500 rss    116363264 in_use     74968160 dhat            0   d_rss    20545.5 d_in_use    1367.0 d_dhat       0.0
+     1000 rss    125706240 in_use     75517664 dhat            0   d_rss    18686.0 d_in_use    1099.0 d_dhat       0.0
+     1500 rss    129388544 in_use     75825744 dhat            0   d_rss     7364.6 d_in_use     616.2 d_dhat       0.0
+     2000 rss    128503808 in_use     76621440 dhat            0   d_rss    -1769.5 d_in_use    1591.4 d_dhat       0.0
+     2500 rss    129024000 in_use     76931072 dhat            0   d_rss     1040.4 d_in_use     619.3 d_dhat       0.0
+     3000 rss    140193792 in_use     77236144 dhat            0   d_rss    22339.6 d_in_use     610.1 d_dhat       0.0
+     3500 rss    140402688 in_use     78474480 dhat            0   d_rss      417.8 d_in_use    2476.7 d_dhat       0.0
+     4000 rss    141606912 in_use     78673552 dhat            0   d_rss     2408.4 d_in_use     398.1 d_dhat       0.0
+-- arena1: exit readings across runs (bytes), then slope per cycle over (N,2N) and (2N,4N)
+   rss            [69447680, 73424896, 88473600]  slope    3977.2    7524.4   after malloc_trim slope    7512.1    6105.1
+   in_use         [75602272, 76886160, 78677696]  slope    1283.9     895.8   after malloc_trim slope    1866.3     603.9
+   free           [7009952, 3665776, 5966144]  slope   -3344.2    1150.2   after malloc_trim slope   -2386.5     819.5
+   heap_rss       [39268352, 43180032, 58134528]  slope    3911.7    7477.2   after malloc_trim slope    7442.4    6058.0
+   anon_rw_rss    [11481088, 11714560, 11685888]  slope     233.5     -14.3   after malloc_trim slope     233.5     -14.3
+   anon_rw_maps   [279, 279, 279]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_exec_rss  [229376, 229376, 229376]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   anon_ro_rss    [352256, 352256, 352256]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   file_rss       [16011264, 15843328, 15970304]  slope    -167.9      63.5   after malloc_trim slope    -167.9      63.5
+   memfd_rss      [2048000, 2048000, 2048000]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   maps           [582, 582, 582]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   dhat           [0, 0, 0]  slope       0.0       0.0   after malloc_trim slope       0.0       0.0
+   within the 4000-cycle run (cycles: rss, malloc in_use+mmapped, dhat live), slope from the previous sample:
+        0 rss     54841344 in_use     73790592 dhat            0
+      500 rss     62304256 in_use     74419328 dhat            0   d_rss    14925.8 d_in_use    1257.5 d_dhat       0.0
+     1000 rss     68325376 in_use     75517296 dhat            0   d_rss    12042.2 d_in_use    2195.9 d_dhat       0.0
+     1500 rss     72777728 in_use     75827888 dhat            0   d_rss     8904.7 d_in_use     621.2 d_dhat       0.0
+     2000 rss     78880768 in_use     76621728 dhat            0   d_rss    12206.1 d_in_use    1587.7 d_dhat       0.0
+     2500 rss     82026496 in_use     76939088 dhat            0   d_rss     6291.5 d_in_use     634.7 d_dhat       0.0
+     3000 rss     83181568 in_use     76688176 dhat            0   d_rss     2310.1 d_in_use    -501.8 d_dhat       0.0
+     3500 rss     85979136 in_use     77926352 dhat            0   d_rss     5595.1 d_in_use    2476.4 d_dhat       0.0
+     4000 rss     88473600 in_use     78677696 dhat            0   d_rss     4988.9 d_in_use    1502.7 d_dhat       0.0
+
+-- by first workspace frame (bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); class)
+    -292.9      165.2    0.01  NOISE    (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)   [428708, 135800, 466140]
+    -248.7      175.4    0.02  NOISE    (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)   [316924, 68188, 418912]
+    -303.2       36.3    0.02  NOISE    (no workspace frame) {closure#0} (src/join/mod.rs:142)   [567380, 264142, 336716]
+     216.3      -86.2    0.00  NOISE    (no workspace frame) __rust_begin_short_backtrace (src/sys/backtrace.rs:166)   [80288, 296544, 124156]
+     149.5      149.5    0.00  LINEAR   apply (mail/view/double_buffer.rs:38) <- publish (mail/view/double_buffer.rs:91) <- publish (registry/mailbox/publish.rs:21)   [149520, 299024, 598032]
+     149.5      149.5    0.00  LINEAR   promote_locked (registry/mailbox/birth.rs:235) <- apply_owner_commands (registry/mailbox/commands.rs:121) <- run_cycle (mail/registry/owner.rs:423)   [149520, 299024, 598032]
+     149.5      149.5    0.00  LINEAR   publish (mail/view/double_buffer.rs:97) <- publish (registry/mailbox/publish.rs:21) <- apply_owner_commands (registry/mailbox/commands.rs:125)   [149520, 299024, 598032]
+    -142.8      148.8    0.02  NOISE    (no workspace frame) {closure#0} (src/join/mod.rs:157)   [150640, 7864, 305372]
+    -166.1      109.5    0.01  NOISE    (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)   [183552, 17448, 236400]
+    -129.8      130.4    0.03  NOISE    (no workspace frame) helper (iter/plumbing/mod.rs:410)   [318016, 188220, 448996]
+    -180.9       -3.1   -0.01  NOISE    (no workspace frame) run (rayon-core-1.13.0/src/registry.rs:50)   [221968, 41100, 34936]
+      88.0       88.0    1.00  LINEAR   clone (src/reference/actor_path.rs:37) <- clone (registry/mailbox/route.rs:26) <- apply_batch_locked (registry/mailbox/apply.rs:393)   [89709, 177709, 353709]
+      88.0       88.0    1.00  LINEAR   clone (src/reference/actor_path.rs:37) <- clone (registry/mailbox/route.rs:26) <- apply_batch_locked (registry/mailbox/apply.rs:394)   [89709, 177709, 353709]
+      88.0       88.0    1.00  LINEAR   clone (src/reference/actor_path.rs:37) <- clone (registry/mailbox/route.rs:26) <- publish (mail/view/double_buffer.rs:97)   [98734, 186734, 362646]
+      84.0       84.0    0.00  LINEAR   promote_starting (src/actor/registry.rs:238) <- install (native/spawn/activation.rs:673) <- promote_locked (registry/mailbox/birth.rs:222)   [83984, 167952, 335888]
+      74.2      -32.4   -0.01  NOISE    (no workspace frame) start_thread (./nptl/pthread_create.c:447)   [41344, 115528, 50644]
+      40.0       40.0    1.00  LINEAR   from_capabilities (mail/registry/contract.rs:59) <- host_guest (native/binding/lifecycle.rs:377) <- sync_guest (native/ctx/guest.rs:54)   [45280, 85280, 165280]
+      31.4       43.5    0.00  LINEAR   remember_settled (src/chassis/settlement.rs:128) <- fire_settled (src/chassis/settlement.rs:301) <- dispatch_envelope (native/slot/dispatcher.rs:705)   [47472, 78912, 165984]
+      34.8       34.8    0.00  LINEAR   remember_settled (src/chassis/settlement.rs:129) <- fire_settled (src/chassis/settlement.rs:301) <- {closure#1} (native/spawn/activation.rs:697)   [34816, 69632, 139264]
+      35.3       31.7   -0.04  LINEAR   (no workspace frame) clone3 (linux/x86_64/clone3.S:78)   [239145, 274449, 337771]
+      37.1       25.0   -0.00  LINEAR   remember_settled (src/chassis/settlement.rs:128) <- fire_settled (src/chassis/settlement.rs:301) <- {closure#1} (native/spawn/activation.rs:697)   [22080, 59184, 109200]
+      29.7       29.7    0.00  LINEAR   remember_settled (src/chassis/settlement.rs:129) <- fire_settled (src/chassis/settlement.rs:301) <- dispatch_envelope (native/slot/dispatcher.rs:705)   [29696, 59392, 118784]
+     -20.2       33.8   -0.00  NOISE    (no workspace frame) {closure#0} (src/join/mod.rs:165)   [39360, 19124, 86784]
+      18.4       18.4    0.00  LINEAR   mark_dead (src/actor/registry.rs:261) <- close_actor (src/actor/registry.rs:410) <- finalize_close_and_fan_out (native/slot/dispatcher.rs:765)   [18448, 36880, 73744]
+      28.2        6.7   -0.01  FILLING  (no workspace frame) run_inline (rayon-core-1.13.0/src/job.rs:102)   [22688, 50860, 64184]
+      34.8        0.0    0.00  FILLING  remember_settled (src/chassis/settlement.rs:128) <- fire_settled (src/chassis/settlement.rs:301) <- apply_owner_commands (registry/mailbox/commands.rs:103)   [34832, 69648, 69648]
+      32.8        0.0    0.00  FILLING  remember_settled (src/chassis/settlement.rs:129) <- fire_settled (src/chassis/settlement.rs:301) <- seal (spawn/spawner/mod.rs:211)   [32768, 65536, 65536]
+      27.9        0.6   -0.01  FILLING  (no workspace frame)  (sys/thread/unix.rs:118)   [39380, 67244, 68364]
+      27.0        0.9   -0.01  FILLING  (no workspace frame) call_once (src/ops/function.rs:250)   [13516, 40560, 42436]
+       3.7       -1.9   -0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:176) <-  (src/mail/outbound.rs:239)   [0, 3728, 0]
+      -3.7        0.0    0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:176) <-  (src/mail/outbound.rs:243)   [3728, 0, 0]
+       0.0        1.9    0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:176) <- egress_to_session (src/mail/outbound.rs:197)   [0, 0, 3728]
+       1.5        0.0    0.00  FILLING  __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- schedule (src/scheduler/slot.rs:405) <- wake (src/scheduler/slot.rs:500)   [0, 1520, 1520]
+      -1.5        0.0    0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- worker_loop (src/scheduler/pool.rs:294) <- {closure#0} (src/scheduler/pool.rs:217)   [1520, 0, 0]
+       0.5       -0.3   -0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:178) <-  (src/mail/outbound.rs:239)   [0, 504, 0]
+      -0.5        0.0    0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:178) <-  (src/mail/outbound.rs:243)   [504, 0, 0]
+       0.0        0.3    0.00  NOISE    __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:178) <- egress_to_session (src/mail/outbound.rs:197)   [0, 0, 504]
+       0.1        0.0    0.00  FILLING  load (mail/view/mod.rs:74) <- apply_owner_commands (registry/mailbox/commands.rs:140) <- run_cycle (mail/registry/owner.rs:423)   [0, 128, 128]
+      -0.1        0.0    0.00  NOISE    load (mail/view/mod.rs:74) <- route_lookup (registry/mailbox/resolve.rs:242) <- route_mail (src/mail/mailer.rs:825)   [128, 0, 0]
+       0.0        0.0    0.00  flat     clone (src/reference/actor_path.rs:37) <- promote_locked (registry/mailbox/birth.rs:232) <- apply_owner_commands (registry/mailbox/commands.rs:121)   [8800, 8800, 8888]
+       0.0        0.0    0.00  flat     apply_batch_locked (registry/mailbox/apply.rs:350) <- {closure#0} (registry/mailbox/apply.rs:45) <- apply_batches (registry/mailbox/apply.rs:54)   [0, 0, 0]
+       0.0        0.0    0.00  flat     schema_to_shape (src/canonical/schema.rs:233) <- {closure#0} (src/canonical/schema.rs:239) <- schema_to_shape (src/canonical/schema.rs:239)   [0, 0, 0]
+       0.0        0.0    0.00  flat     serialize_newtype_variant (src/wire/ser.rs:167) <- serialize (aether-data/src/schema.rs:309) <- encode (src/wire/ser.rs:33)   [0, 0, 0]
+       0.0        0.0    0.00  flat     with_growth (aether-actor/src/trace.rs:126) <- build (spawn/spawner/prepare.rs:217) <- prepare (native/spawn/guest.rs:161)   [49152000, 49152000, 49152000]
+       0.0        0.0    0.00  flat     clone (aether-data/src/schema.rs:250) <- clone (aether-data/src/schema.rs:119) <- clone (aether-data/src/schema.rs:240)   [0, 0, 0]
+       0.0        0.0    0.00  flat     register (actor/wasm/host_fns.rs:506) <- build (aether-substrate/src/boot.rs:140) <- build_passive (aether-harness-substrate/src/chassis.rs:368)   [165, 165, 165]
+       0.0        0.0    0.00  flat     clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:240) <- clone (aether-data/src/schema.rs:115)   [0, 0, 0]
+       0.0        0.0    0.00  flat     compiled_code (wasm/module/cache.rs:130) <- check_in (wasm/module/cache.rs:108) <- begin_load_at (component/runtime/load.rs:313)   [153913, 153913, 153913]
+       0.0        0.0    0.00  flat     claim (chassis/builder/native_actor_boot.rs:144) <- boot_passives (chassis/builder/boot_passives.rs:408) <- build_passive_with_start (chassis/builder/state.rs:299)   [3720, 3720, 3720]
+       0.0        0.0    0.00  flat     schema_to_shape (src/canonical/schema.rs:234) <- {closure#0} (src/canonical/schema.rs:239) <- schema_to_shape (src/canonical/schema.rs:239)   [0, 0, 0]
+       0.0        0.0    0.00  flat     seed (src/mail/cost.rs:239) <- init (chassis/builder/native_actor_boot.rs:236) <- boot_passives (chassis/builder/boot_passives.rs:435)   [672, 672, 672]
+       0.0        0.0    0.00  flat     decode_seq_from (src/wire/owned.rs:203) <- decode_from (src/wire/leaf.rs:135) <- decode_from (aether-kinds/src/lib.rs:657)   [0, 0, 0]
+       0.0        0.0    0.00  flat     clone (mail/registry/effect.rs:742) <- inventory (mail/registry/effect.rs:791) <- refresh_registry_inventory (component/runtime/mod.rs:499)   [0, 0, 0]
+       0.0        0.0    0.00  flat     serialize_element (src/wire/ser.rs:231) <- serialize_field (src/wire/ser.rs:258) <- serialize (aether-data/src/schema.rs:309)   [0, 0, 0]
+       0.0        0.0    0.00  flat     run_steps (aether-harness-substrate/src/execute.rs:766) <- execute (aether-harness-substrate/src/execute.rs:674) <- unload (bin/perf-load-drop/main.rs:290)   [0, 0, 0]
+       0.0        0.0    0.00  flat     register (actor/wasm/host_fns.rs:407) <- build (aether-substrate/src/boot.rs:140) <- build_passive (aether-harness-substrate/src/chassis.rs:368)   [594, 594, 594]
+       0.0        0.0    0.00  flat     with_actor (chassis/builder/state.rs:390) <- build_passive (aether-harness-substrate/src/chassis.rs:481) <- start_inner (aether-harness-substrate/src/harness.rs:715)   [0, 0, 0]
+       0.0        0.0    0.00  flat     capabilities (component/runtime/mod.rs:186) <- of (mail/registry/contract.rs:92) <- init (chassis/builder/native_actor_boot.rs:220)   [0, 0, 0]
+       0.0        0.0    0.00  flat     clone (src/reference/actor_path.rs:37) <- clone (registry/mailbox/route.rs:26) <- apply_batch_locked (registry/mailbox/apply.rs:442)   [104, 104, 104]
+       0.0        0.0    0.00  flat     field_name (src/canonical/merge.rs:145) <- {closure#0} (src/canonical/merge.rs:103) <- merge (src/canonical/merge.rs:107)   [1949, 1949, 1949]
+   class FILLING  sum over all groups: (N,2N)      152.3  (2N,4N)        8.2 bytes/cycle
+   class LINEAR   sum over all groups: (N,2N)     1023.3  (2N,4N)     1019.6 bytes/cycle
+   class NOISE    sum over all groups: (N,2N)    -1195.9  (2N,4N)      677.5 bytes/cycle
+   class flat     sum over all groups: (N,2N)        0.0  (2N,4N)        0.0 bytes/cycle
+

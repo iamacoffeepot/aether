@@ -1,0 +1,27 @@
+== distinct-bare: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     200.6      200.6     0.00  settled-root memory (SettlementRegistry cells)
+     352.0      352.0     6.00  module manifest: asset index
+   75019.0    75019.0   919.00  module manifest: kind descriptors (merged schema trees)
+    1422.0     1422.0     6.00  module manifest: actor inputs and lineage
+    1264.0     1264.0     2.00  module manifest: kind id set and the rest of parse
+     348.0      348.0     1.00  module cache: entry Arc and weak slot map
+     517.5      517.5     4.00  publication table: surface, publication Arc, namespace map
+     261.2      264.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+     160.9       51.6     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+      46.2       37.6     0.01  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+      61.5       14.1     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+      40.4       13.0     0.01  OTHER (no workspace frame) __rust_begin_short_backtrace (src/sys/backtrace.rs:166)
+     193.8       10.5     0.01  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+       4.6        4.0     0.00  OTHER (no workspace frame) run (rayon-core-1.13.0/src/registry.rs:50)
+      10.0        2.5     0.00  OTHER (no workspace frame) start_thread (./nptl/pthread_create.c:447)
+      11.5        2.4     0.00  OTHER (no workspace frame) clone3 (linux/x86_64/clone3.S:78)
+      13.0        1.8     0.01  OTHER (no workspace frame)  (sys/thread/unix.rs:118)
+       1.5        0.7     0.01  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:157)
+       1.7        0.0     0.00  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+      10.5        0.0     0.00  OTHER prepare (src/mail/cost.rs:259) <- prepare (mail/registry/effect.rs:138) <- apply_batch_locked (registry/mailbox/apply.rs:153)
+   80531.1    80116.3           sum of LINEAR and FILLING sites
+    -993.5     -315.2           NOISE sites (live at one exit, not at another)

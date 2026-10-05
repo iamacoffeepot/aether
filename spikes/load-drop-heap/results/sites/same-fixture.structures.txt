@@ -1,0 +1,24 @@
+== same-fixture: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     174.6      135.3     0.01  settled-root memory (SettlementRegistry cells)
+      81.0       81.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+      39.7       39.8     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+      26.8        3.7     0.01  OTHER clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:240) <- clone (aether-data/src/schema.rs:115)
+      21.7        0.6     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+      13.3        0.5     0.00  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+       1.5        0.5     0.00  OTHER clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:26) <- clone (mail/registry/effect.rs:743)
+       1.3        0.4     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:157)
+       2.1        0.2     0.00  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+       1.8        0.1     0.05  OTHER clone (aether-data/src/schema.rs:239) <- clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:240)
+      16.4        0.0     0.00  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+       6.2        0.0     0.00  OTHER clone (aether-data/src/schema.rs:251) <- clone (aether-data/src/schema.rs:119) <- clone (aether-data/src/schema.rs:210)
+       6.5        0.0     0.00  OTHER clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:210) <- clone (aether-data/src/schema.rs:108)
+       3.3        0.0     0.00  OTHER clone (aether-data/src/schema.rs:115) <- clone (aether-data/src/schema.rs:240) <- clone (aether-data/src/schema.rs:251)
+       2.4        0.0     0.00  OTHER clone (aether-data/src/schema.rs:119) <- clone (aether-data/src/schema.rs:240) <- clone (aether-data/src/schema.rs:115)
+       1.5        0.0     0.00  OTHER __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- schedule (src/scheduler/slot.rs:405) <- wake (src/scheduler/slot.rs:500)
+       1.2        0.0     0.00  OTHER clone (aether-data/src/schema.rs:210) <- clone (aether-data/src/schema.rs:108) <- clone (aether-data/src/schema.rs:240)
+     997.4      853.5           sum of LINEAR and FILLING sites
+    -664.1     -848.3           NOISE sites (live at one exit, not at another)

@@ -1,0 +1,15 @@
+live bytes at exit: 4000-cycle run, 32000-cycle run, slope per cycle over the 28000 between
+     1830187     14388523     448.5  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+     1096793      8555293     266.4  route record name (ErasedActorPath clone)
+      668416      4463616     135.5  settled-root memory (SettlementRegistry cells)
+      335888      2686992      84.0  actor registry `actors` map slots
+      170336      1290336      40.0  route contract rows (Arc<[(KindId, ReplyContract)]>)
+       73744       589840      18.4  actor registry `tombstones` set
+     9023827      8635865     -13.9  (everything else)
+    60407808     60407808       0.0  trace and log rings
+      156185       156185       0.0  module cache: entry Arc and weak slot map
+        2088         2088       0.0  publication table: surface, publication Arc, namespace map
+       75019        75019       0.0  module manifest: kind descriptors (merged schema trees)
+        1264         1264       0.0  module manifest: kind id set and the rest of parse
+       10448        10448       0.0  module manifest: asset index
+        1422         1422       0.0  module manifest: actor inputs and lineage

@@ -1,0 +1,24 @@
+== distinct-ref-live0: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     200.6      200.6     0.00  settled-root memory (SettlementRegistry cells)
+   10448.0    10448.0   195.00  module manifest: asset index
+   75019.0    75019.0   919.00  module manifest: kind descriptors (merged schema trees)
+    1422.0     1422.0     6.00  module manifest: actor inputs and lineage
+    1264.0     1264.0     2.00  module manifest: kind id set and the rest of parse
+     348.0      348.0     1.00  module cache: entry Arc and weak slot map
+     517.5      517.5     4.00  publication table: surface, publication Arc, namespace map
+     261.2      264.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+     120.0       87.0     0.01  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+      77.0       66.9     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+      42.2       61.8     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:157)
+      76.4       58.0     0.00  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+      53.9       15.3     0.00  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+      32.4       14.3     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:165)
+       1.4        1.2     0.01  OTHER (no workspace frame) clone3 (linux/x86_64/clone3.S:78)
+      51.4        1.2     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+       4.6        0.1     0.00  OTHER (no workspace frame) call_once (src/ops/function.rs:250)
+   90530.9    90379.9           sum of LINEAR and FILLING sites
+    1812.3     -196.3           NOISE sites (live at one exit, not at another)

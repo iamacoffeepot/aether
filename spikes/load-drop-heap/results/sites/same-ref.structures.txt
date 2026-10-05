@@ -1,0 +1,12 @@
+== same-ref: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     200.6      133.1     0.00  settled-root memory (SettlementRegistry cells)
+     264.0      264.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+       7.6        7.4     0.00  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+       8.5        2.3     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+       3.7        2.3     0.00  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+    1077.9     1000.5           sum of LINEAR and FILLING sites
+   -1096.9      703.0           NOISE sites (live at one exit, not at another)

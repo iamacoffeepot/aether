@@ -1,0 +1,18 @@
+== distinct-unaddressed: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     200.6      200.6     0.00  settled-root memory (SettlementRegistry cells)
+      66.2       69.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+       3.5        2.9     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+       1.8        0.5     0.00  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+       3.1        0.4     0.00  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+       1.2        0.2     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+      11.9        0.1    -0.00  OTHER (no workspace frame) clone3 (linux/x86_64/clone3.S:78)
+       2.6        0.1     0.00  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+      34.7        0.0     0.00  OTHER (no workspace frame) run (rayon-core-1.13.0/src/registry.rs:50)
+       7.5        0.0     0.00  OTHER __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:176) <-  (src/mail/outbound.rs:239)
+       1.0        0.0     0.00  OTHER __rust_alloc_zeroed (bin/perf-load-drop/main.rs:53) <- record (src/mail/outbound.rs:178) <-  (src/mail/outbound.rs:239)
+     926.6      864.7           sum of LINEAR and FILLING sites
+     361.8     -404.7           NOISE sites (live at one exit, not at another)

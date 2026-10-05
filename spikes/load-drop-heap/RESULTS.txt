@@ -1,0 +1,158 @@
+SPIKE load-drop-heap (issue 7414): what a load and drop of an asset bundle keeps
+Base: main c34b6d44f. Host: Linux 6.17 x86_64, glibc 2.39, 32 cores, release build.
+Measured 2026-10-05. Raw tables: results/sites/, results/long-series.txt,
+results/series/ (every run's sample series as JSON). The dhat profiles
+themselves (14 MB to 300 MB each) are not committed.
+
+HOW TO RERUN (Linux, from the checkout root)
+  cargo xtask build-wasm
+  cargo build --release --target wasm32-unknown-unknown -p spike-load-drop-bundle
+  CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release \
+    -p aether-harness-perf --features heap-profile --bin aether-perf-load-drop
+  spikes/load-drop-heap/run.sh <out-dir> [jobs]           # every cell, 3 counts, 3 modes
+  python3 spikes/load-drop-heap/analyze.py <out-dir> same-ref 1000      # per-site slopes
+  python3 spikes/load-drop-heap/structures.py <out-dir> same-ref 1000   # summed by structure
+  python3 spikes/load-drop-heap/series.py <out-dir>/same-ref-4000.plain.series.json
+One process is one cell at one count in one mode (dhat / plain / arena1 =
+MALLOC_ARENA_MAX=1). The long runs and the small-ring runs were started by
+hand: the reference cell's arguments plus `--samples 32`, and `--rings 16`.
+
+THE CELLS
+  The driver is crates/aether-harness-perf/src/bin/perf-load-drop: a
+  SubstrateHarness with the component host, a real LoadComponent mail awaited
+  to settlement (load_any), a real DropComponent mail awaited to its reply,
+  and the last drop awaited to the instance's MonitorNotice before the exit
+  readings. The module is spikes/load-drop-heap/bundle (release wasm,
+  194,725 bytes): one instanced export whose `wire` fetches every catalogued
+  asset by copy.
+  ref = the shape issue 7414's figures were measured with (runite#30 churn):
+        content-addressed marker, 64 assets, 1 MiB payload, 100 instances
+        live, each load named churn~<n>, warm-up 132 cycles.
+  same-ref              one bundle, ref shape              counts 1000/2000/4000
+  same-ref-live0        ref shape, no live window
+  same-ref-watch        ref shape, every drop awaited to its MonitorNotice
+  same-bare             content-addressed, no assets, no live window
+  same-fixture          aether_test_fixtures_bundle (debug, 10 MB, 50 exports),
+                        instanced test.spike.asset_probe, counter keys
+  distinct-ref          a new bundle each cycle, ref shape  counts 500/1000/2000
+  distinct-ref-live0    the same, no live window
+  distinct-bare         content-addressed, one 8-byte asset, no live window
+  distinct-unaddressed  64 assets, 1 MiB, NOT content-addressed (each load is
+                        a successor republish of one namespace)
+
+1. SAME BUNDLE, HEAP: bytes live at exit per cycle, by allocation site
+   (dhat; identical in same-ref, same-ref-live0, same-ref-watch, same-bare
+   to the byte; columns are the slopes over (1000,2000) and (2000,4000))
+
+   448.5  448.5  route hash-table slots in three maps, 149.5 each:
+                 Inner::mailboxes        mail/registry/mailbox/birth.rs:235
+                 double buffer, half A   mail/view/double_buffer.rs:97
+                 double buffer, half B   mail/view/double_buffer.rs:38
+   264.0  264.0  the route's name, one heap copy per map (3 x 88 bytes for
+                 "spike.bundle.<64 hex>:churn~N"): ErasedActorPath::clone
+                 (aether-data/src/reference/actor_path.rs:37) from
+                 apply.rs:393, apply.rs:394, double_buffer.rs:97
+    84.0   84.0  ActorRegistry::actors slot    actor/registry.rs:238 (kept Dead, :260)
+    40.0   40.0  RouteContract rows, one Arc<[..]> per guest
+                 mail/registry/contract.rs:59 <- binding/lifecycle.rs:377
+    18.4   18.4  ActorRegistry::tombstones     actor/registry.rs:261
+   -----
+   855     855   per closed name, kept for the engine's life (ADR-0079 section 7)
+   200.6  133.1  SettlementRegistry settled-root memory, chassis/settlement.rs:128-129
+                 BOUNDED (64 cells x 2,048 roots), still filling
+   -----
+  ~1000  ~1000   sum of the constant-slope sites; dhat's own live-byte counter
+                 inside one 4,000-cycle process gives 995 per cycle, and inside
+                 one 32,000-cycle process 994 per cycle.
+   Hash-table slots are amortised: at these counts each table had just
+   doubled (4,132 entries in 8,192 buckets of 73 bytes). Between doublings a
+   slot costs 83 to 167 bytes per entry.
+   4,000-cycle versus 32,000-cycle profile, per structure
+   (results/sites/same-ref.long-structures.txt): route maps 448.5, names
+   266.4, settled 135.5, actors 84.0, contract 40.0, tombstones 18.4,
+   everything else -13.9, rings 0.0.
+   Noise: 0.2 to 1.4 MB of cranelift compiler-context blocks kept by the
+   wasmtime engine after its one compile land on different rayon stacks in
+   each process, so their sites differ between processes and do not grow
+   within one (everything else: 9,023,827 bytes at 4,000 cycles, 8,635,865
+   at 32,000).
+
+2. SAME BUNDLE, RESIDENT SET: bytes per cycle
+                               (1000,2000)  (2000,4000)   64,000-cycle run, by quarter
+   same-ref  plain   rss          5705.7       6567.9     3184 / 679 / 127 / 1777
+                     in_use       2117.1        796.8      944 / 1049 / 740 / 1875
+   same-ref  arena1  rss          3977.2       7524.4     2279 / 1165 / 1087 / 1613
+                     in_use       1283.9        895.8      965 / 1050 / 727 / 1865
+   same-ref-live0 plain   rss      741.4        864.3
+   same-ref-live0 arena1  rss     -327.7       1075.2
+   same-ref --rings 16 plain  rss  352.3       1910.8     1010 / 1156 / 678 / 2337
+   same-ref --rings 16 arena1 rss 3260.4        -57.3      945 / 1085 / 790 / 1868
+   (in_use = mallinfo2 in-use + mmapped bytes, block headers included;
+    over 64,000 cycles it is 1,079 bytes per cycle in both modes)
+   The reported 7 KiB per cycle is reproduced over cycles 1,000-4,000
+   (5.7-6.6 KiB plain, 4.0-7.5 KiB arena1; 6.3 KiB over the whole span in
+   both). About 1 KiB of it is live heap. The rest is not a leak:
+   - every live actor is given a 491,520-byte trace ring (4,096 x 120 bytes,
+     aether-actor/src/trace.rs:126) and a 73,728-byte log ring (1,024 x 72,
+     aether-actor/src/log.rs:120) with capacity reserved up front
+     (spawn/spawner/prepare.rs:216-217): 56.5 MB of the 70 MB live at exit
+     with 100 bundles live, almost all of it never written;
+   - each cycle frees one pair and allocates another; where the new pair
+     lands, its first pages are touched for the first time (arena1: [heap]
+     resident 25 MB at the start against 74 MB in use, 101 MB against 143 MB
+     at 64,000 cycles), and under default glibc the freed pairs pile up as
+     free chunks in the arenas (free bytes 38 MB -> 85 MB in the first 4,000
+     cycles; malloc_trim at the end returns 48 MB);
+   - it is bounded: by 16,000 cycles the resident slope is at the heap slope;
+   - with 16-entry rings the resident slope equals the in-use slope from the
+     first sample, and the baseline falls from 106 MB to 66 MB (plain).
+   Outside the Rust heap: nothing grows. arena1, same-ref: anonymous
+   executable 229,376 bytes flat, anonymous read-only 352,256 flat, memfd
+   2,048,000 flat, mapping count 582 flat, anonymous read-write outside
+   [heap] 233.5 / -14.3 bytes per cycle.
+
+3. DISTINCT BUNDLES, HEAP: bytes live at exit per bundle (dhat; slopes over
+   (500,1000) and (1000,2000) agree to the byte)
+                                                     distinct-ref   distinct-bare
+   module manifest, kind descriptors                    75019.0        75019.0   919 blocks
+     actor/wasm/kind_manifest.rs:596 -> aether-data/src/canonical/merge.rs,
+     kind_manifest.rs:145
+   module manifest, asset index (64 assets / 1 asset)   10448.0          352.0
+     actor/wasm/asset_manifest.rs:109-110, wasm/module/manifest.rs:57-62,
+     wasm/module/mod.rs:118,127
+   module manifest, actor inputs and lineage             1422.0         1422.0
+   module manifest, kind id set and the rest of parse    1264.0         1264.0
+   module cache: Arc<ModuleEntry> cache.rs:109, weak slot cache.rs:172
+                                                          348.0          348.0
+   publication table: surface admission.rs:53-80, Arc mod.rs:232,
+     namespace map mod.rs:108 <- apply.rs:477             517.5          517.5
+   the per-name records of section 1                      855            855
+   settled-root memory (bounded)                          162.4          200.6
+   -----
+   sum                                                  90035.8        79978.0
+   blocks per bundle                                     1131            942
+   distinct-unaddressed (the same bundles without the marker, so each
+   publish replaces the last): 860.6 bytes per cycle, the per-name records
+   and nothing of the manifest. The publication is what holds the manifest.
+
+4. DISTINCT BUNDLES, RESIDENT SET: bytes per bundle
+                                   (500,1000)  (1000,2000)   16,000-bundle run, by quarter
+   distinct-ref plain   rss         161398.8    136937.5     120019 / 112282 / 116243 / 114218
+                        in_use      113787.0    113363.0     113898 / 113827 / 113309 / 115101
+   distinct-ref arena1  rss         110420.0    117076.0     114226 / 113452 / 113550 / 116517
+                        in_use      113233.8    115232.2     113936 / 113786 / 113272 / 115076
+   distinct-ref-live0 plain rss     115785.7    114929.7
+   distinct-bare plain  rss         101040.1     99774.5
+   distinct-bare arena1 rss          98295.8    100610.0
+   Resident slope = in-use slope = 90.0 KiB requested + 1,131 blocks x about
+   21 bytes of allocator header and rounding. 16,000 bundles end at 1.9 GB.
+   Outside the heap: anonymous executable 229,376 bytes flat (the compile is
+   shared), anonymous read-write outside [heap] 0-246 bytes per bundle.
+
+5. NOT EXERCISED
+   - inline-child alias routes (the bundle spawns none)
+   - boot modules (booted_modules / boot_namespaces)
+   - a trace ring growing from 4,096 to 65,536 entries: the harness pins
+     the ceiling to the floor (aether-harness-substrate/src/harness.rs:661)
+   - the hub / RPC path and any renderer resident
+   - macOS

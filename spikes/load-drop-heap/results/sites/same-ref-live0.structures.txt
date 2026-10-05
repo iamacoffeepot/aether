@@ -1,0 +1,17 @@
+== same-ref-live0: bytes/cycle (N,2N), (2N,4N); blocks/cycle (2N,4N); structure
+     174.6      135.3     0.01  settled-root memory (SettlementRegistry cells)
+     264.0      264.0     3.00  route record name (ErasedActorPath clone)
+     448.5      448.5     0.00  route maps: owner `mailboxes` and both double-buffer halves (hash table slots)
+      40.0       40.0     1.00  route contract rows (Arc<[(KindId, ReplyContract)]>)
+      84.0       84.0     0.00  actor registry `actors` map slots
+      18.4       18.4     0.00  actor registry `tombstones` set
+      20.6        7.4     0.00  OTHER (no workspace frame) {closure#0} (src/join/mod.rs:142)
+      13.8        5.6    -0.00  OTHER (no workspace frame) start_thread (./nptl/pthread_create.c:447)
+       6.0        2.5     0.01  OTHER (no workspace frame) helper (iter/plumbing/mod.rs:410)
+       5.0        0.8     0.00  OTHER (no workspace frame) clone3 (linux/x86_64/clone3.S:78)
+       4.8        0.7     0.00  OTHER (no workspace frame) in_worker (rayon-core-1.13.0/src/registry.rs:0)
+      10.5        0.0     0.00  OTHER (no workspace frame) execute (rayon-core-1.13.0/src/job.rs:120)
+       8.0        0.0     0.00  OTHER (no workspace frame) wait_until_cold (rayon-core-1.13.0/src/registry.rs:800)
+       1.0        0.0    -0.00  OTHER (no workspace frame) call_once (src/ops/function.rs:250)
+    1100.7     1007.5           sum of LINEAR and FILLING sites
+    -363.0      -83.8           NOISE sites (live at one exit, not at another)
