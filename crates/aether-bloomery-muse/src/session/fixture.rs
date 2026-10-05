@@ -104,8 +104,9 @@ pub fn run_async<P: AsyncProgram>(
     }
 }
 
-/// Run async `P` over `input` with `closure` injected beside it, answering
-/// every `Entropy` draw with `entropy`, and decode the result it stages.
+/// Run async `P` over `input` with `closure` injected beside it, as the driver
+/// invokes it, answering every `Entropy` draw with `entropy` and every read it
+/// fetches from `closure`, and decode the result it stages.
 pub fn run_drawn<P: AsyncProgram>(
     input: &P::Input,
     closure: Vec<ClosureArtifact>,
@@ -113,9 +114,11 @@ pub fn run_drawn<P: AsyncProgram>(
 ) -> Result<(P::Result, Store), Refusal> {
     let input = stored(input);
     let digest = input.claimed().unverified();
+    let mut injected = closure.clone();
+    injected.push(input);
     let store = Store(closure.into_iter().map(|artifact| (artifact.claimed().unverified(), artifact)).collect());
     let name = ProgramName::new(P::NAME).expect("program name");
-    let (mut session, mut waiting) = match start_async::<P>(Invoke::new(1, name, digest, vec![input])) {
+    let (mut session, mut waiting) = match start_async::<P>(Invoke::new(1, name, digest, injected)) {
         Started::Finished(invoked) => return finish::<P::Result>(invoked, store),
         Started::Live { session, waiting } => (session, waiting),
     };
