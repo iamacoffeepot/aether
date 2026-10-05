@@ -1,13 +1,14 @@
 //! `tree.grep`: the lines of the tree's files that match a regex.
 
-use aether_bloomery_kinds::{Mode, Name, Node, Refusal};
+use aether_bloomery_kinds::{Mode, Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 use regex::{Regex, RegexBuilder};
 
 use crate::tools::read_args;
 use crate::tools::spine::{directory, leaf};
-use crate::tools::view::{Lines, VIEW_MAX_BYTES, Viewed, cut};
+use crate::tools::view::{Family, Lines, VIEW_MAX_BYTES, Viewed, cut};
 
 /// The hits one grep shows when it names no count.
 pub const GREP_DEFAULT_HITS: usize = 100;
@@ -75,22 +76,38 @@ impl Program for TreeGrep {
     type Result = Viewed;
 
     async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
-        grep(&input, &mut env, Budget { files: GREP_MAX_FILES, bytes: GREP_MAX_SCANNED_BYTES }).await
+        grep(&mut env, input.tree(), input.args(), Family::Tree, Budget::FULL).await
     }
 }
 
 /// How much of the tree one grep may visit.
 #[derive(Debug, Clone, Copy)]
-struct Budget {
+pub(super) struct Budget {
     /// The most entries visited, directories included.
     files: usize,
     /// The most bytes of file text read.
     bytes: usize,
 }
 
-/// One grep of `input` within `budget`.
-async fn grep(input: &Tooled<GrepArgs>, env: &mut Env<Async>, budget: Budget) -> Result<Viewed, Refusal> {
-    let args = match read_args(env, input.args()).await? {
+impl Budget {
+    /// What a grep over a whole tree may visit.
+    pub(super) const FULL: Self = Self { files: GREP_MAX_FILES, bytes: GREP_MAX_SCANNED_BYTES };
+}
+
+/// One grep of `root` for `args` within `budget`, with hints naming
+/// `family`'s tools.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory or file the store cannot give.
+pub(super) async fn grep(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    args: Ref<GrepArgs>,
+    family: Family,
+    budget: Budget,
+) -> Result<Viewed, Refusal> {
+    let args = match read_args(env, args).await? {
         Ok(args) => args,
         Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
     };
@@ -107,11 +124,11 @@ async fn grep(input: &Tooled<GrepArgs>, env: &mut Env<Async>, budget: Budget) ->
     };
 
     let start = match &args.path {
-        None => match directory(env, input.tree(), None).await? {
+        None => match directory(env, root, None, family).await? {
             Ok((_, root)) => entries("", root.entries()),
             Err(message) => return Ok(Viewed::new(message)),
         },
-        Some(path) => match leaf(env, input.tree(), path).await? {
+        Some(path) => match leaf(env, root, path).await? {
             Ok(file @ (Node::File(_) | Node::Executable(_))) => vec![(path.as_str().to_owned(), file)],
             Ok(Node::Directory(dir)) => entries(path.as_str(), env.read(dir).await?.entries()),
             Ok(Node::Symlink(target)) => {
@@ -235,7 +252,7 @@ mod tests {
 
     use super::{Budget, GrepArgs, TreeGrep, grep};
     use crate::session::fixture::{SmallTree, path, run_async};
-    use crate::tools::view::Viewed;
+    use crate::tools::view::{Family, Viewed};
 
     /// `tree.grep` over a two-entry budget.
     struct TwoEntryGrep;
@@ -250,7 +267,7 @@ mod tests {
         type Result = Viewed;
 
         async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
-            grep(&input, &mut env, Budget { files: 2, bytes: usize::MAX }).await
+            grep(&mut env, input.tree(), input.args(), Family::Tree, Budget { files: 2, bytes: usize::MAX }).await
         }
     }
 

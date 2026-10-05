@@ -11,6 +11,7 @@ use aether_bloomery_program::{
     tooled,
 };
 use aether_bloomery_workspace::TreePath;
+use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
 use aether_codec::encode_storage_schema;
 use aether_data::{Cites, Digest, ErasedRef, Ref, Schema, Storage};
 use serde_json::Value;
@@ -204,12 +205,32 @@ impl SmallTree {
         self.called(ClosureArtifact::new(A::ID, payload))
     }
 
+    /// A call over an empty session tree with `args`, bound to a `ProofBound`
+    /// whose vendor tree is this one, as a vendor tool's call is built, and
+    /// the artifacts it could read.
+    pub fn vendor_call<A: Storage + Clone + Cites>(&self, args: &A) -> (ErasedTooled, Vec<ClosureArtifact>) {
+        let environment = Ref::from_digest(Digest::from_bytes([2; 32]));
+        let proofs = ProofBound::new(environment, self.tree(), TestEnv::default());
+        let session = Ref::of_encoded(&Tree::empty()).expect("the empty tree");
+        self.called_over(session, stored(args), stored(&proofs))
+    }
+
     /// A call over this tree with the stored `args`, binding `NoBound` as
     /// every session tool does, and the artifacts it could read.
     fn called(&self, args: ClosureArtifact) -> (ErasedTooled, Vec<ClosureArtifact>) {
-        let bound = stored(&NoBound);
+        self.called_over(self.tree(), args, stored(&NoBound))
+    }
+
+    /// A call over the session tree `session` with the stored `args` and
+    /// `bound`, and the artifacts it could read.
+    fn called_over(
+        &self,
+        session: Ref<Tree>,
+        args: ClosureArtifact,
+        bound: ClosureArtifact,
+    ) -> (ErasedTooled, Vec<ClosureArtifact>) {
         let cited = |artifact: &ClosureArtifact| ErasedRef::new(artifact.kind(), artifact.claimed().unverified());
-        let input = tooled(self.tree(), cited(&args), cited(&bound));
+        let input = tooled(session, cited(&args), cited(&bound));
         (input, self.artifacts.iter().cloned().chain([args, bound]).collect())
     }
 }

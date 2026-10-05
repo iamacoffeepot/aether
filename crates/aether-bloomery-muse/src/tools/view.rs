@@ -10,6 +10,39 @@ pub const VIEW_MAX_BYTES: usize = 64 * 1024;
 /// The bytes kept back from a text's budget for its closing truncation line.
 const MARKER_BYTES: usize = 256;
 
+/// Which tree a read-only tool reads, for the hints that name its sibling.
+///
+/// A hint tells the model which tool to call next, and the model must stay in
+/// the tree it is reading, so the sibling's name follows the family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    /// The session's own tree: `tree.list`, `tree.read`, `tree.grep`.
+    Tree,
+    /// The vendored crate sources: `vendor.list`, `vendor.read`,
+    /// `vendor.grep`.
+    Vendor,
+}
+
+impl Family {
+    /// The name of this family's listing tool.
+    #[must_use]
+    pub const fn list(self) -> &'static str {
+        match self {
+            Self::Tree => "tree.list",
+            Self::Vendor => "vendor.list",
+        }
+    }
+
+    /// The name of this family's reading tool.
+    #[must_use]
+    pub const fn read(self) -> &'static str {
+        match self {
+            Self::Tree => "tree.read",
+            Self::Vendor => "vendor.read",
+        }
+    }
+}
+
 /// A read-only tool's result: the text it read from the tree.
 ///
 /// The read-only counterpart of `Edited`: the loop binds a later call to the

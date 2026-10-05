@@ -1,12 +1,13 @@
 //! `tree.list`: one directory level of the tree.
 
-use aether_bloomery_kinds::{Mode, Name, Node, Refusal};
+use aether_bloomery_kinds::{Mode, Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 
 use crate::tools::read_args;
 use crate::tools::spine::directory;
-use crate::tools::view::{Lines, VIEW_MAX_BYTES, Viewed};
+use crate::tools::view::{Family, Lines, VIEW_MAX_BYTES, Viewed};
 
 /// What `tree.list` is asked to list.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -43,27 +44,42 @@ impl Program for TreeList {
     type Result = Viewed;
 
     async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
-        let args = match read_args(&mut env, input.args()).await? {
-            Ok(args) => args,
-            Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
-        };
-        let (shown, dir) = match directory(&mut env, input.tree(), args.path.as_ref()).await? {
-            Ok(found) => found,
-            Err(message) => return Ok(Viewed::new(message)),
-        };
-        if dir.entries().is_empty() {
-            return Ok(Viewed::new(if shown.is_empty() {
-                "The tree is empty.".into()
-            } else {
-                format!("{shown} is empty.")
-            }));
-        }
-
-        let total = dir.entries().len();
-        let mut lines = Lines::new(VIEW_MAX_BYTES);
-        let shown_entries = dir.entries().iter().take_while(|(name, node)| lines.push(&entry(name, node))).count();
-        Ok(lines.finish(|| format!("[showing {shown_entries} of {total} entries; list a subdirectory or grep]")))
+        list(&mut env, input.tree(), input.args(), Family::Tree).await
     }
+}
+
+/// `args`' directory of `root` as a listing, with hints naming `family`'s
+/// tools.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory the store cannot give.
+pub(super) async fn list(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    args: Ref<ListArgs>,
+    family: Family,
+) -> Result<Viewed, Refusal> {
+    let args = match read_args(env, args).await? {
+        Ok(args) => args,
+        Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
+    };
+    let (shown, dir) = match directory(env, root, args.path.as_ref(), family).await? {
+        Ok(found) => found,
+        Err(message) => return Ok(Viewed::new(message)),
+    };
+    if dir.entries().is_empty() {
+        return Ok(Viewed::new(if shown.is_empty() {
+            "The tree is empty.".into()
+        } else {
+            format!("{shown} is empty.")
+        }));
+    }
+
+    let total = dir.entries().len();
+    let mut lines = Lines::new(VIEW_MAX_BYTES);
+    let shown_entries = dir.entries().iter().take_while(|(name, node)| lines.push(&entry(name, node))).count();
+    Ok(lines.finish(|| format!("[showing {shown_entries} of {total} entries; list a subdirectory or grep]")))
 }
 
 /// One listing line: the entry's kind and name.

@@ -1,12 +1,13 @@
 //! `tree.read`: a window of numbered lines from one file.
 
-use aether_bloomery_kinds::{Mode, Node, Refusal};
+use aether_bloomery_kinds::{Mode, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 
 use crate::tools::read_args;
 use crate::tools::spine::leaf;
-use crate::tools::view::{Lines, VIEW_MAX_BYTES, Viewed, cut};
+use crate::tools::view::{Family, Lines, VIEW_MAX_BYTES, Viewed, cut};
 
 /// The lines one read shows when it names no count.
 pub const READ_DEFAULT_LINES: usize = 400;
@@ -58,33 +59,48 @@ impl Program for TreeRead {
     type Result = Viewed;
 
     async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
-        let args = match read_args(&mut env, input.args()).await? {
-            Ok(args) => args,
-            Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
-        };
-        let path = args.path.as_str();
-        let blob = match leaf(&mut env, input.tree(), &args.path).await? {
-            Ok(Node::File(blob) | Node::Executable(blob)) => blob,
-            Ok(Node::Directory(_)) => return Ok(Viewed::new(format!("{path} is a directory; use tree.list."))),
-            Ok(Node::Symlink(target)) => {
-                return Ok(Viewed::new(format!("{path} is a symlink to {}.", target.as_str())));
-            }
-            Err(blocked) => return Ok(Viewed::new(blocked.describe())),
-        };
-        let Ok(text) = String::from_utf8(env.read_payload(blob.erase()).await?) else {
-            return Ok(Viewed::new(format!("{path} is not UTF-8 text.")));
-        };
-
-        let from_line = args.from_line.map_or(1, count).max(1);
-        let lines = args.lines.map_or(READ_DEFAULT_LINES, count);
-        Ok(window(&text, from_line, lines).unwrap_or_else(|total| {
-            Viewed::new(match total {
-                0 => format!("{path} is empty."),
-                1 => format!("{path} has 1 line; from_line {from_line} is past the end."),
-                _ => format!("{path} has {total} lines; from_line {from_line} is past the end."),
-            })
-        }))
+        read(&mut env, input.tree(), input.args(), Family::Tree).await
     }
+}
+
+/// The window `args` asks of a file of `root`, with hints naming `family`'s
+/// tools.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory or file the store cannot give.
+pub(super) async fn read(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    args: Ref<ReadArgs>,
+    family: Family,
+) -> Result<Viewed, Refusal> {
+    let args = match read_args(env, args).await? {
+        Ok(args) => args,
+        Err(invalid) => return Ok(Viewed::new(format!("{invalid}."))),
+    };
+    let path = args.path.as_str();
+    let blob = match leaf(env, root, &args.path).await? {
+        Ok(Node::File(blob) | Node::Executable(blob)) => blob,
+        Ok(Node::Directory(_)) => return Ok(Viewed::new(format!("{path} is a directory; use {}.", family.list()))),
+        Ok(Node::Symlink(target)) => {
+            return Ok(Viewed::new(format!("{path} is a symlink to {}.", target.as_str())));
+        }
+        Err(blocked) => return Ok(Viewed::new(blocked.describe())),
+    };
+    let Ok(text) = String::from_utf8(env.read_payload(blob.erase()).await?) else {
+        return Ok(Viewed::new(format!("{path} is not UTF-8 text.")));
+    };
+
+    let from_line = args.from_line.map_or(1, count).max(1);
+    let lines = args.lines.map_or(READ_DEFAULT_LINES, count);
+    Ok(window(&text, from_line, lines).unwrap_or_else(|total| {
+        Viewed::new(match total {
+            0 => format!("{path} is empty."),
+            1 => format!("{path} has 1 line; from_line {from_line} is past the end."),
+            _ => format!("{path} has {total} lines; from_line {from_line} is past the end."),
+        })
+    }))
 }
 
 /// A count the model wrote, as a `usize`.

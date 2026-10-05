@@ -3,7 +3,8 @@
 //! Every tool's input is `Tooled<A, B>`: the session's current tree and the
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
-//! to and binds `NoBound`. [`offered`] is the set every session offers:
+//! to and binds `NoBound`, except the vendor view below. [`offered`] is the
+//! set every session offers:
 //! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree
 //! nodes and blobs they touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
@@ -15,10 +16,15 @@
 //! `proof.test`, which formats the tree and runs its workspace tests with
 //! the session's test env; each returns the formatted tree as an `Edited`
 //! and binds the session's `ProofBound`, its environment, vendor tree, cargo
-//! config, and test env. [`required_proofs`] names the proofs a session's
-//! `Done` end must pass, each with its whole-workspace arguments, and
-//! [`proof_passed`] reads a proof's verdict from its `Edited` detail, so the
-//! session loop gates an end without linking a proof type.
+//! config, and test env. It also offers the vendor view from the bundle
+//! [`MUSE`] resolves to, bound to the same `ProofBound`: `vendor.list`,
+//! `vendor.read`, and `vendor.grep`, which run their `tree.*` siblings'
+//! bodies over the vendor tree it cites and return [`Viewed`] as they do;
+//! they are not proofs, so no session can require them.
+//! [`required_proofs`] names the proofs a session's `Done` end must pass,
+//! each with its whole-workspace arguments, and [`proof_passed`] reads a
+//! proof's verdict from its `Edited` detail, so the session loop gates an
+//! end without linking a proof type.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -35,6 +41,7 @@ mod list;
 mod read;
 mod remove;
 mod spine;
+mod vendor;
 mod view;
 mod write;
 
@@ -55,6 +62,7 @@ pub use grep::{GrepArgs, TreeGrep};
 pub use list::{ListArgs, TreeList};
 pub use read::{READ_MAX_LINES, ReadArgs, TreeRead};
 pub use remove::{RemoveArgs, TreeRemove};
+pub use vendor::{VendorGrep, VendorList, VendorRead};
 pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 
@@ -93,8 +101,9 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
 }
 
-/// Every tool [`offered`] offers, then every proof tool bound to `proofs`,
-/// and the artifacts those offers cite, `proofs` among them.
+/// Every tool [`offered`] offers, then every tool bound to `proofs`, the
+/// proof tools and the vendor view, and the artifacts those offers cite,
+/// `proofs` among them.
 ///
 /// # Panics
 ///
@@ -103,11 +112,20 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
 pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArtifact>) {
     let (tools, mut artifacts) = offered();
     let bound = EncodedArtifact::new(proofs).expect("the proof bound encodes");
-    let (proofs, cited): (Vec<_>, Vec<_>) =
-        proof_offers(Ref::from_digest(bound.digest())).into_iter().map(|offer| (offer.tool, offer.cited)).unzip();
+    let (proofs, cited): (Vec<_>, Vec<_>) = proof_bound_offers(Ref::from_digest(bound.digest())).into_iter().unzip();
     artifacts.extend(cited.into_iter().flatten().chain([bound]).chain(cargo_config_artifacts()));
     let tools = tools.as_slice().iter().cloned().chain(proofs).collect();
     (OfferedTools::new(tools).expect("the bound tools keep every tool list rule"), artifacts)
+}
+
+/// Every tool bound to a `ProofBound`, binding `proofs` into every call, and
+/// the artifacts each offer cites besides `proofs`: the proofs of
+/// [`proof_offers`], then the vendor view from the bundle [`MUSE`] resolves
+/// to, which is offered with them but is no proof.
+pub fn proof_bound_offers(proofs: Ref<ProofBound>) -> Vec<(OfferedTool, Vec<EncodedArtifact>)> {
+    let vendor =
+        [bound::<VendorList>(MUSE, proofs), bound::<VendorRead>(MUSE, proofs), bound::<VendorGrep>(MUSE, proofs)];
+    proof_offers(proofs).into_iter().map(|offer| (offer.tool, offer.cited)).chain(vendor).collect()
 }
 
 /// One proof tool offered over a session's `ProofBound`: the offer, the
