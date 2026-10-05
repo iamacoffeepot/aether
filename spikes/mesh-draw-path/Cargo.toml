@@ -1,0 +1,23 @@
+# Nested workspace: isolates the spike from the root aether workspace (a
+# nested `[workspace]` is never absorbed by the outer one) and gives it its
+# own `target/`. `main` never carries a `spikes/` tree — this lives only on
+# `spike/mesh-draw-path`. `Cargo.lock` is a copy of the root lockfile so the
+# engine crates resolve to the versions CI builds.
+[workspace]
+
+[package]
+name = "mesh-draw-path"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aether-data = { path = "../../crates/aether-data" }
+aether-kinds = { path = "../../crates/aether-kinds" }
+aether-math = { path = "../../crates/aether-math" }
+aether-render = { path = "../../crates/aether-render" }
+aether-harness-substrate = { path = "../../crates/aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../../crates/aether-harness-substrate-capture" }
+
+[profile.release]
+debug = "line-tables-only"

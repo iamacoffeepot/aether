@@ -72,6 +72,26 @@ use aether_actor::actor;
 #[cfg(feature = "runtime")]
 mod runtime;
 
+/// SPIKE-ONLY instrumentation (branch `spike/mesh-draw-path`, never on
+/// `main`): wall-clock accumulators the mesh-draw-path spike reads to
+/// separate the render actor's CPU work from its wait on the GPU.
+#[cfg(feature = "runtime")]
+pub mod spike_probe {
+    use std::sync::atomic::AtomicU64;
+
+    /// Nanos spent in `ProgramRegistry::record` (checks, uniform staging,
+    /// bind groups, pass encoding for every pending dispatch).
+    pub static PROGRAM_RECORD_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos `on_frame` spent waiting for the previous frame's submission.
+    pub static GPU_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos spent in `encoder.finish()` plus `queue.submit`.
+    pub static SUBMIT_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Nanos of the whole `on_frame` handler.
+    pub static FRAME_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// Dispatches handed to `ProgramRegistry::record`.
+    pub static DISPATCHES: AtomicU64 = AtomicU64::new(0);
+}
+
 /// `aether.render` cap **identity** (ADR-0122 identity/runtime split). A
 /// ZST carrying only the addressing — `Addressable`, the per-handler
 /// `HandlesKind` markers, and the name-inventory entry, all emitted

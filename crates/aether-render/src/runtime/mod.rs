@@ -634,7 +634,10 @@ impl RenderCapabilityState {
         // registry textures the material and overlay passes below sample,
         // so a dispatch and a draw over its output land in one frame.
         let dispatches = mem::take(&mut self.pending_program_dispatches);
+        let spike_started = Instant::now();
         self.programs.record(gpu, encoder, &mut self.textures, &mut self.geometries, &dispatches);
+        spike_add(&crate::spike_probe::PROGRAM_RECORD_NANOS, spike_started);
+        crate::spike_probe::DISPATCHES.fetch_add(dispatches.len() as u64, std::sync::atomic::Ordering::Relaxed);
         let extras_storage: [&wgpu::RenderPipeline; 1];
         let extras: &[&wgpu::RenderPipeline] = match self.wire_pipeline.as_ref() {
             Some(pipeline) => {
@@ -733,7 +736,9 @@ impl RenderCapabilityState {
             );
         }
 
+        let spike_started = Instant::now();
         self.last_submission = Some(queue.submit(iter::once(encoder.finish())));
+        spike_add(&crate::spike_probe::SUBMIT_NANOS, spike_started);
         // The timing readback is mapped only once its copy is submitted;
         // the map completes on a later frame's poll, so nothing here
         // waits on it (iamacoffeepot/aether#4423).
@@ -781,6 +786,22 @@ impl RenderCapabilityState {
 /// - `live` non-empty → swap it into `last` and clear `live` for next frame.
 /// - `live` empty, `!replay_cache_when_idle` → clear `last` (commit-current).
 /// - `live` empty, `replay_cache_when_idle` → leave `last` (replay-cache).
+/// SPIKE-ONLY (see `crate::spike_probe`): add the elapsed nanos since
+/// `started` to `counter`.
+fn spike_add(counter: &std::sync::atomic::AtomicU64, started: Instant) {
+    let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    counter.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// SPIKE-ONLY: charges the whole `on_frame` handler on drop.
+struct SpikeFrameTimer(Instant);
+
+impl Drop for SpikeFrameTimer {
+    fn drop(&mut self) {
+        spike_add(&crate::spike_probe::FRAME_NANOS, self.0);
+    }
+}
+
 fn commit_or_replay<T>(live: &mut Vec<T>, last: &mut Vec<T>, replay_cache_when_idle: bool) {
     if !live.is_empty() {
         mem::swap(live, last);
@@ -1119,6 +1140,7 @@ impl NativeActor for RenderCapability {
     /// (ADR-0233).
     #[handler::tell]
     fn on_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Frame) {
+        let _spike_frame = SpikeFrameTimer(Instant::now());
         let Frame { replay_cache_when_idle, windows } = mail;
         let windows = deduplicate_windows(windows);
 
@@ -1157,11 +1179,13 @@ impl NativeActor for RenderCapability {
 
         // One-frame-in-flight: drain the prior submission before recording
         // any target in the next global frame (issue 1312).
+        let spike_started = Instant::now();
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
             state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
         }
+        spike_add(&crate::spike_probe::GPU_WAIT_NANOS, spike_started);
         // The poll may itself deliver the callback. A pending capture has
         // not begun recording this frame, so it may survive a successful
         // transaction and record exactly once below.
