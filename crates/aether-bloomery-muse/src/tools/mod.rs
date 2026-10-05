@@ -3,7 +3,8 @@
 //! Every tool's input is `Tooled<A, B>`: the session's current tree and the
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
-//! to and binds `NoBound`, except the vendor view below. [`offered`] is the set every session offers:
+//! to and binds `NoBound`, except the vendor view below. [`offered`] is the
+//! set every session offers:
 //! `tree.edit` and `tree.write`, which read only the tree nodes and blobs they
 //! touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and

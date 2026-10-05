@@ -122,9 +122,10 @@ pub struct SessionOpen;
 /// Refuses settings that offer a tool the session does not bind, or offer a
 /// bound tool with a definition, schema, bundle head, or bound kind other than
 /// its own; the proof tools and the vendor view bind a `ProofBound`, the
-/// session's environment, vendor tree, and test env, whatever its value. Refuses seeds when `tree.read` is not
-/// offered, since a seed's output renders with the offered tool's result
-/// schema; and more than [`ToolCalls::MAX_CALLS`] seeds.
+/// session's environment, vendor tree, and test env, whatever its value.
+/// Refuses seeds when `tree.read` is not offered, since a seed's output
+/// renders with the offered tool's result schema; and more than
+/// [`ToolCalls::MAX_CALLS`] seeds.
 #[program]
 impl Program for SessionOpen {
     const NAME: &'static str = "muse.session.open";
