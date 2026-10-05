@@ -379,6 +379,7 @@ mod tests {
     use crate::input::tests::call;
     use crate::input::{CallId, OfferedTools, OutputBudget, Role, ToolOutput, TurnItem, TurnItemsError};
     use crate::session::fixture::settings;
+    use crate::session::gate::RequiredProofs;
     use crate::session::open::OpenInput;
 
     fn message(role: Role, text: &str) -> TurnItem {
@@ -418,6 +419,7 @@ mod tests {
             TurnLimit(0),
             tree,
             Vec::new(),
+            RequiredProofs::default(),
         );
         let bytes = OpenInput::encode_storage(&StorageData::from_value(zero)).expect("encode");
         assert!(OpenInput::decode_storage(&bytes).is_err(), "a zero limit refuses on decode");

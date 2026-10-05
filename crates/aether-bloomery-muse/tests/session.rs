@@ -12,11 +12,12 @@ use aether_bloomery_kinds::{
     Transition, Tree, Until, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
-    Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
-    MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning, ReasoningEffort,
-    ReasoningId, RecordInput, RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen,
-    SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput,
-    TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered, offered_with_proofs,
+    Answered, CallId, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName,
+    MuseSession, MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning,
+    ReasoningEffort, ReasoningId, RecordInput, RequiredProofs, RestReason, Role, Session, SessionContinue,
+    SessionExhausted, SessionGate, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit,
+    TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult,
+    TurnSettings, Viewed, offered, offered_with_proofs, required_proofs,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -275,6 +276,7 @@ impl Driver {
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
             name if name == SessionExhausted::NAME => invoke::<SessionExhausted>(invocation),
+            name if name == SessionGate::NAME => invoke::<SessionGate>(invocation),
             name => panic!("no program {name}"),
         };
         match invoked {
@@ -473,6 +475,7 @@ fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64
         TurnLimit::new(max_turns)?,
         tree,
         Vec::new(),
+        RequiredProofs::default(),
     );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
@@ -490,6 +493,7 @@ fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Res
         TurnLimit::new(max_turns)?,
         tree,
         seeds,
+        RequiredProofs::default(),
     );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
@@ -506,8 +510,16 @@ fn proofs() -> ProofBound {
 /// Open a session on the small tree that offers every bound tool and the proofs bound to [`proofs`], and makes at
 /// most `max_turns` turns; the open run's seq and the tree.
 fn open_proving(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
+    open_gated(driver, max_turns, &[])
+}
+
+/// Open a session like [`open_proving`] whose `Done` end must pass the proofs named `required`; the open run's seq
+/// and the tree.
+fn open_gated(driver: &mut Driver, max_turns: u32, required: &[&str]) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
     let (tools, artifacts) = offered_with_proofs(&proofs());
-    driver.stage(artifacts);
+    let names = required.iter().map(|name| ProgramName::new(*name)).collect::<Result<Vec<_>, _>>()?;
+    let (required, args) = required_proofs(&names)?;
+    driver.stage(artifacts.into_iter().chain(args));
     let settings = TurnSettings::new(
         Endpoint::new(URL)?,
         ModelName::new("muse-spark-1.3")?,
@@ -525,6 +537,7 @@ fn open_proving(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>),
         TurnLimit::new(max_turns)?,
         tree,
         Vec::new(),
+        required,
     );
     Ok((driver.call_native::<SessionOpen>(&input), tree))
 }
@@ -544,22 +557,33 @@ fn formatted(driver: &mut Driver) -> Result<(Ref<Tree>, RunResult), Box<dyn Erro
     );
     driver.stage([EncodedArtifact::opaque_bytes(FORMATTED), encoded(&src), encoded(&root)]);
 
-    let step = |stdout: &[u8]| -> Result<StepOutcome, Box<dyn Error>> {
-        Ok(StepOutcome {
-            exit_code: Some(0),
-            stdout: Ref::of_bytes(stdout),
-            stderr: Ref::of_bytes(b""),
-            tool: ToolRecord {
-                name: ToolName::new("cargo")?,
-                path: TreePath::new("usr/local/cargo/bin/cargo")?,
-                file: Ref::of_bytes(b"cargo"),
-            },
-        })
-    };
     let listed = b"/work/src/lib.rs\n";
     driver.stage([EncodedArtifact::opaque_bytes(listed), EncodedArtifact::opaque_bytes(b"")]);
-    let steps = vec![step(listed)?, step(b"")?];
+    let steps = vec![step(0, listed, b"")?, step(0, b"", b"")?];
     Ok((Ref::of_encoded(&root)?, RunResult::Ok(Outcome { steps, tree: Ref::of_encoded(&root)? })))
+}
+
+/// Stage a proof outcome that leaves `tree` as it is: fmt rewriting nothing, then clippy passing, or failing with
+/// `failure` on its stderr.
+fn proof_over(driver: &mut Driver, tree: Ref<Tree>, failure: Option<&str>) -> Result<RunResult, Box<dyn Error>> {
+    let (code, stderr) = failure.map_or((0, ""), |failure| (101, failure));
+    driver.stage([EncodedArtifact::opaque_bytes(b""), EncodedArtifact::opaque_bytes(stderr.as_bytes())]);
+    let steps = vec![step(0, b"", b"")?, step(code, b"", stderr.as_bytes())?];
+    Ok(RunResult::Ok(Outcome { steps, tree }))
+}
+
+/// One cargo step of a proof run that exited with `code`, printing `stdout` and `stderr`.
+fn step(code: i32, stdout: &[u8], stderr: &[u8]) -> Result<StepOutcome, Box<dyn Error>> {
+    Ok(StepOutcome {
+        exit_code: Some(code),
+        stdout: Ref::of_bytes(stdout),
+        stderr: Ref::of_bytes(stderr),
+        tool: ToolRecord {
+            name: ToolName::new("cargo")?,
+            path: TreePath::new("usr/local/cargo/bin/cargo")?,
+            file: Ref::of_bytes(b"cargo"),
+        },
+    })
 }
 
 /// Continue `session` from the record `from` with the user message `text`; the continue run's seq.
@@ -1841,6 +1865,239 @@ fn an_end_call_whose_arguments_do_not_decode_is_refused_and_the_session_goes_on(
     let session: Session = driver.value(driver.head(SessionKey::new(opened)));
     assert_eq!(*session.rested(), RestReason::Completed);
 
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+/// What clippy prints when the gate's proof fails in these sessions.
+const DIAGNOSTICS: &str = "error: unused variable: `slag`";
+
+/// The text `muse.session.gate` answers an end call with after the proof run at `proved` failed.
+fn gate_refusal(driver: &Driver, proved: u64) -> String {
+    let proved: Edited<ProofVerdict> = driver.result(proved);
+    format!(
+        "`muse-end` with `Done` needs `proof-clippy` to pass on the session's tree; it failed:\n\n{}",
+        proved.summary()
+    )
+}
+
+/// The outputs `turn` carries for the call `call_id`.
+fn outputs_of<'a>(turn: &'a TurnInput, call_id: &str) -> Vec<&'a ToolOutput> {
+    let answers = |item: &'a TurnItem| match item {
+        TurnItem::CallOutput { call_id: id, output } if id.as_str() == call_id => Some(output),
+        _ => None,
+    };
+    turn.items().iter().filter_map(answers).collect()
+}
+
+/// The turn the one call the entry at `seq` asked for sends.
+fn next_turn(driver: &Driver, seq: u64) -> Result<TurnInput, Box<dyn Error>> {
+    let next = asked(driver, seq);
+    assert_eq!(next.name.as_str(), MuseTurn::NAME, "a turn runs next");
+    let CallInput::Value(next) = next.input else {
+        panic!("expected the next turn as a value");
+    };
+    Ok(TurnInput::decode_storage(&payload(&next))?.value)
+}
+
+#[test]
+fn a_done_end_over_an_unproven_tree_runs_the_required_proof_and_rests_with_the_tree_it_proved() -> TestResult {
+    // Catches a gate that never runs, runs its proof in the muse bundle or over another tree or bound, or rests the
+    // session on the tree from before the proof formatted it, and folds that diverge between warm-up and live
+    // delivery.
+    let mut driver = Driver::new(&[ENDED]);
+    let (opened, opened_tree) = open_gated(&mut driver, 2, &[ClippyProof::NAME])?;
+    let (formatted_tree, outcome) = formatted(&mut driver)?;
+    driver.proof = Some(outcome);
+    let first_turn = driver.follow(opened);
+    let ended_run = driver.follow(first_turn);
+
+    let proving = asked(&driver, ended_run);
+    assert_eq!((&proving.program, proving.name.as_str()), (&WORKSPACE_PROGRAMS, ClippyProof::NAME), "the gate runs");
+    let CallInput::Value(input) = &proving.input else {
+        panic!("expected the proof's input as a value");
+    };
+    let input = ErasedTooled::decode_storage(&payload(input))?.value;
+    assert_eq!(input.tree(), opened_tree, "the proof runs over the session's tree");
+    assert_eq!(input.bound(), Ref::of_encoded(&proofs())?.erase(), "the proof binds its offer's bound");
+
+    let proved_run = driver.follow(ended_run);
+    assert_eq!(asked_at(&driver, proved_run), SessionRecord::NAME, "a passing gate records the session");
+    driver.settle(proved_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, formatted_tree));
+    let summary = TurnItem::message(Role::Assistant, Ref::of_text(SUMMARY));
+    assert_eq!(session.items().last(), Some(&summary), "the summary still closes the session");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_failed_gate_answers_the_end_call_with_the_proofs_diagnostics_and_spends_its_turn() -> TestResult {
+    // Catches a failed gate that rests `Completed`, answers the end call without the proof's diagnostics or beside
+    // its `Done` instead of in its place, never gates the next end, or fails the record at the turn limit instead of
+    // resting it there.
+    let again = ended_again();
+    let mut driver = Driver::new(&[ENDED, &again]);
+    let (opened, opened_tree) = open_gated(&mut driver, 2, &[ClippyProof::NAME])?;
+    driver.proof = Some(proof_over(&mut driver, opened_tree, Some(DIAGNOSTICS))?);
+    let first_turn = driver.follow(opened);
+    let ended_run = driver.follow(first_turn);
+    let proved_run = driver.follow(ended_run);
+    assert_eq!(asked_at(&driver, proved_run), SessionGate::NAME, "a failed proof is answered");
+
+    let refusal = gate_refusal(&driver, proved_run);
+    assert!(refusal.contains(DIAGNOSTICS), "the answer carries the diagnostics: {refusal}");
+    let gated_run = driver.follow(proved_run);
+    let next = next_turn(&driver, gated_run)?;
+    let refused = ToolOutput::Refused(Ref::of_text(&refusal));
+    assert_eq!(outputs_of(&next, "call_end"), [&refused], "the refusal replaces the end call's `Done`");
+
+    driver.proof = Some(proof_over(&mut driver, opened_tree, None)?);
+    let second_turn = driver.follow(gated_run);
+    let again_run = driver.follow(second_turn);
+    assert_eq!(asked_at(&driver, again_run), ClippyProof::NAME, "the next `Done` end is gated too");
+    driver.settle(again_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
+    assert_warm_and_live_agree(&driver);
+
+    let mut driver = Driver::new(&[ENDED]);
+    let (opened, opened_tree) = open_gated(&mut driver, 1, &[ClippyProof::NAME])?;
+    driver.proof = Some(proof_over(&mut driver, opened_tree, Some(DIAGNOSTICS))?);
+    let first_turn = driver.follow(opened);
+    let ended_run = driver.follow(first_turn);
+    let proved_run = driver.follow(ended_run);
+    let refusal = gate_refusal(&driver, proved_run);
+    driver.settle(proved_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::TurnLimit, "a failed gate at the turn limit spends the last turn");
+    let refused =
+        TurnItem::CallOutput { call_id: CallId::new("call_end")?, output: ToolOutput::Refused(Ref::of_text(&refusal)) };
+    assert_eq!(session.items().last(), Some(&refused), "the record replays the refusal");
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_proof_the_model_passed_on_the_tree_it_ends_on_is_not_run_again_but_one_on_an_older_tree_is() -> TestResult {
+    // Catches a gate that ignores the model's own passing run, reuses a pass from a tree the session has since
+    // edited, or proves the tree a proof was given instead of the one it returned.
+    let mut driver = Driver::new(&[CALLED_PROOF, ENDED]);
+    let (opened, _) = open_gated(&mut driver, 4, &[ClippyProof::NAME])?;
+    let (formatted_tree, outcome) = formatted(&mut driver)?;
+    driver.proof = Some(outcome);
+    let first_turn = driver.follow(opened);
+    let proved_run = driver.follow(first_turn);
+    let second_turn = driver.follow(proved_run);
+    let ended_run = driver.follow(second_turn);
+    assert_eq!(asked_at(&driver, ended_run), SessionRecord::NAME, "the model's pass on this tree gates the end");
+    driver.settle(ended_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, formatted_tree));
+    assert_warm_and_live_agree(&driver);
+
+    let mut driver = Driver::new(&[CALLED_PROOF, CALLED_EDIT_WRITE, ENDED]);
+    let (opened, _) = open_gated(&mut driver, 4, &[ClippyProof::NAME])?;
+    let (_, outcome) = formatted(&mut driver)?;
+    driver.proof = Some(outcome);
+    let first_turn = driver.follow(opened);
+    let proved_run = driver.follow(first_turn);
+    let second_turn = driver.follow(proved_run);
+    let edited_run = driver.follow(second_turn);
+    let written_run = driver.follow(edited_run);
+    let written: Edited = driver.result(written_run);
+    let third_turn = driver.follow(written_run);
+    let ended_run = driver.follow(third_turn);
+
+    let proving = asked(&driver, ended_run);
+    assert_eq!(proving.name.as_str(), ClippyProof::NAME, "an edit after the pass reruns the proof");
+    let CallInput::Value(input) = &proving.input else {
+        panic!("expected the proof's input as a value");
+    };
+    assert_eq!(ErasedTooled::decode_storage(&payload(input))?.value.tree(), written.tree());
+    driver.proof = Some(proof_over(&mut driver, written.tree(), None)?);
+    driver.settle(ended_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, written.tree()));
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_blocked_or_asked_end_is_not_gated() -> TestResult {
+    // Catches a gate on the ends that say the work is not done, which would spend a proof run and a turn on them.
+    for (ending, rested) in [
+        (Ending::Blocked { reason: "The store is unreachable.".into() }, RestReason::Blocked),
+        (Ending::Asked { question: "Which file holds the brief?".into() }, RestReason::Asked),
+    ] {
+        let reply = ended_with(&ending);
+        let mut driver = Driver::new(&[&reply]);
+        let (opened, _) = open_gated(&mut driver, 2, &[ClippyProof::NAME])?;
+        let first_turn = driver.follow(opened);
+        let ended_run = driver.follow(first_turn);
+        assert_eq!(asked_at(&driver, ended_run), SessionRecord::NAME, "{ending:?} records without a proof");
+        driver.settle(ended_run);
+        let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+        assert_eq!(*session.rested(), rested, "{ending:?}");
+        assert_warm_and_live_agree(&driver);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_exhausted_gate_proof_answers_the_end_call_and_the_session_goes_on() -> TestResult {
+    // Catches a gate proof's exhaustion that fails the session, retries another run, or pushes its answer as an
+    // extra output instead of answering the end call.
+    let again = ended_again();
+    let mut driver = Driver::new(&[ENDED, &again]);
+    let (opened, opened_tree) = open_gated(&mut driver, 2, &[ClippyProof::NAME])?;
+    let first_turn = driver.follow(opened);
+    let mut trigger = driver.follow(first_turn);
+    let proving = asked(&driver, trigger);
+
+    for _ in 0..2 {
+        let request = driver.request(trigger);
+        trigger = fault(&mut driver, &request, FaultReason::TimedOut);
+        assert_eq!(asked(&driver, trigger).input, proving.input, "the retry runs the same proof over the same input");
+    }
+    let request = driver.request(trigger);
+    trigger = fault(&mut driver, &request, FaultReason::TimedOut);
+    assert_eq!(asked_at(&driver, trigger), SessionExhausted::NAME, "the third exhaustion is answered");
+
+    let answered = driver.follow(trigger);
+    let next = next_turn(&driver, answered)?;
+    let refused = ToolOutput::Refused(Ref::of_text("`proof.clippy` ran out of time after 3 attempts"));
+    assert_eq!(outputs_of(&next, "call_end"), [&refused], "the exhausted answer replaces the end call's `Done`");
+
+    driver.proof = Some(proof_over(&mut driver, opened_tree, None)?);
+    driver.settle(answered);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!(*session.rested(), RestReason::Completed);
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_session_continued_after_a_failed_gate_is_still_gated() -> TestResult {
+    // Catches a continue that drops the required proofs, so the resumed session could end `Done` unproven.
+    let again = ended_again();
+    let mut driver = Driver::new(&[ENDED, &again]);
+    let (opened, opened_tree) = open_gated(&mut driver, 1, &[ClippyProof::NAME])?;
+    driver.proof = Some(proof_over(&mut driver, opened_tree, Some(DIAGNOSTICS))?);
+    driver.settle(opened);
+    let key = SessionKey::new(opened);
+    let rested = driver.head(key);
+    assert_eq!(*driver.value::<Session>(rested).rested(), RestReason::TurnLimit);
+
+    let resumed = continue_from(&mut driver, key, rested, "Fix the lint, then end again.", 1);
+    let resumed_turn = driver.follow(resumed);
+    let ended_run = driver.follow(resumed_turn);
+    assert_eq!(asked_at(&driver, ended_run), ClippyProof::NAME, "the resumed `Done` end is gated");
+    driver.proof = Some(proof_over(&mut driver, opened_tree, None)?);
+    driver.settle(ended_run);
+    assert_eq!(*driver.value::<Session>(driver.head(key)).rested(), RestReason::Completed);
     assert_warm_and_live_agree(&driver);
     Ok(())
 }

@@ -15,7 +15,10 @@
 //! `proof.test`, which formats the tree and runs its workspace tests with
 //! the session's test env; each returns the formatted tree as an `Edited`
 //! and binds the session's `ProofBound`, its environment, vendor tree, cargo
-//! config, and test env.
+//! config, and test env. [`required_proofs`] names the proofs a session's
+//! `Done` end must pass, each with its whole-workspace arguments, and
+//! [`proof_passed`] reads a proof's verdict from its `Edited` detail, so the
+//! session loop gates an end without linking a proof type.
 //!
 //! A tool never refuses over what the model wrote: invalid arguments, a
 //! path that names nothing usable, a pattern that does not compile, or a
@@ -36,11 +39,13 @@ mod write;
 
 use std::iter;
 
-use aether_bloomery_kinds::{EncodedArtifact, Head, Refusal};
+use aether_bloomery_kinds::{EncodedArtifact, Head, ProgramName, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
-use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, TestProof, cargo_config_artifacts};
-use aether_data::{OpaqueBytes, Ref, Schema, Storage};
+use aether_bloomery_workspace_programs::proof::{
+    ClippyArgs, ClippyProof, ProofBound, ProofVerdict, TestArgs, TestProof, cargo_config_artifacts,
+};
+use aether_data::{ErasedRef, OpaqueBytes, Ref, Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
@@ -52,7 +57,7 @@ pub use view::{VIEW_MAX_BYTES, Viewed};
 pub use write::{TreeWrite, WriteArgs};
 
 use crate::input::{OfferedTool, OfferedTools};
-use crate::session::{MUSE, program_name};
+use crate::session::{MUSE, RequiredProof, RequiredProofs, program_name};
 
 /// The most bytes of text one tool call may write or match: 1 MiB.
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
@@ -108,6 +113,53 @@ pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<(OfferedTool, Vec<EncodedArt
     vec![bound::<ClippyProof>(WORKSPACE_PROGRAMS, proofs), bound::<TestProof>(WORKSPACE_PROGRAMS, proofs)]
 }
 
+/// Whether a proof's `Edited` `detail` says it passed: it cites exactly
+/// [`ProofVerdict::Passed`], which cites nothing, so the digest alone decides
+/// and the session loop links no proof type.
+///
+/// # Panics
+///
+/// When the verdict does not encode, which holds or fails the same way on
+/// every call.
+#[must_use]
+pub fn proof_passed(detail: ErasedRef) -> bool {
+    detail == Ref::of_encoded(&ProofVerdict::Passed).expect("the verdict encodes").erase()
+}
+
+/// The proofs `names` require, each with its whole-workspace arguments, and
+/// the arguments to stage: every proof tool [`proof_offers`] offers can be
+/// required.
+///
+/// # Errors
+///
+/// A name that is no proof tool, or a name given twice.
+///
+/// # Panics
+///
+/// When a proof's arguments do not encode, which holds or fails the same
+/// way on every call.
+pub fn required_proofs(names: &[ProgramName]) -> Result<(RequiredProofs, Vec<EncodedArtifact>), String> {
+    let rows = [
+        (program_name::<ClippyProof>(), EncodedArtifact::new(&ClippyArgs).expect("the arguments encode")),
+        (program_name::<TestProof>(), EncodedArtifact::new(&TestArgs).expect("the arguments encode")),
+    ];
+    let (proofs, artifacts): (Vec<_>, Vec<_>) = names
+        .iter()
+        .map(|name| {
+            let (_, args) = rows
+                .iter()
+                .find(|(program, _)| program == name)
+                .ok_or_else(|| format!("{} is not a proof tool", name.as_str()))?;
+            let cited = ErasedRef::new(args.kind(), args.digest());
+            Ok((RequiredProof::new(name.clone(), cited), args.clone()))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .unzip();
+    let proofs = RequiredProofs::new(proofs).map_err(|error| format!("the required proofs: {error}"))?;
+    Ok((proofs, artifacts))
+}
+
 /// `P` as a bound tool from the bundle `head` resolves to, binding the cited
 /// `value` into every call, and the artifacts its offer cites besides `value`.
 fn bound<P: Program>(
@@ -141,4 +193,22 @@ async fn read_args<A: Storage>(env: &mut Env<Async>, args: Ref<A>) -> Result<Res
     Ok(A::decode_storage(&payload)
         .map(|data| data.value)
         .map_err(|error| format!("The arguments are invalid ({error})")))
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_data::Ref;
+
+    use aether_bloomery_workspace_programs::proof::ProofVerdict;
+
+    use super::proof_passed;
+
+    #[test]
+    fn only_a_passed_verdict_reads_as_passed() {
+        // Catches a gate that compares the wrong digest, and so reruns every proof or never reruns a failed one.
+        let passed = Ref::of_encoded(&ProofVerdict::Passed).expect("verdict").erase();
+        let failed = ProofVerdict::Failed { diagnostics: Ref::of_text("error: unused variable") };
+        assert!(proof_passed(passed));
+        assert!(!proof_passed(Ref::of_encoded(&failed).expect("verdict").erase()));
+    }
 }
