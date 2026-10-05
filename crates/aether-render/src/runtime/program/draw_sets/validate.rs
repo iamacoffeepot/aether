@@ -4,8 +4,10 @@
 
 use naga::Module;
 
-use crate::runtime::program::validate::{Attached, PassPlan, check_depth, check_vertex_interface, vertex_entry};
-use crate::{Cull, DepthUse, DrawSetsPass, PassLoad, ProgramRegister, VertexAttribute};
+use crate::runtime::program::validate::{
+    PassPlan, RasterPass, check_depth, check_depth_only, check_vertex_interface, vertex_entry,
+};
+use crate::{Cull, DepthUse, DepthWrite, DrawSetsPass, PassLoad, ProgramRegister, VertexAttribute};
 
 /// One validated draw-sets pass: the authored vertex entry, the two
 /// layouts its vertex buffers are built from and a drawn set must have,
@@ -34,22 +36,25 @@ pub struct ValidatedDrawSets {
 /// Validate one `PassStage::DrawSets` declaration, in check order: the
 /// vertex entry exists, the two layouts can each be a vertex buffer and
 /// share no location, the vertex stage's interface agrees with the two
-/// together, and the depth declaration is coherent with the pass.
+/// together, the depth declaration is coherent with the pass, and a
+/// pass with no color output is a well-formed depth-only pass that
+/// writes the depth slot it names.
 pub fn validate_draw_sets(
     mail: &ProgramRegister,
     module: &Module,
-    index: usize,
     pass: &DrawSetsPass,
-    fragment_entry: (usize, &str),
-    attached: Attached,
+    raster: &RasterPass<'_>,
 ) -> Result<ValidatedDrawSets, String> {
+    let index = raster.index;
     let vertex_entry_index = vertex_entry(module, index, &pass.vertex_entry_point)?;
     check_layouts(index, &pass.vertex_layout, &pass.instance_layout)?;
 
     let attributes: Vec<VertexAttribute> = pass.vertex_layout.iter().chain(&pass.instance_layout).copied().collect();
     let declared_by = "the pass's vertex or instance layout";
     check_vertex_interface(module, index, vertex_entry_index, &attributes, declared_by)?;
-    check_depth(mail, module, index, pass.depth.map(|depth| depth.slot), fragment_entry, attached)?;
+    check_depth(mail, module, pass.depth.map(|depth| depth.slot), raster)?;
+    check_depth_only(module, pass.load, raster)?;
+    check_depth_only_writes(pass.depth, raster)?;
 
     Ok(ValidatedDrawSets {
         plan: DrawSetsPlan {
@@ -63,6 +68,22 @@ pub fn validate_draw_sets(
         },
         vertex_entry_index,
     })
+}
+
+/// A depth-only pass writes the depth slot it names, since that slot is
+/// all it attaches: `DepthWrite::TestOnly`, which only this stage can
+/// declare, would leave a pass that draws and writes nothing.
+fn check_depth_only_writes(depth: Option<DepthUse>, raster: &RasterPass<'_>) -> Result<(), String> {
+    let depth_only = raster.attached.is_none();
+    let test_only = depth.is_some_and(|depth| depth.write == DepthWrite::TestOnly);
+    if depth_only && test_only {
+        return Err(format!(
+            "pass {}: a depth-only pass declaring DepthWrite::TestOnly would write nothing — its depth slot is all \
+             it attaches, so it declares DepthWrite::Write",
+            raster.index,
+        ));
+    }
+    Ok(())
 }
 
 /// Each layout must be one a vertex buffer can be built from, and the
@@ -133,9 +154,9 @@ pub fn list_slots(passes: &[PassPlan]) -> Result<u32, String> {
 mod tests {
     use crate::runtime::program::validate::validate;
     use crate::{
-        Blend, Cull, DepthSpec, DepthUse, DepthWrite, DrawSetsPass, Mips, OutputSlot, PassLoad, PassStage, ProgramPass,
-        ProgramRegister, Samples, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, VertexAttribute,
-        VertexFormat, Wrap,
+        Blend, Cull, DepthExtent, DepthSpec, DepthUse, DepthWrite, DrawSetsPass, Mips, OutputSlot, PassLoad, PassStage,
+        ProgramPass, ProgramRegister, Samples, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat,
+        VertexAttribute, VertexFormat, Wrap,
     };
 
     /// A vertex stage reading one per-vertex location (0) and two
@@ -155,6 +176,9 @@ fn vs_placed(@location(0) position: vec3<f32>, @location(4) offset: vec2<f32>, @
 fn fs_color(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
     return color;
 }
+
+@fragment
+fn fs_nothing() {}
 ";
 
     fn vertex_layout() -> Vec<VertexAttribute> {
@@ -203,7 +227,10 @@ fn fs_color(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
             }],
             transients: Vec::new(),
             geometries: Vec::new(),
-            depth_transients: vec![DepthSpec { extent: SlotExtent::Divided { divisor: 2 }, samples: Samples::One }],
+            depth_transients: vec![DepthSpec {
+                extent: DepthExtent::Output(SlotExtent::Divided { divisor: 2 }),
+                samples: Samples::One,
+            }],
             passes,
         }
     }
@@ -272,5 +299,33 @@ fn fs_color(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
         let reason = rejection(&program(vec![pass(DrawSetsPass { depth, ..stage() })]));
 
         assert!(reason.contains("depth transient 0 declares extent"), "depth-extent class: {reason}");
+    }
+
+    /// A depth-only pass over depth slot 0 under `write`.
+    fn depth_only(write: DepthWrite) -> ProgramPass {
+        let depth = Some(DepthUse { slot: 0, write });
+        ProgramPass {
+            blend: Blend::Replace,
+            entry_point: "fs_nothing".to_owned(),
+            output: OutputSlot::None,
+            ..pass(DrawSetsPass { depth, load: PassLoad::Load, ..stage() })
+        }
+    }
+
+    /// The bugs: a depth-only draw-sets pass refused for having no
+    /// output, so no instanced scene casts a shadow; and a `TestOnly`
+    /// one registering, which rasterizes every listed draw each
+    /// dispatch and writes nothing anywhere.
+    #[test]
+    fn a_depth_only_pass_must_write_its_depth_slot() {
+        let plan = validate(&program(vec![depth_only(DepthWrite::Write), pass(stage())]))
+            .expect("a depth-only pass that writes its slot validates");
+        assert_eq!(plan.passes[0].output, None);
+
+        let reason = rejection(&program(vec![depth_only(DepthWrite::TestOnly), pass(stage())]));
+        assert!(
+            reason.contains("pass 0: a depth-only pass declaring DepthWrite::TestOnly"),
+            "test-only class: {reason}"
+        );
     }
 }

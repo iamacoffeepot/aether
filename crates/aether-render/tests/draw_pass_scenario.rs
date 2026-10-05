@@ -25,16 +25,16 @@ use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
-use aether_harness_substrate_capture::visual::{background_top_left, decode_png};
+use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthSpec, DrawPass, DrawShapes,
-    DrawTexturedQuads, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass,
-    ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent, SlotShape, SlotSpec, TextureFormat,
-    TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthExtent, DepthSpec, DrawPass,
+    DrawShapes, DrawTexturedQuads, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch,
+    ProgramPass, ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent, SlotShape, SlotSpec,
+    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -52,7 +52,8 @@ fn require_wgpu_only() -> bool {
 /// The shared draw module. `vs_flat` reads the position attribute for
 /// x and y but takes clip depth from the uniform window, so the pass's
 /// window reaching the *vertex* stage is what places the geometry in
-/// depth; `fs_flat` paints the window's flat color.
+/// depth; `fs_flat` paints the window's flat color, and `fs_nothing`
+/// returns none, as the fragment entry point of a depth-only pass does.
 const MODULE: &str = r"
 struct DrawParams {
     color: vec4<f32>,
@@ -74,6 +75,9 @@ fn vs_tinted(@location(0) position: vec3<f32>, @location(1) tint: vec4<f32>) -> 
 fn fs_flat() -> @location(0) vec4<f32> {
     return draw_params.color;
 }
+
+@fragment
+fn fs_nothing() {}
 ";
 
 /// Bytes of the module's `DrawParams` block: a `vec4<f32>` then an
@@ -399,33 +403,20 @@ fn one_program_dispatched_twice_in_a_frame_draws_with_each_dispatchs_uniforms() 
     }
 }
 
-/// ADR-0171 depth sharing: two consecutive draw passes naming one depth
-/// transient agree on occlusion. The near quad is drawn *first* at clip
-/// depth 0.2 and the far quad second at 0.8, so only a working depth
-/// test can keep the near one on top where they overlap — without it
-/// the later pass simply paints over. The named bugs: the depth
-/// attachment omitted or the comparison inverted (the overlap turns the
-/// far color); the second pass re-clearing the shared depth instead of
-/// loading it (the overlap turns the far color again, which is why the
-/// left-only probe is asserted too — it separates "depth ignored" from
-/// "second pass never ran"); and the second pass clearing the color
-/// output despite declaring `Load`, which would erase the near quad
-/// everywhere.
-#[test]
-fn consecutive_draw_passes_share_depth_and_occlude() {
-    if !require_wgpu_only() {
-        return;
-    }
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
-
+/// Run a two-pass program over one shared depth slot and capture its
+/// output: `near_pass` draws geometry slot 0, a quad over clip x
+/// `-1..0.2`, with the first uniform window (red, depth 0.2), and
+/// `far_pass` draws slot 1, a quad over `-0.2..1`, with the second
+/// (green, depth 0.8). Screen 22 is then inside the near quad alone, 32
+/// inside the overlap and 42 inside the far quad alone, on row 24.
+fn capture_near_then_far(harness: &mut SubstrateHarness, near_pass: ProgramPass, far_pass: ProgramPass) -> Image {
     let (near_positions, indices) = quad_geometry(-1.0, 0.2);
-    let near_id = create_geometry(&mut harness, "create_near", &near_positions, &indices);
+    let near_id = create_geometry(harness, "create_near", &near_positions, &indices);
     let (far_positions, _) = quad_geometry(-0.2, 1.0);
-    let far_id = create_geometry(&mut harness, "create_far", &far_positions, &indices);
-    let output_id = create_output(&mut harness);
-    let window_bytes = u32::try_from(DRAW_PARAMS_BYTES).expect("window length fits u32");
+    let far_id = create_geometry(harness, "create_far", &far_positions, &indices);
+    let output_id = create_output(harness);
     let program_id = registered_id(
-        &mut harness,
+        harness,
         "register",
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
@@ -436,11 +427,8 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
             }],
             transients: Vec::new(),
             geometries: vec![position_slot(), position_slot()],
-            depth_transients: vec![DepthSpec { extent: SlotExtent::Full, samples: Samples::One }],
-            passes: vec![
-                draw_pass(0, Some(0), PassLoad::Clear, 0),
-                draw_pass(1, Some(0), PassLoad::Load, window_bytes),
-            ],
+            depth_transients: vec![DepthSpec { extent: DepthExtent::Output(SlotExtent::Full), samples: Samples::One }],
+            passes: vec![near_pass, far_pass],
         },
     );
 
@@ -461,10 +449,37 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
     ];
     let captured =
         harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture depth output");
-    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode depth capture png");
+    decode_png(captured.captured("snap").expect("snap step ran")).expect("decode depth capture png")
+}
 
-    // Screen 22 is inside the near quad alone, 32 inside the overlap,
-    // 42 inside the far quad alone; row 24 is the vertical middle.
+/// The byte offset of the second pass's uniform window.
+fn second_window() -> u32 {
+    u32::try_from(DRAW_PARAMS_BYTES).expect("window length fits u32")
+}
+
+/// ADR-0171 depth sharing: two consecutive draw passes naming one depth
+/// transient agree on occlusion. The near quad is drawn *first* at clip
+/// depth 0.2 and the far quad second at 0.8, so only a working depth
+/// test can keep the near one on top where they overlap — without it
+/// the later pass simply paints over. The named bugs: the depth
+/// attachment omitted or the comparison inverted (the overlap turns the
+/// far color); the second pass re-clearing the shared depth instead of
+/// loading it (the overlap turns the far color again, which is why the
+/// left-only probe is asserted too — it separates "depth ignored" from
+/// "second pass never ran"); and the second pass clearing the color
+/// output despite declaring `Load`, which would erase the near quad
+/// everywhere.
+#[test]
+fn consecutive_draw_passes_share_depth_and_occlude() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let near_pass = draw_pass(0, Some(0), PassLoad::Clear, 0);
+    let far_pass = draw_pass(1, Some(0), PassLoad::Load, second_window());
+    let img = capture_near_then_far(&mut harness, near_pass, far_pass);
+
     let near_only = rgba_at(&img, 22, 24);
     let overlap = rgba_at(&img, 32, 24);
     let far_only = rgba_at(&img, 42, 24);
@@ -475,6 +490,40 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
         "the near quad was drawn first at depth 0.2, so the shared depth test must keep it over the far quad at \
          0.8 in the overlap; got {overlap:?}",
     );
+}
+
+/// ADR-0246 decision 9 through the `Draw` stage, which records through
+/// its own arm: a depth-only pass draws the near quad into the depth
+/// slot and no colour, then a colour pass naming the same slot draws
+/// the far quad behind it. The near quad's region and the overlap stay
+/// unlit, and the far quad shows only where the near one does not
+/// cover. The named bugs: the depth-only pass writing no depth (the
+/// overlap turns the far colour); the colour pass clearing the depth
+/// the depth-only pass left (the same); and the depth-only pass failing
+/// on the device and dropping the rest of the dispatch (the far-only
+/// probe is unlit).
+#[test]
+fn a_depth_only_draw_pass_hides_the_far_quad_where_it_drew() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let near_pass = ProgramPass {
+        blend: Blend::Replace,
+        entry_point: "fs_nothing".to_owned(),
+        output: OutputSlot::None,
+        ..draw_pass(0, Some(0), PassLoad::Load, 0)
+    };
+    let far_pass = draw_pass(1, Some(0), PassLoad::Clear, second_window());
+    let img = capture_near_then_far(&mut harness, near_pass, far_pass);
+    let bg = background_top_left(&img);
+    let tolerance = 5;
+
+    let far_only = rgba_at(&img, 42, 24);
+    assert!(far_only[1] > far_only[0] + 60, "the far quad's own region must be green; got {far_only:?}");
+    assert!(!pixel_is_lit(&img, 32, 24, bg, tolerance), "the depth-only pass's depth must hide the far quad");
+    assert!(!pixel_is_lit(&img, 22, 24, bg, tolerance), "a depth-only pass must draw no colour");
 }
 
 /// ADR-0171 register validation: the draw classes reply their own

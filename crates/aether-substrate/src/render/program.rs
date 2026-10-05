@@ -272,25 +272,35 @@ pub struct ProgramDepthState {
     pub write: bool,
 }
 
+/// The color target of a draw pipeline: the attachment's `format`, and
+/// the `blend` state the pass declared, as on [`ProgramPipelineSpec`].
+/// The two travel together because a pipeline with no color target has
+/// neither.
+#[derive(Debug, Copy, Clone)]
+pub struct ProgramColorTarget {
+    pub format: wgpu::TextureFormat,
+    pub blend: Option<wgpu::BlendState>,
+}
+
 /// One draw pass's pipeline shape (ADR-0171, ADR-0246): the authored
 /// module's vertex and fragment entry points over `vertex_buffers`, in
-/// buffer-slot order, into a color attachment of `color_format` that
-/// holds `sample_count` samples per texel. A pass over one bound
-/// geometry has one per-vertex buffer; a draw-sets pass adds a
-/// per-instance buffer at slot 1. `cull_mode` is `None` for a pass that
-/// draws both windings. `blend` is the state the pass declared, as on
-/// [`ProgramPipelineSpec`]. `depth` is the state a declared depth
-/// transient attaches under, at the same sample count; a pass declaring
-/// none rasterizes in draw order.
+/// buffer-slot order, at `sample_count` samples per texel. A pass over
+/// one bound geometry has one per-vertex buffer; a draw-sets pass adds
+/// a per-instance buffer at slot 1. `cull_mode` is `None` for a pass
+/// that draws both windings. `color` is the color attachment the pass
+/// renders into, or `None` for a depth-only pass, whose pipeline has a
+/// fragment stage and no color target. `depth` is the state a declared
+/// depth transient attaches under, at the same sample count; a pass
+/// declaring none rasterizes in draw order. A pipeline declares at
+/// least one of the two.
 pub struct ProgramDrawPipelineSpec<'a> {
     pub module: &'a wgpu::ShaderModule,
     pub vertex_entry_point: &'a str,
     pub fragment_entry_point: &'a str,
     pub vertex_buffers: &'a [ProgramVertexBuffer<'a>],
     pub cull_mode: Option<wgpu::Face>,
-    pub color_format: wgpu::TextureFormat,
+    pub color: Option<ProgramColorTarget>,
     pub sample_count: u32,
-    pub blend: Option<wgpu::BlendState>,
     pub depth: Option<ProgramDepthState>,
     pub uniform_layout: &'a wgpu::BindGroupLayout,
     pub inputs_layout: &'a wgpu::BindGroupLayout,
@@ -318,11 +328,11 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
             })
         })
         .collect();
-    let fragment_targets = [Some(wgpu::ColorTargetState {
-        format: spec.color_format,
-        blend: spec.blend,
-        write_mask: wgpu::ColorWrites::ALL,
-    })];
+    // An `Option` as a slice is the target list itself: one target, or
+    // none for a depth-only pipeline.
+    let fragment_target = spec.color.map(|color| {
+        Some(wgpu::ColorTargetState { format: color.format, blend: color.blend, write_mask: wgpu::ColorWrites::ALL })
+    });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("aether program draw pipeline"),
         layout: Some(&pipeline_layout),
@@ -336,7 +346,7 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
             module: spec.module,
             entry_point: Some(spec.fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &fragment_targets,
+            targets: fragment_target.as_slice(),
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -400,9 +410,10 @@ pub fn build_program_compute_pipeline(
 
 /// Create one depth transient for the program transient pool
 /// (ADR-0171): a `Depth32Float` attachment of `sample_count` samples
-/// per texel that draw passes clear and test against. Render-attachment
-/// only — nothing samples it or resolves it, and the pass that shares
-/// it does so by attaching it again.
+/// per texel that draw passes clear and test against, beside a color
+/// attachment of the same size or, under a depth-only pass, alone.
+/// Render-attachment only — nothing samples it or resolves it, and the
+/// pass that shares it does so by attaching it again.
 #[must_use]
 pub fn create_program_depth_transient(
     device: &wgpu::Device,
@@ -560,18 +571,27 @@ pub struct ProgramDepthAttachment<'a> {
     pub clear: bool,
 }
 
+/// The color attachment of one recorded draw pass iteration: the color
+/// slot `view` it renders into, the single-sample view a multisampled
+/// color slot resolves into when this iteration ends (`None` when it
+/// does not resolve), and whether the pass's declared load semantic
+/// clears the slot to transparent black or loads it. The three travel
+/// together because a pass with no color attachment has none of them.
+pub struct ProgramColorAttachment<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub resolve_target: Option<&'a wgpu::TextureView>,
+    pub clear: bool,
+}
+
 /// What every recorded draw pass iteration opens with (ADR-0171,
-/// ADR-0246): the pass's pipeline, the color slot view it renders into
-/// under the pass's declared load semantic, the single-sample view a
-/// multisampled color slot resolves into when this iteration ends
-/// (`None` when it does not resolve), an optional depth attachment of
-/// the color slot's sample count, and the group-0 uniform window and
-/// group-1 input pairs.
+/// ADR-0246): the pass's pipeline, its color attachment (`None` for a
+/// depth-only pass, which opens a render pass with no color
+/// attachments), an optional depth attachment of the pass's sample
+/// count, and the group-0 uniform window and group-1 input pairs. A
+/// pass opens with at least one of the two attachments.
 pub struct ProgramDrawPassOpen<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
-    pub target_view: &'a wgpu::TextureView,
-    pub resolve_target: Option<&'a wgpu::TextureView>,
-    pub clear_color: bool,
+    pub color: Option<ProgramColorAttachment<'a>>,
     pub depth: Option<ProgramDepthAttachment<'a>>,
     pub uniform_bind_group: &'a wgpu::BindGroup,
     pub uniform_offset: u32,
@@ -589,11 +609,21 @@ pub fn begin_program_draw_pass<'e>(
     encoder: &'e mut wgpu::CommandEncoder,
     open: &ProgramDrawPassOpen<'_>,
 ) -> wgpu::RenderPass<'e> {
-    let load = if open.clear_color {
-        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-    } else {
-        wgpu::LoadOp::Load
-    };
+    // An `Option` as a slice is the attachment list itself: one color
+    // attachment, or none for a depth-only pass.
+    let color_attachment = open.color.as_ref().map(|color| {
+        let load = if color.clear {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        } else {
+            wgpu::LoadOp::Load
+        };
+        Some(wgpu::RenderPassColorAttachment {
+            view: color.view,
+            resolve_target: color.resolve_target,
+            depth_slice: None,
+            ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+        })
+    });
     let depth_attachment = open.depth.as_ref().map(|depth| {
         let load = if depth.clear {
             wgpu::LoadOp::Clear(1.0)
@@ -608,12 +638,7 @@ pub fn begin_program_draw_pass<'e>(
     });
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether program draw pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: open.target_view,
-            resolve_target: open.resolve_target,
-            depth_slice: None,
-            ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
-        })],
+        color_attachments: color_attachment.as_slice(),
         depth_stencil_attachment: depth_attachment,
         timestamp_writes: open.timestamps.map(PassTimestamps::writes),
         occlusion_query_set: None,
@@ -644,7 +669,7 @@ pub enum ProgramDrawCommand<'a> {
 
 /// Record one draw pass iteration into `encoder`: an indexed
 /// triangle-list draw of the bound geometry through the pass pipeline
-/// into the color attachment, optionally depth-tested. A geometry with
+/// into the pass's attachments. A geometry with
 /// no indices still runs the pass — its clears are the caller's
 /// declaration — and issues no draw.
 pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &ProgramDrawPass<'_>) {

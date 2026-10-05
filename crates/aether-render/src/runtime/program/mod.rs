@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramComputePipelineSpec, ProgramDepthState, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler,
-    ProgramInputView, ProgramPipelineSpec, ProgramTransientSpec, ProgramVertexBuffer, build_fullscreen_vertex_module,
-    build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
-    program_storage_layout, program_uniform_layout,
+    ProgramColorTarget, ProgramComputePipelineSpec, ProgramDepthState, ProgramDrawPipelineSpec, ProgramInput,
+    ProgramInputSampler, ProgramInputView, ProgramPipelineSpec, ProgramTransientSpec, ProgramVertexBuffer,
+    build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
+    build_program_pipeline, program_inputs_layout, program_storage_layout, program_uniform_layout,
 };
 use aether_substrate::session_ids::SessionIds;
 
@@ -458,8 +458,9 @@ struct DrawStage<'a> {
 }
 
 /// Build the draw pipeline of one rasterizing pass: `stage` over the
-/// pass's fragment entry, color output and its `(uniform, inputs)`
-/// bind-group layouts.
+/// pass's fragment entry, its color output when it has one (a
+/// depth-only pass has none, and its pipeline no color target) and its
+/// `(uniform, inputs)` bind-group layouts.
 fn build_draw_pipeline(
     device: &wgpu::Device,
     module: &wgpu::ShaderModule,
@@ -468,7 +469,10 @@ fn build_draw_pipeline(
     (uniform_layout, inputs_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
     stage: &DrawStage<'_>,
 ) -> PassPipeline {
-    let output = pass.output.expect("a rasterizing pass has an output");
+    let color = pass.output.map(|output| ProgramColorTarget {
+        format: super::texture::wgpu_texture_format(plan.slot_format(output)),
+        blend: blend_state(pass.blend),
+    });
     PassPipeline::Render(build_program_draw_pipeline(
         device,
         &ProgramDrawPipelineSpec {
@@ -477,9 +481,8 @@ fn build_draw_pipeline(
             fragment_entry_point: &pass.entry_point,
             vertex_buffers: stage.vertex_buffers,
             cull_mode: stage.cull_mode,
-            color_format: super::texture::wgpu_texture_format(plan.slot_format(output)),
-            sample_count: plan.samples(output).count(),
-            blend: blend_state(pass.blend),
+            color,
+            sample_count: plan.pass_samples(pass).count(),
             depth: stage.depth,
             uniform_layout,
             inputs_layout,

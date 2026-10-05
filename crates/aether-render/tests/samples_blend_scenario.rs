@@ -20,7 +20,7 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::{
-    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthSpec, DrawPass,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthExtent, DepthSpec, DrawPass,
     DrawTexturedQuads, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassRepeat, PassStage, ProgramDispatch,
     ProgramPass, ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability, Samples, Sampling, SlotExtent,
     SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, TransientSpec, VertexAttribute,
@@ -261,7 +261,7 @@ fn edge_program(samples: Samples) -> ProgramRegister {
         bindings: vec![target()],
         transients: vec![TransientSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full, samples }],
         geometries: vec![position_slot()],
-        depth_transients: vec![DepthSpec { extent: SlotExtent::Full, samples }],
+        depth_transients: vec![DepthSpec { extent: DepthExtent::Output(SlotExtent::Full), samples }],
         passes: vec![
             draw("fs_red", 0, Some(0), PassLoad::Clear, OutputSlot::Transient { index: 0 }),
             copy("fs_flatten", OutputSlot::Binding { index: 0 }),
