@@ -89,7 +89,8 @@ after=<seq>
 - `--instructions` is required: a file holding the session instructions, sent
   as the leading developer message ahead of the brief with a short preface
   saying the session works only through the offered tools, makes every
-  independent call in the same turn, and ends its run only by calling
+  independent call in the same turn, runs `tree-diff` before ending `Done`,
+  and ends its run only by calling
   `muse-end`; with proofs offered, it also tells the model to run
   `proof-clippy` and `proof-test` until each passes before ending `Done`, and
   with proofs required, that ending `Done` runs them.
@@ -100,12 +101,12 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. The
+  `tree.diff`, `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. The
   model reads a read's text and an edit's summary exactly as stored, so the
   text after a line's number and tab is what `tree.edit` matches. A
   reply without a tool call does not end the session: the loop nudges the model back for
   another turn. The first turn sends the instructions as the developer
-  message ahead of the brief.
+  message ahead of the brief. `tree.diff` shows the session's tree against the tree it opened on.
 - `--environment <digest>` and `--vendor <digest>`, given together, also offer
   `proof.clippy` and `proof.test` from the `workspace-programs` bundle, bound
   to that environment, vendor tree, and the `--test-env` variables (see
@@ -181,7 +182,9 @@ sessions on one engine are each followed by their own `wait`.
   ended `Done` with a summary, `blocked` that it ended `Blocked` with what
   stopped it, and `asked` that it ended `Asked` with the one question it
   cannot go on without. The final message follows for all three end reasons:
-  the summary, reason, or question.
+  the summary, reason, or question. The `muse-end` call takes `ending`, one of
+  `Done`, `Blocked`, or `Asked`, and `text`, a plain string. A journal that
+  holds end calls from before this change does not replay them.
 - `turns` counts the session's `muse.turn` runs read, and `usage` sums the
   token counts they reported.
 - `from` is the tree the activation started on (the open's tree, or the tree

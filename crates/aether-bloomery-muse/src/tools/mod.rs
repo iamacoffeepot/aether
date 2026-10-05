@@ -3,13 +3,14 @@
 //! Every tool's input is `Tooled<A, B>`: the session's current tree and the
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
-//! to and binds `NoBound`, except the vendor view below. [`offered`] is the
-//! set every session offers:
+//! to and binds `NoBound`, except the vendor view below, which binds its
+//! `ProofBound`, and `tree.diff`, which binds the tree the session opened on.
+//! [`offered`] is the set every session offers:
 //! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree
 //! nodes and blobs they touch and return an `Edited` tree;
-//! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
-//! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
-//! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
+//! `tree.list`, `tree.read`, `tree.grep`, and `tree.diff`, which only read the
+//! tree and return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with
+//! the cut marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the
 //! run as done, blocked, or asking a question. [`offered_with_proofs`] adds
 //! the proofs from the bundle `WORKSPACE_PROGRAMS` resolves to,
 //! `proof.clippy`, which formats the tree and checks it with clippy, and
@@ -47,7 +48,7 @@ mod write;
 
 use std::iter;
 
-use aether_bloomery_kinds::{EncodedArtifact, Head, ProgramName, Refusal};
+use aether_bloomery_kinds::{EncodedArtifact, Head, ProgramName, Refusal, Tree};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_bloomery_workspace_programs::proof::{
@@ -55,6 +56,7 @@ use aether_bloomery_workspace_programs::proof::{
 };
 use aether_data::{ErasedRef, OpaqueBytes, Ref, Schema, Storage};
 
+pub use diff::{DiffArgs, TreeDiff};
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};
 pub use end::{End, EndArgs, Ending, NUDGE_TEXT, end_position, ends_run};
@@ -76,12 +78,16 @@ pub const MAX_TEXT_BYTES: usize = 1 << 20;
 /// those offers cite: each definition, each arguments and result schema, and
 /// the bound value, for a caller that opens a session to stage.
 ///
+/// `base` is the tree the session opens on, which `tree.diff` compares the
+/// session's tree against; its artifact is not cited, the caller stages the
+/// tree it opens on.
+///
 /// # Panics
 ///
 /// When a bound tool does not render as a tool or its schema does not encode,
 /// which holds or fails the same way on every call.
 #[must_use]
-pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
+pub fn offered(base: Ref<Tree>) -> (OfferedTools, Vec<EncodedArtifact>) {
     let no_bound = EncodedArtifact::new(&NoBound).expect("the bound encodes");
     let none = Ref::<NoBound>::from_digest(no_bound.digest());
     let (tools, artifacts): (Vec<_>, Vec<_>) = [
@@ -92,6 +98,7 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
         bound::<TreeList>(MUSE, none),
         bound::<TreeRead>(MUSE, none),
         bound::<TreeGrep>(MUSE, none),
+        bound::<TreeDiff>(MUSE, base),
         bound::<End>(MUSE, none),
     ]
     .into_iter()
@@ -109,8 +116,8 @@ pub fn offered() -> (OfferedTools, Vec<EncodedArtifact>) {
 ///
 /// As [`offered`] does.
 #[must_use]
-pub fn offered_with_proofs(proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArtifact>) {
-    let (tools, mut artifacts) = offered();
+pub fn offered_with_proofs(base: Ref<Tree>, proofs: &ProofBound) -> (OfferedTools, Vec<EncodedArtifact>) {
+    let (tools, mut artifacts) = offered(base);
     let bound = EncodedArtifact::new(proofs).expect("the proof bound encodes");
     let (proofs, cited): (Vec<_>, Vec<_>) = proof_bound_offers(Ref::from_digest(bound.digest())).into_iter().unzip();
     artifacts.extend(cited.into_iter().flatten().chain([bound]).chain(cargo_config_artifacts()));

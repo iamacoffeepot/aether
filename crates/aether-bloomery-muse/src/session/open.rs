@@ -12,7 +12,7 @@ use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls, TurnI
 use crate::session::gate::{RequiredProof, RequiredProofs};
 use crate::session::state::{TurnLimit, TurnSettings};
 use crate::session::tools::program_name;
-use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered, proof_bound_offers, proof_offers};
+use crate::tools::{READ_MAX_LINES, ReadArgs, TreeDiff, TreeRead, offered, proof_bound_offers, proof_offers};
 
 /// A session to open: what every turn sends, the session instructions, the
 /// first user message, how many turns it may make before it rests, the tree
@@ -139,6 +139,7 @@ pub struct SessionOpen;
 /// bound tool with a definition, schema, bundle head, or bound kind other than
 /// its own; the proof tools and the vendor view bind a `ProofBound`, the
 /// session's environment, vendor tree, and test env, whatever its value.
+/// Refuses a `tree.diff` offer bound to a tree other than the session's.
 /// Refuses a required proof that is not offered as a proof tool, since the
 /// gate runs it through its offer, and required arguments of another kind
 /// than the offer's input schema names, which the proof could not decode; a
@@ -154,11 +155,15 @@ impl Program for SessionOpen {
     type Result = Opened;
 
     fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
-        let (own, _) = offered();
+        let (own, _) = offered(input.tree());
         let unbound = input.settings.tools().iter().find(|tool| !binds(&own, tool));
         if let Some(tool) = unbound {
             let reason = format!("{} is not offered as a tool the session binds", tool.program().as_str());
             return Err(Refusal::Refused { reason: Detail::new(reason) });
+        }
+        let rebased = input.settings.tools().iter().any(|tool| diffs_another_tree(tool, input.tree()));
+        if rebased {
+            return Err(refused(String::from("tree.diff is bound to a tree other than the session's")));
         }
         for proof in input.required.as_slice() {
             gates(&input, proof, *env)?;
@@ -179,6 +184,13 @@ fn binds(own: &OfferedTools, tool: &OfferedTool) -> bool {
     let is_own = own.offers(tool);
     let is_proof_bound = proof_bound(tool);
     is_own || is_proof_bound
+}
+
+/// Whether the tool is the diff tool bound to a tree other than the base.
+fn diffs_another_tree(tool: &OfferedTool, base: Ref<Tree>) -> bool {
+    let is_diff = *tool.program() == program_name::<TreeDiff>();
+    let rebased = tool.bound() != base.erase();
+    is_diff && rebased
 }
 
 /// Whether `tool` is a proof tool or a vendor tool offered over a
@@ -279,7 +291,8 @@ mod tests {
         // messages, one that admits a tool the loop cannot run, a bound tool offered with another definition or a
         // bound of another kind or from another bundle head, one that refuses a bound value it should only check the kind of, and seeds made up
         // from no paths.
-        let (bound, _) = offered();
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (bound, _) = offered(tree);
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), Vec::new())).expect("bound tools open");
         assert_eq!(opened.seeds(), None);
         let first: TurnInput = store.value(opened.turn());
@@ -314,6 +327,26 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_bound_to_another_tree_is_refused() {
+        // Catches an open that checks the bound's kind only, which would let a diff run against a tree the session
+        // never opened on.
+        use std::iter::once;
+
+        use aether_bloomery_kinds::Name;
+        use aether_bloomery_kinds::Node;
+
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let other_root =
+            Tree::new(once((Name::new("other").expect("name"), Node::File(Ref::of_bytes(b"other")))).collect());
+        let other = Ref::of_encoded(&other_root).expect("other");
+        let (other_offer, _) = offered(other);
+        let refused = run_stored::<SessionOpen>(&open(other_offer, Vec::new()));
+        assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
+        let (same_offer, _) = offered(tree);
+        run_stored::<SessionOpen>(&open(same_offer, Vec::new())).expect("a diff bound to the session's tree opens");
+    }
+
+    #[test]
     fn proof_bound_offers_open_over_any_proof_bound_from_their_own_bundle_only() {
         // Catches an open that refuses the proof tools or the vendor view a lane offers, admits one whose bound the
         // tool cannot decode or that the loop would call in a bundle that does not hold it, or opens over only one
@@ -324,7 +357,8 @@ mod tests {
 
         let digest = |byte| Digest::from_bytes([byte; 32]);
         let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)), TestEnv::default());
-        let (tools, _) = offered_with_proofs(&proofs);
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (tools, _) = offered_with_proofs(tree, &proofs);
         run_stored::<SessionOpen>(&open(tools.clone(), Vec::new())).expect("bound proof tools open");
 
         for (offer, _) in proof_bound_offers(Ref::from_digest(digest(1))) {
@@ -379,7 +413,8 @@ mod tests {
 
         let digest = |byte| Digest::from_bytes([byte; 32]);
         let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)), TestEnv::default());
-        let (proving, artifacts) = offered_with_proofs(&proofs);
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (proving, artifacts) = offered_with_proofs(tree, &proofs);
         let closure: Vec<_> = artifacts
             .into_iter()
             .map(|artifact| {
@@ -398,7 +433,8 @@ mod tests {
 
         opens(&proving, required("proof.clippy", clippy_args)).expect("a required proof over its offer opens");
 
-        let (own, _) = offered();
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (own, _) = offered(tree);
         let echo_args = Ref::of_encoded(&EchoArgs::new("hi")).expect("args").erase();
         let test_args = Ref::of_encoded(&TestArgs).expect("args").erase();
         let read_args = Ref::of_encoded(&ReadArgs::new(path("README"), None, None)).expect("args").erase();
@@ -417,7 +453,8 @@ mod tests {
     fn each_seed_is_a_decoded_read_of_its_path_and_seeds_need_the_read_offered() {
         // Catches a seed that reads another path or a partial window, call ids that collide or shift, arguments
         // JSON that does not match the decoded arguments, and seeds opened without `tree.read` to render them.
-        let (bound, _) = offered();
+        let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
+        let (bound, _) = offered(tree);
         let seeds = vec![path("src/lib.rs"), path("README")];
         let (opened, store) = run_stored::<SessionOpen>(&open(bound.clone(), seeds)).expect("seeds open");
         let first: TurnInput = store.value(opened.turn());

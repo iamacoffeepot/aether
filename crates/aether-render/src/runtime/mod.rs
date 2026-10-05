@@ -66,10 +66,20 @@ mod capture;
 mod config;
 pub use config::{DEFAULT_CLEAR_COLOR, apply_manifest_clear_color};
 mod device;
+// The ADR-0246 draw-set registry: retained lists of draws, each checked
+// when its set is made or patched, holding the geometries and instance
+// buffers they name.
+mod draw_set;
 // The ADR-0171 geometry registry: staged vertex/index bytes realized
 // lazily as wgpu buffers at first GPU use (the draw-pass slice records
 // against the realized side).
 mod geometry;
+// The hold counts and retired entries a resource registry keeps for the
+// draw sets naming its entries (ADR-0246 decision 2).
+mod holds;
+// The ADR-0246 instance-record registry: fixed-capacity record buffers
+// whose CPU copy is the source of truth, written in place on the GPU.
+mod instances;
 mod material;
 // The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
 // so painter order inside the overlay pass is receipt order across the three.
@@ -106,17 +116,21 @@ use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTarget
 pub use self::capture::resolve_reference;
 use self::capture::{AcceptedCapture, PendingCapture};
 use self::device::DeviceRecovery;
+pub use self::draw_set::{DrawSet, DrawSetRegistry, DrawSetRows, HeldDraw};
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
+pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
 use self::program::ProgramRegistry;
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
+    CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
+    CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances,
     DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads,
     DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
+    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
+    UpdateInstances, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -144,6 +158,14 @@ pub struct RenderCapabilityState {
     /// here at create/update; the draw-pass record path realizes and
     /// consumes the wgpu buffers.
     geometries: GeometryRegistry,
+    /// ADR-0246 instance records: the session-scoped registry. Its CPU
+    /// copy of each buffer is the source of truth; the draw-set record
+    /// path realizes and reads the wgpu buffers.
+    instances: InstancesRegistry,
+    /// ADR-0246 draw sets: the session-scoped registry of retained draw
+    /// lists. Each set holds the geometries and instance buffers it
+    /// names in the two registries above.
+    draw_sets: DrawSetRegistry,
     /// ADR-0170 authored render programs: the session-scoped registry.
     programs: ProgramRegistry,
     /// Dispatches queued since the last frame record. Unlike the draw
@@ -540,6 +562,7 @@ impl RenderCapabilityState {
 
         self.textures.invalidate_device_resources();
         self.geometries.invalidate_device_resources();
+        self.instances.invalidate_device_resources();
         self.programs.rebuild_for_device(&gpu);
         self.discard_device_replay_caches();
         self.device_recovery.finish_replacement(ticket, &gpu.device);
@@ -833,6 +856,8 @@ impl NativeActor for RenderCapability {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
+            instances: InstancesRegistry::new(),
+            draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(config.pass_timings),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
@@ -956,6 +981,78 @@ impl NativeActor for RenderCapability {
             return;
         }
         state.geometries.destroy(mail);
+    }
+
+    /// `CreateInstances` (ADR-0246), on the owned instance registry —
+    /// validation, the record copy and id assignment are CPU-side, so
+    /// the reply needs no booted GPU.
+    #[handler::request]
+    fn on_create_instances(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateInstances,
+    ) -> CreateInstancesResult {
+        if let Err(error) = state.service_device_for_request() {
+            return CreateInstancesResult::Err { error };
+        }
+        state.instances.create(mail)
+    }
+
+    /// `UpdateInstances` (ADR-0246), on the owned instance registry.
+    #[handler::tell]
+    fn on_update_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateInstances) {
+        if state.warn_drop_if_unusable("update_instances") {
+            return;
+        }
+        state.instances.update(mail);
+    }
+
+    /// `DestroyInstances` (ADR-0246), on the owned instance registry.
+    #[handler::tell]
+    fn on_destroy_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyInstances) {
+        if state.warn_drop_if_unusable("destroy_instances") {
+            return;
+        }
+        state.instances.destroy(mail);
+    }
+
+    /// `CreateDrawSet` (ADR-0246), on the owned draw-set registry —
+    /// every draw is checked against the geometry and instance
+    /// registries before the reply.
+    #[handler::request]
+    fn on_create_draw_set(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateDrawSet,
+    ) -> CreateDrawSetResult {
+        if let Err(error) = state.service_device_for_request() {
+            return CreateDrawSetResult::Err { error };
+        }
+        state.draw_sets.create(mail, &mut state.geometries, &mut state.instances)
+    }
+
+    /// `UpdateDrawSet` (ADR-0246), on the owned draw-set registry. A
+    /// refused patch replies its reason and changes nothing.
+    #[handler::request]
+    fn on_update_draw_set(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: UpdateDrawSet,
+    ) -> UpdateDrawSetResult {
+        if let Err(error) = state.service_device_for_request() {
+            return UpdateDrawSetResult::Err { error };
+        }
+        state.draw_sets.update(mail, &mut state.geometries, &mut state.instances)
+    }
+
+    /// `DestroyDrawSet` (ADR-0246), on the owned draw-set registry —
+    /// lets go of every buffer the set held.
+    #[handler::tell]
+    fn on_destroy_draw_set(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyDrawSet) {
+        if state.warn_drop_if_unusable("destroy_draw_set") {
+            return;
+        }
+        state.draw_sets.destroy(mail, &mut state.geometries, &mut state.instances);
     }
 
     /// `ProgramRegister` (ADR-0170): validate the WGSL and pass graph,
@@ -1317,6 +1414,8 @@ mod tests {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
+            instances: InstancesRegistry::new(),
+            draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(false),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,

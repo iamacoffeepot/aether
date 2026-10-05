@@ -87,13 +87,21 @@ Every kind below addresses the `aether.render` mailbox.
 | `aether.render.create_geometry` | `CreateGeometry { layout, vertices, indices }` | validate + stage; reply `aether.render.create_geometry_result` / `CreateGeometryResult` (`Ok { geometry_id }` / `Err { error }`) |
 | `aether.render.update_geometry` | `UpdateGeometry { geometry_id, vertices, indices }` | fire-and-forget in-place replacement against the created layout |
 | `aether.render.destroy_geometry` | `DestroyGeometry { geometry_id }` | fire-and-forget release, mirroring `destroy_texture` |
+| `aether.render.create_instances` | `CreateInstances { layout, capacity, records }` | validate + copy; reply `aether.render.create_instances_result` / `CreateInstancesResult` (`Ok { instances_id }` / `Err { error }`) |
+| `aether.render.update_instances` | `UpdateInstances { instances_id, first, records }` | fire-and-forget in-place write of a run of records |
+| `aether.render.destroy_instances` | `DestroyInstances { instances_id }` | fire-and-forget release, mirroring `destroy_geometry` |
+| `aether.render.create_draw_set` | `CreateDrawSet { vertex_layout, instance_layout, draws }` | check every draw + hold its buffers; reply `aether.render.create_draw_set_result` / `CreateDrawSetResult` (`Ok { draw_set_id }` / `Err { error }`) |
+| `aether.render.update_draw_set` | `UpdateDrawSet { draw_set_id, first, draws }` | check + patch in place, all or nothing; reply `aether.render.update_draw_set_result` / `UpdateDrawSetResult` (`Ok` / `Err { error }`) |
+| `aether.render.destroy_draw_set` | `DestroyDrawSet { draw_set_id }` | fire-and-forget release of the set and what it holds |
 
 `program_id` and `geometry_id` are session-scoped and assigned like texture and
 instrument identifiers. A rejected register or create consumes no id, so
 accepted ids stay dense. Destroying a program releases its compiled pipelines;
 pooled transient textures stay in the shared pool for other programs.
-Destroying a geometry releases its staged bytes and any realized GPU buffers,
-and the released id is never handed out again.
+Destroying a geometry retires its id at once and for good: nothing can name it
+again and it is never handed out again. Its staged bytes and any realized GPU
+buffers are released with it, unless a [draw set](#the-draw-set-resource) names
+the geometry, in which case they live until the last such set lets go.
 
 A fragment-only program leaves `geometries` and `depth_transients` empty and
 registers exactly as it does with no draw pass anywhere in the graph. Both
@@ -159,7 +167,8 @@ at create — the lengths may change, so a mesh may grow or shrink. It is
 fire-and-forget: an unknown id, or a replacement that fails the create-time
 rules, logs a warning under the `aether_render` target and leaves the previous
 content staged. `destroy_geometry` releases the entry, and an unknown id
-warn-drops the same way.
+warn-drops the same way. A geometry a draw set names is held by that set, which
+narrows both verbs; see [the draw set resource](#the-draw-set-resource).
 
 ### Deformation is program content
 
@@ -176,6 +185,145 @@ to avoid. View-dependent geometry that is small by nature — a handful of
 ribbons regenerated per frame — may ride per-frame `update_geometry` at that
 scale. The measure is size and cadence together: a few kilobytes per frame is
 mail like any other, a character mesh per frame is not.
+
+## The instance resource
+
+An instance buffer holds **records**: one instance's attributes each, packed as
+a `layout: Vec<VertexAttribute>` declares, under the same
+[layout vocabulary](#layout-vocabulary) and stride rule a geometry uses. The
+substrate does not interpret a record — a placement, a table index, a tint are
+the authoring actor's business. The buffer is a vertex buffer stepped once per
+instance rather than once per vertex ([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decision 3). No stage draws from one yet; the draw-set stage is its first
+reader.
+
+`capacity` and `first` count records, never bytes. `create_instances` fixes the
+capacity for the buffer's life: `records` is the initial contents from record
+0, it may hold fewer records than the capacity, and the rest start zeroed.
+`update_instances` overwrites the run of records starting at record `first`,
+in place. Neither the capacity nor the `instances_id` changes, so whatever
+names the buffer keeps naming the same one; a larger buffer is a new
+`create_instances`. An update is the per-frame verb for things that move, and
+its cost is the bytes it carries: write the records that changed, not the
+buffer.
+
+The substrate keeps its own copy of every record, and that copy is the source
+of truth. A create and any number of updates are accepted before a GPU device
+exists; the GPU buffer is created at the first use and afterwards receives only
+the bytes written since the last one. After a render device replacement the
+records come back under the same id with the contents they had, as texture and
+geometry bytes do.
+
+`create_instances` validates before it assigns an id, and each failure class
+replies its own reason:
+
+| Class | Reason shape |
+|---|---|
+| Empty layout | `instance layout declares no attributes` |
+| Zero capacity | `instance capacity is zero records` |
+| Buffer limit | `capacity of N records at stride S exceeds the device limit max_buffer_size = M` |
+| Not resident | `instance record bytes are not resident in this process` |
+| Record stride | `records length N does not divide evenly by the layout stride S` |
+| Capacity | `C records from record F run past the capacity of N records` |
+
+`update_instances` is fire-and-forget. An unknown id, bytes that are not
+resident, a length off the stride, or a run that ends past the capacity logs a
+warning under the `aether_render` target and leaves every record as it was; a
+refused update is never partly applied. An empty `records` is accepted and
+writes nothing. `destroy_instances` retires the id at once: a later update or
+draw naming it finds nothing, the id is never handed out again, and an unknown
+id warn-drops the same way. The records and the GPU buffer are released with
+it, unless a draw set names the buffer, in which case they live, with the
+contents they had, until the last such set lets go.
+
+## The draw set resource
+
+A draw set is a retained list of draws
+([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decisions 1 and 2). Each draw is a run of one geometry's indices, drawn once
+per record of a run of one instance buffer:
+
+```rust
+pub struct IndexRange { pub first: u32, pub count: u32 }      // counts indices
+pub struct InstanceRange { pub first: u32, pub count: u32 }   // counts records
+pub struct DrawSpec {
+    pub geometry_id: u32,
+    pub indices: IndexRange,
+    pub instances_id: u32,
+    pub instances: InstanceRange,
+}
+```
+
+A draw carries no texture and no per-draw constant; what varies between draws
+rides in the instance records. The set fixes two layouts at create,
+`vertex_layout` and `instance_layout`, and every draw's geometry and instance
+buffer must have been created with them. A set is checked against layouts, not
+against a program, so any pass with the same two layouts may draw it. No stage
+draws a set yet; the draw-set pass stage is its first reader.
+
+Every check runs when the set is made or patched, where the sender gets a
+reply, so that a pass walking the set has nothing left to check. The first
+failure refuses the whole mail, and each class replies its own reason. A
+per-draw reason starts `draw N:`, with `N` the draw's position in the mail's
+`draws`:
+
+| Class | Reason shape |
+|---|---|
+| Empty vertex layout (create) | `draw set vertex layout declares no attributes` |
+| Empty instance layout (create) | `draw set instance layout declares no attributes` |
+| Unknown set (patch) | `unknown draw set id D` |
+| Gap (patch) | `first F is past the set's N draws` |
+| Unknown geometry | `draw N: unknown geometry id G` |
+| Geometry layout | `draw N: geometry G was created with a layout that is not the set's vertex layout` |
+| Index range | `draw N: C indices from index F run past geometry G's M indices` |
+| Unknown instances | `draw N: unknown instances id I` |
+| Instance layout | `draw N: instance buffer I was created with a layout that is not the set's instance layout` |
+| Instance range | `draw N: C records from record F run past instance buffer I's capacity of M records` |
+
+A range's end is `first + count`, summed without wrapping, and it may sit
+exactly at the buffer's end. A count of zero is inside every buffer and draws
+nothing, which blanks one entry without moving the others. A refused create
+consumes no id and holds nothing; a refused patch leaves the set exactly as it
+was, never partly applied.
+
+### Patching a set
+
+`update_draw_set` writes `draws` over the set's entries from position `first`,
+counted in draws. One rule covers every edit:
+
+- `first` may be at most the set's length. Entries inside the set are
+  overwritten in place.
+- A run that passes the end extends the set, so appending is a patch with
+  `first` equal to the length.
+- An empty `draws` truncates the set to its first `first` entries.
+
+No entry moves unless the sender moves it, so a position stays a stable name
+for a draw. A patch costs what it carries: change a hundred entries in the
+middle of thirty thousand by sending the hundred.
+
+### What a set holds
+
+A set holds the geometries and instance buffers its draws name, from the patch
+that first names one until the patch or destroy that removes its last draw of
+it. Holding is what keeps a checked draw valid, and it changes three things for
+the buffers held:
+
+- `destroy_geometry` and `destroy_instances` retire the id and keep the bytes
+  and GPU buffers alive for the sets still drawing them. The retired id cannot
+  be named by a new draw, an update, or a dispatch. The buffer is released for
+  good when its last set lets go.
+- `update_geometry` may replace a held geometry's vertex contents and nothing
+  else. A replacement with a different vertex count, or with indices that are
+  not byte-for-byte the ones staged, logs a warning under the `aether_render`
+  target and leaves the geometry as it was. `update_geometry` carries no reply,
+  so the log is where a refusal shows. Once no set names the geometry it may be
+  resized again.
+- An instance buffer's capacity is fixed at create, so `update_instances`
+  needs no extra rule.
+
+Growing a held geometry or buffer means creating a new one and patching the
+set onto it. `destroy_draw_set` releases the set and everything it holds; the
+released `draw_set_id` is never handed out again, and an unknown id warn-drops.
 
 ## The pass graph
 
@@ -661,7 +809,9 @@ alongside it covers the draw stage in rasterized pixels — a triangle observed
 through the overlay path, two passes sharing a depth transient, the register
 classes, and a dispatch naming a geometry id that does not exist. The registry
 lifecycle over mail has its own scenario in
-[`geometry_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/geometry_scenario.rs).
+[`geometry_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/geometry_scenario.rs),
+and the draw-set lifecycle in
+[`draw_set_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/draw_set_scenario.rs).
 
 ## Chassis behavior
 

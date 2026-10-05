@@ -14,7 +14,9 @@
 use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, pixel_is_lit, require_adapter, rgb_close, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{
+    envelope, pixel_is_lit, require_wgpu_adapter, rgb_close, rgba_at,
+};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
@@ -255,7 +257,7 @@ fn shows(probe: [u8; 4], texel: [u8; 4]) -> bool {
 /// the frame's background.
 #[test]
 fn a_texture_binding_takes_a_texture_of_its_own_size() {
-    if !require_adapter() {
+    if !require_wgpu_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -292,7 +294,7 @@ fn a_texture_binding_takes_a_texture_of_its_own_size() {
 /// sampler, so both programs clamp and both probes show the edge.
 #[test]
 fn a_bindings_wrap_reaches_the_sampler() {
-    if !require_adapter() {
+    if !require_wgpu_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -371,7 +373,7 @@ fn create_cover(harness: &mut SubstrateHarness) -> u32 {
 /// of exactly, which blends texel 2 with its neighbours.
 #[test]
 fn a_vertex_stage_reads_a_texel_table_ahead_of_a_filtered_input() {
-    if !require_adapter() {
+    if !require_wgpu_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -453,7 +455,7 @@ fn control_quad() -> DrawShapes {
 /// that poisons the whole frame rather than dropping one dispatch.
 #[test]
 fn a_texture_array_binding_registers_and_refuses_a_plain_texture() {
-    if !require_adapter() {
+    if !require_wgpu_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");

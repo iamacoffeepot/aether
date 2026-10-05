@@ -83,7 +83,7 @@ impl Script {
             "status": "completed",
             "call_id": format!("call_t{turn}_end"),
             "name": "muse-end",
-            "arguments": r#"{"ending": {"Done": {"summary": "Done."}}}"#,
+            "arguments": r#"{"ending": "Done", "text": "Done."}"#,
         })
     }
 

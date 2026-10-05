@@ -66,8 +66,9 @@
 //! [`TreeEdit`] (`tree.edit`), [`TreeWrite`] (`tree.write`), and
 //! [`TreeRemove`] (`tree.remove`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
-//! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
-//! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
+//! [`TreeRead`] (`tree.read`), [`TreeGrep`] (`tree.grep`), and [`TreeDiff`]
+//! (`tree.diff`), which return the text they read as [`Viewed`] and leave the
+//! tree as it was, `tree.diff` bound to the tree the session opened on; [`End`]
 //! (`muse.end`), which ends the run as done, blocked, or asking a question;
 //! and the fixture [`Echo`] (`muse.echo`). A session opened with
 //! [`offered_with_proofs`] also offers `proof.clippy` and `proof.test` from
@@ -139,9 +140,10 @@ pub use session::{
     SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
-    Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
-    ReadArgs, RemoveArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeRemove, TreeWrite, VIEW_MAX_BYTES, VendorGrep,
-    VendorList, VendorRead, Viewed, WriteArgs, offered, offered_with_proofs, proof_passed, required_proofs,
+    DiffArgs, Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES,
+    NUDGE_TEXT, ReadArgs, RemoveArgs, TreeDiff, TreeEdit, TreeGrep, TreeList, TreeRead, TreeRemove, TreeWrite,
+    VIEW_MAX_BYTES, VendorGrep, VendorList, VendorRead, Viewed, WriteArgs, offered, offered_with_proofs, proof_passed,
+    required_proofs,
 };
 
 aether_actor::export!(
@@ -160,6 +162,7 @@ aether_actor::export!(
         TreeList,
         TreeRead,
         TreeGrep,
+        TreeDiff,
         VendorList,
         VendorRead,
         VendorGrep,

@@ -158,7 +158,8 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     let bundle = batch.stage_bytes(&fs::read(&wasm_path)?).digest();
     batch.push_event(&RecordedHeadMove::new(RecordedHead::from(&MUSE), bundle), None)?;
     let set = batch.stage_encoded(&ReactorSet::new(vec![MUSE])?)?;
-    let (tools, artifacts) = offered();
+    let tree = batch.stage_encoded(&Tree::empty())?;
+    let (tools, artifacts) = offered(tree);
     for artifact in artifacts {
         batch.stage_artifact(artifact);
     }
@@ -172,7 +173,6 @@ fn a_rested_muse_session_reads_as_json_with_its_transcript_inline() -> Result<()
     );
     let user = batch.stage_text(QUESTION);
     let instructions = batch.stage_text("Work through the tree with only the offered tree tools.");
-    let tree = batch.stage_encoded(&Tree::empty())?;
     let open = batch.stage_encoded(&OpenInput::new(
         settings,
         instructions,

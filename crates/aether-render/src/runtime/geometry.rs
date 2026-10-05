@@ -5,12 +5,20 @@
 //! draw-pass record path (the next ADR-0171 slice) is what triggers
 //! realization. `create_geometry` / `update_geometry` only touch the
 //! staging side.
+//!
+//! A draw set holds the geometries it names (ADR-0246 decision 2). The
+//! registry counts those holds and keeps two promises for them: a held
+//! geometry that is destroyed leaves `entries`, so its id answers
+//! nothing, and moves whole into the retired store until the last set
+//! lets go; and a held geometry keeps its vertex count and its indices,
+//! so an index range a set checked stays inside it.
 
 use std::collections::HashMap;
 
 use aether_data::Blob;
 use aether_substrate::session_ids::SessionIds;
 
+use super::holds::Holds;
 use crate::VertexFormat;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
@@ -104,6 +112,17 @@ impl StagedGeometry {
         self.indices.contiguous().expect("create_geometry and update_geometry refuse non-contiguous index bytes")
     }
 
+    /// How many indices the geometry holds: the bound a draw set checks
+    /// an index range against.
+    ///
+    /// # Panics
+    /// Panics if the index count exceeds `u32` — unreachable behind the
+    /// mail frame-size cap, and fail-fast per ADR-0063 if it ever isn't.
+    #[must_use]
+    pub fn index_count(&self) -> u32 {
+        u32::try_from(self.index_bytes().len() / size_of::<u32>()).expect("index count fits u32")
+    }
+
     /// Realize the GPU buffers if they aren't yet, or re-create them if
     /// `update_geometry` dirtied the staging since the last use — an
     /// update replaces the bytes wholesale and may resize them, so a
@@ -140,7 +159,7 @@ impl StagedGeometry {
                 &indirect_control_bytes(self.vertex_bytes(), self.index_bytes(), &self.layout),
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE,
             ),
-            index_count: u32::try_from(self.index_bytes().len() / size_of::<u32>()).expect("index count fits u32"),
+            index_count: self.index_count(),
         });
         self.dirty = false;
     }
@@ -198,21 +217,59 @@ fn staged_buffer(
 pub struct GeometryRegistry {
     pub ids: SessionIds<u32>,
     pub entries: HashMap<u32, StagedGeometry>,
+    holds: Holds<StagedGeometry>,
 }
 
 impl GeometryRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self { ids: SessionIds::new(), entries: HashMap::new() }
+        Self { ids: SessionIds::new(), entries: HashMap::new(), holds: Holds::default() }
+    }
+
+    /// One more draw set names `geometry_id`. The caller has checked
+    /// that the id is live.
+    pub fn hold(&mut self, geometry_id: u32) {
+        self.holds.hold(geometry_id);
+    }
+
+    /// One draw set no longer names `geometry_id`. When that was the
+    /// last and the geometry was destroyed meanwhile, its bytes and GPU
+    /// buffers are dropped here.
+    ///
+    /// # Panics
+    /// Panics on an id no set holds, fail-fast per ADR-0063.
+    pub fn release(&mut self, geometry_id: u32) {
+        self.holds.release(geometry_id);
+    }
+
+    /// Whether any draw set names `geometry_id`.
+    #[must_use]
+    pub fn is_held(&self, geometry_id: u32) -> bool {
+        self.holds.is_held(geometry_id)
+    }
+
+    /// The geometry a draw set holds under `geometry_id`, whether it is
+    /// still live or was destroyed under the set. This is the lookup a
+    /// set's rows are realized through; it cannot miss for an id a set
+    /// holds.
+    ///
+    /// # Panics
+    /// Panics on an id that is neither live nor retired, fail-fast per
+    /// ADR-0063: a held id is always in one of the two.
+    pub fn held_mut(&mut self, geometry_id: u32) -> &mut StagedGeometry {
+        match self.entries.get_mut(&geometry_id) {
+            Some(entry) => entry,
+            None => self.holds.retired_mut(geometry_id).expect("a held geometry id is live or retired"),
+        }
     }
 
     /// Drop every buffer realization built against the current device
     /// while preserving ids, layouts, and CPU-authored bytes. Each entry
     /// becomes upload-ready for lazy realization on the replacement
-    /// device.
-    #[allow(dead_code, reason = "device-loss runtime wiring lands in the next recovery slice")]
+    /// device. A geometry destroyed under a draw set is covered too: its
+    /// bytes are what the replacement device re-uploads for that set.
     pub fn invalidate_device_resources(&mut self) {
-        for entry in self.entries.values_mut() {
+        for entry in self.entries.values_mut().chain(self.holds.retired_entries_mut()) {
             entry.realized = None;
             entry.dirty = true;
             entry.revision = entry.revision.wrapping_add(1);
@@ -253,7 +310,9 @@ impl GeometryRegistry {
     /// against its created layout. Fire-and-forget, so every rejection
     /// warns and drops rather than replying — an unknown id, or a
     /// replacement that fails the create-time rules, leaves the
-    /// previous content staged and undirtied.
+    /// previous content staged and undirtied. So does a replacement that
+    /// would change the vertex count or the indices of a geometry a draw
+    /// set names (ADR-0246 decision 2).
     pub fn update(&mut self, mail: UpdateGeometry) {
         let Some(entry) = self.entries.get_mut(&mail.geometry_id) else {
             tracing::warn!(
@@ -281,6 +340,27 @@ impl GeometryRegistry {
             );
             return;
         }
+
+        let held = self.holds.is_held(mail.geometry_id);
+        let resizes_held = held && vertices.len() != entry.vertex_bytes().len();
+        let reindexes_held = held && indices != entry.index_bytes();
+        if resizes_held {
+            tracing::warn!(
+                target: "aether_render",
+                geometry_id = mail.geometry_id,
+                "update_geometry would change the vertex count of a geometry a draw set names; dropping",
+            );
+            return;
+        }
+        if reindexes_held {
+            tracing::warn!(
+                target: "aether_render",
+                geometry_id = mail.geometry_id,
+                "update_geometry would change the indices of a geometry a draw set names; dropping",
+            );
+            return;
+        }
+
         entry.vertices = mail.vertices;
         entry.indices = mail.indices;
         entry.dirty = true;
@@ -288,14 +368,21 @@ impl GeometryRegistry {
     }
 
     /// Release a registered geometry. Same fire-and-forget disposition
-    /// as [`Self::update`].
+    /// as [`Self::update`]. The id is gone for every lookup by id from
+    /// here on; an entry a draw set names is kept whole, bytes and GPU
+    /// buffers, until the last such set lets go.
     pub fn destroy(&mut self, mail: DestroyGeometry) {
-        if self.entries.remove(&mail.geometry_id).is_none() {
+        let Some(entry) = self.entries.remove(&mail.geometry_id) else {
             tracing::warn!(
                 target: "aether_render",
                 geometry_id = mail.geometry_id,
                 "destroy_geometry for unknown geometry id; dropping",
             );
+            return;
+        };
+
+        if self.holds.is_held(mail.geometry_id) {
+            self.holds.retire(mail.geometry_id, entry);
         }
     }
 }
@@ -452,6 +539,90 @@ mod tests {
 
         assert_eq!(registry.entries.len(), 1);
         assert!(registry.entries.contains_key(&geometry_id));
+    }
+
+    /// ADR-0246 decision 2: a geometry a draw set names keeps its vertex
+    /// count and its indices, and the rule ends with the hold. The bugs
+    /// pinned: a resize that lets an index range a set checked run past
+    /// the end, a re-index that points a checked range at other
+    /// vertices, a refusal that still dirties the entry, a refusal of
+    /// the same-size vertex write a held geometry is allowed, and a
+    /// refusal that outlives the set.
+    #[test]
+    fn held_geometry_refuses_resize_and_reindex_until_released() {
+        let mut registry = GeometryRegistry::new();
+        let vertices = vec![1u8; 60];
+        let indices = indices_bytes(&[0, 1, 2]);
+        let CreateGeometryResult::Ok { geometry_id } =
+            registry.create(create(skinned_layout(), vertices.clone(), indices.clone()))
+        else {
+            panic!("create accepted");
+        };
+        registry.hold(geometry_id);
+
+        // One vertex fewer, with indices valid for two vertices.
+        registry.update(update(geometry_id, vec![2u8; 40], indices_bytes(&[0, 1, 0])));
+        // The same three vertices, wound the other way.
+        registry.update(update(geometry_id, vec![2u8; 60], indices_bytes(&[0, 2, 1])));
+        let entry = &registry.entries[&geometry_id];
+        assert_eq!(entry.vertex_bytes(), vertices, "a refused update must leave the vertices staged");
+        assert_eq!(entry.index_bytes(), indices, "a refused update must leave the indices staged");
+        assert!(!entry.dirty, "a refused update must not dirty the entry");
+        assert_eq!(entry.revision, 0, "a refused update must not invalidate resident bindings");
+
+        let rewritten = vec![3u8; 60];
+        registry.update(update(geometry_id, rewritten.clone(), indices));
+        let entry = &registry.entries[&geometry_id];
+        assert_eq!(entry.vertex_bytes(), rewritten, "a held geometry accepts new vertex contents of the same size");
+        assert_eq!(entry.revision, 1);
+
+        registry.release(geometry_id);
+        registry.update(update(geometry_id, vec![4u8; 40], indices_bytes(&[0, 1, 0])));
+        let entry = &registry.entries[&geometry_id];
+        assert_eq!(entry.vertex_bytes(), vec![4u8; 40], "a geometry no set names may be resized again");
+        assert_eq!(entry.index_count(), 3);
+    }
+
+    /// ADR-0246 decision 2: a geometry destroyed under a draw set stops
+    /// answering to its id and keeps its bytes for the set, across a
+    /// device replacement, until the last hold goes. The bugs pinned: an
+    /// entry dropped while a set still draws it, a retired entry that
+    /// leaks after its last set, a count kept as a flag so the first of
+    /// two releases drops it, and a retired entry keeping buffers of a
+    /// device that is gone.
+    #[test]
+    fn destroyed_held_geometry_lives_until_its_last_release() {
+        let mut registry = GeometryRegistry::new();
+        let vertices = vec![7u8; 40];
+        let indices = indices_bytes(&[0, 1, 0]);
+        let CreateGeometryResult::Ok { geometry_id } =
+            registry.create(create(skinned_layout(), vertices.clone(), indices.clone()))
+        else {
+            panic!("create accepted");
+        };
+        registry.hold(geometry_id);
+        registry.hold(geometry_id);
+
+        registry.destroy(DestroyGeometry { geometry_id });
+        registry.update(update(geometry_id, vec![9u8; 40], indices.clone()));
+        assert!(!registry.entries.contains_key(&geometry_id), "a destroyed geometry must not answer to its id");
+        assert_eq!(registry.held_mut(geometry_id).vertex_bytes(), vertices, "a retired geometry keeps its bytes");
+
+        if has_wgpu_adapter() {
+            let booted = boot_offscreen(None);
+            registry.held_mut(geometry_id).ensure_realized(&booted.device, &booted.queue);
+            registry.invalidate_device_resources();
+            let retired = registry.held_mut(geometry_id);
+            assert!(retired.realized.is_none(), "a retired geometry must release old-device buffers");
+            assert!(retired.dirty, "a retired geometry must be upload-ready for the replacement device");
+            assert_eq!(retired.vertex_bytes(), vertices, "device replacement keeps a retired geometry's bytes");
+        }
+
+        registry.release(geometry_id);
+        assert_eq!(registry.held_mut(geometry_id).index_bytes(), indices, "one of two sets letting go keeps it");
+        registry.release(geometry_id);
+        assert!(!registry.is_held(geometry_id));
+        assert!(registry.holds.retired_mut(geometry_id).is_none(), "the last release drops the retired entry");
     }
 
     #[test]

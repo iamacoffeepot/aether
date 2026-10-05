@@ -13,13 +13,13 @@ pub use aether_harness_substrate::test_helpers::{
     envelope, init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
 use aether_render::{
-    InputSlot, Mips, OutputSlot, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
-    TextureFormat, Wrap,
+    InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat,
 };
 
 use crate::visual::Image;
 
-/// Probe for any usable wgpu adapter. Used by [`require_adapter`].
+/// Probe for any usable wgpu adapter. Used by [`require_wgpu_adapter`] and
+/// by visual tests that carry their own gate.
 #[must_use]
 pub fn has_wgpu_adapter() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -31,40 +31,15 @@ pub fn has_wgpu_adapter() -> bool {
     .is_ok()
 }
 
-/// Gate for visual scenarios: probes wgpu through [`require_adapter`],
-/// then locates the wasm via `require_wasm`. Returns the wasm path on
-/// success; `None` when the test skips.
+/// Gate for visual tests that need wgpu but no wasm component: `true` when
+/// an adapter is available, `false` when the test skips.
 ///
-/// The two gates answer differently on purpose (issue #5724). A missing
-/// wasm artifact fails: it is one `cargo xtask build-wasm` away, and a
-/// scenario that reports `test … ok` without running is worse than a red
-/// one. A missing wgpu adapter still skips: no command the reader can
+/// A missing wgpu adapter skips: no command the reader can
 /// run puts a GPU on a driverless box, and the workspace's standing
 /// promise is that such a box builds and tests cleanly.
 /// `AETHER_REQUIRE_RUNTIME=1` — which CI exports — turns the adapter
-/// skip into a panic too, so a runner that lost its driver is loud
+/// skip into a panic, so a runner that lost its driver is loud
 /// rather than vacuous.
-///
-/// # Panics
-/// Panics if the named crate's wasm artifact is not pre-built (unless
-/// `AETHER_ALLOW_WASM_SKIP=1`), or, under `AETHER_REQUIRE_RUNTIME=1`, if
-/// no wgpu adapter is available — fail-fast per ADR-0063.
-#[must_use]
-pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
-    if !require_adapter() {
-        return None;
-    }
-    require_wasm(crate_name)
-}
-
-/// Gate for a scenario that needs wgpu and no wasm component: `true`
-/// when an adapter is available, `false` when the test skips.
-///
-/// A missing wgpu adapter skips: no command the reader can run puts a
-/// GPU on a driverless box, and the workspace's standing promise is
-/// that such a box builds and tests cleanly. `AETHER_REQUIRE_RUNTIME=1`
-/// — which CI exports — turns the skip into a panic, so a runner that
-/// lost its driver is loud rather than vacuous.
 ///
 /// # Panics
 /// Panics under `AETHER_REQUIRE_RUNTIME=1` if no wgpu adapter is
@@ -76,14 +51,34 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 // Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle, a test
 // harness knob, not cap config.
 #[allow(clippy::disallowed_methods)]
-pub fn require_adapter() -> bool {
+pub fn require_wgpu_adapter() -> bool {
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
+    let available = has_wgpu_adapter();
+    if !available {
         assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
         eprintln!("skipping: no wgpu adapter available");
-        return false;
     }
-    true
+    available
+}
+
+/// Gate for visual scenarios that load a component: [`require_wgpu_adapter`],
+/// then the wasm through `require_wasm`. Returns the wasm path, or `None`
+/// when the test skips.
+///
+/// The two gates answer differently on purpose (issue #5724). The adapter
+/// gate skips; a missing wasm artifact fails, because it is one
+/// `cargo xtask build-wasm` away and a scenario that reports `test … ok`
+/// without running is worse than a red one.
+///
+/// # Panics
+/// Panics where [`require_wgpu_adapter`] does, and when the named crate's
+/// wasm artifact is not pre-built (unless `AETHER_ALLOW_WASM_SKIP=1`).
+#[must_use]
+pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
+    if !require_wgpu_adapter() {
+        return None;
+    }
+    require_wasm(crate_name)
 }
 
 /// The RGBA quadruple at `(x, y)` in a decoded capture.
@@ -152,11 +147,7 @@ pub fn append_capture_probe(
 
     register.wgsl.push('\n');
     register.wgsl.push_str(probe_wgsl);
-    register.bindings.push(SlotSpec {
-        format: TextureFormat::Rgba8,
-        shape: SlotShape::Target(SlotExtent::Full),
-        sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-    });
+    register.bindings.push(SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full });
     register.passes.push(ProgramPass {
         stage: PassStage::Fragment,
         entry_point: "fs_probe".to_owned(),
@@ -176,11 +167,7 @@ mod tests {
 
     #[test]
     fn append_capture_probe_adds_the_declared_binding_and_pass() {
-        let initial = SlotSpec {
-            format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Full),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
-        };
+        let initial = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
         let inputs = vec![InputSlot::Binding { index: 0 }];
         let mut register = ProgramRegister {
             wgsl: "base".to_owned(),
