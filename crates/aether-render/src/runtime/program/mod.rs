@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, ProgramPipelineSpec, build_fullscreen_vertex_module,
-    build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
-    program_storage_layout, program_uniform_layout,
+    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler, ProgramInputView,
+    ProgramPipelineSpec, build_fullscreen_vertex_module, build_program_compute_pipeline, build_program_draw_pipeline,
+    build_program_pipeline, program_inputs_layout, program_storage_layout, program_uniform_layout,
 };
 use aether_substrate::session_ids::SessionIds;
 
@@ -22,16 +22,18 @@ use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
 use crate::{
     ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
-    TextureFormat,
+    Sampling, SlotShape, SlotSpec, TextureFormat,
 };
 
 mod cache;
 mod record;
+mod sampler;
 mod submit;
 mod timing;
 mod validate;
 
 use cache::DispatchCache;
+use sampler::ProgramSamplers;
 use submit::FramePasses;
 use timing::{Availability, PassCosts, PassTimingInstrument};
 use validate::{PassPlanStage, ProgramPlan};
@@ -97,6 +99,10 @@ pub struct ProgramRegistry {
     entries: HashMap<u32, RegisteredProgram>,
     /// The shared fullscreen vertex module, built on first register.
     fullscreen_module: Option<wgpu::ShaderModule>,
+    /// The samplers program inputs bind, built with the fullscreen
+    /// module on first register and discarded with it when the device
+    /// is replaced.
+    samplers: Option<ProgramSamplers>,
     /// Pooled transient intermediates keyed by resolved extent + format,
     /// persistent across dispatches so a repaint reuses its allocations.
     transient_pool: HashMap<TransientKey, Vec<wgpu::TextureView>>,
@@ -120,6 +126,7 @@ impl ProgramRegistry {
             ids: SessionIds::new(),
             entries: HashMap::new(),
             fullscreen_module: None,
+            samplers: None,
             transient_pool: HashMap::new(),
             timings_enabled,
             timings: None,
@@ -143,6 +150,8 @@ impl ProgramRegistry {
             Ok(passes_gpu) => passes_gpu,
             Err(error) => return ProgramRegisterResult::Err { error },
         };
+
+        self.samplers.get_or_insert_with(|| ProgramSamplers::build(device));
 
         let Some(program_id) = self.ids.allocate() else {
             return ProgramRegisterResult::Err {
@@ -173,12 +182,14 @@ impl ProgramRegistry {
     #[allow(dead_code, reason = "device-loss runtime wiring lands in the next recovery slice")]
     pub fn rebuild_for_device(&mut self, gpu: &RenderGpu) {
         self.fullscreen_module = None;
+        self.samplers = None;
         self.transient_pool.clear();
         self.timings = None;
 
         if self.entries.is_empty() {
             return;
         }
+        self.samplers = Some(ProgramSamplers::build(&gpu.device));
         let fullscreen = build_fullscreen_vertex_module(&gpu.device);
         for (&program_id, program) in &mut self.entries {
             program.state = match build_program_passes(&gpu.device, &fullscreen, &program.plan, &program.wgsl) {
@@ -264,7 +275,7 @@ impl ProgramRegistry {
             .sum();
         let measuring = instrument.begin_frame(&gpu.device, declared);
 
-        let Self { entries, transient_pool, timings, .. } = self;
+        let Self { entries, samplers, transient_pool, timings, .. } = self;
         // `record_passes` runs once per dirty target and only the first
         // takes the frame's dispatches, so an empty call must not trim
         // the slots the previous frame's dispatches built.
@@ -292,6 +303,7 @@ impl ProgramRegistry {
                 encoder,
                 record::DispatchRecord {
                     program,
+                    samplers: samplers.as_ref().expect("registering a program builds the sampler table"),
                     pool: transient_pool,
                     textures,
                     geometries,
@@ -339,8 +351,9 @@ fn build_program_passes(
                 PassPlanStage::Compute(_) => wgpu::ShaderStages::COMPUTE,
             };
             let uniform_layout = program_uniform_layout(device, bound_uniform_bytes, visibility);
-            let filterable: Vec<bool> = pass.inputs.iter().map(|slot| plan.slot_format(*slot).filterable()).collect();
-            let inputs_layout = program_inputs_layout(device, &filterable, visibility);
+            let inputs: Vec<ProgramInput> =
+                pass.inputs.iter().map(|slot| program_input(plan.slot_spec(*slot))).collect();
+            let inputs_layout = program_inputs_layout(device, &inputs, visibility);
             let mut storage_layout = None;
             let pipeline = match &pass.stage {
                 PassPlanStage::Fragment => {
@@ -404,6 +417,23 @@ fn build_program_passes(
         .map_or_else(|| Ok(passes_gpu), |error| Err(format!("pipeline creation failed: {error}")))
 }
 
+/// What a pass's group-1 layout declares for an input reading `spec`:
+/// the view its shape takes, and the sampler its sampling and format
+/// allow. A `Filtered` input over a format that cannot be filtered
+/// (`R32Float`) gets the non-filtering sampler, as it always has.
+fn program_input(spec: SlotSpec) -> ProgramInput {
+    let view = match spec.shape {
+        SlotShape::Target(_) | SlotShape::Texture => ProgramInputView::Plain,
+        SlotShape::TextureArray => ProgramInputView::Array,
+    };
+    let sampler = match spec.sampling {
+        Sampling::Texel => ProgramInputSampler::None,
+        Sampling::Filtered { .. } if spec.format.filterable() => ProgramInputSampler::Filtering,
+        Sampling::Filtered { .. } => ProgramInputSampler::NonFiltering,
+    };
+    ProgramInput { view, sampler }
+}
+
 /// Blend state per output format: blendable color formats alpha-blend
 /// over the target; a data plane replaces, which is what a pass writing
 /// a quantity rather than a colour means by writing it.
@@ -425,8 +455,8 @@ mod rebuild_tests {
     use super::*;
     use crate::runtime::surface::boot_offscreen;
     use crate::{
-        CreateTexture, CreateTextureResult, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec, TextureSampling,
-        TextureUsage,
+        CreateTexture, CreateTextureResult, Mips, OutputSlot, PassStage, ProgramPass, SlotExtent, TextureSampling,
+        TextureUsage, Wrap,
     };
 
     const SOLID_WGSL: &str = r"
@@ -444,7 +474,11 @@ fn fs_solid() -> @location(0) vec4<f32> {
     fn solid_program() -> ProgramRegister {
         ProgramRegister {
             wgsl: SOLID_WGSL.to_owned(),
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: Vec::new(),
             depth_transients: Vec::new(),

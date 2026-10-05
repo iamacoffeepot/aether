@@ -21,9 +21,9 @@ use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawTexturedQuads,
-    GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
-    ProgramRegisterResult, QuadBlend, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
-    VertexAttribute, VertexFormat,
+    GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
+    ProgramRegisterResult, QuadBlend, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling,
+    TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
 };
 
 const DRAW_WGSL: &str = r"
@@ -116,7 +116,11 @@ fn create_geometry(harness: &mut SubstrateHarness, label: &'static str) -> u32 {
 fn draw_program() -> ProgramRegister {
     ProgramRegister {
         wgsl: DRAW_WGSL.to_owned(),
-        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        bindings: vec![SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }],
         transients: Vec::new(),
         geometries: vec![GeometrySlotSpec { layout: position_layout() }],
         depth_transients: Vec::new(),

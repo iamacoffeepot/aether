@@ -32,9 +32,9 @@ use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
-    GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
-    ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
-    VertexAttribute, VertexFormat,
+    GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
+    ProgramRegisterResult, Sampling, Shape, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling,
+    TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -265,7 +265,11 @@ fn draw_pass_rasterizes_a_triangle_into_its_output() {
         "register",
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: vec![position_slot()],
             depth_transients: Vec::new(),
@@ -330,7 +334,11 @@ fn one_program_dispatched_twice_in_a_frame_draws_with_each_dispatchs_uniforms() 
         "register",
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: vec![position_slot()],
             depth_transients: Vec::new(),
@@ -418,7 +426,11 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
         "register",
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: vec![position_slot(), position_slot()],
             depth_transients: vec![SlotExtent::Full],
@@ -473,7 +485,11 @@ fn vertex_layout_mismatch_replies_a_distinguishable_error() {
 
     let base = || ProgramRegister {
         wgsl: MODULE.to_owned(),
-        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        bindings: vec![SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }],
         transients: Vec::new(),
         geometries: vec![position_slot()],
         depth_transients: Vec::new(),
@@ -544,7 +560,11 @@ fn unknown_geometry_id_drops_and_frame_survives() {
         "register",
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: vec![position_slot()],
             depth_transients: Vec::new(),
@@ -611,7 +631,11 @@ fn a_frame_of_thousands_of_program_passes_draws_on_both_sides_of_a_submission() 
     let output_id = create_output(&mut harness);
     let register = ProgramRegister {
         wgsl: MODULE.to_owned(),
-        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        bindings: vec![SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }],
         transients: Vec::new(),
         geometries: vec![position_slot()],
         depth_transients: Vec::new(),

@@ -53,51 +53,96 @@ pub fn program_uniform_layout(
     })
 }
 
-/// Group-1 layout for a pass's input slots: one texture / sampler pair
-/// per input, in slot order — input `n` is texture `@binding(2n)` plus
-/// sampler `@binding(2n + 1)`. `filterable` carries each input's format
-/// filterability: a filterable input gets the `Float { filterable: true }`
-/// / `Filtering` pair, a data-plane input (`R32Float`) the non-filtering
-/// pair, matching the shared [`super::TextureBindings`] convention.
+/// How the texture at one program input is viewed, which is also the
+/// type the shader declares for it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProgramInputView {
+    /// `texture_2d<f32>`.
+    Plain,
+    /// `texture_2d_array<f32>`.
+    Array,
+}
+
+/// The sampler that accompanies one program input's texture.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProgramInputSampler {
+    /// A filtering sampler over a filterable texture.
+    Filtering,
+    /// A non-filtering sampler, for a format core WebGPU cannot
+    /// linear-filter (`R32Float`).
+    NonFiltering,
+    /// No sampler: the shader reads the texture with `textureLoad`.
+    None,
+}
+
+/// One input of a program pass, as its group-1 layout needs it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ProgramInput {
+    pub view: ProgramInputView,
+    pub sampler: ProgramInputSampler,
+}
+
+/// Group-1 layout for a pass's inputs, in slot order. Input `n` is the
+/// texture at `@binding(2n)` and, when it has one, the sampler at
+/// `@binding(2n + 1)`. An input without a sampler leaves `2n + 1` out
+/// of the layout, so the inputs after it keep their binding numbers
+/// whatever the inputs before them declare.
 ///
-/// Visible to both stages, for the same reason the uniform window is
-/// (ADR-0172): a draw pass whose vertex stage displaces geometry by a
-/// data plane — the ink ribbons reading their own visibility field —
-/// must `textureLoad` that plane before the rasterizer exists to have a
-/// fragment stage. Sampling with implicit derivatives stays a
-/// fragment-only operation by WGSL's own rule, so widening the layout
-/// grants a vertex stage `textureLoad` / `textureSampleLevel` and
-/// nothing more, and visibility a stage does not use costs nothing.
+/// The texture entry is filterable exactly when its sampler is
+/// [`ProgramInputSampler::Filtering`]. Declaring the other two
+/// unfilterable is what lets a texture of any format bind there: a
+/// filterable texture satisfies an unfilterable entry, and the reverse
+/// does not hold.
+///
+/// Visible to every stage the caller names, for the same reason the
+/// uniform window is (ADR-0172): a draw pass whose vertex stage
+/// displaces geometry by a data plane — the ink ribbons reading their
+/// own visibility field — must `textureLoad` that plane before the
+/// rasterizer exists to have a fragment stage. Sampling with implicit
+/// derivatives stays a fragment-only operation by WGSL's own rule, so
+/// widening the layout grants a vertex stage `textureLoad` /
+/// `textureSampleLevel` and nothing more, and visibility a stage does
+/// not use costs nothing.
+///
+/// # Panics
+/// Panics if the input count exceeds what a `u32` binding index holds,
+/// unreachable behind WebGPU's per-stage sampled-texture limit.
 #[must_use]
 pub fn program_inputs_layout(
     device: &wgpu::Device,
-    filterable: &[bool],
+    inputs: &[ProgramInput],
     visibility: wgpu::ShaderStages,
 ) -> wgpu::BindGroupLayout {
-    let mut entries = Vec::with_capacity(filterable.len() * 2);
-    let mut base = 0u32;
-    for &filterable in filterable {
+    let mut entries = Vec::with_capacity(inputs.len() * 2);
+    for (input, description) in inputs.iter().enumerate() {
+        let base = u32::try_from(input * 2).expect("program input binding index fits u32");
+        let view_dimension = match description.view {
+            ProgramInputView::Plain => wgpu::TextureViewDimension::D2,
+            ProgramInputView::Array => wgpu::TextureViewDimension::D2Array,
+        };
+        let filterable = description.sampler == ProgramInputSampler::Filtering;
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base,
             visibility,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable },
-                view_dimension: wgpu::TextureViewDimension::D2,
+                view_dimension,
                 multisampled: false,
             },
             count: None,
         });
+
+        let sampler = match description.sampler {
+            ProgramInputSampler::Filtering => wgpu::SamplerBindingType::Filtering,
+            ProgramInputSampler::NonFiltering => wgpu::SamplerBindingType::NonFiltering,
+            ProgramInputSampler::None => continue,
+        };
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base + 1,
             visibility,
-            ty: wgpu::BindingType::Sampler(if filterable {
-                wgpu::SamplerBindingType::Filtering
-            } else {
-                wgpu::SamplerBindingType::NonFiltering
-            }),
+            ty: wgpu::BindingType::Sampler(sampler),
             count: None,
         });
-        base += 2;
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aether program inputs bind group layout"),

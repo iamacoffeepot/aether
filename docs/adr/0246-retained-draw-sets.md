@@ -109,9 +109,17 @@ pub enum SlotShape {
     TextureArray,         // any size and layer count, read only
 }
 pub enum Sampling { Filtered { wrap: Wrap, mips: Mips }, Texel }
+pub enum Wrap { Clamp, Repeat }
+pub enum Mips { Base, Chain }
 ```
 
 A read-only binding is visible to the vertex stage as well as the fragment stage, and `Texel` reads exact values, so a table of data is an ordinary texture. This is the whole of issue 7401.
+
+`Wrap` is the sampler's address mode: `Clamp` extends the edge texel and `Repeat` tiles. `Mips::Base` reads the base level only and `Mips::Chain` filters across the whole mip chain. `Sampling` carries no filter: linear or nearest stays a property of the bound texture, which the quad and material paths draw under the same setting.
+
+A `Texel` input binds a texture and no sampler. Input `n` of a pass keeps its numbering whatever its sampling: its texture is `@binding(2 * n)`, and for a `Texel` input `@binding(2 * n + 1)` is left out of the layout, so the inputs after it do not shift. The texture entry is declared unfilterable, so a texture of any format binds there, and the shader reads it with `textureLoad`.
+
+Only a `Target` has an extent, so a transient and every binding a pass writes is a `Target`, and the final pass's binding is `Target(SlotExtent::Full)`.
 
 **6. Texture arrays are a resource.**
 

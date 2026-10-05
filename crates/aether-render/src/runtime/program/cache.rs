@@ -417,9 +417,10 @@ fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Option<Tr
     let mut assignments: Vec<Option<TransientAssignment>> = (0..plan.transients.len()).map(|_| None).collect();
     for t in order {
         let live = &plan.transients[t];
+        let slot = ResolvedSlot::Transient(u32::try_from(t).expect("transient index fits u32"));
         let first_write = live.first_write.expect("filtered to written transients");
         let last_use = live.last_use.expect("a written transient has a live range");
-        let (width, height) = resolve_extent(live.spec.extent, reference);
+        let (width, height) = resolve_extent(plan.target_extent(slot), reference);
         let key = (width, height, wgpu_texture_format(live.spec.format));
 
         let heap = free.entry(key).or_default();
@@ -472,8 +473,8 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
 mod tests {
     use super::*;
     use crate::{
-        DrawPass, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister,
-        SlotExtent, SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
+        DrawPass, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister,
+        Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, VertexAttribute, VertexFormat, Wrap,
     };
 
     const MODULE: &str = r"
@@ -507,7 +508,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// reuses and allocates one texture per hop.
     #[test]
     fn ping_pong_chain_settles_on_two_physical_allocations() {
-        let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let full = SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        };
         let mail = ProgramRegister {
             wgsl: MODULE.to_owned(),
             bindings: vec![full, full],
@@ -538,7 +543,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// a resized dispatch keeps sampling the previous size's textures.
     #[test]
     fn transient_pool_class_follows_the_reference_extent() {
-        let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let full = SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        };
         let mail = ProgramRegister {
             wgsl: MODULE.to_owned(),
             bindings: vec![full, full],
@@ -597,7 +606,11 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     /// unassigned, which panics the encode path that resolves its view.
     #[test]
     fn depth_slots_share_by_name_and_never_alias() {
-        let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let full = SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        };
         let mail = ProgramRegister {
             wgsl: DRAW_MODULE.to_owned(),
             bindings: vec![full],
@@ -629,7 +642,11 @@ fn fs_opaque() -> @location(0) vec4<f32> {
     /// which wipes the accumulation a chain is built on.
     #[test]
     fn clear_sequencing_marks_only_the_first_write_of_each_slot() {
-        let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let full = SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        };
         let mail = ProgramRegister {
             wgsl: DRAW_MODULE.to_owned(),
             bindings: vec![full],

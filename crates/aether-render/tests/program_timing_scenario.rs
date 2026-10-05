@@ -33,9 +33,9 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateTexture, CreateTextureResult, InputSlot, OutputSlot, PassStage, PassStageKind, ProgramDispatch, ProgramPass,
-    ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, SlotExtent, SlotSpec, TextureFormat,
-    TextureSampling, TextureUsage,
+    CreateTexture, CreateTextureResult, InputSlot, Mips, OutputSlot, PassStage, PassStageKind, ProgramDispatch,
+    ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, Sampling, SlotExtent,
+    SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, Wrap,
 };
 
 /// Canvas the timed graph develops at. Small — the assertions are on
@@ -83,12 +83,21 @@ fn register() -> ProgramRegister {
     ProgramRegister {
         wgsl: MODULE.to_owned(),
         bindings: vec![
-            SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full },
-            SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full },
+            SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            },
+            SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            },
         ],
         transients: vec![SlotSpec {
             format: TextureFormat::Rgba8,
-            extent: SlotExtent::Divided { divisor: REDUCED_DIVISOR },
+            shape: SlotShape::Target(SlotExtent::Divided { divisor: REDUCED_DIVISOR }),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
         }],
         geometries: Vec::new(),
         depth_transients: Vec::new(),

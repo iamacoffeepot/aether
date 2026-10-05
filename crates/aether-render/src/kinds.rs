@@ -720,23 +720,99 @@ pub enum SlotExtent {
     Divided { divisor: u32 },
 }
 
-/// The declared shape of one program texture slot — an entry in
-/// `ProgramRegister.bindings` (a registry texture supplied at dispatch)
-/// or `ProgramRegister.transients` (an executor-owned intermediate).
+/// What one program binding takes (ADR-0246 decision 5): a texture
+/// sized from the program's output, or one of a size of its own.
+///
+/// Only a `Target` has an extent, so only a `Target` can be a pass
+/// output or a transient: the executor has to know the size of what it
+/// attaches and pools. The other two shapes are read-only, take a
+/// texture of any size, and are sampled by the fragment stage of any
+/// pass, by the authored vertex stage of a draw pass, and by a compute
+/// pass.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SlotShape {
+    /// A texture the size of the program's reference extent scaled by
+    /// the [`SlotExtent`]. A pass may write it or read it. The bound
+    /// texture must be exactly that size, and the shader declares it
+    /// `texture_2d<f32>`.
+    Target(SlotExtent),
+    /// A texture of any size, read only: a lookup table, a tile sheet,
+    /// a table of per-instance data. The shader declares it
+    /// `texture_2d<f32>`; a pass naming it as its output is refused at
+    /// register.
+    Texture,
+    /// An array texture of any size and layer count, read only. The
+    /// shader declares it `texture_2d_array<f32>`; a pass naming it as
+    /// its output is refused at register, and a dispatch that binds a
+    /// texture that is not an array there is dropped.
+    TextureArray,
+}
+
+/// How a `Filtered` binding addresses a coordinate outside `0..1`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Wrap {
+    /// The edge texel extends outward.
+    Clamp,
+    /// The texture tiles.
+    Repeat,
+}
+
+/// Which mip levels a `Filtered` binding reads.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Mips {
+    /// The base level only, whatever the bound texture holds.
+    Base,
+    /// The whole chain, blended between levels when the texture is
+    /// linear-filtered. A texture with no chain reads as `Base` does.
+    Chain,
+}
+
+/// How a program reads one binding (ADR-0246 decision 5).
+///
+/// The binding decides whether there is a sampler, how it addresses a
+/// coordinate outside the texture and which mip levels it reads. The
+/// bound texture decides linear or nearest: nearest when it was created
+/// `TextureSampling::Nearest` or its format cannot be filtered
+/// (`R32Float`), linear otherwise.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Sampling {
+    /// A texture and a sampler. Input `n` of a pass is the texture at
+    /// `@group(1) @binding(2 * n)` and the sampler at
+    /// `@group(1) @binding(2 * n + 1)`.
+    Filtered { wrap: Wrap, mips: Mips },
+    /// A texture and no sampler, read texel by texel with `textureLoad`.
+    /// Input `n` is still the texture at `@group(1) @binding(2 * n)`;
+    /// `@binding(2 * n + 1)` is left out of the pass's layout, so the
+    /// inputs after it keep their numbers. A pass whose entry point
+    /// uses a sampler there is refused at register.
+    Texel,
+}
+
+/// One program texture slot: an entry in `ProgramRegister.bindings` (a
+/// registry texture supplied at dispatch) or `ProgramRegister.transients`
+/// (an executor-owned intermediate).
+///
 /// `format` fixes the slot's pixel format at register time, which is
 /// what lets every pass pipeline build (and fail) inside the register
-/// reply rather than at first dispatch; a dispatch binding whose
-/// registry texture disagrees with the declared format or resolved
-/// extent warn-drops the dispatch.
+/// reply rather than at first dispatch. `shape` says what the slot takes
+/// and whether a pass may write it; `sampling` says how a pass that
+/// reads it does so. A transient is always a [`SlotShape::Target`]; one
+/// declared otherwise is refused at register.
+///
+/// At dispatch a binding's registry texture must have the declared
+/// format, and for a `Target` the resolved size; a `Texture` takes any
+/// size. A texture that disagrees drops the dispatch with a warning
+/// naming the binding.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SlotSpec {
     pub format: TextureFormat,
-    pub extent: SlotExtent,
+    pub shape: SlotShape,
+    pub sampling: Sampling,
 }
 
 /// One input slot a program pass samples (ADR-0170). Every variant
-/// resolves to a texture the pass binds in its group-1 input pairs, in
-/// declaration order.
+/// resolves to a texture the pass binds at group 1 in declaration
+/// order, with the sampler its slot's [`Sampling`] declares.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InputSlot {
     /// The dispatch binding at `index` into `ProgramDispatch.bindings`,
@@ -760,8 +836,10 @@ pub enum InputSlot {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum OutputSlot {
     /// The dispatch binding at `index` into `ProgramDispatch.bindings`.
-    /// The bound registry texture must be `TextureUsage::Writable`;
-    /// a `Sampled` texture there warn-drops the dispatch.
+    /// The binding must be declared [`SlotShape::Target`], or the
+    /// register is refused. The bound registry texture must be
+    /// `TextureUsage::Writable`; a `Sampled` texture there warn-drops
+    /// the dispatch.
     Binding { index: u32 },
     /// The transient intermediate at `index` into
     /// `ProgramRegister.transients`.
@@ -920,7 +998,8 @@ pub struct PassRepeat {
 /// the DAG check a single index comparison at register time.
 /// `entry_point` names a fragment entry for fragment and draw stages,
 /// or a compute entry for `PassStage::Compute`. `inputs` bind in order
-/// as the pass's group-1 texture / sampler pairs; render stages attach
+/// at group 1, input `n` at `@binding(2 * n)` with its sampler, when
+/// its slot declares one, at `@binding(2 * n + 1)`; render stages attach
 /// `output`, while compute declares `OutputSlot::None` and writes its
 /// group-2 resident buffers. `uniform_offset` /
 /// `uniform_length` window the dispatch's uniform blob in bytes — the
@@ -945,6 +1024,8 @@ pub struct ProgramPass {
 /// paints. Validation happens here, once, each failure class with a
 /// distinguishable `Err` reason: the WGSL through naga (`invalid
 /// wgsl`), then the graph — every declared extent divisor is nonzero,
+/// every transient and every binding a pass writes is a
+/// [`SlotShape::Target`],
 /// every pass's entry point exists in its declared stage, every texture
 /// slot is written before it is read (the sequence-index check), no pass reads
 /// its own output, every uniform window covers the uniform block its
@@ -953,8 +1034,9 @@ pub struct ProgramPass {
 /// it stages, both summed over the whole pass list — a per-pass repeat
 /// ceiling alone leaves their product unbounded), the final pass writes
 /// a dispatch binding
-/// declared `Full` extent (the program's result texture, whose size is
-/// the reference every other extent scales from) — and finally wgpu
+/// declared `Target(SlotExtent::Full)` (the program's result texture,
+/// whose size is the reference every other extent scales from) — and
+/// finally wgpu
 /// shader-module + pipeline creation under a validation error scope
 /// (`pipeline creation failed`), so a bad-but-parseable program replies
 /// `Err` instead of crashing the substrate. A rejected register
@@ -966,9 +1048,18 @@ pub struct ProgramPass {
 /// top-left to `(1, 1)` bottom-right, texture convention — and returns
 /// `@location(0) vec4<f32>`. Its uniform window binds at
 /// `@group(0) @binding(0) var<uniform>`; its input slots bind in
-/// declaration order at group 1 as texture / sampler pairs — input `n`
-/// is `@binding(2 * n)` (`texture_2d<f32>`) plus `@binding(2 * n + 1)`
-/// (`sampler`). Blendable-format outputs (`Rgba8`, `R8`) alpha-blend
+/// declaration order at group 1 — input `n` is the texture at
+/// `@binding(2 * n)`, `texture_2d<f32>` for a `Target` or `Texture`
+/// slot and `texture_2d_array<f32>` for a `TextureArray`, plus the
+/// `sampler` at `@binding(2 * n + 1)` when the slot's sampling is
+/// `Filtered`. A `Texel` slot has no sampler and leaves
+/// `@binding(2 * n + 1)` unused, so the numbering of the inputs after
+/// it does not move; the shader reads it with `textureLoad`. A module
+/// whose entry point disagrees with the slots — it reads an array where
+/// a plain texture is declared, or uses a sampler on a `Texel` input —
+/// fails pipeline creation and replies `Err`. Group 1 is visible to the fragment stage
+/// of every pass, to the authored vertex stage of a draw pass and to a
+/// compute pass. Blendable-format outputs (`Rgba8`, `R8`) alpha-blend
 /// onto the target; `R32Float` outputs replace it (core WebGPU cannot
 /// blend 32-bit floats). The first write a dispatch makes to each
 /// output slot clears it to transparent black; later writes — a
@@ -1039,8 +1130,11 @@ pub enum ProgramRegisterResult {
 /// staging arrangement, so windows need no alignment of their own —
 /// pack them tight). Runtime mismatches — an unknown `program_id`, a
 /// wrong binding or geometry count, an unknown texture or geometry id,
-/// a binding whose format,
-/// size, or writability disagrees with the declared graph, a geometry
+/// a binding whose format disagrees with its declared slot, a `Target`
+/// binding whose size is not the reference extent scaled by its
+/// declared extent (a `Texture` binding takes any size), a
+/// `TextureArray` binding whose texture is not an array, a written
+/// binding whose texture is not writable, a geometry
 /// whose layout disagrees with its declared slot, a uniform
 /// window past the blob's end, or a pass whose input and output resolve
 /// to the same texture — warn-drop the dispatch naming the program,
