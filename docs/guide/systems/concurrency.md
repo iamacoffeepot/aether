@@ -165,16 +165,13 @@ the freed slot. The waiting task's chain is still its own request's, so a
 request's chain settles when that request is answered, never when another
 request's work finishes.
 
-A request the caller should not wait for is answered late without any hold.
-`aether.fs.load` captures the caller's reply target in its handler and starts
-the read with `dispatch_blocking_resumed_with(None, reply_target, ..)`, which
-takes no settlement hold, so the caller's chain settles as soon as the handler
-returns. The completion resolves the `TaskDone` through that target: with no
-hold there is no root, so the reply joins no chain, yet it still reaches the
-caller's response handler by its correlation, with the context the caller
-bound. The handler is `#[handler::unchecked]`, since every public `Pending<R>`
-takes the hold this shape avoids. The cap bounds these workers with its own
-queue.
+A request the caller should not wait for is owed with `ctx.defer` (below)
+instead of `hold`. `aether.fs.load` defers its `Loaded` reply and keeps the
+`Held` on its own bounded queue; a started load's worker attaches to that debt
+with `dispatch_blocking_held_with`, and its completion `resolve`s it. The
+caller's chain settles as soon as the handler returns, and the late reply
+reaches the caller's response handler by its correlation, with the context the
+caller bound, joining no chain.
 
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the

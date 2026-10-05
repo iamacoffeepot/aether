@@ -268,8 +268,8 @@ impl ListResult {
 
 /// `aether.fs.load` — read a file without holding the caller's chain.
 /// Mailed to the `"aether.fs"` mailbox like any request, its one reply is
-/// [`Loaded`]. Unlike `aether.fs.read`, `aether.fs` answers it late
-/// without holding the caller's chain: the chain (and a `Tick` frame it
+/// [`Loaded`]. Unlike `aether.fs.read`, `aether.fs` owes it through
+/// `ctx.defer` and answers it late without holding the caller's chain: the chain (and a `Tick` frame it
 /// rides) settles as soon as the request is handled, and `Loaded` arrives
 /// afterwards, outside it. Correlate it as any reply: bind a context with
 /// `send_with_context` and take it in the `#[handler::response]`. Use
@@ -298,6 +298,18 @@ impl Loaded {
         match read {
             Ok(bytes) => Self::Ok { addr, bytes },
             Err(error) => Self::Err { addr, error },
+        }
+    }
+}
+
+/// A load `aether.fs` owes through its load queue, answered when the actor
+/// closes before the load finished (ADR-0243 §1). The request's address is
+/// gone with the queue, so the echo is empty.
+impl HeldReply for Loaded {
+    fn unanswered() -> Self {
+        Self::Err {
+            addr: NamespaceAddr::new("", ""),
+            error: FsError::AdapterError("aether.fs closed before answering".to_owned()),
         }
     }
 }

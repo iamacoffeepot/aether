@@ -17,7 +17,7 @@ use super::{
     List, ListResult, Load, Loaded, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     build_registry,
 };
-use aether_actor::{Unchecked, runtime};
+use aether_actor::runtime;
 use aether_data::Blob;
 use aether_substrate::actor::native::{BlobCheckIn, Pending, TaskDone, TaskQueue};
 
@@ -53,8 +53,8 @@ pub struct FsCapabilityState {
     /// Frame-bound reads on worker threads, each holding its request's
     /// chain until it is answered.
     reads: TaskQueue<ReadResult>,
-    /// Loads on worker threads, holding no chain: each is answered late,
-    /// after the caller's chain has settled.
+    /// Loads on worker threads, each owed through a `defer`red `Held` that
+    /// holds no chain: answered late, after the caller's chain has settled.
     loads: LoadQueue,
 }
 
@@ -171,28 +171,28 @@ impl NativeActor for FsCapability {
         state.reads.complete(ctx, done);
     }
 
-    /// Read bytes without holding the caller's chain. The handler returns
-    /// without replying, so the caller's chain (and a `Tick` frame it rides)
-    /// settles at once; the load reads on a worker that holds no chain, and
-    /// its completion answers `Loaded` late, through the caller's reply
-    /// target, with no root. The caller's bound context still comes back
-    /// with it, by correlation. Unchecked because a checked request must
-    /// return `Loaded` or a `Pending<Loaded>`, and every public `Pending`
-    /// takes the settlement hold a load exists to avoid.
+    /// Read bytes without holding the caller's chain. `ctx.defer` owes the
+    /// `Loaded` reply with no settlement hold, so the caller's chain (and a
+    /// `Tick` frame it rides) settles as soon as this handler returns; the
+    /// load reads on a worker, and its completion answers the caller late,
+    /// by its correlation, with the context the caller bound.
     ///
     /// # Agent
     /// Reply: `Loaded`, sent after the file is read and after the request's
     /// own chain has settled. Echoes the address on both arms. Over MCP the
     /// call settles before the reply exists; use `aether.fs.read` there.
-    #[handler::unchecked(reason = "answers from the load queue's completion, holding no chain")]
-    fn on_load(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Load) {
+    #[handler::request]
+    fn on_load(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Load) -> Pending<Loaded> {
+        let (pending, held) = ctx.defer::<Loaded>();
         let registry = Arc::clone(&state.registry);
         let check_in = ctx.blob_check_in();
 
-        state.loads.submit(ctx, move || {
+        state.loads.submit(ctx, held, move || {
             let read = read_blob(&registry, &mail.addr, &check_in);
             Loaded::from_op(mail.addr, read)
         });
+
+        pending
     }
 
     /// Completion of a load: answer its caller late, then start the next
