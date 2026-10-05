@@ -183,7 +183,7 @@ impl Program for SessionRecord {
                 (session_items(items)?, RestReason::Failed(failure))
             }
         };
-        Ok(Session::new(turn.settings(), items, rested, input.tree))
+        Ok(Session::new(turn.settings(), items, rested, input.tree, turn.cache_key().clone()))
     }
 }
 
@@ -303,8 +303,8 @@ mod tests {
     use super::{Answered, CallAnswer, RecordInput, SessionRecord};
     use crate::input::tests::call;
     use crate::input::{
-        CallId, OfferedTools, Reasoning, ReasoningId, Role, ToolCall, ToolCalls, ToolOutput, TurnInput, TurnItem,
-        TurnItems,
+        CacheKey, CallId, OfferedTools, Reasoning, ReasoningId, Role, ToolCall, ToolCalls, ToolOutput, TurnInput,
+        TurnItem, TurnItems,
     };
     use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
     use crate::session::fixture::{run, settings, stored};
@@ -330,7 +330,8 @@ mod tests {
     }
 
     fn turn(items: Vec<TurnItem>) -> TurnInput {
-        settings(OfferedTools::default()).with_items(TurnItems::new(items).expect("items"))
+        let key = CacheKey::new("test-key").expect("key");
+        settings(OfferedTools::default()).with_items(TurnItems::new(items).expect("items"), key)
     }
 
     fn result(outcome: TurnOutcome) -> TurnResult {

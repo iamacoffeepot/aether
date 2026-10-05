@@ -471,7 +471,7 @@ mod tests {
     };
     use crate::input::tests::{call, offered_tool};
     use crate::input::{
-        Endpoint, InputLimit, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems,
+        CacheKey, Endpoint, InputLimit, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems,
     };
 
     #[test]
@@ -537,6 +537,7 @@ mod tests {
             max_output_tokens: OutputBudget::new(64).expect("budget"),
             reasoning: ReasoningEffort::Low,
             input_limit: InputLimit::new(u64::MAX).expect("limit"),
+            cache_key: CacheKey::new("test-key").expect("key"),
         };
 
         let stored = TurnInput::encode_storage(&StorageData::from_value(input)).expect("encode");

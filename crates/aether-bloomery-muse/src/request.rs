@@ -5,8 +5,9 @@
 //! (`include: ["reasoning.encrypted_content"]`), and the conversation resends the reasoning items earlier replies
 //! carried, ahead of the items they produced.
 //!
-//! The body also carries a prompt cache key derived from the conversation's first item, which every turn of a session
-//! resends unchanged, so the vendor routes a session's turns to the servers that hold its prefix.
+//! The body also carries the session's prompt cache key, drawn when the
+//! session opened, so the vendor routes a session's turns to the servers that
+//! hold its prefix.
 //!
 //! Pure over the input and its read and rendered texts, so the request the recorded
 //! closure describes is testable without the invocation machinery. The
@@ -16,7 +17,6 @@ use std::borrow::Cow;
 
 use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
 use aether_bloomery_program::function_name;
-use aether_data::hash_bytes;
 use aether_http::{Fetch, HttpHeader, HttpMethod};
 use serde::Serialize;
 use serde_json::Value;
@@ -157,12 +157,6 @@ fn definition(tool: &OfferedTool, text: &str) -> Result<Value, Refusal> {
     Ok(definition)
 }
 
-/// The session's prompt cache key: the hex sha256 of the turn's first item as sent, which every turn of a session
-/// resends unchanged.
-fn cache_key(first: &Item<'_>) -> String {
-    hash_bytes(&serde_json::to_vec(first).expect("an item of strings always serializes")).to_string()
-}
-
 /// Build the turn's request. `texts[i]` is the text `input.items()[i]` sends
 /// (see [`crate::render`]) and `definitions[j]` the read definition of
 /// `input.tools()[j]`.
@@ -175,13 +169,16 @@ fn cache_key(first: &Item<'_>) -> String {
 pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Result<Fetch, Refusal> {
     let items: Vec<Item<'_>> =
         input.items().iter().zip(texts).map(|(item, text)| Item::new(item, text)).collect::<Result<_, _>>()?;
+    if items.is_empty() {
+        return Err(refused("the turn sends no items".into()));
+    }
     let body = Body {
         model: input.model().as_str(),
         store: false,
         include: ["reasoning.encrypted_content"],
         max_output_tokens: input.max_output_tokens().get(),
         reasoning: Reasoning { effort: effort(input.reasoning()) },
-        prompt_cache_key: cache_key(items.first().ok_or_else(|| refused("the turn sends no items".into()))?),
+        prompt_cache_key: input.cache_key().as_str().to_owned(),
         tools: input
             .tools()
             .iter()
@@ -211,23 +208,40 @@ mod tests {
     use super::fetch;
     use crate::input::tests::offered_tool;
     use crate::input::{
-        CallId, Endpoint, FunctionName, InputLimit, ModelName, OfferedTools, OutputBudget, Reasoning, ReasoningEffort,
-        ReasoningId, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
+        CacheKey, CallId, Endpoint, FunctionName, InputLimit, ModelName, OfferedTools, OutputBudget, Reasoning,
+        ReasoningEffort, ReasoningId, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems,
     };
+    use crate::session::TurnSettings;
+
+    fn input_with_key(tools: OfferedTools, items: Vec<TurnItem>, key: &str) -> TurnInput {
+        input_at_with_key(ReasoningEffort::Medium, tools, items, key)
+    }
 
     fn input(tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
-        input_at(ReasoningEffort::Medium, tools, items)
+        input_with_key(tools, items, "test-key")
     }
 
     fn input_at(reasoning: ReasoningEffort, tools: OfferedTools, items: Vec<TurnItem>) -> TurnInput {
+        input_at_with_key(reasoning, tools, items, "test-key")
+    }
+
+    fn input_at_with_key(
+        reasoning: ReasoningEffort,
+        tools: OfferedTools,
+        items: Vec<TurnItem>,
+        key: &str,
+    ) -> TurnInput {
         TurnInput::new(
-            Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
-            ModelName::new("muse-spark-1.3").expect("model"),
-            tools,
+            TurnSettings::new(
+                Endpoint::new("https://example.test/v1/responses").expect("endpoint"),
+                ModelName::new("muse-spark-1.3").expect("model"),
+                tools,
+                OutputBudget::new(512).expect("budget"),
+                reasoning,
+                InputLimit::new(u64::MAX).expect("limit"),
+            ),
             TurnItems::new(items).expect("items"),
-            OutputBudget::new(512).expect("budget"),
-            reasoning,
-            InputLimit::new(u64::MAX).expect("limit"),
+            CacheKey::new(key).expect("key"),
         )
     }
 
@@ -239,15 +253,12 @@ mod tests {
         OfferedTools::new(names.iter().map(|name| offered_tool(program(name))).collect()).expect("tools")
     }
 
-    /// The request body with its `prompt_cache_key` removed, after checking the key is a full lowercase hex sha256.
+    /// The request body with its `prompt_cache_key` removed, after checking the key keeps the cache key rules.
     fn body_without_key(body: &[u8]) -> serde_json::Value {
         let mut body: serde_json::Value = serde_json::from_slice(body).expect("body is JSON");
         let key = body.as_object_mut().expect("body is an object").remove("prompt_cache_key").expect("a cache key");
         let key = key.as_str().expect("the key is a string");
-        assert!(
-            key.len() == 64 && key.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
-            "the key is 64 lowercase hex characters: {key}"
-        );
+        assert!(CacheKey::new(key).is_ok(), "the key keeps every cache key rule: {key}");
         body
     }
 
@@ -259,30 +270,23 @@ mod tests {
     }
 
     #[test]
-    fn every_turn_of_a_session_sends_its_first_items_key() {
-        // Catches a key derived from the last item or the whole input, which would change every turn and route each
-        // one away from the cached prefix, and a key that ignores the role, which would route two sessions with
-        // different prefixes together.
+    fn every_turn_of_a_session_sends_the_key_it_opened_with() {
+        // Catches a key derived from the conversation again, which would route
+        // sessions with the same opening together, and a later turn that sends
+        // another key than its first.
         let message = |role, text: &str| TurnItem::message(role, Ref::of_text(text));
         let texts = ["What is a bloom?", "A flowering.", "And a bloomery?"].map(String::from);
-        let first = input(OfferedTools::default(), vec![message(Role::User, &texts[0])]);
+        let first = input_with_key(OfferedTools::default(), vec![message(Role::User, &texts[0])], "session-key");
         let second = first
             .append([message(Role::Assistant, &texts[1]), message(Role::User, &texts[2])])
             .expect("a reply and a follow-up append");
-        let other_texts = ["What is a forge?".to_owned()];
-        let other = input(OfferedTools::default(), vec![message(Role::User, &other_texts[0])]);
-        let developer_texts = [texts[0].clone(), texts[2].clone()];
-        let developer = input(
-            OfferedTools::default(),
-            vec![message(Role::Developer, &developer_texts[0]), message(Role::User, &developer_texts[1])],
-        );
+        let other = input_with_key(OfferedTools::default(), vec![message(Role::User, &texts[0])], "another-key");
 
         let key = cache_key(&first, &texts[..1]);
 
-        assert!(key.is_string(), "the request sends a key");
+        assert_eq!(key, serde_json::Value::String("session-key".to_owned()), "the request sends the input's key");
         assert_eq!(cache_key(&second, &texts), key, "a later turn of the session sends the same key");
-        assert_ne!(cache_key(&other, &other_texts), key, "a session with another first item sends another key");
-        assert_ne!(cache_key(&developer, &developer_texts), key, "the same text under another role sends another key");
+        assert_ne!(cache_key(&other, &texts[..1]), key, "the same items with another key send another key");
     }
 
     #[test]

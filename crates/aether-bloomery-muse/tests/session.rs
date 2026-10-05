@@ -6,14 +6,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    CLOCK, CLOCK_BUNDLE, CallInput, CallProgram, ClosureArtifact, Detail, EncodedArtifact, Evaluated, Event, Fault,
-    FaultReason, Fired, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node, ProgramName, ProgramRef,
-    ReactionFailed, ReactorIntent, ReactorName, ReadArtifactResult, RecordedHead, RequestSource, Requested, SetHeads,
-    Transition, Tree, Until, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
+    CLOCK, CLOCK_BUNDLE, CallInput, CallProgram, ClosureArtifact, Detail, EncodedArtifact, EntropyResult, Evaluated,
+    Event, Fault, FaultReason, Fired, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node, ProgramApi,
+    ProgramName, ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifactResult, RecordedHead,
+    RequestSource, Requested, SetHeads, Transition, Tree, Until, Warm, WarmEntries, Warmed, decode_call_program,
+    decode_set_heads,
 };
 use aether_bloomery_muse::{
-    Answered, CallId, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, MUSE, ModelName,
-    MuseSession, MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning,
+    Answered, CacheKey, CallId, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, MUSE,
+    ModelName, MuseSession, MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning,
     ReasoningEffort, ReasoningId, RecordInput, RequiredProofs, RestReason, Role, Session, SessionContinue,
     SessionExhausted, SessionGate, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeDiff,
     TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome,
@@ -276,7 +277,7 @@ impl Driver {
             name if name == TreeDiff::NAME => self.run_async::<TreeDiff>(invocation),
             name if name == VendorRead::NAME => self.run_async::<VendorRead>(invocation),
             name if name == ClippyProof::NAME => self.prove(invocation),
-            name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
+            name if name == SessionOpen::NAME => self.open(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
             name if name == SessionRecord::NAME => invoke::<SessionRecord>(invocation),
             name if name == SessionExhausted::NAME => invoke::<SessionExhausted>(invocation),
@@ -302,6 +303,41 @@ impl Driver {
         match start_async::<P>(invocation) {
             Started::Finished(invoked) => invoked,
             Started::Live { session, waiting } => self.answer_reads(session, waiting),
+        }
+    }
+
+    /// One open, answering its `Entropy` draw with fixed bytes and every read
+    /// it fetches from the store.
+    fn open(&self, invocation: Invoke) -> Invoked {
+        const BYTES: &[u8] = &[7; 16];
+        match start_async::<SessionOpen>(invocation) {
+            Started::Finished(invoked) => invoked,
+            Started::Live { mut session, mut waiting } => loop {
+                let Some(pending) = waiting else {
+                    panic!("expected the open to wait, got no pending");
+                };
+                match pending {
+                    Pending::Artifact(artifact) => {
+                        let reply = if self.store.contains_key(&artifact.digest) {
+                            ReadArtifactResult::Found { artifact: self.artifact(artifact.digest) }
+                        } else {
+                            ReadArtifactResult::Missing { digest: artifact.digest }
+                        };
+                        session.fulfill(artifact, reply);
+                    }
+                    Pending::Send(call) => {
+                        assert_eq!(call.api, ProgramApi::Entropy, "an open draws only entropy");
+                        let reply = EntropyResult::Drawn { bytes: BYTES.to_vec() };
+                        session.fulfill_send(&call, EntropyResult::ID, reply.encode_into_bytes());
+                    }
+                }
+                waiting = match session.poll() {
+                    PollResult::Finished(invoked) => return invoked,
+                    PollResult::NeedArtifact(pending) => Some(Pending::Artifact(pending)),
+                    PollResult::NeedSend(pending) => Some(Pending::Send(pending)),
+                    other @ PollResult::Waiting => panic!("expected the open to finish, read, or draw, got {other:?}"),
+                };
+            },
         }
     }
 
@@ -721,15 +757,7 @@ fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestR
         TurnItem::Call(call_b.clone()),
     ];
     let items = first.items().iter().cloned().chain(replayed).chain(outputs).collect();
-    let next = TurnInput::new(
-        first.endpoint().clone(),
-        first.model().clone(),
-        OfferedTools::new(first.tools().to_vec())?,
-        TurnItems::new(items)?,
-        first.max_output_tokens(),
-        first.reasoning(),
-        first.input_limit(),
-    );
+    let next = TurnInput::new(first.settings(), TurnItems::new(items)?, first.cache_key().clone());
     let next_call = asked(&driver, trigger);
     assert_eq!(next_call.name.as_str(), MuseTurn::NAME);
     assert_eq!(next_call.input, CallInput::Value(encoded(&next)), "the next turn extends the first exactly");
@@ -1107,13 +1135,9 @@ fn a_bare_turn_is_never_a_session() -> TestResult {
     let settings = settings(&mut driver, tree)?;
     driver.stage([EncodedArtifact::text(QUESTION)]);
     let input = TurnInput::new(
-        Endpoint::new(URL)?,
-        ModelName::new("muse-spark-1.3")?,
-        OfferedTools::new(settings.tools().to_vec())?,
+        settings,
         TurnItems::new(vec![TurnItem::message(Role::User, Ref::of_text(QUESTION))])?,
-        OutputBudget::new(512)?,
-        ReasoningEffort::Low,
-        settings.input_limit(),
+        CacheKey::new("test-key").expect("key"),
     );
 
     let turn = driver.call_native::<MuseTurn>(&input);
