@@ -577,7 +577,7 @@ request at a time:
      toolchain's `bin`.
    - `env` holds only what every step shares: `PATH`, led by the toolchain's
      `bin`, and `LANG=C.UTF-8`. The root is read-only, so `CARGO_HOME`,
-     `CARGO_TARGET_DIR` and `TMPDIR` belong to each step.
+     `CARGO_TARGET_DIR`, `HOME` and `TMPDIR` belong to each step.
 
    The input cites both trees, so the driver checks every member of both into
    the engine blob store for the call, deduplicated by digest. That closure
@@ -835,9 +835,9 @@ is fixed:
 | Tool | `cargo` for both steps, resolved through the environment's `tools` table; cargo finds `cargo-fmt` and `cargo-clippy` on the environment's `PATH` |
 | Step 1 | `fmt --all -- -l`: rustfmt writes its fixes and prints each file it rewrote |
 | Step 2 | clippy's lint command (see [The clippy proof](#the-clippy-proof)) or the test command (see [The test proof](#the-test-proof)) |
-| Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `TMPDIR=/work/tmp` on both steps, plus the bound's test env on the test step only |
+| Env | `CARGO_HOME=/work/tmp/cargo-home`, `CARGO_TARGET_DIR=/work/target`, `HOME=/work/tmp/home`, `TMPDIR=/work/tmp` on both steps, plus the bound's test env on the test step only |
 | Mounts | the vendor tree at `vendor`, the cargo config at `.cargo` |
-| Scratch | `target` and `tmp`, so neither the build output nor cargo's home reaches the output tree |
+| Scratch | `target` and `tmp`, so neither the build output, cargo's home, nor the home directory reaches the output tree |
 | Network | `Off` |
 
 fmt runs first and fixes, so a proof never fails on formatting alone. Both

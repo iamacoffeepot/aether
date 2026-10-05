@@ -8,11 +8,13 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use aether_actor::NAMESPACE_SEGMENT_MAX_LEN;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::{ActorLineageRecord, CONTENT_ADDRESSED_SECTION, KindDescriptor, KindId};
 use aether_kinds::AssetInfo;
+use rustc_hash::FxHashMap;
 
 use super::{AssetName, HASH_HEX_BYTES};
 use crate::actor::wasm::asset_manifest;
@@ -34,8 +36,55 @@ pub struct ModuleManifest {
     lineage: Vec<ActorLineageRecord>,
     namespace: Option<String>,
     content_addressed: bool,
-    asset_catalog: Vec<AssetInfo>,
-    asset_sections: Vec<AssetSection>,
+    assets: Arc<AssetIndex>,
+}
+
+/// A module's assets, indexed once when the module is parsed and shared by
+/// every load window over it (ADR-0163 §3).
+pub struct AssetIndex {
+    /// Section order: what `describe_component` reports.
+    catalog: Vec<AssetInfo>,
+    /// Section order: each asset's name and payload range.
+    sections: Vec<AssetSection>,
+    /// An asset's position in both lists, by name.
+    by_name: FxHashMap<AssetName, usize>,
+}
+
+impl AssetIndex {
+    /// Index `records`, each name minted into an [`AssetName`]. The lists
+    /// keep the records' order; the map answers a name in constant time.
+    fn new(records: Vec<asset_manifest::AssetRecord>) -> Result<Self, String> {
+        let mut sections = Vec::with_capacity(records.len());
+        let mut by_name = FxHashMap::default();
+        by_name.reserve(records.len());
+        for (position, record) in records.iter().enumerate() {
+            let name = AssetName::new(&record.info.name)?;
+            by_name.insert(name.clone(), position);
+            sections.push(AssetSection { name, range: record.offset..record.offset + record.len });
+        }
+        let catalog = records.into_iter().map(|record| record.info).collect();
+
+        Ok(Self { catalog, sections, by_name })
+    }
+
+    /// The asset named `name`: its name and payload range, or `None` when
+    /// the module carries none.
+    #[must_use]
+    pub fn section(&self, name: &str) -> Option<&AssetSection> {
+        self.by_name.get(name).map(|&position| &self.sections[position])
+    }
+
+    /// Each asset's name and length, in section order.
+    #[must_use]
+    pub fn catalog(&self) -> &[AssetInfo] {
+        &self.catalog
+    }
+
+    /// Each asset's name and payload range, in section order.
+    #[must_use]
+    pub fn sections(&self) -> &[AssetSection] {
+        &self.sections
+    }
 }
 
 /// Where one asset's payload sits in the wasm bytes, for a load window to
@@ -62,15 +111,7 @@ impl ModuleManifest {
         let namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
         let records = asset_manifest::read_assets_from_bytes(wasm)?;
 
-        let asset_sections = records
-            .iter()
-            .map(|record| {
-                Ok(AssetSection {
-                    name: AssetName::new(&record.info.name)?,
-                    range: record.offset..record.offset + record.len,
-                })
-            })
-            .collect::<Result<_, String>>()?;
+        let assets = Arc::new(AssetIndex::new(records)?);
         let kind_ids =
             kinds.iter().map(|descriptor| KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema))).collect();
 
@@ -83,8 +124,7 @@ impl ModuleManifest {
             lineage,
             namespace,
             content_addressed: kind_manifest::read_content_addressed_marker(wasm),
-            asset_catalog: records.into_iter().map(|record| record.info).collect(),
-            asset_sections,
+            assets,
         };
         if manifest.content_addressed
             && let Some((namespace, _)) = manifest
@@ -182,11 +222,11 @@ impl ModuleManifest {
         self.content_addressed
     }
 
-    /// Each asset's name, length and sha256, in section order: the catalog
+    /// Each asset's name and length, in section order: the catalog
     /// `describe_component` reports.
     #[must_use]
     pub fn asset_catalog(&self) -> &[AssetInfo] {
-        &self.asset_catalog
+        self.assets.catalog()
     }
 
     /// Each asset's name and the byte range of its payload in the module's
@@ -194,6 +234,12 @@ impl ModuleManifest {
     /// its opener brought.
     #[must_use]
     pub fn asset_sections(&self) -> &[AssetSection] {
-        &self.asset_sections
+        self.assets.sections()
+    }
+
+    /// The module's asset index, for a load window to share rather than copy.
+    #[must_use]
+    pub fn assets(&self) -> &Arc<AssetIndex> {
+        &self.assets
     }
 }

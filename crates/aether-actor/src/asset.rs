@@ -6,8 +6,8 @@
 //! instance's life) from "give me the payload" (available only during the
 //! load window — `init` + `wire`):
 //!
-//! - [`AssetCatalog`] lists the [`AssetInfo`] entries — name, length,
-//!   sha256. A few hundred bytes of metadata, so it stays queryable for
+//! - [`AssetCatalog`] lists the [`AssetInfo`] entries — name and
+//!   length. A few hundred bytes of metadata, so it stays queryable for
 //!   the instance's life and surfaces through `describe_component`.
 //! - [`AssetWindow`] adds payload access. It is implemented only by the
 //!   load-window ctxs (`init` / `wire`), so a "fetch later" from a
@@ -54,7 +54,7 @@ pub use aether_kinds::AssetInfo;
 
 /// The asset catalog of a loaded component — one [`AssetInfo`] per
 /// `aether.asset.<path>` custom section it carries (ADR-0163 §3). Metadata
-/// only (name / length / sha256), so it is cheap to keep for the
+/// only (name / length), so it is cheap to keep for the
 /// instance's life; implemented by every load-window ctx and by the
 /// host-side served window. Payload access is the separate
 /// [`AssetWindow`].

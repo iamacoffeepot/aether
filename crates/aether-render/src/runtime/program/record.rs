@@ -25,6 +25,7 @@ use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
 use super::super::texture::TextureRegistry;
 use super::cache::{BoundInput, BoundStorage, CacheParts};
+use super::submit::FramePasses;
 use super::timing::FrameQueries;
 use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
@@ -40,13 +41,14 @@ pub(super) struct DispatchRecord<'a> {
     pub(super) geometries: &'a mut GeometryRegistry,
     pub(super) dispatch: &'a ProgramDispatch,
     pub(super) queries: Option<FrameQueries<'a>>,
+    pub(super) passes: &'a mut FramePasses,
 }
 
 /// Execute one dispatch into `encoder`, or warn-drop it whole: the
 /// checks run first, so a rejected dispatch records nothing and the
 /// frame survives untouched.
 pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, record: DispatchRecord<'_>) {
-    let DispatchRecord { program, pool, textures, geometries, dispatch, queries } = record;
+    let DispatchRecord { program, pool, textures, geometries, dispatch, queries, passes } = record;
     let RegisteredProgram { plan, state, timings, .. } = program;
     let ProgramDeviceState::Ready { passes_gpu, cache } = state else {
         let ProgramDeviceState::Quarantined { reason } = state else {
@@ -123,7 +125,7 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
     encode_passes(
         gpu,
         encoder,
-        PassEncoding { plan, passes_gpu, cache: &mut parts, pool, textures, geometries, dispatch, queries },
+        PassEncoding { plan, passes_gpu, cache: &mut parts, pool, textures, geometries, dispatch, queries, passes },
     );
 }
 
@@ -432,6 +434,7 @@ struct PassEncoding<'a, 'c> {
     geometries: &'a GeometryRegistry,
     dispatch: &'a ProgramDispatch,
     queries: Option<FrameQueries<'a>>,
+    passes: &'a mut FramePasses,
 }
 
 /// Stage the dispatch's uniform windows, refresh the bind groups whose
@@ -444,7 +447,7 @@ struct PassEncoding<'a, 'c> {
 // arguments — the same shape `record_overlay_batches` keeps.
 #[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: PassEncoding<'_, '_>) {
-    let PassEncoding { plan, passes_gpu, cache, pool, textures, geometries, dispatch, mut queries } = encoding;
+    let PassEncoding { plan, passes_gpu, cache, pool, textures, geometries, dispatch, mut queries, passes } = encoding;
     let layout = cache.layout;
     let extent = cache.extent;
     let transient_view = |transient: u32| {
@@ -567,6 +570,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         ResolvedSlot::Binding(binding) => cache.binding_view(binding),
                         ResolvedSlot::Transient(transient) => transient_view(transient),
                     };
+                    passes.admit(gpu, encoder);
                     record_program_pass(
                         encoder,
                         &ProgramPassDraw {
@@ -601,6 +605,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     } else {
                         ProgramDrawCommand::Direct { index_count: realized.index_count }
                     };
+                    passes.admit(gpu, encoder);
                     record_program_draw_pass(
                         encoder,
                         &ProgramDrawPass {
@@ -619,6 +624,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     );
                 }
                 (PassPlanStage::Compute(compute), PassPipeline::Compute(pipeline)) => {
+                    passes.admit(gpu, encoder);
                     record_program_compute_pass(
                         encoder,
                         &ProgramComputePass {

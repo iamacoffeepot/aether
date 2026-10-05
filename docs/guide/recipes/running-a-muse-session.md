@@ -101,7 +101,9 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.diff`, `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. A
+  `tree.diff`, `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. The
+  model reads a read's text and an edit's summary exactly as stored, so the
+  text after a line's number and tab is what `tree.edit` matches. A
   reply without a tool call does not end the session: the loop nudges the model back for
   another turn. The first turn sends the instructions as the developer
   message ahead of the brief. `tree.diff` shows the session's tree against the tree it opened on.

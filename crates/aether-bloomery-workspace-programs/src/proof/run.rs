@@ -27,7 +27,7 @@ const CARGO_CONFIG: &str = ".cargo";
 /// The scratch path that holds cargo's build output.
 const TARGET_SCRATCH: &str = "target";
 
-/// The scratch path that holds temporary files and cargo's home.
+/// The scratch path that holds temporary files, the home, and cargo's home.
 const TMP_SCRATCH: &str = "tmp";
 
 /// Cargo's home, under [`TMP_SCRATCH`]: the root is read-only.
@@ -39,8 +39,13 @@ const CARGO_TARGET_DIR: &str = "/work/target";
 /// Temporary files, at [`TMP_SCRATCH`].
 const TMPDIR: &str = "/work/tmp";
 
+/// The home directory, under [`TMP_SCRATCH`]: the root is read-only, and a
+/// child a test forks resolves its data and config directories from it.
+const HOME: &str = "/work/tmp/home";
+
 /// The variables each run gives every step, over the environment's own.
-const ENV: [(&str, &str); 3] = [("CARGO_HOME", CARGO_HOME), ("CARGO_TARGET_DIR", CARGO_TARGET_DIR), ("TMPDIR", TMPDIR)];
+const ENV: [(&str, &str); 4] =
+    [("CARGO_HOME", CARGO_HOME), ("CARGO_TARGET_DIR", CARGO_TARGET_DIR), ("HOME", HOME), ("TMPDIR", TMPDIR)];
 
 /// The first step: format every package of the workspace in place, printing
 /// the path of each file rustfmt rewrote, one per line, to stdout. A proof

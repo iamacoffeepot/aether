@@ -150,7 +150,9 @@ impl Reasoning {
 /// What a replayed call produced.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum ToolOutput {
-    /// The program's stored result, sent rendered to JSON with its schema.
+    /// The program's stored result: a `Viewed` sends its text and an `Edited`
+    /// its summary, as stored, and any other result is sent rendered to JSON
+    /// with its schema.
     Result {
         /// The cited schema of the program's result. The output cites its
         /// own, since a later turn may no longer offer the program.

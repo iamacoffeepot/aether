@@ -14,7 +14,8 @@ pub struct MuseTurn;
 ///
 /// Reads every artifact the input cites (the driver's closure walk has
 /// injected them, so no read fetches): each item's text, or a replayed
-/// result and its schema, rendered to JSON; and each offered tool's
+/// result and its schema, sent as its text when it is a `Viewed` or an
+/// `Edited` and rendered to JSON otherwise; and each offered tool's
 /// definition and input schema. Sends exactly one `Fetch`, and records the
 /// reply, decoding each call's arguments against its tool's input schema.
 /// It never retries and never runs a call: a retry is a new request the

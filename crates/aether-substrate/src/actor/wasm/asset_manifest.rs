@@ -9,15 +9,22 @@
 //! host-side before compilation, exactly as `kind_manifest` reads
 //! `aether.kinds`: [`read_assets_from_bytes`] walks the raw bytes with
 //! `wasmparser` and records, per asset, its catalog entry ([`AssetInfo`]:
-//! name, length, sha256) plus the byte range of its payload within the
+//! name, length) plus the byte range of its payload within the
 //! module file. The module cache runs it once per content hash and keeps
 //! the catalog and the ranges, never the payloads (ADR-0241 §2,
 //! [`super::module`]).
 //!
-//! The catalog is metadata — a few hundred bytes — so it is kept for the
-//! instance's life and surfaces through `describe_component`
-//! ([`aether_kinds::ComponentCapabilities::assets`]). Payload access is
-//! the [`LoadWindow`]: it holds the code blob its opener brought (the
+//! The module parse builds one [`AssetIndex`] from those records, once per
+//! module: the catalog and the ranges in section order, and a map from a
+//! name to its position, so a lookup is constant time. Every window over
+//! the module shares that index through an `Arc` and copies none of it.
+//!
+//! The catalog is metadata, kept for the instance's life; it surfaces
+//! through `describe_component`
+//! ([`aether_kinds::ComponentCapabilities::assets`]). Nothing hashes an
+//! asset's bytes here: the catalog outlives them, and the one hash of an
+//! asset a reader needs is the blob handle [`LoadWindow::fetch_blob`] mints.
+//! Payload access is the [`LoadWindow`]: it holds the code blob its opener brought (the
 //! load's, or the republish's) and serves [`LoadWindow::fetch`] by
 //! streaming the named asset's range out of it, or
 //! [`LoadWindow::fetch_blob`] by viewing that range in place as a blob of
@@ -37,14 +44,15 @@
 //! property out of this module; it makes no such claim.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use aether_actor::AssetCatalog;
 use aether_data::{Blob, BlobReader};
 use aether_kinds::AssetInfo;
-use sha2::{Digest, Sha256};
+use rustc_hash::FxHashSet;
 use wasmparser::{Parser, Payload};
 
-use super::module::{AssetSection, Module};
+use super::module::{AssetIndex, Module};
 use crate::actor::native::BlobCheckIn;
 
 /// The prefix every asset custom section's name carries (ADR-0163 §2). An
@@ -56,7 +64,7 @@ pub const ASSET_SECTION_PREFIX: &str = "aether.asset.";
 /// window reads from its opener's code (ADR-0163 §3).
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
-    /// Catalog metadata: name, length, sha256.
+    /// Catalog metadata: name and length.
     pub info: AssetInfo,
     /// Offset of the asset's payload bytes within the module file.
     pub offset: usize,
@@ -66,7 +74,7 @@ pub struct AssetRecord {
 
 /// Walk a module's `aether.asset.*` custom sections and index each asset
 /// (ADR-0163 §3): catalog name (the section-name suffix after
-/// [`ASSET_SECTION_PREFIX`]), byte length, sha256, and byte range into
+/// [`ASSET_SECTION_PREFIX`]), byte length, and byte range into
 /// `wasm`. Sections without the prefix are ignored; a module carrying no
 /// asset sections returns an empty vec.
 ///
@@ -77,6 +85,7 @@ pub struct AssetRecord {
 /// than serving an ambiguous or truncated payload.
 pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
     let mut records: Vec<AssetRecord> = Vec::new();
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
 
     for payload in Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
@@ -89,7 +98,7 @@ pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
         if path.is_empty() {
             return Err(format!("{ASSET_SECTION_PREFIX}: empty asset path (custom section named {:?})", reader.name()));
         }
-        if records.iter().any(|r| r.info.name == path) {
+        if !seen.insert(path) {
             return Err(format!(
                 "{ASSET_SECTION_PREFIX}{path}: asset custom section appears more than once — a \
                  bundle must carry each asset path exactly once (ADR-0163 §3)"
@@ -97,9 +106,8 @@ pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
         }
 
         let data = reader.data();
-        let sha256: [u8; 32] = Sha256::digest(data).into();
         records.push(AssetRecord {
-            info: AssetInfo { name: path.to_owned(), len: data.len() as u64, sha256 },
+            info: AssetInfo { name: path.to_owned(), len: data.len() as u64 },
             offset: reader.data_offset(),
             len: data.len(),
         });
@@ -117,16 +125,16 @@ pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
 /// the window, while the catalog metadata is retained for the instance's
 /// life (the ADR's "catalog for life, payload for the window" split).
 pub struct LoadWindow {
-    /// Each asset's name and payload range in `source`.
-    sections: Vec<AssetSection>,
+    /// The module's assets: their names, payload ranges in `source`, and
+    /// the catalog, shared with every other window over the module and
+    /// retained for the instance's life.
+    index: Arc<AssetIndex>,
     /// The module's wasm bytes, held only while the window is open: the
     /// code the load or republish that opened it checked the module in
     /// from. `None` for an instance spawned from its publication, which
     /// brought no bytes, and once [`close`](Self::close)d.
     source: Option<Blob>,
     open: bool,
-    /// Catalog metadata — retained for the instance's life, survives close.
-    catalog: Vec<AssetInfo>,
 }
 
 impl LoadWindow {
@@ -136,13 +144,7 @@ impl LoadWindow {
     /// window that never serves a payload.
     #[must_use]
     pub fn open(module: &Module, source: Option<Blob>) -> Self {
-        let manifest = module.manifest();
-        Self {
-            sections: manifest.asset_sections().to_vec(),
-            source,
-            open: true,
-            catalog: manifest.asset_catalog().to_vec(),
-        }
+        Self { index: Arc::clone(module.manifest().assets()), source, open: true }
     }
 
     /// The asset catalog (metadata) as owned entries — for handing into
@@ -150,7 +152,7 @@ impl LoadWindow {
     /// through `describe_component`.
     #[must_use]
     pub fn catalog(&self) -> Vec<AssetInfo> {
-        self.catalog.clone()
+        self.index.catalog().to_vec()
     }
 
     /// The bytes of the asset named `name`: `Ok(None)` when the module
@@ -207,7 +209,7 @@ impl LoadWindow {
         if !self.open {
             return Ok(None);
         }
-        let Some(section) = self.sections.iter().find(|section| section.name.as_str() == name) else {
+        let Some(section) = self.index.section(name) else {
             return Ok(None);
         };
         let Some(source) = self.source.as_ref() else {
@@ -260,7 +262,7 @@ fn ends_early(name: &str, range: &Range<usize>) -> String {
 
 impl AssetCatalog for LoadWindow {
     fn assets(&self) -> &[AssetInfo] {
-        &self.catalog
+        self.index.catalog()
     }
 }
 
@@ -301,11 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn indexes_name_len_sha256_and_range() {
-        // Tripwire: the indexed len + sha256 are computed off the exact
-        // section bytes, and the recorded range slices back to those bytes.
-        // A drift in the section-name scheme, the range math, or the hash
-        // input reds this against a known payload.
+    fn indexes_name_len_and_range() {
+        // Tripwire: the recorded range slices back to the exact section
+        // bytes. A drift in the section-name scheme or the range math reds
+        // this against a known payload.
         let payload: &[u8] = b"slime-sprite-bytes";
         let wasm = wasm_with_sections(&[("aether.asset.sprites/slime.png", payload)]);
 
@@ -314,10 +315,36 @@ mod tests {
         let record = &records[0];
         assert_eq!(record.info.name, "sprites/slime.png");
         assert_eq!(record.info.len, payload.len() as u64);
-        let expected_sha: [u8; 32] = Sha256::digest(payload).into();
-        assert_eq!(record.info.sha256, expected_sha);
         // The recorded range reads the exact payload back out of the module.
         assert_eq!(&wasm[record.offset..record.offset + record.len], payload);
+    }
+
+    /// A module of many assets with distinct payloads lists them in section
+    /// order and fetches each name's own payload. It catches a catalog built
+    /// by walking the name map (hash order, which a two-asset module can pass
+    /// by luck) and a map whose positions disagree with the lists.
+    #[test]
+    fn many_assets_keep_section_order_and_fetch_their_own_payloads() {
+        let names: Vec<String> = (0..64).map(|n| format!("bundle/asset-{n:03}.bin")).collect();
+        let payloads: Vec<Vec<u8>> = (0..64u8).map(|n| vec![n; usize::from(n) + 1]).collect();
+        let sections: Vec<(String, &[u8])> = names
+            .iter()
+            .zip(&payloads)
+            .map(|(name, bytes)| (format!("aether.asset.{name}"), bytes.as_slice()))
+            .collect();
+        let borrowed: Vec<(&str, &[u8])> = sections.iter().map(|(name, bytes)| (name.as_str(), *bytes)).collect();
+        let (cache, blobs, _store) = engine();
+        let code = blobs.check_in(wasm_with_sections(&borrowed).into_boxed_slice());
+        let module = cache.check_in(&blobs, &code).unwrap();
+        let window = LoadWindow::open(&module, Some(code));
+
+        let catalog: Vec<(&str, u64)> = window.assets().iter().map(|info| (info.name.as_str(), info.len)).collect();
+        let expected: Vec<(&str, u64)> =
+            names.iter().zip(&payloads).map(|(name, bytes)| (name.as_str(), bytes.len() as u64)).collect();
+        assert_eq!(catalog, expected);
+        for (name, payload) in names.iter().zip(&payloads) {
+            assert_eq!(window.fetch(name).unwrap().as_deref(), Some(payload.as_slice()));
+        }
     }
 
     #[test]

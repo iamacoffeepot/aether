@@ -713,8 +713,8 @@ mod control_plane {
 
     /// One asset a component carries in an `aether.asset.<path>` wasm
     /// custom section (ADR-0163 §2/§3). The load-time indexer records
-    /// each asset's catalog entry — the path it was declared under, its
-    /// byte length, and the sha256 of its bytes — by walking the custom
+    /// each asset's catalog entry — the path it was declared under
+    /// and its byte length — by walking the custom
     /// sections host-side, without instantiating the component. The
     /// catalog rides [`ComponentCapabilities::assets`] so
     /// `describe_component` answers "what does this bundle carry" without
@@ -729,8 +729,6 @@ mod control_plane {
         pub name: String,
         /// The asset's byte length.
         pub len: u64,
-        /// sha256 over the asset's bytes.
-        pub sha256: [u8; 32],
     }
 
     /// ADR-0090 (issue 1257) the component's declared boot-config kind.

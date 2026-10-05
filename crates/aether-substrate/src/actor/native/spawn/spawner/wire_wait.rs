@@ -46,30 +46,35 @@ impl Spawner {
     /// `gate` names the wait in the slow-log and in the panic at the
     /// settlement cap.
     ///
+    /// The subscription lives on the actor's retained slot and is released
+    /// with it when the actor closes (issue #7402), so the wait covers an
+    /// actor that is still open.
+    ///
     /// # Panics
     /// Panics when `id` is not a pooled instanced actor this spawner
-    /// retained, when its `wire` ran under the boot's root rather than one
-    /// of its own (await `PassiveChassis::await_boot_settled` for it), or
-    /// when the wait passes the settlement cap.
+    /// holds, with a message of its own when that is because the actor
+    /// closed before the wait, when its `wire` ran under the boot's root
+    /// rather than one of its own (await
+    /// `PassiveChassis::await_boot_settled` for it), or when the wait
+    /// passes the settlement cap.
     pub(crate) fn await_wire_settled(&self, id: MailboxId, gate: &str) {
-        let taken = mem::replace(
-            &mut self
-                .instanced_slots
-                .lock()
-                .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
-                .get_mut(&id)
-                .unwrap_or_else(|| {
-                    panic!("{gate}: {id} is not a pooled instanced actor; await_wire_settled covers only those")
-                })
-                .wire_settled,
-            WireSettled::Awaited,
-        );
+        let taken = self
+            .instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
+            .get_mut(&id)
+            .map(|entry| mem::replace(&mut entry.wire_settled, WireSettled::Awaited));
+
         match taken {
-            WireSettled::Pending(settled) => await_settled(&settled, gate),
-            WireSettled::Awaited => {}
-            WireSettled::Unrooted => panic!(
+            Some(WireSettled::Pending(settled)) => await_settled(&settled, gate),
+            Some(WireSettled::Awaited) => {}
+            Some(WireSettled::Unrooted) => panic!(
                 "{gate}: {id}'s wire ran under the boot's wire root, not one of its own; await PassiveChassis::await_boot_settled"
             ),
+            None if self.actor_registry.is_closed_at(id) => panic!(
+                "{gate}: {id} closed before the wait, and its wire root subscription was released with its slot; await_wire_settled covers an actor that is still open"
+            ),
+            None => panic!("{gate}: {id} is not a pooled instanced actor; await_wire_settled covers only those"),
         }
     }
 }

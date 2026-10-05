@@ -107,7 +107,11 @@ use crate::scheduler::{
 /// `Pooled` actor; held strongly by the chassis (so `unwire` and
 /// registry finalize run when the cap shuts down) and weakly by the
 /// pool's [`crate::scheduler::WakeHandle`] (so a wake after the cap
-/// is gone silently no-ops).
+/// is gone silently no-ops). A spawned instanced actor's strong
+/// reference is its spawner's entry, which the slot's own close cycle
+/// gives up ([`Self::release_retained_slot`]): a closed instanced actor's
+/// slot, with its rings and its binding, is freed once the worker that
+/// ran the cycle returns.
 pub struct DispatcherSlot<A>
 where
     A: NativeActor,
@@ -261,6 +265,19 @@ where
         }
     }
 
+    /// Issue #7402: give up the spawner's strong reference to this slot
+    /// once its close cycle has run, so a closed actor's slot, rings and
+    /// binding are freed rather than kept until chassis teardown. The
+    /// worker running the cycle holds its own strong reference, so the
+    /// slot outlives this call. A slot the spawner never retained (a
+    /// composed singleton, a test binding with no spawner) releases
+    /// nothing.
+    fn release_retained_slot(&self) {
+        if let Some(spawner) = self.binding.spawner() {
+            spawner.release_closed_slot(self.self_id);
+        }
+    }
+
     /// Per-envelope dispatch — a one-line delegation to the shared
     /// [`dispatch_envelope`] free function, the single dispatch body both
     /// this pooled slot and the externally-pumped
@@ -401,6 +418,11 @@ where
             // wakes onto an unlocked slot.
             drop(actor_guard);
             self.state.mark_idle();
+            // Issue #7402: the spawner gives the slot up here, after the
+            // registry close queued the route drop and before close-done
+            // fires, so a waiter that saw close-done knows the spawner
+            // holds nothing of this actor.
+            self.release_retained_slot();
             // Issue 714: signal chassis teardown that this slot's
             // close cycle finished. `is_closed()` would return `true`
             // from this point onward; the channel signal lets the

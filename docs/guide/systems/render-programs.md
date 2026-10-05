@@ -263,6 +263,9 @@ an aligned staging arrangement before upload, so the blob packs tight. The
 blob is the program's entire per-run parameter space — everything that varies
 per dispatch rides it.
 
+A program may be dispatched any number of times in a frame, each dispatch with its
+own blob: every dispatch's passes read the uniforms that dispatch carried.
+
 ### Repeats
 
 A pass may declare `repeat: Some(PassRepeat { count, uniform_stride })`. The
@@ -495,6 +498,14 @@ re-executes only when dispatched again. That distinguishes a program's output
 from the immediate-mode draw kinds — the draws must be resent every frame,
 while a dispatched program's result is retained pixels that later frames keep
 sampling.
+
+A frame's program passes may span several queue submissions, in order. The
+backend counts command buffers not yet submitted (Metal refuses the 4,097th and
+loses the device, and each pass costs two), so the executor submits the frame's
+encoder after every 1,024 program passes and continues in a fresh one. Dispatch
+arrival order, and the rule that programs run before the world, material and
+overlay passes that sample their outputs, hold across those submissions; a frame
+under 1,024 program passes submits once.
 
 Device replacement is the one exception to writable-pixel persistence
 ([ADR-0173](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0173-render-device-loss-recovery-contract.md)).

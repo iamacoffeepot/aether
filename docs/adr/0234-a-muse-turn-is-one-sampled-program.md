@@ -118,8 +118,9 @@ program is tested without spending money.
      - `CallOutput { call_id, output }`: that call's output, replayed as a
        `function_call_output` item matched by `call_id`. `output` is a
        `ToolOutput`: `Result { schema, result }`, a `Ref<ToolSchema>` and
-       an `ErasedRef` citing the program's stored result, sent rendered to
-       JSON; or `Refused(Ref<Utf8Text>)`, sent as its stored text. A result
+       an `ErasedRef` citing the program's stored result, sent as its text
+       when it is a `Viewed` or an `Edited` and rendered to JSON otherwise;
+       or `Refused(Ref<Utf8Text>)`, sent as its stored text. A result
        cites its own schema, since a later turn may no longer offer the
        program.
      - `Reasoning { id, encrypted }`: a reasoning item an earlier reply
@@ -294,10 +295,15 @@ program is tested without spending money.
      which. A loop above the program runs decoded arguments as a
      `Tooled<A, B>` over its current tree and the offer's bound value, and replays a refusal as the call's
      `ToolOutput::Refused`.
-   - When it builds the request, `muse.turn` renders each cited
-     `ToolOutput::Result` with `decode_storage_schema` under a fixed value
+   - When it builds the request, `muse.turn` sends a cited
+     `ToolOutput::Result` that the model reads as text byte for byte: a
+     `Viewed` (`muse.tree.viewed`) as its text and an `Edited`
+     (`bloomery.program.edited`) as its summary, without its tree and
+     detail digests. What a read shows is then what `tree.edit` matches,
+     with no escaping for the model to undo. It renders every other result
+     with `decode_storage_schema` under a fixed value
      ceiling and serializes it with `serde_json`, whose maps sort their
-     keys, so the request bytes are a function of the cited input alone. A
+     keys. Either way the request bytes are a function of the cited input alone. A
      result not stored under its schema's kind, or one its schema cannot
      decode, refuses the run before any fetch, like a misnamed definition.
    - Two limits are accepted. Decoded arguments carry no citations, since
