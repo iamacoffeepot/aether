@@ -17,14 +17,11 @@
 //!   `aether.asset.tile.rgba` custom section, emitted by
 //!   [`export_asset!`](aether_actor::export_asset). Never instantiated
 //!   into linear memory; addressable only host-side at load.
-//! - **The door** — `wire` is the load window. It takes the tile through
-//!   [`AssetWindow::asset_blob`], a handle on the bytes where the module
-//!   file already sits in the engine's store, hands that blob to
-//!   `aether.render.create_texture`, and keeps only the returned
-//!   `texture_id` plus the fixed layout. The bundle only routes its
-//!   payload, so no pixel enters its linear memory and the renderer reads
-//!   the same bytes in place. When `wire` returns the window closes and the
-//!   payload path is gone; the blob was sent on, not retained.
+//! - **The door** — `wire` is the load window. It pulls the bytes through
+//!   [`AssetWindow::asset`], hands them to `aether.render.create_texture`,
+//!   and keeps only the returned `texture_id` plus the fixed layout. When
+//!   `wire` returns the window closes and the payload path is gone; the
+//!   bytes were consumed, not retained.
 //! - **Warm** — actor state holds a handle and a layout table (the
 //!   [`BundleComponent`]'s `tile` field), never payload bytes.
 //! - **Hot** — the engine-resident texture the `texture_id` names. The
@@ -52,7 +49,8 @@
 //! header — the reference pattern is bytes→engine-resident, not format
 //! parsing, so the actor never links an image decoder.
 
-use aether_actor::{ActorInitError, AssetCatalog, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_data::Blob;
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_math::Rgba;
@@ -71,7 +69,7 @@ pub const TILE_HEIGHT: u32 = 16;
 
 /// The `aether.asset.<name>` section suffix the bundle pulls in `wire` —
 /// the exact string `export_asset!` keyed the section on, matched against
-/// the catalog by [`AssetWindow::asset_blob`].
+/// the catalog by [`AssetWindow::asset`].
 const TILE_ASSET_NAME: &str = "tile.rgba";
 
 /// On-screen size the tile draws at, in window pixels. Larger than the
@@ -121,26 +119,24 @@ impl WasmActor for BundleComponent {
         Ok(BundleComponent { tile: None })
     }
 
-    /// The load window (ADR-0163 §4). Takes the embedded tile through the
-    /// asset window — the only place the payload is reachable — as a blob
-    /// held by handle, and starts its transform into an engine resident by
-    /// mailing `aether.render.create_texture` with that blob as the pixels.
-    /// The blob is sent on here and never stored; only the eventual
-    /// `texture_id` survives the window (captured in
-    /// [`on_create_texture_result`]). Subscribes `Tick` so the draw loop
-    /// runs every frame.
+    /// The load window (ADR-0163 §4). Pulls the embedded tile through the
+    /// asset window — the only place the payload bytes are reachable —
+    /// and starts its transform into an engine resident by mailing
+    /// `aether.render.create_texture` with the raw pixels. The bytes are
+    /// consumed here and never stored; only the eventual `texture_id`
+    /// survives the window (captured in [`on_create_texture_result`]).
+    /// Subscribes `Tick` so the draw loop runs every frame.
     ///
-    /// A missing asset (the name doesn't match the catalog) or a catalogued
+    /// A missing asset (the name doesn't match the catalog) or a byte
     /// length that doesn't match `TILE_WIDTH × TILE_HEIGHT × 4` warn-logs
     /// and leaves the actor tile-less — a loud, load-time failure surface,
-    /// exactly where ADR-0163 wants asset failures to land. The length is
-    /// read from the catalog entry, so the check costs no payload read.
+    /// exactly where ADR-0163 wants asset failures to land.
     ///
     /// [`on_create_texture_result`]: BundleComponent::on_create_texture_result
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
         ctx.subscribe::<LifecycleCapability, Tick>();
 
-        let Some(pixels) = ctx.asset_blob(TILE_ASSET_NAME) else {
+        let Some(pixels) = ctx.asset(TILE_ASSET_NAME) else {
             tracing::warn!(
                 target: "aether_kit",
                 asset = TILE_ASSET_NAME,
@@ -148,15 +144,12 @@ impl WasmActor for BundleComponent {
             );
             return;
         };
-
-        let expected = u64::from(TILE_WIDTH) * u64::from(TILE_HEIGHT) * TextureFormat::Rgba8.bytes_per_pixel() as u64;
-        let catalogued = ctx.assets().iter().find(|asset| asset.name == TILE_ASSET_NAME).map(|asset| asset.len);
-        let fits = catalogued == Some(expected);
-        if !fits {
+        let expected = TILE_WIDTH as usize * TILE_HEIGHT as usize * TextureFormat::Rgba8.bytes_per_pixel();
+        if pixels.len() != expected {
             tracing::warn!(
                 target: "aether_kit",
                 asset = TILE_ASSET_NAME,
-                got = ?catalogued,
+                got = pixels.len(),
                 expected,
                 "bundle: embedded tile has an unexpected byte length; skipping texture upload",
             );
@@ -169,7 +162,7 @@ impl WasmActor for BundleComponent {
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels,
+            pixels: Blob::from(pixels),
         });
     }
 

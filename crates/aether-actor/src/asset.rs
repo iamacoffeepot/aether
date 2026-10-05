@@ -22,13 +22,16 @@
 //!   is a range of the module bytes where they already sit in the engine's
 //!   store. Take it when the actor **routes** the asset, mailing it on as a
 //!   `Blob` field to the actor that consumes it (a texture upload, a mesh
-//!   load): the recipient reads the same bytes in place. This is the verb a
-//!   bundle reaches for by default.
+//!   load): the recipient reads the same bytes in place. It fits a module
+//!   that is mostly payload, since whoever keeps the blob keeps the whole
+//!   module file resident with it.
 //! - [`AssetWindow::asset`] copies the asset into guest memory as a
 //!   `Vec<u8>`. Take it when the actor **reads** the payload itself: parses
 //!   it, slices it, or transforms it before anything leaves. A blob can be
 //!   read too, through [`aether_data::BlobReader`], a range at a time;
-//!   `asset` is the plain form when the whole payload is wanted in hand.
+//!   `asset` is the plain form when the whole payload is wanted in hand, and
+//!   the right one for a small asset in a module that is mostly code: the
+//!   copy costs the asset's size, where a kept blob would hold the module.
 //!
 //! A blob the actor keeps past `wire` in its own state stays resident, and
 //! holds the whole module file it is a range of resident with it, until the

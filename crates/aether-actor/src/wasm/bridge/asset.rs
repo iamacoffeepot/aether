@@ -10,7 +10,7 @@
 //! allocator — the host allocated it via `realloc_p32` (which routes to
 //! [`realloc_bytes`]), so the guest frees it the same way.
 //!
-//! [`fetch_asset_blob`] is the other pull: the host leaves the bytes where
+//! `fetch_asset_blob` is the other pull: the host leaves the bytes where
 //! the module's code already sits in its store, holds the asset for this
 //! instance, and hands back only its hash and length, which the guest's blob
 //! backing wraps (`crate::blob::guest`).
