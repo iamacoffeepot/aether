@@ -437,7 +437,7 @@ impl FrameQueries<'_> {
 ///
 /// A program destroyed since the frame was recorded is skipped.
 fn fold_readback(slot: &Readback, period_nanos: f32, programs: &mut HashMap<u32, RegisteredProgram>) {
-    let view = slot.host.slice(..).get_mapped_range();
+    let view = slot.host.slice(..).get_mapped_range().expect("a readback is folded only after its map succeeded");
     let ticks: Vec<u64> = view
         .chunks_exact(8)
         .take(slot.queries as usize)

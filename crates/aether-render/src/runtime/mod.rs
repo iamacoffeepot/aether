@@ -772,7 +772,7 @@ impl RenderCapabilityState {
         // waits on it (iamacoffeepot/aether#4423).
         self.programs.after_frame_submit();
         if let Some(texture) = surface_texture {
-            texture.present();
+            queue.present(texture);
         }
         Ok(capture_meta)
     }
@@ -1295,7 +1295,10 @@ impl NativeActor for RenderCapability {
         let device = Arc::clone(&gpu.device);
 
         // One-frame-in-flight: drain the prior submission before recording
-        // any target in the next global frame (issue 1312).
+        // any target in the next global frame (issue 1312). On Metal the wait
+        // is exact because wgpu-hal 30 blocks on the command buffer's
+        // completion (gfx-rs/wgpu pull request 9328), and wgpu-hal 29 slept
+        // in 1 ms steps there.
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {

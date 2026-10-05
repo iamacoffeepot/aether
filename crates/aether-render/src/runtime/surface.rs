@@ -4,7 +4,6 @@
 //! wgpu-only — no winit — so they ride the `runtime` feature, and a headless
 //! consumer that never owns a surface simply never calls them.
 
-use std::slice;
 use std::sync::Arc;
 
 use aether_substrate::render::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT, vertex_buffer_layout};
@@ -186,6 +185,7 @@ fn request_offscreen_adapter() -> Result<wgpu::Adapter, String> {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .map_err(|error| format!("request offscreen adapter: {error}"))
 }
@@ -276,6 +276,7 @@ fn surface_configuration(
         height: size.1.max(1),
         present_mode,
         alpha_mode,
+        color_space: wgpu::SurfaceColorSpace::Auto,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
@@ -297,6 +298,7 @@ pub fn boot_surface(
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .map_err(|error| format!("request compatible render adapter: {error}"))?;
     let adapter_info = adapter.get_info();
@@ -390,7 +392,6 @@ pub fn build_wireframe_overlay_pipeline(
         label: Some("wireframe shader"),
         source: wgpu::ShaderSource::Wgsl(WIREFRAME_WGSL.into()),
     });
-    let vertex_layout = vertex_buffer_layout();
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("wireframe overlay pipeline"),
         layout: Some(pipeline_layout),
@@ -398,7 +399,7 @@ pub fn build_wireframe_overlay_pipeline(
             module: &wire_shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(&vertex_layout),
+            buffers: &[Some(vertex_buffer_layout())],
         },
         fragment: Some(wgpu::FragmentState {
             module: &wire_shader,

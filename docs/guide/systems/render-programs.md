@@ -689,7 +689,9 @@ binds for the vertex stage and the fragment stage alike — a view-projection
 matrix, a pose, a per-pass depth all ride there.
 
 The fragment entry point receives whatever the vertex stage returns as
-varyings, and returns `@location(0) vec4<f32>` into the pass's color output. It
+varyings, and returns `@location(0) vec4<f32>` into the pass's color output. An
+integer varying must be declared `@interpolate(flat)` on both stages, and a
+program that omits it is refused at register with the `invalid wgsl:` class. It
 may also sample the pass's `inputs` through group 1, exactly as a fragment
 pass does — a draw pass that reads a mask texture while rasterizing is an
 ordinary declaration. The vertex entry point reads the same inputs, which is

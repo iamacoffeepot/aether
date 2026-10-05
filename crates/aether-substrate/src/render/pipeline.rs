@@ -13,7 +13,6 @@ use super::{
     CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, MSAA_SAMPLE_COUNT, VERTEX_STRIDE,
     vertex_buffer_layout,
 };
-use std::slice;
 
 /// Surfaceable failures from `record_main_pass`. Today there's only
 /// the buffer-overflow case (frame dropped); reified as a `Result`
@@ -96,7 +95,6 @@ pub fn build_main_pipeline(
         immediate_size: 0,
     });
 
-    let vertex_layout = vertex_buffer_layout();
     let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::REPLACE))];
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("aether main pipeline"),
@@ -105,7 +103,7 @@ pub fn build_main_pipeline(
             module: &shader,
             entry_point: Some("vs_main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: slice::from_ref(&vertex_layout),
+            buffers: &[Some(vertex_buffer_layout())],
         },
         fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
         primitive: wgpu::PrimitiveState {
