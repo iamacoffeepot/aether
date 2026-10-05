@@ -23,8 +23,14 @@
 //!   slot it samples — the texture id for a binding, the pool class and
 //!   physical index for a transient — so rebinding, a resize, or a pool
 //!   class change rebuilds it and nothing else does.
-//! - The uniform bind groups name the program's staging buffer, so they
-//!   are held with it and rebuilt only when it is reallocated to grow.
+//! - The uniform bind groups name a staging buffer, and a queued write
+//!   lands before any pass of the frame runs, so each dispatch of a
+//!   program within a frame stages into its own buffer. The slots are
+//!   kept across frames and the bind groups built once per slot — a
+//!   staging buffer's size is fixed by the plan, so nothing rebuilds
+//!   them — and [`DispatchCache::begin_frame`] releases the slots a
+//!   frame that dispatched the program stopped using; a frame that did
+//!   not dispatch it leaves its slots alone.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -166,12 +172,11 @@ struct PassStorage {
     group: wgpu::BindGroup,
 }
 
-/// The program's uniform staging buffer and the per-pass bind groups
+/// One dispatch's uniform staging buffer and the per-pass bind groups
 /// that name it. Each group binds the buffer's head with its pass's
-/// bound window size and is indexed by dynamic offset, so it survives
-/// every dispatch the buffer fits — the groups are rebuilt exactly when
-/// the buffer is reallocated to grow, because that is the one event that
-/// changes the resource they name.
+/// bound window size and is indexed by dynamic offset. The buffer is
+/// sized once from the plan's staging bytes, so the groups live as long
+/// as the slot does.
 struct UniformCache {
     buffer: wgpu::Buffer,
     groups: Vec<wgpu::BindGroup>,
@@ -189,7 +194,12 @@ pub(super) struct DispatchCache {
     binding_views: Vec<Option<(u32, wgpu::TextureView)>>,
     pass_inputs: Vec<Option<PassInputs>>,
     pass_storage: Vec<Option<PassStorage>>,
-    uniforms: Option<UniformCache>,
+    /// One slot per dispatch of this program within a frame, in dispatch
+    /// order, so every dispatch's passes read the bytes it staged.
+    uniforms: Vec<UniformCache>,
+    /// Slots the current frame has taken so far; the dispatch being
+    /// recorded stages into slot `uniforms_used - 1`.
+    uniforms_used: usize,
     /// Reused staging bytes, refilled from each dispatch's blob.
     staging: Vec<u8>,
 }
@@ -202,9 +212,23 @@ impl DispatchCache {
             binding_views: (0..plan.bindings.len()).map(|_| None).collect(),
             pass_inputs: (0..plan.passes.len()).map(|_| None).collect(),
             pass_storage: (0..plan.passes.len()).map(|_| None).collect(),
-            uniforms: None,
+            uniforms: Vec::new(),
+            uniforms_used: 0,
             staging: Vec::new(),
         }
+    }
+
+    /// Open a frame's dispatches of this program: release the uniform
+    /// slots the previous frame did not use and restart the count, so
+    /// the first dispatch stages into slot 0 again. A program the
+    /// previous frame did not dispatch at all keeps every slot, so one
+    /// dispatched intermittently does not rebuild its buffers and bind
+    /// groups each time it returns.
+    pub fn begin_frame(&mut self) {
+        if self.uniforms_used > 0 {
+            self.uniforms.truncate(self.uniforms_used);
+        }
+        self.uniforms_used = 0;
     }
 
     /// Build the plan-only layout on the first dispatch that reaches the
@@ -250,6 +274,7 @@ impl DispatchCache {
             pass_inputs: &mut self.pass_inputs,
             pass_storage: &mut self.pass_storage,
             uniforms: &mut self.uniforms,
+            uniforms_used: &mut self.uniforms_used,
             staging: &mut self.staging,
         }
     }
@@ -264,7 +289,8 @@ pub(super) struct CacheParts<'a> {
     binding_views: &'a [Option<(u32, wgpu::TextureView)>],
     pass_inputs: &'a mut [Option<PassInputs>],
     pass_storage: &'a mut [Option<PassStorage>],
-    uniforms: &'a mut Option<UniformCache>,
+    uniforms: &'a mut Vec<UniformCache>,
+    uniforms_used: &'a mut usize,
     staging: &'a mut Vec<u8>,
 }
 
@@ -279,10 +305,9 @@ impl<'a> CacheParts<'a> {
     }
 
     /// Refill the staging bytes from this dispatch's blob at the
-    /// layout's fixed offsets, then upload them. The buffer is
-    /// reallocated only when the plan's staging bytes no longer fit,
-    /// and that reallocation is what rebuilds the uniform bind groups —
-    /// they name the buffer, so nothing else can invalidate them.
+    /// layout's fixed offsets, then upload them to the next slot of the
+    /// frame. A slot is built the first time the program reaches that
+    /// many dispatches in a frame and reused after.
     pub fn upload_uniforms(
         &mut self,
         gpu_device: &wgpu::Device,
@@ -305,8 +330,10 @@ impl<'a> CacheParts<'a> {
             }
         }
 
-        let staging_bytes = self.staging.len() as u64;
-        if self.uniforms.as_ref().is_none_or(|held| held.buffer.size() < staging_bytes) {
+        let slot = *self.uniforms_used;
+        *self.uniforms_used += 1;
+        if slot == self.uniforms.len() {
+            let staging_bytes = self.staging.len() as u64;
             let buffer = gpu_device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("aether program uniform staging"),
                 size: staging_bytes,
@@ -330,11 +357,10 @@ impl<'a> CacheParts<'a> {
                     })
                 })
                 .collect();
-            *self.uniforms = Some(UniformCache { buffer, groups });
+            self.uniforms.push(UniformCache { buffer, groups });
         }
 
-        let held = self.uniforms.as_ref().expect("uniform buffer ensured above");
-        queue.write_buffer(&held.buffer, 0, self.staging);
+        queue.write_buffer(&self.uniforms[slot].buffer, 0, self.staging);
     }
 
     /// Whether a pass's cached input bind group was built from a
@@ -360,7 +386,8 @@ impl<'a> CacheParts<'a> {
     /// The uniform bind group for a pass, valid once
     /// [`Self::upload_uniforms`] has run for this dispatch.
     pub fn uniform_group(&self, pass: usize) -> &wgpu::BindGroup {
-        &self.uniforms.as_ref().expect("uniforms uploaded before the encode").groups[pass]
+        let slot = self.uniforms_used.checked_sub(1).expect("uniforms uploaded before the encode");
+        &self.uniforms[slot].groups[pass]
     }
 
     /// The input bind group for a pass, valid once a miss has been

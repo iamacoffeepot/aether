@@ -306,6 +306,88 @@ fn draw_pass_rasterizes_a_triangle_into_its_output() {
     );
 }
 
+/// One program dispatched twice in one frame draws each dispatch with
+/// the uniforms that dispatch carried: the left half is painted by the
+/// first dispatch's color and the right half by the second's, and a
+/// second frame with the colors swapped repaints both. The named bugs:
+/// every dispatch's staging write landing in one shared buffer before
+/// any pass runs, so both halves come out in the last-written color; and
+/// a slot that keeps the previous frame's bytes instead of restaging.
+#[test]
+fn one_program_dispatched_twice_in_a_frame_draws_with_each_dispatchs_uniforms() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let (left_positions, indices) = quad_geometry(-1.0, 0.0);
+    let left_id = create_geometry(&mut harness, "create_left", &left_positions, &indices);
+    let (right_positions, _) = quad_geometry(0.0, 1.0);
+    let right_id = create_geometry(&mut harness, "create_right", &right_positions, &indices);
+    let output_id = create_output(&mut harness);
+    let program_id = registered_id(
+        &mut harness,
+        "register",
+        &ProgramRegister {
+            wgsl: MODULE.to_owned(),
+            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            transients: Vec::new(),
+            geometries: vec![position_slot()],
+            depth_transients: Vec::new(),
+            passes: vec![draw_pass(0, None, PassLoad::Load, 0)],
+        },
+    );
+
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let green = [0.0, 1.0, 0.0, 1.0];
+    for (label, left_color, right_color) in [("first_frame", red, green), ("swapped_frame", green, red)] {
+        let dispatch = |geometry_id: u32, color: [f32; 4]| {
+            envelope(
+                "aether.render",
+                &ProgramDispatch {
+                    program_id,
+                    bindings: vec![output_id],
+                    geometries: vec![geometry_id],
+                    uniforms: draw_params(color, 0.5),
+                },
+            )
+        };
+        let pre = vec![
+            dispatch(left_id, left_color),
+            dispatch(right_id, right_color),
+            envelope("aether.render", &output_overlay(output_id)),
+        ];
+        let captured =
+            harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture frame");
+        let img = decode_png(captured.captured(label).expect("capture step ran")).expect("decode capture png");
+
+        // Screen 24 is inside the left half of the readback quad, 40
+        // inside the right half; row 24 is the vertical middle.
+        let left = rgba_at(&img, 24, 24);
+        let right = rgba_at(&img, 40, 24);
+        let dominant = |pixel: [u8; 4]| {
+            if pixel[0] > pixel[1] {
+                "red"
+            } else {
+                "green"
+            }
+        };
+        let expected = |color: [f32; 4]| {
+            if color == red {
+                "red"
+            } else {
+                "green"
+            }
+        };
+        assert_eq!(dominant(left), expected(left_color), "{label}: left half drew with the wrong uniforms: {left:?}");
+        assert_eq!(
+            dominant(right),
+            expected(right_color),
+            "{label}: right half drew with the wrong uniforms: {right:?}"
+        );
+    }
+}
+
 /// ADR-0171 depth sharing: two consecutive draw passes naming one depth
 /// transient agree on occlusion. The near quad is drawn *first* at clip
 /// depth 0.2 and the far quad second at 0.8, so only a working depth

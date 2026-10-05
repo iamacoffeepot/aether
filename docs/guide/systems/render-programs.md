@@ -263,6 +263,9 @@ an aligned staging arrangement before upload, so the blob packs tight. The
 blob is the program's entire per-run parameter space — everything that varies
 per dispatch rides it.
 
+A program may be dispatched any number of times in a frame, each dispatch with its
+own blob: every dispatch's passes read the uniforms that dispatch carried.
+
 ### Repeats
 
 A pass may declare `repeat: Some(PassRepeat { count, uniform_stride })`. The

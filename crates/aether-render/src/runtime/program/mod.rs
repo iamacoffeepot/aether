@@ -263,6 +263,16 @@ impl ProgramRegistry {
         let measuring = instrument.begin_frame(&gpu.device, declared);
 
         let Self { entries, transient_pool, timings, .. } = self;
+        // `record_passes` runs once per dirty target and only the first
+        // takes the frame's dispatches, so an empty call must not trim
+        // the slots the previous frame's dispatches built.
+        if !dispatches.is_empty() {
+            for program in entries.values_mut() {
+                if let ProgramDeviceState::Ready { cache, .. } = &mut program.state {
+                    cache.begin_frame();
+                }
+            }
+        }
         let instrument = timings.as_mut().expect("the instrument was inserted above");
         for dispatch in dispatches {
             let Some(program) = entries.get_mut(&dispatch.program_id) else {
