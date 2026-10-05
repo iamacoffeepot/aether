@@ -12,6 +12,7 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
+use aether_actor::HeldReply;
 use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::{ClipRect, QuadSpace};
 use aether_math::{Rgb, Rgba};
@@ -299,9 +300,12 @@ pub struct DestroyTexture {
 /// The id comes from the sequence `CreateTexture` draws from, so one
 /// `texture_id` names a texture or an array and never both, and
 /// `DestroyTexture` releases either. The layer ceiling is the render
-/// device's, so creation needs a device: on desktop a create sent
-/// before the first window attaches replies `Err`. Reply:
-/// `CreateTextureArrayResult`.
+/// device's, so creation needs a device. A create sent before the
+/// render device exists (desktop: before the first window attaches) is
+/// answered once the device is up. Its own chain settles first, so
+/// nothing waits on a window: a `send_mail` over MCP returns with no
+/// reply for it, and one sent after a window is listed is answered
+/// inside the call. Reply: `CreateTextureArrayResult`.
 #[aether_data::kind(name = "aether.render.create_texture_array")]
 pub struct CreateTextureArray {
     pub format: TextureFormat,
@@ -321,6 +325,12 @@ pub struct CreateTextureArray {
 pub enum CreateTextureArrayResult {
     Ok { texture_id: u32 },
     Err { error: String },
+}
+
+impl HeldReply for CreateTextureArrayResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "render capability closed before the texture array request was answered".into() }
+    }
 }
 
 /// `aether.render.write_texture_layer` — replace the contents of one
@@ -1646,9 +1656,11 @@ pub struct ProgramPass {
 ///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. The headless chassis
-/// composes no render actor, and a register before the render GPU boots
-/// (desktop: before the first window attaches) replies `Err` rather than
-/// parking.
+/// composes no render actor. A register sent before the render device
+/// exists (desktop: before the first window attaches) is answered once
+/// the device is up. Its own chain settles first, so nothing waits on a
+/// window: a `send_mail` over MCP returns with no reply for it, and one
+/// sent after a window is listed is answered inside the call.
 #[aether_data::kind(name = "aether.render.program.register")]
 pub struct ProgramRegister {
     pub wgsl: String,
@@ -1679,6 +1691,12 @@ pub struct ProgramRegister {
 pub enum ProgramRegisterResult {
     Ok { program_id: u32 },
     Err { error: String },
+}
+
+impl HeldReply for ProgramRegisterResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "render capability closed before the program register request was answered".into() }
+    }
 }
 
 /// `aether.render.program.dispatch` — execute a registered program once

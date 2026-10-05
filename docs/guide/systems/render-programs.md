@@ -272,7 +272,11 @@ material draws) treats an array's id as unknown and warn-drops.
 
 The layer ceiling is the render device's, so creation needs a device. On the
 SubstrateHarness the first create boots it; **on desktop a create sent before
-the first window attaches replies `Err`**, as a program `register` does.
+the first window attaches is answered once the device is up**, as a program
+`register` is. A sender asks once from `wire` and continues from its response
+handler: it learns the id only from the reply, so it writes layers
+(`write_texture_layer`) or dispatches from there. The request's own chain
+settles first, so over MCP such a call settles with no reply.
 `create_texture_array` validates before it assigns an id, and each failure
 class replies its own reason:
 
@@ -1213,9 +1217,12 @@ transient, and a `Replace` pass erasing what an `Rgba8` output held.
 
 ## Chassis behavior
 
-- **Desktop** executes programs. A `register` sent before the render GPU
-  boots (before the first window attaches) replies `Err` rather than
-  parking.
+- **Desktop** executes programs. A `register` sent before the render device
+  exists (before the first window attaches) is answered once it is up. A
+  sender asks once from `wire` and continues from its response handler: it
+  learns the `program_id` only from the reply, so it dispatches from there.
+  The request's own chain settles first, so over MCP such a call settles with
+  no reply; one sent after a window is listed is answered inside the call.
 - **Headless** composes no render actor, so a component that depends on
   render is refused at load there rather than mailing programs into a
   stand-in.

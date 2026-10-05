@@ -230,7 +230,7 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
     fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
         let attachment = self
             .render_slot
-            .host_turn(|state, _ctx| state.attach_window(path, window))
+            .host_turn(|state, ctx| state.attach_window(ctx, path, window))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
         let attached = Instant::now();
