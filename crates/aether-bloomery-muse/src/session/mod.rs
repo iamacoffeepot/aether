@@ -122,6 +122,7 @@ mod exhausted;
 pub mod fixture;
 mod gate;
 mod open;
+mod reads;
 mod record;
 mod replay;
 mod retry;
@@ -139,6 +140,7 @@ pub use gate::{
     GateFailure, GateInput, Gated, MAX_GATE_RUNS, RequiredProof, RequiredProofs, RequiredProofsError, SessionGate,
 };
 pub use open::{OpenInput, Opened, SessionOpen};
+pub use reads::{Reads, SessionReads};
 pub use record::{Answered, CallAnswer, RecordInput, SessionRecord, TurnEnd};
 pub use state::{
     Failure, RestReason, Session, SessionItems, SessionItemsError, SessionKey, TurnLimit, TurnLimitError, TurnSettings,

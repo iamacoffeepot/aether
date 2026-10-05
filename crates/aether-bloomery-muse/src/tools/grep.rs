@@ -53,6 +53,12 @@ impl GrepArgs {
     pub fn new(pattern: impl Into<String>, path: Option<TreePath>, max_hits: Option<u32>) -> Self {
         Self { pattern: pattern.into(), path, max_hits }
     }
+
+    /// The file or directory searched, or `None` for the whole tree.
+    #[must_use]
+    pub const fn path(&self) -> Option<&TreePath> {
+        self.path.as_ref()
+    }
 }
 
 /// The `tree.grep` program.
