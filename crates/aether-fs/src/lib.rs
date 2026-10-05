@@ -9,8 +9,11 @@
 //! returns `BootError` when a root is unusable, so a misconfigured chassis
 //! fails at boot and not at the first read.
 //!
-//! Adapter calls run synchronously on the actor's dispatcher thread, the one
-//! that pulls envelopes from the `aether.fs` mailbox.
+//! `read` and `load` run their adapter calls on bounded worker queues, so
+//! several files are read at once: a `read` holds its caller's chain until
+//! it is answered, while a `load` is answered late without holding it, so
+//! the caller's chain settles at once and `Loaded` arrives afterwards. The
+//! other verbs run their adapter calls on the actor's own turn.
 
 #![forbid(unsafe_code)]
 
@@ -59,3 +62,6 @@ use aether_actor::actor;
 // `runtime.rs`, gated once here.
 #[cfg(feature = "runtime")]
 mod runtime;
+
+#[cfg(feature = "runtime")]
+pub use runtime::{MAX_LOADS_IN_FLIGHT, MAX_READS_IN_FLIGHT};

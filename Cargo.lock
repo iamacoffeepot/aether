@@ -541,6 +541,7 @@ dependencies = [
  "confique",
  "dirs",
  "inventory",
+ "libc",
  "serde",
  "tracing",
 ]
