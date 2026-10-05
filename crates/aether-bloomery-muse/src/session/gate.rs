@@ -93,11 +93,14 @@ impl RequiredProofs {
     }
 
     fn check(proofs: &[RequiredProof]) -> Result<(), RequiredProofsError> {
-        if proofs.len() > OfferedTools::MAX_TOOLS {
+        let too_many = proofs.len() > OfferedTools::MAX_TOOLS;
+        if too_many {
             return Err(RequiredProofsError::TooMany);
         }
+
         let mut programs = BTreeSet::new();
-        if !proofs.iter().all(|proof| programs.insert(&proof.program)) {
+        let each_once = proofs.iter().all(|proof| programs.insert(&proof.program));
+        if !each_once {
             return Err(RequiredProofsError::DuplicateProgram);
         }
         Ok(())
