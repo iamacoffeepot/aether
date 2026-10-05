@@ -10,9 +10,9 @@ error[E0277]: the trait bound `Rc<u32>: Schema` is not satisfied
             Box<T>
             Counted
             DagId
+            Digest
             EngineId
             ErasedActorPath
-            KindId
           and $N others
 
 error[E0277]: the trait bound `Rc<u32>: WireEncode` is not satisfied
