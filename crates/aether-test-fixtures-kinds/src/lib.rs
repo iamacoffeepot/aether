@@ -171,6 +171,21 @@ pub struct AssetProbeResult {
     pub checksum: u64,
 }
 
+/// Driver kind: ask the `QuietProbe` fixture what it got when `wire` took
+/// `asset_empty.bin` by both verbs. No-payload query; the reply is an
+/// [`EmptyAssetProbeResult`].
+#[aether_data::kind(name = "aether.test_fixtures.empty_asset_probe", default)]
+pub struct EmptyAssetProbe;
+
+/// Reply kind for [`EmptyAssetProbe`]: the length each verb returned for
+/// `asset_empty.bin` (`AssetWindow::asset` as `copied_len`, `asset_blob` as
+/// `blob_len`), `None` where the verb answered `None`.
+#[aether_data::kind(name = "aether.test_fixtures.empty_asset_probe_result", eq)]
+pub struct EmptyAssetProbeResult {
+    pub copied_len: Option<u64>,
+    pub blob_len: Option<u64>,
+}
+
 /// Driver kind: ask the `QuietProbe` fixture for the asset it took from its
 /// load window as a blob during `wire` and kept in its state (ADR-0163 §3).
 /// No-payload query; the reply is an [`AssetBlobProbeResult`].

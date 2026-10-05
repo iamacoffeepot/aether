@@ -605,7 +605,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the window is open but carries
     //     no asset by that name; the guest maps it to `None`.
     //   - any other value — `(ptr << 32) | len`, a live guest buffer the
-    //     SDK copies out and frees.
+    //     SDK copies out and frees. An empty asset answers `0` (no buffer,
+    //     length 0), distinct from the not-found sentinel.
     // A call after the window closed (post-`wire`) or with no window at all
     // traps, so the type-fence (`asset` lives only on the init/wire ctx) is
     // backed by a loud runtime failure for a hand-rolled guest, never a
@@ -967,9 +968,17 @@ fn read_guest_utf8(caller: &mut Caller<'_, ComponentCtx>, ptr: u32, len: u32) ->
 /// null — a non-conforming guest, consistent with the config-delivery
 /// path. A grow may relocate linear memory, so `memory` is re-fetched
 /// after the allocator call.
+///
+/// Empty `bytes` carry no buffer: the answer is the packed `0` and the
+/// guest allocator is never called, because the SDK allocator reads a
+/// zero `new_size` as a free and answers null (`realloc_bytes`), which
+/// this function would take for a failed allocation.
 fn deliver_bytes_to_guest(caller: &mut Caller<'_, ComponentCtx>, bytes: &[u8]) -> wasmtime::Result<u64> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| wasmtime::Error::msg("asset payload exceeds the 4 GiB guest-address bound"))?;
+    if len == 0 {
+        return Ok(0);
+    }
     let realloc_export = caller.get_export("realloc_p32").and_then(wasmtime::Extern::into_func);
     let Some(realloc) = realloc_export else {
         return Err(wasmtime::Error::msg("guest exports no realloc_p32 allocator; cannot deliver asset bytes"));

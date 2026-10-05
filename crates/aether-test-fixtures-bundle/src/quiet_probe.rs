@@ -13,8 +13,11 @@
 //!   per-actor log ring the log-ring tests read.
 
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_data::Blob;
-use aether_test_fixtures_kinds::{AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, LogMarker};
+use aether_data::{Blob, BlobReader};
+use aether_test_fixtures_kinds::{
+    AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, EmptyAssetProbe, EmptyAssetProbeResult,
+    LogMarker,
+};
 
 pub struct QuietProbe {
     /// ADR-0163 §3 (#3984): what `wire` pulled from the asset load window,
@@ -24,6 +27,9 @@ pub struct QuietProbe {
     /// held by handle past the window and forwarded by
     /// [`QuietProbe::on_asset_blob_probe`].
     asset_blob: Option<Blob>,
+    /// What `wire` got for `asset_empty.bin` by each verb, answered by
+    /// [`QuietProbe::on_empty_asset_probe`].
+    empty: EmptyAssetProbeResult,
 }
 
 #[actor(root)]
@@ -31,7 +37,11 @@ impl WasmActor for QuietProbe {
     const NAMESPACE: &'static str = "test.quiet_probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(QuietProbe { asset: AssetProbeResult::default(), asset_blob: None })
+        Ok(QuietProbe {
+            asset: AssetProbeResult::default(),
+            asset_blob: None,
+            empty: EmptyAssetProbeResult { copied_len: None, blob_len: None },
+        })
     }
 
     /// Pull the bundle's asset through the load window (open during `wire`).
@@ -48,6 +58,14 @@ impl WasmActor for QuietProbe {
             let checksum = bytes.iter().fold(0u64, |acc, &byte| acc.wrapping_add(u64::from(byte)));
             self.asset = AssetProbeResult { pulled: true, len: bytes.len() as u64, checksum };
         }
+
+        // After the two fetches above, so the sourceless-window test still
+        // traps on the first `asset_blob`. The bundle carries no such asset
+        // unless a test appends one, so both lengths are `None` otherwise.
+        self.empty = EmptyAssetProbeResult {
+            blob_len: ctx.asset_blob("asset_empty.bin").map(|blob| BlobReader::open(&blob).len()),
+            copied_len: ctx.asset("asset_empty.bin").map(|bytes| bytes.len() as u64),
+        };
     }
 
     /// Emits `typed_send_alive` on every delivery.
@@ -86,5 +104,17 @@ impl WasmActor for QuietProbe {
     #[handler::request]
     fn on_asset_blob_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: AssetBlobProbe) -> AssetBlobProbeResult {
         AssetBlobProbeResult { blob: self.asset_blob.clone() }
+    }
+
+    /// Reply with the length each asset verb returned for `asset_empty.bin`
+    /// during `wire`.
+    ///
+    /// # Agent
+    /// Send `aether.test_fixtures.empty_asset_probe`; the reply
+    /// `aether.test_fixtures.empty_asset_probe_result` carries `{ copied_len,
+    /// blob_len }`.
+    #[handler::request]
+    fn on_empty_asset_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: EmptyAssetProbe) -> EmptyAssetProbeResult {
+        self.empty.clone()
     }
 }
