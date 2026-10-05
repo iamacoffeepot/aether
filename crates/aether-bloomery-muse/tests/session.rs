@@ -873,7 +873,7 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_en
 
 /// The `muse-end` arguments the `ended.json` fixture carries, spelled as they
 /// sit in the fixture's escaped string.
-const DONE_ARGUMENTS: &str = r#"{\"ending\": {\"Done\": {\"summary\": \"Every briefed change is in the tree.\"}}}"#;
+const DONE_ARGUMENTS: &str = r#"{\"ending\":\"Done\",\"text\":\"Every briefed change is in the tree.\"}"#;
 
 /// The `ended.json` reply under another call id, for a later turn of a
 /// session that already holds its call: a conversation's call ids are unique.
@@ -881,15 +881,22 @@ fn ended_again() -> String {
     ENDED.replace(r#""call_end""#, r#""call_end_again""#)
 }
 
-/// The `ended.json` reply with its `muse-end` arguments replaced by `ending`,
-/// escaped as the fixture's arguments string is.
+/// The `ended.json` reply with its `muse-end` arguments replaced by `arguments`, escaped as the fixture's string is.
+fn with_arguments(arguments: &str) -> String {
+    let escaped = serde_json::to_string(arguments).expect("escapes");
+    let escaped = escaped.trim_matches('"');
+    ENDED.replace(DONE_ARGUMENTS, escaped)
+}
+
+/// The `ended.json` reply with its `muse-end` arguments replaced by `ending`.
 fn ended_with(ending: &Ending) -> String {
-    let (variant, field, text) = match ending {
-        Ending::Done { summary } => ("Done", "summary", summary),
-        Ending::Blocked { reason } => ("Blocked", "reason", reason),
-        Ending::Asked { question } => ("Asked", "question", question),
+    let variant = match ending {
+        Ending::Done { .. } => "Done",
+        Ending::Blocked { .. } => "Blocked",
+        Ending::Asked { .. } => "Asked",
     };
-    ENDED.replace(DONE_ARGUMENTS, &format!(r#"{{\"ending\": {{\"{variant}\": {{\"{field}\": \"{text}\"}}}}}}"#))
+    let inner = serde_json::json!({"ending": variant, "text": ending.text()}).to_string();
+    with_arguments(&inner)
 }
 
 /// The payload `artifact` stores.
@@ -1785,7 +1792,7 @@ fn an_end_call_beside_an_edit_rests_after_both_outputs_with_the_edited_tree() ->
     // Catches an end rest that drops the sibling call's tree: the natural final turn does its last edit and ends, and
     // the session rests with the edited tree and the summary last.
     let mut edit = serde_json::from_str::<serde_json::Value>(CALLED_EDIT_WRITE)?;
-    let arguments = format!(r#"{{"ending": {{"Done": {{"summary": "{SUMMARY}"}}}}}}"#);
+    let arguments = format!(r#"{{"ending": "Done", "text": "{SUMMARY}"}}"#);
     let end_call = serde_json::json!({
         "id": "fc_00202",
         "type": "function_call",
@@ -1890,9 +1897,11 @@ fn an_asked_session_continues_with_an_answer_and_ends_done() -> TestResult {
 
 #[test]
 fn an_end_call_whose_arguments_do_not_decode_is_refused_and_the_session_goes_on() -> TestResult {
-    // Catches a broken end call that runs as `muse.end` or drops the session: it is answered with its refusal and the
-    // session goes on.
-    let broken = ENDED.replace(DONE_ARGUMENTS, "not json");
+    // Catches a broken end call that runs as `muse.end` or drops the session, a stringified ending that runs as an
+    // end, and a refusal that does not tell the model the fix: it is answered with its refusal and the session goes
+    // on.
+    let inner = serde_json::json!({"ending": "{\"Done\": {}}", "text": "hi"}).to_string();
+    let broken = with_arguments(&inner);
     let again = ended_again();
     let mut driver = Driver::new(&[&broken, &again]);
     let (opened, _) = open(&mut driver, 2)?;
@@ -1905,6 +1914,11 @@ fn an_end_call_whose_arguments_do_not_decode_is_refused_and_the_session_goes_on(
     let ToolInput::Refused { refusal, .. } = end.input() else {
         panic!("expected the broken end call to refuse, got {:?}", end.input());
     };
+    let sent = serde_json::Value::String("{\"Done\": {}}".to_string()).to_string();
+    let expected = format!(
+        "The arguments do not decode as muse.end.args: `ending` must be one of \"Done\", \"Blocked\", \"Asked\", not `{sent}`"
+    );
+    assert_eq!(*refusal, Ref::of_text(&expected), "the refusal names the three endings");
     let next_call = asked(&driver, first_turn);
     assert_eq!(next_call.name.as_str(), MuseTurn::NAME, "no tool runs");
     let CallInput::Value(next) = next_call.input else {
