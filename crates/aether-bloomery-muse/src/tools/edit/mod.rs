@@ -1,10 +1,13 @@
 //! `tree.edit`: replace one exact occurrence of a text in a file.
 
+mod miss;
+
 use aether_bloomery_kinds::{Mode, Node, Refusal};
 use aether_bloomery_program::{Async, Edited, Env, NoDetail, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
 use aether_data::Ref;
 
+use crate::tools::edit::miss::{Matches, hint, occurrence};
 use crate::tools::spine::{leaf, place};
 use crate::tools::{MAX_TEXT_BYTES, read_args};
 
@@ -35,9 +38,12 @@ pub struct TreeEdit;
 
 /// Replaces one exact occurrence of a text in a UTF-8 file of the tree.
 ///
-/// The old text must occur exactly once in the file, counting occurrences
-/// that overlap. The file keeps its executable bit. When the edit cannot be
-/// made, the tree is returned unchanged and the summary says why.
+/// The old text is the file's own text, as `tree.read` shows it after each
+/// line's number and tab. It must occur exactly once in the file, counting
+/// occurrences that overlap. The file keeps its executable bit. When the edit
+/// cannot be made, the tree is returned unchanged and the summary says why;
+/// when the old text does not occur, the summary says where it stops matching
+/// the file if one place is unambiguous.
 #[program]
 impl Program for TreeEdit {
     const NAME: &'static str = "tree.edit";
@@ -74,7 +80,12 @@ impl Program for TreeEdit {
         let edited = match replace_once(&text, &args.old, &args.new) {
             Ok(edited) => edited,
             Err(Matches::None) => {
-                return unchanged(format!("The old text does not occur in {path}, so nothing changed."));
+                let missed = format!("The old text does not occur in {path}, so nothing changed.");
+                let summary = match hint(&text, &args.old) {
+                    Some(hint) => format!("{missed} {hint}"),
+                    None => missed,
+                };
+                return unchanged(summary);
             }
             Err(Matches::Several) => {
                 return unchanged(format!("The old text occurs more than once in {path}, so nothing changed."));
@@ -96,21 +107,9 @@ impl Program for TreeEdit {
     }
 }
 
-/// Why `old` could not be replaced once.
-#[derive(Debug, PartialEq, Eq)]
-enum Matches {
-    None,
-    Several,
-}
-
 /// `text` with its one occurrence of the non-empty `old` replaced by `new`.
-/// A second occurrence may overlap the first: `aa` occurs twice in `aaa`.
 fn replace_once(text: &str, old: &str, new: &str) -> Result<String, Matches> {
-    let first = text.find(old).ok_or(Matches::None)?;
-    let next = first + old.chars().next().map_or(1, char::len_utf8);
-    if text[next..].contains(old) {
-        return Err(Matches::Several);
-    }
+    let first = occurrence(text, old)?;
     Ok([&text[..first], new, &text[first + old.len()..]].concat())
 }
 
@@ -154,6 +153,11 @@ mod tests {
         let small = SmallTree::new();
         let cases = [
             (EditArgs::new(path("README"), "iron", "x"), "The old text does not occur in README, so nothing changed."),
+            (
+                EditArgs::new(path("README"), "# Bloomery iron", "x"),
+                "The old text does not occur in README, so nothing changed. Its first 10 bytes occur once, ending on \
+                 line 1; there the file continues with:\n(end of line)\nbut the old text continues with:\n iron",
+            ),
             (EditArgs::new(path("blob.bin"), "a", "b"), "blob.bin is not UTF-8 text, so nothing changed."),
             (EditArgs::new(path("src"), "a", "b"), "src is a directory, so nothing changed."),
             (EditArgs::new(path("link"), "a", "b"), "link is a symlink, so nothing changed."),
