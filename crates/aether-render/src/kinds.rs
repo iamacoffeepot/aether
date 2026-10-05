@@ -999,7 +999,7 @@ pub enum SlotExtent {
 /// write it before each pass that reads it, so a `Four` transient some
 /// pass reads costs a four-sample texture and a single-sample one, and
 /// one that no pass reads costs the four-sample texture alone.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Samples {
     /// One sample per texel.
     One,
