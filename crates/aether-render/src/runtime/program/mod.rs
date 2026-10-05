@@ -27,10 +27,12 @@ use crate::{
 
 mod cache;
 mod record;
+mod submit;
 mod timing;
 mod validate;
 
 use cache::DispatchCache;
+use submit::FramePasses;
 use timing::{Availability, PassCosts, PassTimingInstrument};
 use validate::{PassPlanStage, ProgramPlan};
 
@@ -274,6 +276,7 @@ impl ProgramRegistry {
             }
         }
         let instrument = timings.as_mut().expect("the instrument was inserted above");
+        let mut passes = FramePasses::default();
         for dispatch in dispatches {
             let Some(program) = entries.get_mut(&dispatch.program_id) else {
                 tracing::warn!(
@@ -287,7 +290,15 @@ impl ProgramRegistry {
             record::record_dispatch(
                 gpu,
                 encoder,
-                record::DispatchRecord { program, pool: transient_pool, textures, geometries, dispatch, queries },
+                record::DispatchRecord {
+                    program,
+                    pool: transient_pool,
+                    textures,
+                    geometries,
+                    dispatch,
+                    queries,
+                    passes: &mut passes,
+                },
             );
         }
         instrument.end_frame(encoder);
