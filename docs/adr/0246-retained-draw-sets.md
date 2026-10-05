@@ -37,13 +37,23 @@ pub struct DrawSpec {
     pub instances_id: u32,
     pub instances: InstanceRange,
 }
+pub struct IndexRange { pub first: u32, pub count: u32 }      // counts indices
+pub struct InstanceRange { pub first: u32, pub count: u32 }   // counts records
+#[aether_data::kind(name = "aether.render.create_draw_set_result")]
+pub enum CreateDrawSetResult { Ok { draw_set_id: u32 }, Err { error: String } }
 #[aether_data::kind(name = "aether.render.update_draw_set")]
 pub struct UpdateDrawSet { pub draw_set_id: u32, pub first: u32, pub draws: Vec<DrawSpec> }
+#[aether_data::kind(name = "aether.render.update_draw_set_result")]
+pub enum UpdateDrawSetResult { Ok, Err { error: String } }
 #[aether_data::kind(name = "aether.render.destroy_draw_set")]
 pub struct DestroyDrawSet { pub draw_set_id: u32 }
 ```
 
-Creation and update reply `Ok` or `Err`, and a refused update leaves the set unchanged. A set is validated against layouts, not against a program, so one set can be drawn by any pass whose layouts match: a colour pass and a depth-only pass share it. A draw carries no texture and no per-draw constant; what varies between draws rides in the instance records.
+Creation replies `CreateDrawSetResult` and an update `UpdateDrawSetResult`; a destroy carries no reply. An `Err` names the failing draw and its class, a refused creation consumes no id, and a refused update leaves the set unchanged. The two ranges are separate types because one counts indices and the other records.
+
+An update writes `draws` over the set's entries from position `first`. `first` may be at most the set's length, and a run that passes the end extends the set, so appending is an update at `first` equal to the length. An empty `draws` truncates the set to its first `first` entries. No entry moves unless the sender moves it, and a draw with a zero count is valid and draws nothing.
+
+A set is validated against layouts, not against a program, so one set can be drawn by any pass whose layouts match: a colour pass and a depth-only pass share it. A draw carries no texture and no per-draw constant; what varies between draws rides in the instance records.
 
 **2. A draw inside a set cannot fail at frame time.** Every check runs once, where the sender gets a reply:
 

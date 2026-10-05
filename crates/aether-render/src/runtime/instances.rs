@@ -8,12 +8,17 @@
 //! (ADR-0173) re-uploads the copy under the same id. The wgpu buffer is
 //! created once per device and written in place, so its capacity and
 //! identity hold for as long as a draw set names it.
+//!
+//! A draw set holds the buffers it names (ADR-0246 decision 2). A held
+//! buffer that is destroyed leaves `entries`, so its id answers nothing,
+//! and moves whole into the retired store until the last set lets go.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use aether_substrate::session_ids::SessionIds;
 
+use super::holds::Holds;
 use super::surface::render_limits;
 use crate::kinds::{
     CreateInstances, CreateInstancesResult, DestroyInstances, UpdateInstances, VertexAttribute, vertex_stride_bytes,
@@ -160,12 +165,13 @@ fn staged_records(mail: &CreateInstances) -> Result<Vec<u8>, String> {
 pub struct InstancesRegistry {
     ids: SessionIds<u32>,
     entries: HashMap<u32, StagedInstances>,
+    holds: Holds<StagedInstances>,
 }
 
 impl InstancesRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self { ids: SessionIds::new(), entries: HashMap::new() }
+        Self { ids: SessionIds::new(), entries: HashMap::new(), holds: Holds::default() }
     }
 
     /// The buffer registered under `instances_id`, if it is live.
@@ -179,12 +185,50 @@ impl InstancesRegistry {
         self.entries.get_mut(&instances_id)
     }
 
+    /// One more draw set names `instances_id`. The caller has checked
+    /// that the id is live.
+    pub fn hold(&mut self, instances_id: u32) {
+        self.holds.hold(instances_id);
+    }
+
+    /// One draw set no longer names `instances_id`. When that was the
+    /// last and the buffer was destroyed meanwhile, its records and GPU
+    /// buffer are dropped here.
+    ///
+    /// # Panics
+    /// Panics on an id no set holds, fail-fast per ADR-0063.
+    pub fn release(&mut self, instances_id: u32) {
+        self.holds.release(instances_id);
+    }
+
+    /// Whether any draw set names `instances_id`.
+    #[must_use]
+    pub fn is_held(&self, instances_id: u32) -> bool {
+        self.holds.is_held(instances_id)
+    }
+
+    /// The buffer a draw set holds under `instances_id`, whether it is
+    /// still live or was destroyed under the set. This is the lookup a
+    /// set's rows are realized through; it cannot miss for an id a set
+    /// holds.
+    ///
+    /// # Panics
+    /// Panics on an id that is neither live nor retired, fail-fast per
+    /// ADR-0063: a held id is always in one of the two.
+    pub fn held_mut(&mut self, instances_id: u32) -> &mut StagedInstances {
+        match self.entries.get_mut(&instances_id) {
+            Some(entry) => entry,
+            None => self.holds.retired_mut(instances_id).expect("a held instances id is live or retired"),
+        }
+    }
+
     /// Drop every buffer built against the current device while keeping
     /// ids, layouts, capacities and record bytes. Each entry's whole
     /// copy becomes dirty, so the replacement device's buffer is
-    /// created and filled at its next use.
+    /// created and filled at its next use. A buffer destroyed under a
+    /// draw set is covered too.
     pub fn invalidate_device_resources(&mut self) {
-        for entry in self.entries.values_mut() {
+        for entry in self.entries.values_mut().chain(self.holds.retired_entries_mut()) {
             entry.realized = None;
             entry.mark_all_dirty();
         }
@@ -246,14 +290,21 @@ impl InstancesRegistry {
     }
 
     /// Release a registered instance buffer. Same fire-and-forget
-    /// disposition as [`Self::update`].
+    /// disposition as [`Self::update`]. The id is gone for every lookup
+    /// by id from here on; a buffer a draw set names is kept whole,
+    /// records and GPU buffer, until the last such set lets go.
     pub fn destroy(&mut self, mail: DestroyInstances) {
-        if self.entries.remove(&mail.instances_id).is_none() {
+        let Some(entry) = self.entries.remove(&mail.instances_id) else {
             tracing::warn!(
                 target: "aether_render",
                 instances_id = mail.instances_id,
                 "destroy_instances for unknown instances id; dropping",
             );
+            return;
+        };
+
+        if self.holds.is_held(mail.instances_id) {
+            self.holds.retire(mail.instances_id, entry);
         }
     }
 }
@@ -373,6 +424,28 @@ mod tests {
         let entry = registry.get(instances_id).expect("entry survives the refused updates");
         assert_eq!(entry.record_bytes(), vec![0xAA; 5 * STRIDE]);
         assert_eq!(entry.dirty, None);
+    }
+
+    /// A buffer destroyed under a draw set stops answering to its id and
+    /// keeps its records for the set until the hold goes. The bugs
+    /// pinned: an update by id reaching a retired buffer and changing
+    /// what a set draws after its sender gave the buffer up, and the
+    /// records dropped while a set still draws them.
+    #[test]
+    fn destroyed_held_buffer_refuses_updates_and_keeps_its_records() {
+        let mut registry = InstancesRegistry::new();
+        let instances_id = created(&mut registry, create(layout(), 2, vec![0xAA; 2 * STRIDE]));
+        registry.hold(instances_id);
+
+        registry.destroy(DestroyInstances { instances_id });
+        registry.update(update(instances_id, 0, vec![0x55; STRIDE]));
+
+        assert!(registry.get(instances_id).is_none(), "a destroyed buffer must not answer to its id");
+        assert_eq!(registry.held_mut(instances_id).record_bytes(), vec![0xAA; 2 * STRIDE]);
+
+        registry.release(instances_id);
+        assert!(!registry.is_held(instances_id));
+        assert!(registry.holds.retired_mut(instances_id).is_none(), "the last release drops the retired buffer");
     }
 
     /// The GPU buffer is created once and written in place. The bugs

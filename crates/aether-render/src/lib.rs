@@ -49,9 +49,9 @@ pub use kinds::*;
 // `kinds` module (re-exported above).
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    DEFAULT_CLEAR_COLOR, GeometryRegistry, InstancesRegistry, RealizedGeometry, RenderCapabilityState, RenderParams,
-    RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay, StagedGeometry, StagedInstances,
-    WHITE_TEXTURE_ID, apply_manifest_clear_color,
+    DEFAULT_CLEAR_COLOR, DrawSet, DrawSetRegistry, DrawSetRows, GeometryRegistry, HeldDraw, InstancesRegistry,
+    RealizedGeometry, RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
+    RenderTuningOverlay, StagedGeometry, StagedInstances, WHITE_TEXTURE_ID, apply_manifest_clear_color,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123

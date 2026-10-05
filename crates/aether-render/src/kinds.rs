@@ -369,7 +369,14 @@ pub enum CreateGeometryResult {
 /// may change). Fire-and-forget; an unknown `geometry_id` or an invalid
 /// replacement logs and drops, leaving the previous content staged. The
 /// staged bytes update immediately; the GPU buffers re-realize at the
-/// next GPU use. Per-frame updates are for view-dependent geometry that
+/// next GPU use. While a draw set names the geometry (ADR-0246 decision
+/// 2) the replacement may change the vertex contents only: one with a
+/// different vertex count, or with indices that are not byte-for-byte
+/// the ones staged, logs and drops the same way, because the set's
+/// index ranges were checked against the sizes it was made with. Once
+/// no set names the geometry it may be resized again. Nothing is
+/// replied either way; a refusal is a warning in the render actor's
+/// log. Per-frame updates are for view-dependent geometry that
 /// is small by nature (the ink ribbons) — a deforming mesh poses
 /// through the uniform blob instead. `vertices` and `indices` arrive as
 /// `Blob`s and are staged as received, without a copy.
@@ -383,8 +390,12 @@ pub struct UpdateGeometry {
 /// `aether.render.destroy_geometry` — release a previously-created
 /// geometry from the render cap's session-scoped geometry registry,
 /// mirroring `destroy_texture`. Fire-and-forget; an unknown
-/// `geometry_id` logs and drops. Dropping the registry entry releases
-/// the staged bytes and any realized GPU buffers.
+/// `geometry_id` logs and drops. The id stops answering at once: a
+/// later update, dispatch, or draw naming it finds nothing. The staged
+/// bytes and any realized GPU buffers are released with it, unless a
+/// draw set names the geometry (ADR-0246 decision 2), in which case they
+/// live until the last such set is destroyed or patched off it, and the
+/// set goes on drawing them.
 #[aether_data::kind(name = "aether.render.destroy_geometry")]
 pub struct DestroyGeometry {
     pub geometry_id: u32,
@@ -441,11 +452,131 @@ pub struct UpdateInstances {
 
 /// `aether.render.destroy_instances` — release a previously-created
 /// instance buffer, mirroring `destroy_geometry`. Fire-and-forget; an
-/// unknown `instances_id` logs and drops. The released id is never
-/// handed out again.
+/// unknown `instances_id` logs and drops. The id stops answering at
+/// once, so a later update or draw naming it finds nothing, and it is
+/// never handed out again. The records and the GPU buffer are released
+/// with it, unless a draw set names the buffer (ADR-0246 decision 2), in
+/// which case they live, with the contents they had, until the last such
+/// set is destroyed or patched off it.
 #[aether_data::kind(name = "aether.render.destroy_instances")]
 pub struct DestroyInstances {
     pub instances_id: u32,
+}
+
+/// A run of a geometry's indices: `count` indices starting at index
+/// `first`. Both count indices, never bytes and never triangles. A
+/// `count` of zero is inside every geometry and draws nothing.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct IndexRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// A run of an instance buffer's records: `count` records starting at
+/// record `first`. Both count records, never bytes. A `count` of zero is
+/// inside every buffer and draws nothing.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InstanceRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// One draw of a draw set (ADR-0246 decision 1): the `indices` run of
+/// geometry `geometry_id`, drawn once per record of the `instances` run
+/// of instance buffer `instances_id`. A draw carries no texture and no
+/// per-draw constant; what varies between draws rides in the instance
+/// records. A draw whose index or instance count is zero is valid and
+/// draws nothing, which blanks one entry of a set without moving the
+/// others.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DrawSpec {
+    pub geometry_id: u32,
+    pub indices: IndexRange,
+    pub instances_id: u32,
+    pub instances: InstanceRange,
+}
+
+/// `aether.render.create_draw_set` — make a retained list of draws in
+/// the render cap's session-scoped draw-set registry (ADR-0246 decisions
+/// 1 and 2). `vertex_layout` and `instance_layout` are the layouts every
+/// draw's geometry and instance buffer must have been created with; a
+/// set is checked against layouts, not against a program, so any pass
+/// with the same two layouts may draw it. `draws` may be empty.
+///
+/// Every check runs here, before an id is assigned, and the first
+/// failure refuses the whole mail: an empty vertex layout or an empty
+/// instance layout, and then per draw, in order, an unknown
+/// `geometry_id`, a geometry whose layout is not `vertex_layout`, an
+/// index range that ends past the geometry's index count, an unknown
+/// `instances_id`, an instance buffer whose layout is not
+/// `instance_layout`, or an instance range that ends past the buffer's
+/// capacity. A range's end is `first + count`, summed without wrapping.
+/// A per-draw reason starts `draw N:`, with `N` the draw's position in
+/// `draws`.
+///
+/// An accepted set holds the geometries and instance buffers it names:
+/// destroying one retires its id while its bytes and GPU buffers live
+/// until no set names it, and `UpdateGeometry` may not change the vertex
+/// count or the indices of a geometry a set names. Reply:
+/// `CreateDrawSetResult`.
+#[aether_data::kind(name = "aether.render.create_draw_set")]
+pub struct CreateDrawSet {
+    pub vertex_layout: Vec<VertexAttribute>,
+    pub instance_layout: Vec<VertexAttribute>,
+    pub draws: Vec<DrawSpec>,
+}
+
+/// Reply to `CreateDrawSet`. `Ok` carries the assigned `draw_set_id` —
+/// thread it into `UpdateDrawSet.draw_set_id` and
+/// `DestroyDrawSet.draw_set_id`. `Err` carries a human-readable reason
+/// naming its class and, for a per-draw class, the draw. A refused
+/// create consumes no id and holds no buffer.
+#[aether_data::kind(name = "aether.render.create_draw_set_result")]
+pub enum CreateDrawSetResult {
+    Ok { draw_set_id: u32 },
+    Err { error: String },
+}
+
+/// `aether.render.update_draw_set` — patch a draw set in place (ADR-0246
+/// decision 1). `draws` is written over the set's entries from position
+/// `first`, counted in draws. `first` may be at most the set's length,
+/// and a run that passes the end extends the set, so appending is a
+/// patch with `first` equal to the length. An empty `draws` truncates
+/// the set to its first `first` entries. No entry moves unless the
+/// sender moves it.
+///
+/// Every new draw is checked as `CreateDrawSet` checks it, against the
+/// layouts fixed at create, and the first failure refuses the whole
+/// mail, as do an unknown `draw_set_id` and a `first` past the set's
+/// length. A per-draw reason starts `draw N:`, with `N` the draw's
+/// position in this mail's `draws`. A refused patch leaves the set and
+/// what it holds exactly as they were. An accepted patch lets go of each
+/// buffer no draw of the set names any more. Reply:
+/// `UpdateDrawSetResult`.
+#[aether_data::kind(name = "aether.render.update_draw_set")]
+pub struct UpdateDrawSet {
+    pub draw_set_id: u32,
+    pub first: u32,
+    pub draws: Vec<DrawSpec>,
+}
+
+/// Reply to `UpdateDrawSet`. `Ok` means the whole patch was applied;
+/// `Err` carries a human-readable reason naming its class and means none
+/// of it was.
+#[aether_data::kind(name = "aether.render.update_draw_set_result")]
+pub enum UpdateDrawSetResult {
+    Ok,
+    Err { error: String },
+}
+
+/// `aether.render.destroy_draw_set` — release a draw set and let go of
+/// every geometry and instance buffer it holds. Fire-and-forget; an
+/// unknown `draw_set_id` logs and drops. A buffer that was destroyed
+/// while the set named it is released for good when its last set goes.
+/// The released id is never handed out again.
+#[aether_data::kind(name = "aether.render.destroy_draw_set")]
+pub struct DestroyDrawSet {
+    pub draw_set_id: u32,
 }
 
 /// How a textured composite lays its source over what is already in
