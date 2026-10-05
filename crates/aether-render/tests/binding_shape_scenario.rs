@@ -11,19 +11,10 @@
 //! Skipped when no wgpu adapter is available (driverless runners);
 //! `AETHER_REQUIRE_RUNTIME=1` (CI) flips the skip into a hard panic.
 
-// Integration-test skip diagnostic: emit via stderr so `cargo test`
-// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
-#![allow(clippy::print_stderr)]
-// Reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness knob,
-// not cap config.
-#![allow(clippy::disallowed_methods)]
-
-use std::env;
-
 use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgb_close, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{envelope, pixel_is_lit, require_adapter, rgb_close, rgba_at};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
@@ -33,18 +24,6 @@ use aether_render::{
     ProgramRegisterResult, QuadBlend, RenderCapability, Sampling, Shape, SlotExtent, SlotShape, SlotSpec,
     TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
 };
-
-/// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
-/// is available — every scenario here executes programs for real.
-fn require_wgpu_only() -> bool {
-    if has_wgpu_adapter() {
-        return true;
-    }
-    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
-    eprintln!("skipping: no wgpu adapter available");
-    false
-}
 
 /// Side of every program output texture and of the overlay quad that
 /// reads it back, so one output texel is one frame pixel.
@@ -276,7 +255,7 @@ fn shows(probe: [u8; 4], texel: [u8; 4]) -> bool {
 /// the frame's background.
 #[test]
 fn a_texture_binding_takes_a_texture_of_its_own_size() {
-    if !require_wgpu_only() {
+    if !require_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -313,7 +292,7 @@ fn a_texture_binding_takes_a_texture_of_its_own_size() {
 /// sampler, so both programs clamp and both probes show the edge.
 #[test]
 fn a_bindings_wrap_reaches_the_sampler() {
-    if !require_wgpu_only() {
+    if !require_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -392,7 +371,7 @@ fn create_cover(harness: &mut SubstrateHarness) -> u32 {
 /// of exactly, which blends texel 2 with its neighbours.
 #[test]
 fn a_vertex_stage_reads_a_texel_table_ahead_of_a_filtered_input() {
-    if !require_wgpu_only() {
+    if !require_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
@@ -474,7 +453,7 @@ fn control_quad() -> DrawShapes {
 /// that poisons the whole frame rather than dropping one dispatch.
 #[test]
 fn a_texture_array_binding_registers_and_refuses_a_plain_texture() {
-    if !require_wgpu_only() {
+    if !require_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
