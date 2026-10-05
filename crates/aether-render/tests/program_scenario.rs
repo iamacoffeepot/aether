@@ -27,9 +27,9 @@ use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DrawShapes, DrawTexturedQuads, InputSlot, Mips, OutputSlot, PassStage,
-    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Sampling, Shape, SlotExtent, SlotShape,
-    SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, Wrap,
+    Blend, CreateTexture, CreateTextureResult, DrawShapes, DrawTexturedQuads, InputSlot, Mips, OutputSlot, PassStage,
+    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent,
+    SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, TransientSpec, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -77,6 +77,7 @@ fn full(format: TextureFormat) -> SlotSpec {
 fn pass(entry: &str, inputs: Vec<InputSlot>, output: OutputSlot, offset: u32, length: u32) -> ProgramPass {
     ProgramPass {
         stage: PassStage::Fragment,
+        blend: Blend::Alpha,
         entry_point: entry.to_owned(),
         inputs,
         output,
@@ -93,7 +94,11 @@ fn ping_pong_register() -> ProgramRegister {
     ProgramRegister {
         wgsl: MODULE.to_owned(),
         bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
-        transients: vec![full(TextureFormat::Rgba8)],
+        transients: vec![TransientSpec {
+            format: TextureFormat::Rgba8,
+            extent: SlotExtent::Full,
+            samples: Samples::One,
+        }],
         geometries: Vec::new(),
         depth_transients: Vec::new(),
         passes: vec![

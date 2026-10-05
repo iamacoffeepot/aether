@@ -22,11 +22,12 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::{
-    CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
-    CreateTexture, CreateTextureResult, Cull, DepthUse, DepthWrite, DestroyGeometry, DrawSetsPass, DrawSpec,
-    DrawTexturedQuads, IndexRange, InstanceRange, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass,
-    ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability, Sampling, SlotExtent, SlotShape, SlotSpec,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
+    Blend, CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances,
+    CreateInstancesResult, CreateTexture, CreateTextureResult, Cull, DepthSpec, DepthUse, DepthWrite, DestroyGeometry,
+    DrawSetsPass, DrawSpec, DrawTexturedQuads, IndexRange, InstanceRange, Mips, OutputSlot, PassLoad, PassStage,
+    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability, Samples,
+    Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Side of every program output texture and of the overlay quad that
@@ -216,6 +217,7 @@ fn register(harness: &mut SubstrateHarness, label: &'static str, passes: &[PassS
                 depth: shape.depth.map(|write| DepthUse { slot: 0, write }),
                 load: shape.load,
             }),
+            blend: Blend::Alpha,
             entry_point: "fs_color".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },
@@ -233,7 +235,7 @@ fn register(harness: &mut SubstrateHarness, label: &'static str, passes: &[PassS
         }],
         transients: Vec::new(),
         geometries: Vec::new(),
-        depth_transients: vec![SlotExtent::Full],
+        depth_transients: vec![DepthSpec { extent: SlotExtent::Full, samples: Samples::One }],
         passes,
     };
     let registered: ProgramRegisterResult =

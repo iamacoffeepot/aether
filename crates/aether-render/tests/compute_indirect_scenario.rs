@@ -17,7 +17,7 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{
-    ComputeBufferBinding, ComputePass, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult,
+    Blend, ComputeBufferBinding, ComputePass, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult,
     DrawPass, DrawTexturedQuads, GeometryBuffer, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage,
     PassStageKind, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings,
     ProgramTimingsResult, QuadBlend, Sampling, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat,
@@ -157,6 +157,7 @@ fn program() -> ProgramRegister {
                     ],
                     workgroups: [1, 1, 1],
                 }),
+                blend: Blend::Replace,
                 entry_point: "cs_derive".to_owned(),
                 inputs: Vec::new(),
                 output: OutputSlot::None,
@@ -171,6 +172,7 @@ fn program() -> ProgramRegister {
                     depth: None,
                     load: PassLoad::Clear,
                 }),
+                blend: Blend::Alpha,
                 entry_point: "fs_red".to_owned(),
                 inputs: Vec::new(),
                 output: OutputSlot::Binding { index: 0 },

@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use crate::runtime::program::validate::validate;
     use crate::{
-        CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances,
+        Blend, CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances,
         CreateInstancesResult, Cull, DrawSetsPass, DrawSpec, IndexRange, InstanceRange, Mips, OutputSlot, PassLoad,
         PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat,
         VertexAttribute, VertexFormat, Wrap,
@@ -148,6 +148,7 @@ fn fs_white() -> @location(0) vec4<f32> {
                 depth: None,
                 load: PassLoad::Load,
             }),
+            blend: Blend::Alpha,
             entry_point: "fs_white".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },

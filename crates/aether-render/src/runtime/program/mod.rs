@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use aether_substrate::render::{
     ProgramComputePipelineSpec, ProgramDepthState, ProgramDrawPipelineSpec, ProgramInput, ProgramInputSampler,
-    ProgramInputView, ProgramPipelineSpec, ProgramVertexBuffer, build_fullscreen_vertex_module,
+    ProgramInputView, ProgramPipelineSpec, ProgramTransientSpec, ProgramVertexBuffer, build_fullscreen_vertex_module,
     build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
     program_storage_layout, program_uniform_layout,
 };
@@ -24,8 +24,8 @@ use super::pipeline::RenderGpu;
 use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
 use crate::{
-    Cull, DepthWrite, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
-    ProgramTimingsResult, Sampling, SlotShape, SlotSpec, TextureFormat, VertexAttribute,
+    Blend, Cull, DepthWrite, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, Sampling, SlotShape, SlotSpec, VertexAttribute,
 };
 
 mod cache;
@@ -88,11 +88,15 @@ enum PassPipeline {
     Compute(wgpu::ComputePipeline),
 }
 
-/// Pool key: resolved size plus realized format. Pooling on the
-/// resolved values (not the declared `SlotExtent`) unifies slots that
-/// resolve to the same texture — `Full` and `Divided { divisor: 1 }`
-/// share allocations, and programs share the pool with each other.
-type TransientKey = (u32, u32, wgpu::TextureFormat);
+/// Pool key: resolved size, realized format and sample count — what a
+/// pooled texture is created as. Pooling on the resolved values (not the
+/// declared `SlotExtent`) unifies slots that resolve to the same
+/// texture — `Full` and `Divided { divisor: 1 }` share allocations, and
+/// programs share the pool with each other. The sample count is part of
+/// the class because a multisampled texture and a single-sample one of
+/// one size and format are not interchangeable: a pass attaches one at
+/// its pipeline's count, and only the single-sample one can be read.
+type TransientKey = ProgramTransientSpec;
 
 /// The resource registries a frame's dispatches resolve their ids
 /// against. A dispatch realizes what it binds, so every registry that
@@ -107,8 +111,9 @@ pub struct DispatchResources<'a> {
 
 /// Session-scoped registry of authored render programs, plus the shared
 /// transient pool their dispatches allocate intermediates from. Each
-/// pooled entry is the transient texture's view — it serves as both the
-/// pass attachment and the sampled input, and keeps the texture alive.
+/// pooled entry is the transient texture's view, which keeps the
+/// texture alive: a single-sample one serves as both a pass attachment
+/// and a sampled input, and a multisampled one as an attachment alone.
 pub struct ProgramRegistry {
     ids: SessionIds<u32>,
     entries: HashMap<u32, RegisteredProgram>,
@@ -118,8 +123,9 @@ pub struct ProgramRegistry {
     /// module on first register and discarded with it when the device
     /// is replaced.
     samplers: Option<ProgramSamplers>,
-    /// Pooled transient intermediates keyed by resolved extent + format,
-    /// persistent across dispatches so a repaint reuses its allocations.
+    /// Pooled transient intermediates keyed by resolved extent, format
+    /// and sample count, persistent across dispatches so a repaint
+    /// reuses its allocations.
     transient_pool: HashMap<TransientKey, Vec<wgpu::TextureView>>,
     /// Whether the operator wants per-pass GPU timings measured
     /// (iamacoffeepot/aether#4423). Resolved at boot; the instrument
@@ -375,15 +381,16 @@ fn build_program_passes(
             let mut storage_layout = None;
             let pipeline = match &pass.stage {
                 PassPlanStage::Fragment => {
-                    let output_format = plan.slot_format(pass.output.expect("fragment pass has an output"));
+                    let output = pass.output.expect("fragment pass has an output");
                     PassPipeline::Render(build_program_pipeline(
                         device,
                         &ProgramPipelineSpec {
                             vertex_module: fullscreen,
                             fragment_module: &module,
                             entry_point: &pass.entry_point,
-                            color_format: super::texture::wgpu_texture_format(output_format),
-                            blend: blend_for(output_format),
+                            color_format: super::texture::wgpu_texture_format(plan.slot_format(output)),
+                            sample_count: plan.samples(output).count(),
+                            blend: blend_state(pass.blend),
                             uniform_layout: &uniform_layout,
                             inputs_layout: &inputs_layout,
                         },
@@ -461,7 +468,7 @@ fn build_draw_pipeline(
     (uniform_layout, inputs_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
     stage: &DrawStage<'_>,
 ) -> PassPipeline {
-    let output_format = plan.slot_format(pass.output.expect("a rasterizing pass has an output"));
+    let output = pass.output.expect("a rasterizing pass has an output");
     PassPipeline::Render(build_program_draw_pipeline(
         device,
         &ProgramDrawPipelineSpec {
@@ -470,8 +477,9 @@ fn build_draw_pipeline(
             fragment_entry_point: &pass.entry_point,
             vertex_buffers: stage.vertex_buffers,
             cull_mode: stage.cull_mode,
-            color_format: super::texture::wgpu_texture_format(output_format),
-            blend: blend_for(output_format),
+            color_format: super::texture::wgpu_texture_format(plan.slot_format(output)),
+            sample_count: plan.samples(output).count(),
+            blend: blend_state(pass.blend),
             depth: stage.depth,
             uniform_layout,
             inputs_layout,
@@ -517,13 +525,22 @@ fn program_input(spec: SlotSpec) -> ProgramInput {
     ProgramInput { view, sampler }
 }
 
-/// Blend state per output format: blendable color formats alpha-blend
-/// over the target; a data plane replaces, which is what a pass writing
-/// a quantity rather than a colour means by writing it.
-fn blend_for(format: TextureFormat) -> Option<wgpu::BlendState> {
-    match format {
-        TextureFormat::Rgba8 | TextureFormat::R8 => Some(wgpu::BlendState::ALPHA_BLENDING),
-        TextureFormat::R32Float | TextureFormat::R16Float | TextureFormat::Rgba16Float => None,
+/// The blend state a pass's declaration is (ADR-0246 decision 7),
+/// whatever its output's format. `Replace` is no blend state, and not
+/// `BlendState::REPLACE`: wgpu refuses any blend state on a format the
+/// device cannot blend, and a pass that replaces an `R32Float` output
+/// registers on every device. `Additive` adds source to destination on
+/// all four channels.
+fn blend_state(blend: Blend) -> Option<wgpu::BlendState> {
+    let sum = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    match blend {
+        Blend::Replace => None,
+        Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+        Blend::Additive => Some(wgpu::BlendState { color: sum, alpha: sum }),
     }
 }
 
@@ -538,8 +555,8 @@ mod rebuild_tests {
     use super::*;
     use crate::runtime::surface::boot_offscreen;
     use crate::{
-        CreateTexture, CreateTextureResult, Mips, OutputSlot, PassStage, ProgramPass, SlotExtent, TextureSampling,
-        TextureUsage, Wrap,
+        CreateTexture, CreateTextureResult, Mips, OutputSlot, PassStage, ProgramPass, SlotExtent, TextureFormat,
+        TextureSampling, TextureUsage, Wrap,
     };
 
     const SOLID_WGSL: &str = r"
@@ -567,6 +584,7 @@ fn fs_solid() -> @location(0) vec4<f32> {
             depth_transients: Vec::new(),
             passes: vec![ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_solid".to_owned(),
                 inputs: Vec::new(),
                 output: OutputSlot::Binding { index: 0 },
@@ -644,11 +662,12 @@ fn fs_solid() -> @location(0) vec4<f32> {
             }],
         );
         assert!(textures.entries[&healthy_texture_id].realized.is_some());
+        let pooled =
+            ProgramTransientSpec { width: 1, height: 1, format: wgpu::TextureFormat::Rgba8Unorm, sample_count: 1 };
         registry.transient_pool.insert(
-            (1, 1, wgpu::TextureFormat::Rgba8Unorm),
+            pooled,
             vec![
-                create_program_transient(&old_gpu.device, 1, 1, wgpu::TextureFormat::Rgba8Unorm)
-                    .create_view(&wgpu::TextureViewDescriptor::default()),
+                create_program_transient(&old_gpu.device, pooled).create_view(&wgpu::TextureViewDescriptor::default()),
             ],
         );
         assert!(registry.timings.is_some(), "recording initializes the old-device timing instrument");

@@ -33,9 +33,9 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateTexture, CreateTextureResult, InputSlot, Mips, OutputSlot, PassStage, PassStageKind, ProgramDispatch,
-    ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, Sampling, SlotExtent,
-    SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, Wrap,
+    Blend, CreateTexture, CreateTextureResult, InputSlot, Mips, OutputSlot, PassStage, PassStageKind, ProgramDispatch,
+    ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, Samples, Sampling,
+    SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TransientSpec, Wrap,
 };
 
 /// Canvas the timed graph develops at. Small — the assertions are on
@@ -94,16 +94,17 @@ fn register() -> ProgramRegister {
                 sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
             },
         ],
-        transients: vec![SlotSpec {
+        transients: vec![TransientSpec {
             format: TextureFormat::Rgba8,
-            shape: SlotShape::Target(SlotExtent::Divided { divisor: REDUCED_DIVISOR }),
-            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            extent: SlotExtent::Divided { divisor: REDUCED_DIVISOR },
+            samples: Samples::One,
         }],
         geometries: Vec::new(),
         depth_transients: Vec::new(),
         passes: vec![
             ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_reduce".to_owned(),
                 inputs: vec![InputSlot::Binding { index: 0 }],
                 output: OutputSlot::Transient { index: 0 },
@@ -113,6 +114,7 @@ fn register() -> ProgramRegister {
             },
             ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_expand".to_owned(),
                 inputs: vec![InputSlot::Transient { index: 0 }],
                 output: OutputSlot::Binding { index: 1 },

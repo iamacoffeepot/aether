@@ -26,7 +26,7 @@ use super::super::instances::InstancesRegistry;
 use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
 use super::super::texture::{BoundTexture, TextureRegistry};
-use super::cache::{BoundInput, BoundStorage, CacheParts};
+use super::cache::{BoundInput, BoundStorage, CacheParts, TransientAssignment};
 use super::draw_sets::encode::{DrawSetSources, RowBuffers};
 use super::draw_sets::{dispatch as draw_sets_dispatch, encode as draw_sets_encode};
 use super::sampler::{Filter, ProgramSamplers};
@@ -128,14 +128,16 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
     cache.refresh_binding_views(textures, &dispatch.bindings);
 
     let mut parts = cache.split();
-    for assignment in parts.extent.assignments.iter().chain(parts.extent.depth_assignments.iter()).flatten() {
-        let views = pool.entry(assignment.key).or_default();
+    let extent = parts.extent;
+    let assigned = extent.assignments.iter().chain(&extent.resolve_assignments).chain(&extent.depth_assignments);
+    for assignment in assigned.flatten() {
+        let key = assignment.key;
+        let views = pool.entry(key).or_default();
         while views.len() <= assignment.physical {
-            let (width, height, format) = assignment.key;
-            let texture = if format == PROGRAM_DEPTH_FORMAT {
-                create_program_depth_transient(&gpu.device, width, height)
+            let texture = if key.format == PROGRAM_DEPTH_FORMAT {
+                create_program_depth_transient(&gpu.device, key.width, key.height, key.sample_count)
             } else {
-                create_program_transient(&gpu.device, width, height, format)
+                create_program_transient(&gpu.device, key)
             };
             views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         }
@@ -531,26 +533,36 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
     let geometries = sources.geometries;
     let layout = cache.layout;
     let extent = cache.extent;
-    let transient_view = |transient: u32| {
-        let assignment = extent.assignments[transient as usize]
-            .as_ref()
-            .expect("read/written transients were assigned physical slots");
-        &pool[&assignment.key][assignment.physical]
-    };
+    let pooled_view = |assignment: TransientAssignment| &pool[&assignment.key][assignment.physical];
     let depth_view = |slot: u32| {
-        let assignment = extent.depth_assignments[slot as usize]
-            .as_ref()
-            .expect("depth slots a pass names were assigned physical slots");
-        &pool[&assignment.key][assignment.physical]
+        let assignment =
+            extent.depth_assignments[slot as usize].expect("depth slots a pass names were assigned physical slots");
+        pooled_view(assignment)
     };
     let bound_input = |slot: &ResolvedSlot| match slot {
         ResolvedSlot::Binding(binding) => BoundInput::Binding(dispatch.bindings[*binding as usize]),
         ResolvedSlot::Transient(transient) => {
-            let assignment = extent.assignments[*transient as usize]
-                .as_ref()
-                .expect("read/written transients were assigned physical slots");
+            let assignment = extent.read(*transient);
             BoundInput::Transient(assignment.key, assignment.physical)
         }
+    };
+    let transient_view = |transient: u32| pooled_view(extent.attached(transient));
+    // The single-sample view a pass's multisampled output resolves into
+    // when an iteration ends: only the last iteration of the last pass
+    // to write a `Four` transient before a pass reads it. The plan's
+    // resolve sequencing and the resolve assignment both follow from
+    // that same read, so a pass that resolves has a texture to resolve
+    // into.
+    let resolve_view = |pass: usize, output: ResolvedSlot, last_iteration: bool| {
+        let ResolvedSlot::Transient(transient) = output else {
+            return None;
+        };
+        let ends_last_write = layout.resolves_output[pass] && last_iteration;
+        if !ends_last_write {
+            return None;
+        }
+        let target = extent.resolved(transient).expect("a transient a pass resolves is read, so it was assigned");
+        Some(pooled_view(target))
     };
 
     // Both reused across passes: neither borrows the cache, so they
@@ -577,7 +589,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         (cache.binding_view(*binding), bound.nearest())
                     }
                     ResolvedSlot::Transient(transient) => {
-                        (transient_view(*transient), !plan.slot_format(*slot).filterable())
+                        (pooled_view(extent.read(*transient)), !plan.slot_format(*slot).filterable())
                     }
                 };
                 let base = u32::try_from(input * 2).expect("program input binding index fits u32");
@@ -651,21 +663,25 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
             .and_then(|queries| queries.open(dispatch.program_id, u32::try_from(pass).expect("pass index fits u32")));
         let iterations = offsets.len();
         for (iteration, &uniform_offset) in offsets.iter().enumerate() {
+            let last_iteration = iteration + 1 == iterations;
             let timestamps = bracket.and_then(|query| {
                 queries.as_ref().and_then(|queries| queries.timestamps(query, iteration, iterations))
             });
             match (&pass_plan.stage, &pass_gpu.pipeline) {
                 (PassPlanStage::Fragment, PassPipeline::Render(pipeline)) => {
-                    let target_view = match pass_plan.output.expect("fragment pass has an output") {
+                    let output = pass_plan.output.expect("fragment pass has an output");
+                    let target_view = match output {
                         ResolvedSlot::Binding(binding) => cache.binding_view(binding),
                         ResolvedSlot::Transient(transient) => transient_view(transient),
                     };
+                    let resolve_target = resolve_view(pass, output, last_iteration);
                     passes.admit(gpu, encoder);
                     record_program_pass(
                         encoder,
                         &ProgramPassDraw {
                             pipeline,
                             target_view,
+                            resolve_target,
                             clear: layout.clears_output[pass] && iteration == 0,
                             uniform_bind_group,
                             uniform_offset,
@@ -678,10 +694,12 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw),
                     PassPipeline::Render(pipeline),
                 ) => {
-                    let target_view = match pass_plan.output.expect("draw pass has an output") {
+                    let output = pass_plan.output.expect("draw pass has an output");
+                    let target_view = match output {
                         ResolvedSlot::Binding(binding) => cache.binding_view(binding),
                         ResolvedSlot::Transient(transient) => transient_view(transient),
                     };
+                    let resolve_target = resolve_view(pass, output, last_iteration);
                     let depth = draw.depth.map(|slot| ProgramDepthAttachment {
                         view: depth_view(slot),
                         clear: layout.clears_depth[pass] && iteration == 0,
@@ -702,6 +720,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                             open: ProgramDrawPassOpen {
                                 pipeline,
                                 target_view,
+                                resolve_target,
                                 clear_color: draw.load == PassLoad::Clear && iteration == 0,
                                 depth,
                                 uniform_bind_group,
@@ -716,10 +735,12 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     );
                 }
                 (PassPlanStage::DrawSets(draw_sets), PassPipeline::Render(pipeline)) => {
-                    let target_view = match pass_plan.output.expect("draw-sets pass has an output") {
+                    let output = pass_plan.output.expect("draw-sets pass has an output");
+                    let target_view = match output {
                         ResolvedSlot::Binding(binding) => cache.binding_view(binding),
                         ResolvedSlot::Transient(transient) => transient_view(transient),
                     };
+                    let resolve_target = resolve_view(pass, output, last_iteration);
                     let depth = draw_sets.depth.map(|depth| ProgramDepthAttachment {
                         view: depth_view(depth.slot),
                         clear: layout.clears_depth[pass] && iteration == 0,
@@ -730,6 +751,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         &ProgramDrawPassOpen {
                             pipeline,
                             target_view,
+                            resolve_target,
                             clear_color: draw_sets.load == PassLoad::Clear && iteration == 0,
                             depth,
                             uniform_bind_group,

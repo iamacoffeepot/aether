@@ -30,9 +30,9 @@ use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, Mips, OutputSlot,
-    PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Sampling, Shape, SlotExtent, SlotShape,
-    SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, Wrap,
+    Blend, CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, Mips,
+    OutputSlot, PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape,
+    SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, TransientSpec, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -206,6 +206,7 @@ fn oversized_encode_budget_rejects_and_the_renderer_survives() {
     let over_budget_passes: Vec<ProgramPass> = (0..24)
         .map(|index| ProgramPass {
             stage: PassStage::Fragment,
+            blend: Blend::Alpha,
             entry_point: "fs_copy".to_owned(),
             inputs: vec![InputSlot::Binding { index: 0 }],
             output: if index == 23 {
@@ -225,7 +226,11 @@ fn oversized_encode_budget_rejects_and_the_renderer_survives() {
         &ProgramRegister {
             wgsl: MODULE.to_owned(),
             bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
-            transients: vec![full(TextureFormat::Rgba8)],
+            transients: vec![TransientSpec {
+                format: TextureFormat::Rgba8,
+                extent: SlotExtent::Full,
+                samples: Samples::One,
+            }],
             geometries: Vec::new(),
             depth_transients: Vec::new(),
             passes: over_budget_passes,
@@ -247,6 +252,7 @@ fn oversized_encode_budget_rejects_and_the_renderer_survives() {
             geometries: Vec::new(),
             passes: vec![ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_copy".to_owned(),
                 inputs: vec![InputSlot::Binding { index: 0 }],
                 output: OutputSlot::Binding { index: 1 },

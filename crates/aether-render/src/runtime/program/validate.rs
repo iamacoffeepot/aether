@@ -14,9 +14,9 @@ use naga::{
 use super::super::surface::render_limits;
 use super::draw_sets::validate::{DrawSetsPlan, list_slots, validate_draw_sets};
 use crate::{
-    ComputeBufferBinding, ComputePass, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad,
-    PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat,
-    VertexAttribute, VertexFormat,
+    Blend, ComputeBufferBinding, ComputePass, DepthSpec, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, Mips,
+    OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Samples, Sampling, SlotExtent, SlotShape, SlotSpec,
+    StorageAccess, TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -52,19 +52,33 @@ pub enum ResolvedSlot {
     Transient(u32),
 }
 
-/// One validated pass: explicit stage, entry point, resolved texture
-/// slots, uniform window, and flattened repeat (`repeat_count` is 1 for
-/// an unrepeated pass). Compute carries no texture output.
+/// One validated pass: explicit stage, the blend it declared, entry
+/// point, resolved texture slots, uniform window, and flattened repeat
+/// (`repeat_count` is 1 for an unrepeated pass). Compute carries no
+/// texture output and declares `Blend::Replace`.
 #[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
     pub stage: PassPlanStage,
+    pub blend: Blend,
     pub inputs: Vec<ResolvedSlot>,
     pub output: Option<ResolvedSlot>,
     pub uniform_offset: u32,
     pub uniform_length: u32,
     pub repeat_count: u32,
     pub uniform_stride: u32,
+}
+
+impl PassPlan {
+    /// Whether the pass samples `slot`.
+    pub fn reads(&self, slot: ResolvedSlot) -> bool {
+        self.inputs.contains(&slot)
+    }
+
+    /// Whether the pass attaches `slot` as its color output.
+    pub fn writes(&self, slot: ResolvedSlot) -> bool {
+        self.output == Some(slot)
+    }
 }
 
 #[derive(Debug)]
@@ -137,7 +151,7 @@ pub struct ComputePlan {
 /// holder's `first_write`.
 #[derive(Debug)]
 pub struct TransientPlan {
-    pub spec: SlotSpec,
+    pub spec: TransientSpec,
     pub first_write: Option<u32>,
     pub last_use: Option<u32>,
 }
@@ -150,9 +164,9 @@ pub struct ProgramPlan {
     pub transients: Vec<TransientPlan>,
     /// Declared geometry slots (ADR-0171), in dispatch-supply order.
     pub geometries: Vec<GeometrySlotSpec>,
-    /// Declared depth transients (ADR-0171), by extent — the format is
-    /// fixed at `Depth32Float`.
-    pub depth_transients: Vec<SlotExtent>,
+    /// Declared depth transients (ADR-0171), by extent and sample
+    /// count — the format is fixed at `Depth32Float`.
+    pub depth_transients: Vec<DepthSpec>,
     pub passes: Vec<PassPlan>,
     /// The dispatch binding the final pass writes — the program's
     /// result texture, whose size is the reference extent.
@@ -172,11 +186,24 @@ impl ProgramPlan {
         self.slot_spec(slot).format
     }
 
-    /// The declared spec of a resolved slot.
+    /// What a pass that reads or writes a resolved slot is built
+    /// against: a binding's declaration, or a transient in the same
+    /// terms (`read_as`), so the layout, the sampler choice and the
+    /// extent have one code path for both.
     pub fn slot_spec(&self, slot: ResolvedSlot) -> SlotSpec {
         match slot {
             ResolvedSlot::Binding(index) => self.bindings[index as usize],
-            ResolvedSlot::Transient(index) => self.transients[index as usize].spec,
+            ResolvedSlot::Transient(index) => read_as(self.transients[index as usize].spec),
+        }
+    }
+
+    /// How many samples a resolved slot holds per texel: a binding is a
+    /// registry texture and always has one, and a transient has what it
+    /// declares. A pass's pipeline is built with its output's count.
+    pub fn samples(&self, slot: ResolvedSlot) -> Samples {
+        match slot {
+            ResolvedSlot::Binding(_) => Samples::One,
+            ResolvedSlot::Transient(index) => self.transients[index as usize].spec.samples,
         }
     }
 
@@ -190,6 +217,18 @@ impl ProgramPlan {
     /// transient of a validated plan is.
     pub fn target_extent(&self, slot: ResolvedSlot) -> SlotExtent {
         target_extent(self.slot_spec(slot)).expect("a validated output or transient slot is a Target")
+    }
+}
+
+/// A transient in the terms a binding is declared in: a target of its
+/// extent that a pass reads through a clamping sampler at the base
+/// level. Whether that sampler is linear follows from the format, as it
+/// does for a binding.
+fn read_as(spec: TransientSpec) -> SlotSpec {
+    SlotSpec {
+        format: spec.format,
+        shape: SlotShape::Target(spec.extent),
+        sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
     }
 }
 
@@ -231,17 +270,18 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         }
     }
     for (index, spec) in mail.transients.iter().enumerate() {
-        let Some(extent) = target_extent(*spec) else {
+        check_extent(spec.extent, || format!("transient {index}"))?;
+        let unresolvable = spec.samples == Samples::Four && !spec.format.resolvable();
+        if unresolvable {
             return Err(format!(
-                "transient {index}: a transient must declare a Target shape, not {:?} — the executor allocates it \
-                 at a size taken from the program's output",
-                spec.shape,
+                "transient {index}: a Four transient is read resolved, and {:?} cannot be resolved — declare it One, \
+                 or in a format that resolves",
+                spec.format,
             ));
-        };
-        check_extent(extent, || format!("transient {index}"))?;
+        }
     }
-    for (index, extent) in mail.depth_transients.iter().enumerate() {
-        check_extent(*extent, || format!("depth transient {index}"))?;
+    for (index, spec) in mail.depth_transients.iter().enumerate() {
+        check_extent(spec.extent, || format!("depth transient {index}"))?;
     }
     for (index, slot) in mail.geometries.iter().enumerate() {
         check_geometry_slot(index, slot)?;
@@ -422,8 +462,8 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             (PassPlanStage::Fragment, None)
         }
         PassStage::Draw(draw) | PassStage::DrawIndexedIndirect(draw) => {
-            let output_extent = attached_extent(mail, index, output, "draw")?;
-            let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), output_extent)?;
+            let attached = attached_output(mail, index, output, "draw")?;
+            let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), attached)?;
             if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
                 check_indirect_writer(earlier, index, draw.geometry)?;
             }
@@ -439,12 +479,19 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             if output.is_some() {
                 return Err(format!("pass {index}: a compute pass must declare OutputSlot::None"));
             }
+            if pass.blend != Blend::Replace {
+                return Err(format!(
+                    "pass {index}: a compute pass has no color output to blend onto, so it declares Blend::Replace, \
+                     not {:?}",
+                    pass.blend,
+                ));
+            }
             (PassPlanStage::Compute(validate_compute(mail, module, info, index, entry_index, compute)?), None)
         }
         PassStage::DrawSets(draw_sets) => {
-            let output_extent = attached_extent(mail, index, output, "draw-sets")?;
+            let attached = attached_output(mail, index, output, "draw-sets")?;
             let fragment_entry = (entry_index, pass.entry_point.as_str());
-            let validated = validate_draw_sets(mail, module, index, draw_sets, fragment_entry, output_extent)?;
+            let validated = validate_draw_sets(mail, module, index, draw_sets, fragment_entry, attached)?;
             (PassPlanStage::DrawSets(validated.plan), Some(validated.vertex_entry_index))
         }
     };
@@ -483,6 +530,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
     Ok(PassPlan {
         entry_point: pass.entry_point.clone(),
         stage,
+        blend: pass.blend,
         inputs,
         output,
         uniform_offset: pass.uniform_offset,
@@ -492,23 +540,36 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
     })
 }
 
-/// The extent of the color output a rasterizing pass attaches, which
-/// its depth attachment has to share. `stage` names the stage in the
-/// refusal of a pass that declares no texture output.
-fn attached_extent(
+/// The extent and sample count of the color output a rasterizing pass
+/// attaches, both of which its depth attachment has to share.
+#[derive(Copy, Clone)]
+pub struct Attached {
+    pub extent: SlotExtent,
+    pub samples: Samples,
+}
+
+/// What the color output of a rasterizing pass attaches as: a binding
+/// at its declared extent and one sample, a transient as it declares.
+/// `stage` names the stage in the refusal of a pass that declares no
+/// texture output.
+fn attached_output(
     mail: &ProgramRegister,
     index: usize,
     output: Option<ResolvedSlot>,
     stage: &str,
-) -> Result<SlotExtent, String> {
-    let Some(output) = output else {
-        return Err(format!("pass {index}: a {stage} pass must declare a texture output"));
+) -> Result<Attached, String> {
+    let attached = match output {
+        None => return Err(format!("pass {index}: a {stage} pass must declare a texture output")),
+        Some(ResolvedSlot::Binding(binding)) => Attached {
+            extent: target_extent(mail.bindings[binding as usize]).expect("a written binding was checked a Target"),
+            samples: Samples::One,
+        },
+        Some(ResolvedSlot::Transient(transient)) => {
+            let spec = mail.transients[transient as usize];
+            Attached { extent: spec.extent, samples: spec.samples }
+        }
     };
-    let output_spec = match output {
-        ResolvedSlot::Binding(binding) => mail.bindings[binding as usize],
-        ResolvedSlot::Transient(transient) => mail.transients[transient as usize],
-    };
-    Ok(target_extent(output_spec).expect("outputs and transients were checked to be Targets"))
+    Ok(attached)
 }
 
 /// A validated draw declaration plus the naga entry index of its vertex
@@ -650,7 +711,7 @@ fn validate_draw(
     index: usize,
     draw: &DrawPass,
     fragment_entry: (usize, &str),
-    output_extent: SlotExtent,
+    attached: Attached,
 ) -> Result<ValidatedDraw, String> {
     let vertex_entry_index = vertex_entry(module, index, &draw.vertex_entry_point)?;
 
@@ -659,7 +720,7 @@ fn validate_draw(
     })?;
     let declared_by = format!("geometry slot {}'s layout", draw.geometry);
     check_vertex_interface(module, index, vertex_entry_index, &slot.layout, &declared_by)?;
-    check_depth(mail, module, index, draw.depth, fragment_entry, output_extent)?;
+    check_depth(mail, module, index, draw.depth, fragment_entry, attached)?;
 
     Ok(ValidatedDraw {
         plan: DrawPlan {
@@ -682,9 +743,10 @@ pub(super) fn vertex_entry(module: &Module, index: usize, name: &str) -> Result<
 }
 
 /// The depth rule every rasterizing pass shares: a pass depth-tests
-/// exactly when it names a depth slot, so the only two ways to be wrong
-/// are naming a slot that does not exist or resolve to the color
-/// output's extent (wgpu requires attachments of one size), and writing
+/// exactly when it names a depth slot, so the ways to be wrong are
+/// naming a slot that does not exist, naming one that does not share
+/// the color output's extent or its sample count (wgpu requires the
+/// attachments of one pass to agree on both), and writing
 /// `@builtin(frag_depth)` from the fragment stage with no depth
 /// attachment to write it into.
 pub(super) fn check_depth(
@@ -693,7 +755,7 @@ pub(super) fn check_depth(
     index: usize,
     depth: Option<u32>,
     fragment_entry: (usize, &str),
-    output_extent: SlotExtent,
+    attached: Attached,
 ) -> Result<(), String> {
     let (fragment_entry_index, fragment_entry_point) = fragment_entry;
     let Some(depth) = depth else {
@@ -706,14 +768,21 @@ pub(super) fn check_depth(
         return Ok(());
     };
 
-    let extent = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
+    let slot = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
         format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len())
     })?;
-    if extent != output_extent {
+    if slot.extent != attached.extent {
         return Err(format!(
-            "pass {index}: depth transient {depth} declares extent {extent:?}, which does not match its color \
-             output's extent {output_extent:?} — a depth attachment must be the size of the color attachment it \
-             tests for",
+            "pass {index}: depth transient {depth} declares extent {:?}, which does not match its color output's \
+             extent {:?} — a depth attachment must be the size of the color attachment it tests for",
+            slot.extent, attached.extent,
+        ));
+    }
+    if slot.samples != attached.samples {
+        return Err(format!(
+            "pass {index}: depth transient {depth} declares samples {:?}, which does not match its color output's \
+             samples {:?} — the attachments of one pass share one sample count",
+            slot.samples, attached.samples,
         ));
     }
     Ok(())
@@ -925,7 +994,7 @@ fn uniform_block_bytes(module: &Module, info: &ModuleInfo, entry_index: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Mips, PassRepeat, Sampling, Wrap};
+    use crate::PassRepeat;
 
     const MODULE: &str = r"
 struct WindowParams { value: f32 }
@@ -942,6 +1011,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     fn pass(entry: &str, inputs: Vec<InputSlot>, output: OutputSlot, offset: u32, length: u32) -> ProgramPass {
         ProgramPass {
             stage: PassStage::Fragment,
+            blend: Blend::Alpha,
             entry_point: entry.to_owned(),
             inputs,
             output,
@@ -959,6 +1029,16 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         }
     }
 
+    /// A full-extent transient of `samples` samples per texel.
+    fn transient(format: TextureFormat, samples: Samples) -> TransientSpec {
+        TransientSpec { format, extent: SlotExtent::Full, samples }
+    }
+
+    /// A full-extent depth slot of `samples` samples per texel.
+    fn depth_slot(samples: Samples) -> DepthSpec {
+        DepthSpec { extent: SlotExtent::Full, samples }
+    }
+
     /// A ping-pong chain writes each hop to a fresh transient; the plan's
     /// live ranges must expire each transient the pass after its last
     /// read, or the dispatch-time pool assignment would either alias a
@@ -969,7 +1049,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         let mail = ProgramRegister {
             wgsl: MODULE.to_owned(),
             bindings: vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)],
-            transients: vec![full(TextureFormat::Rgba8); 3],
+            transients: vec![transient(TextureFormat::Rgba8, Samples::One); 3],
             geometries: Vec::new(),
             depth_transients: Vec::new(),
             passes: vec![
@@ -1023,7 +1103,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         assert!(missing_entry.contains("no fragment entry point"), "entry class: {missing_entry}");
 
         let unwritten_read = rejection(&ProgramRegister {
-            transients: vec![full(TextureFormat::Rgba8)],
+            transients: vec![transient(TextureFormat::Rgba8, Samples::One)],
             passes: vec![ProgramPass { inputs: vec![InputSlot::Transient { index: 0 }], ..valid_pass() }],
             ..base()
         });
@@ -1040,7 +1120,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         assert!(self_read.contains("its own output"), "self-read class: {self_read}");
 
         let transient_tail = rejection(&ProgramRegister {
-            transients: vec![full(TextureFormat::Rgba8)],
+            transients: vec![transient(TextureFormat::Rgba8, Samples::One)],
             passes: vec![ProgramPass { output: OutputSlot::Transient { index: 0 }, ..valid_pass() }],
             ..base()
         });
@@ -1053,10 +1133,9 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         assert!(zero_repeat.contains("repeat count"), "repeat class: {zero_repeat}");
 
         let zero_divisor = rejection(&ProgramRegister {
-            transients: vec![SlotSpec {
-                format: TextureFormat::Rgba8,
-                shape: SlotShape::Target(SlotExtent::Divided { divisor: 0 }),
-                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            transients: vec![TransientSpec {
+                extent: SlotExtent::Divided { divisor: 0 },
+                ..transient(TextureFormat::Rgba8, Samples::One)
             }],
             ..base()
         });
@@ -1114,11 +1193,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     /// The two-binding copy program the shape rules are checked on:
     /// binding 0 read, binding 1 written by the only pass.
-    fn copy_program(bindings: Vec<SlotSpec>, transients: Vec<SlotSpec>) -> ProgramRegister {
+    fn copy_program(bindings: Vec<SlotSpec>) -> ProgramRegister {
         ProgramRegister {
             wgsl: MODULE.to_owned(),
             bindings,
-            transients,
+            transients: Vec::new(),
             geometries: Vec::new(),
             depth_transients: Vec::new(),
             passes: vec![pass(
@@ -1139,10 +1218,8 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// pass rule and not the final-output rule.
     #[test]
     fn a_pass_writing_a_texture_binding_is_refused() {
-        let mut mail = copy_program(
-            vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8), read_only(SlotShape::Texture)],
-            Vec::new(),
-        );
+        let mut mail =
+            copy_program(vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8), read_only(SlotShape::Texture)]);
         mail.passes
             .insert(0, pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Binding { index: 2 }, 0, 4));
 
@@ -1158,21 +1235,12 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     fn a_final_output_that_is_not_a_full_target_is_refused() {
         let halved =
             SlotSpec { shape: SlotShape::Target(SlotExtent::Divided { divisor: 2 }), ..full(TextureFormat::Rgba8) };
-        let reason = rejection(&copy_program(vec![full(TextureFormat::Rgba8), halved], Vec::new()));
+        let reason = rejection(&copy_program(vec![full(TextureFormat::Rgba8), halved]));
         assert!(reason.contains("must declare Target(Full)"), "final-output class: {reason}");
 
-        let any_size = copy_program(vec![full(TextureFormat::Rgba8), read_only(SlotShape::Texture)], Vec::new());
+        let any_size = copy_program(vec![full(TextureFormat::Rgba8), read_only(SlotShape::Texture)]);
         let reason = rejection(&any_size);
         assert!(reason.contains("binding 1"), "the refusal names the binding: {reason}");
-    }
-
-    /// The pool allocates a transient at a size resolved from its
-    /// extent; one declared `Texture` has none to resolve.
-    #[test]
-    fn a_transient_that_is_not_a_target_is_refused() {
-        let bindings = vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)];
-        let reason = rejection(&copy_program(bindings, vec![read_only(SlotShape::Texture)]));
-        assert!(reason.contains("transient 0: a transient must declare a Target shape"), "transient class: {reason}");
     }
 
     /// A `Texture` binding has no extent, so a register that still
@@ -1182,7 +1250,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     #[test]
     fn a_texel_texture_binding_validates() {
         let table = read_only(SlotShape::Texture);
-        let plan = validate(&copy_program(vec![table, full(TextureFormat::Rgba8)], Vec::new()))
+        let plan = validate(&copy_program(vec![table, full(TextureFormat::Rgba8)]))
             .expect("a read-only binding of its own size validates");
         assert_eq!(plan.slot_spec(ResolvedSlot::Binding(0)), table);
         assert_eq!(plan.output_binding, 1);
@@ -1245,6 +1313,20 @@ fn fs_depth_writer() -> DepthOut {
         })
     }
 
+    /// A draw of geometry slot 0 into binding 0 under depth slot 0.
+    fn draw_pass() -> ProgramPass {
+        ProgramPass {
+            stage: draw_stage("vs_flat", 0, Some(0)),
+            blend: Blend::Alpha,
+            entry_point: "fs_flat".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::Binding { index: 0 },
+            uniform_offset: 0,
+            uniform_length: DRAW_PARAMS_BYTES,
+            repeat: None,
+        }
+    }
+
     /// ADR-0171 draw validation: each new failure class replies its own
     /// distinguishable reason. The bugs pinned, one per class: a typo'd
     /// vertex entry or geometry slot reaching wgpu as an opaque
@@ -1258,21 +1340,12 @@ fn fs_depth_writer() -> DepthOut {
     /// attachment to receive it.
     #[test]
     fn draw_validation_classes_have_distinguishable_reasons() {
-        let draw_pass = || ProgramPass {
-            stage: draw_stage("vs_flat", 0, Some(0)),
-            entry_point: "fs_flat".to_owned(),
-            inputs: Vec::new(),
-            output: OutputSlot::Binding { index: 0 },
-            uniform_offset: 0,
-            uniform_length: DRAW_PARAMS_BYTES,
-            repeat: None,
-        };
         let base = || ProgramRegister {
             wgsl: DRAW_MODULE.to_owned(),
             bindings: vec![full(TextureFormat::Rgba8)],
             transients: Vec::new(),
             geometries: vec![position_slot()],
-            depth_transients: vec![SlotExtent::Full],
+            depth_transients: vec![depth_slot(Samples::One)],
             passes: vec![draw_pass()],
         };
 
@@ -1327,8 +1400,8 @@ fn fs_depth_writer() -> DepthOut {
         });
         assert!(bad_depth.contains("depth transient 4 is out of range"), "depth-range class: {bad_depth}");
 
-        let mismatched_depth =
-            rejection(&ProgramRegister { depth_transients: vec![SlotExtent::Divided { divisor: 2 }], ..base() });
+        let halved = DepthSpec { extent: SlotExtent::Divided { divisor: 2 }, ..depth_slot(Samples::One) };
+        let mismatched_depth = rejection(&ProgramRegister { depth_transients: vec![halved], ..base() });
         assert!(
             mismatched_depth.contains("does not match its color output's extent"),
             "depth-extent class: {mismatched_depth}",
@@ -1363,15 +1436,58 @@ fn fs_depth_writer() -> DepthOut {
                 // A fragment entry that reads nothing from group 0, so
                 // only the vertex stage's use can drive the check.
                 entry_point: "fs_opaque".to_owned(),
-                inputs: Vec::new(),
-                output: OutputSlot::Binding { index: 0 },
-                uniform_offset: 0,
                 uniform_length: 4,
-                repeat: None,
+                ..draw_pass()
             }],
         };
         let short = rejection(&mail);
         assert!(short.contains("uniform window"), "window class over the vertex stage: {short}");
+    }
+
+    /// A draw into transient 0 under depth slot 0, then a draw into the
+    /// output binding with no depth, with the transient and the depth
+    /// slot declared as given.
+    fn multisampled_draw(color: Samples, depth: Samples) -> ProgramRegister {
+        ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8)],
+            transients: vec![transient(TextureFormat::Rgba8, color)],
+            geometries: vec![position_slot()],
+            depth_transients: vec![depth_slot(depth)],
+            passes: vec![
+                ProgramPass { output: OutputSlot::Transient { index: 0 }, ..draw_pass() },
+                ProgramPass { stage: draw_stage("vs_flat", 0, None), ..draw_pass() },
+            ],
+        }
+    }
+
+    /// The bug: a `One` depth slot under a `Four` color output
+    /// registers, and wgpu then refuses every dispatch at
+    /// `begin_render_pass` because the attachments of one pass disagree
+    /// on their sample count.
+    #[test]
+    fn a_depth_slot_of_another_sample_count_is_refused() {
+        validate(&multisampled_draw(Samples::Four, Samples::Four)).expect("a Four depth slot under a Four output");
+
+        let reason = rejection(&multisampled_draw(Samples::Four, Samples::One));
+        assert!(reason.contains("pass 0: depth transient 0"), "the refusal names pass and depth slot: {reason}");
+        assert!(reason.contains("samples One") && reason.contains("samples Four"), "and both counts: {reason}");
+    }
+
+    /// The bug: a `Four` `R32Float` transient registers, and the resolve
+    /// a reader needs is refused by wgpu on every dispatch — core
+    /// WebGPU multisamples that format and cannot resolve it.
+    #[test]
+    fn a_four_transient_that_cannot_resolve_is_refused() {
+        let declares = |format: TextureFormat| ProgramRegister {
+            transients: vec![transient(format, Samples::Four)],
+            ..copy_program(vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)])
+        };
+        validate(&declares(TextureFormat::Rgba16Float)).expect("a Four transient of a format that resolves");
+
+        let reason = rejection(&declares(TextureFormat::R32Float));
+        assert!(reason.contains("transient 0"), "the refusal names the transient: {reason}");
+        assert!(reason.contains("R32Float cannot be resolved"), "and the format: {reason}");
     }
 
     const COMPUTE_MODULE: &str = r"
@@ -1421,6 +1537,7 @@ fn fs_red() -> @location(0) vec4<f32> {
     fn compute_pass() -> ProgramPass {
         ProgramPass {
             stage: compute_stage(),
+            blend: Blend::Replace,
             entry_point: "cs_derive".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::None,
@@ -1438,6 +1555,7 @@ fn fs_red() -> @location(0) vec4<f32> {
                 depth: None,
                 load: PassLoad::Clear,
             }),
+            blend: Blend::Alpha,
             entry_point: "fs_red".to_owned(),
             inputs: Vec::new(),
             output: OutputSlot::Binding { index: 0 },
@@ -1519,6 +1637,19 @@ fn fs_red() -> @location(0) vec4<f32> {
         assert!(reason.contains("no preceding compute pass"), "indirect-dependency class: {reason}");
     }
 
+    /// The bug: a compute pass declaring `Additive` registers, and the
+    /// blend it declared silently does nothing — a compute pass has no
+    /// color output for it to apply to.
+    #[test]
+    fn a_compute_pass_declaring_a_blend_is_refused() {
+        let mut blended = compute_program();
+        blended.passes[0].blend = Blend::Additive;
+
+        let reason = rejection(&blended);
+        assert!(reason.contains("pass 0: a compute pass"), "the refusal names the pass: {reason}");
+        assert!(reason.contains("Blend::Replace, not Additive"), "compute-blend class: {reason}");
+    }
+
     #[test]
     fn pass_output_cannot_name_outputless_compute() {
         let mut mail = compute_program();
@@ -1526,6 +1657,7 @@ fn fs_red() -> @location(0) vec4<f32> {
             1,
             ProgramPass {
                 stage: PassStage::Fragment,
+                blend: Blend::Alpha,
                 entry_point: "fs_red".to_owned(),
                 inputs: vec![InputSlot::PassOutput { pass: 0 }],
                 output: OutputSlot::Binding { index: 0 },

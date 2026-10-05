@@ -31,10 +31,10 @@ use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
-    GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
-    ProgramRegisterResult, Sampling, Shape, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthSpec, DrawPass, DrawShapes,
+    DrawTexturedQuads, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass,
+    ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent, SlotShape, SlotSpec, TextureFormat,
+    TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -104,6 +104,7 @@ fn draw_params(color: [f32; 4], depth: f32) -> Vec<u8> {
 fn draw_pass(geometry: u32, depth: Option<u32>, load: PassLoad, uniform_offset: u32) -> ProgramPass {
     ProgramPass {
         stage: PassStage::Draw(DrawPass { vertex_entry_point: "vs_flat".to_owned(), geometry, depth, load }),
+        blend: Blend::Alpha,
         entry_point: "fs_flat".to_owned(),
         inputs: Vec::new(),
         output: OutputSlot::Binding { index: 0 },
@@ -435,7 +436,7 @@ fn consecutive_draw_passes_share_depth_and_occlude() {
             }],
             transients: Vec::new(),
             geometries: vec![position_slot(), position_slot()],
-            depth_transients: vec![SlotExtent::Full],
+            depth_transients: vec![DepthSpec { extent: SlotExtent::Full, samples: Samples::One }],
             passes: vec![
                 draw_pass(0, Some(0), PassLoad::Clear, 0),
                 draw_pass(1, Some(0), PassLoad::Load, window_bytes),
