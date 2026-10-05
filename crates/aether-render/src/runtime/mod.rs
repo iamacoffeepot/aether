@@ -62,13 +62,13 @@ use winit::window::Window;
 // accumulator), `material` (the material-batch accumulator), `capture` (the
 // similarity-reference resolver), and `config` (the `RenderTuningConfig`
 // knobs + `RenderParams`).
-// The program and texture-array requests that arrived before the first
-// render device, kept until it is installed.
-mod awaiting_device;
 mod capture;
 mod config;
 pub use config::{DEFAULT_CLEAR_COLOR, apply_manifest_clear_color};
 mod device;
+// The program and texture-array requests that arrived before the first
+// render device, kept until it is installed.
+mod awaiting_device;
 // The ADR-0246 draw-set registry: retained lists of draws, each checked
 // when its set is made or patched, holding the geometries and instance
 // buffers they name.
@@ -117,9 +117,10 @@ use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_o
 #[cfg(feature = "desktop")]
 use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTargets};
 
+use self::awaiting_device::AwaitingDevice;
+
 // These seam items are `pub` (visible in `render`) in their now-nested child
 // modules, so the re-export up to runtime level keeps that exact visibility.
-use self::awaiting_device::AwaitingDevice;
 pub use self::capture::resolve_reference;
 use self::capture::{AcceptedCapture, PendingCapture};
 use self::device::DeviceRecovery;
@@ -491,7 +492,9 @@ impl RenderCapabilityState {
 
         while let Some(waiting) = self.awaiting_device.pop_front() {
             match waiting {
-                AwaitingDevice::ProgramRegister { mail, held } => held.answer(ctx, &self.answer_program_register(mail)),
+                AwaitingDevice::ProgramRegister { mail, held } => {
+                    held.answer(ctx, &self.answer_program_register(mail));
+                }
                 AwaitingDevice::CreateTextureArray { mail, held } => {
                     held.answer(ctx, &self.answer_create_texture_array(mail));
                 }
