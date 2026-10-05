@@ -165,6 +165,8 @@ cargo xtask muse wait --rpc-port <port> --unit primary --session <key> --after <
 ```
 
 ```text
+turn=21931 input=18422 cached=17920 output=311 reasoning=96
+unreported turn=21940
 rested completed turns=7
 from=<tree digest> to=<tree digest>
 usage input=184220 cached=151040 output=9311 reasoning=4096
@@ -187,6 +189,9 @@ sessions on one engine are each followed by their own `wait`.
   holds end calls from before this change does not replay them.
 - `turns` counts the session's `muse.turn` runs read, and `usage` sums the
   token counts they reported.
+- Each `turn=` line is one turn's own tokens, keyed by the journal seq of its
+  `muse.turn` run; a turn the vendor answered without usage prints
+  `unreported turn=<seq>`.
 - `from` is the tree the activation started on (the open's tree, or the tree
   the continued record held) and `to` the tree its record holds.
 - A fault or failed reaction in the session's chain is printed after the rest
