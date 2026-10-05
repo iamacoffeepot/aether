@@ -12,7 +12,7 @@ use std::{fmt, slice, str};
 
 use aether_bloomery_kinds::{ClosureLimit, RecordedHeadMove};
 use aether_data::wire::WireDecode;
-use aether_data::{Blob, Citation, Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
+use aether_data::{Blob, Citation, Digest, Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Statement, Transaction, TransactionBehavior, params, params_from_iter};
 
@@ -23,7 +23,7 @@ use crate::runtime::clock::{Clock, SystemClock};
 use crate::runtime::closure::{Closure, plan_closure, read_each};
 use crate::runtime::draft::Draft;
 use crate::runtime::worker::WorkerReader;
-use crate::{DecodeError, Digest, Entry, Seq};
+use crate::{DecodeError, Entry, Seq};
 
 /// Kind prefix and payload of one stored artifact, or `None` when absent.
 type LoadedArtifact = Option<(KindId, Vec<u8>)>;
@@ -548,8 +548,8 @@ fn lock_root(root: &Path) -> Result<File, JournalError> {
 /// no event, so every open root holds it and a program can cite it unstaged.
 /// Its file lands before its row, as in [`insert_staged`].
 fn seed_empty_tree(conn: &mut Connection, blobs: &BlobDir, recorded_at_millis: u64) -> Result<(), JournalError> {
-    use aether_bloomery_kinds::{Tree, artifact_blob, hash_bytes};
-    use aether_data::StorageData;
+    use aether_bloomery_kinds::Tree;
+    use aether_data::{StorageData, artifact_blob, hash_bytes};
 
     let payload = Tree::encode_storage(&StorageData::from_value(Tree::empty())).map_err(JournalError::Encode)?;
     let bytes = artifact_blob(Tree::ID, &payload);

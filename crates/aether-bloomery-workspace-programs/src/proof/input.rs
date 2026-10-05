@@ -1,14 +1,16 @@
 //! What a proof tool takes: the arguments the model writes for each proof,
 //! and the session values every proof binds, the environment, the vendor
-//! tree, and the test env.
+//! tree, the cargo config, and the test env.
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Ref, Tree};
+use aether_bloomery_kinds::Tree;
 use aether_bloomery_workspace::{EnvVar, Environment};
-use aether_data::Invariant;
+use aether_data::{Invariant, Ref};
+
+use super::config;
 
 /// The arguments of `proof.clippy`: none. The proof always runs over the
 /// whole workspace in the session's tree, so the model writes `{}`.
@@ -94,12 +96,12 @@ impl TestEnv {
 
 /// What every proof binds besides the tree it runs over: the environment the
 /// run happens in, the crate sources it builds against (ADR-0237
-/// decisions 3 and 4), and the session-supplied test env, which reaches the
-/// test step only. The session that offers a proof binds it, and the
-/// model never sees it.
+/// decisions 3 and 4), the cargo config that points cargo at them, and the
+/// session-supplied test env, which reaches the test step only. The session
+/// that offers a proof binds it, and the model never sees it.
 ///
-/// The environment and vendor are typed citations, so the driver's closure
-/// walk carries them into the invocation.
+/// The environment, vendor, and cargo config are typed citations, so the
+/// driver's closure walk carries them into the invocation.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "proof.bound")]
 pub struct ProofBound {
@@ -111,6 +113,11 @@ pub struct ProofBound {
     /// transition over a source with the same `Cargo.lock`. An empty tree
     /// serves a workspace with no dependencies.
     vendor: Ref<Tree>,
+    /// The tree holding `config.toml`, mounted read-only at `/.cargo`: every
+    /// cargo in the run reads it as an ancestor of `/work`, and it replaces
+    /// crates.io with `/vendor` offline. Staged beside the bound by
+    /// [`cargo_config_artifacts`](super::cargo_config_artifacts).
+    cargo_config: Ref<Tree>,
     /// The session-supplied variables the test step hands cargo. The fmt and
     /// clippy steps never see them.
     test_env: TestEnv,
@@ -118,10 +125,16 @@ pub struct ProofBound {
 
 impl ProofBound {
     /// Proofs that run in `environment`, build against the crate sources
-    /// in `vendor`, and hand `test_env` to the test step only.
+    /// in `vendor` through the fixed cargo config, and hand `test_env` to the
+    /// test step only.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the fixed cargo config tree always encodes.
     #[must_use]
     pub fn new(environment: Ref<Environment>, vendor: Ref<Tree>, test_env: TestEnv) -> Self {
-        Self { environment, vendor, test_env }
+        let cargo_config = Ref::of_encoded(&config::tree()).expect("the fixed cargo config tree encodes");
+        Self { environment, vendor, cargo_config, test_env }
     }
 
     /// The environment the run happens in.
@@ -134,6 +147,12 @@ impl ProofBound {
     #[must_use]
     pub const fn vendor(&self) -> Ref<Tree> {
         self.vendor
+    }
+
+    /// The cargo config tree, mounted at `/.cargo`.
+    #[must_use]
+    pub const fn cargo_config(&self) -> Ref<Tree> {
+        self.cargo_config
     }
 
     /// The session-supplied variables, reaching the test step only.

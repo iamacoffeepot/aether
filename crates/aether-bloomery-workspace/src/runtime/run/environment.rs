@@ -13,8 +13,9 @@
 //! label does not match, are `Refused(EnvironmentUnavailable)`, the one place
 //! that refusal is used. A transport failure is `Failed`.
 
-use aether_bloomery_kinds::{Ref, Tree};
+use aether_bloomery_kinds::Tree;
 use aether_bloomery_tar::{EncodeError, encode};
+use aether_data::Ref;
 
 use super::{Stop, engine_failed, upload_stop};
 use crate::runtime::engine::{Engine, EngineError, UploadError};

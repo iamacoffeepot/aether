@@ -11,6 +11,7 @@
     {
       "id": "rs_0010",
       "type": "reasoning",
+      "encrypted_content": "gAAAAABecho-reasoning",
       "summary": [
         { "type": "summary_text", "text": "Echo both words, then answer." }
       ]

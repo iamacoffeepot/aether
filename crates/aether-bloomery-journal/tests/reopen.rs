@@ -6,8 +6,8 @@ use std::error::Error;
 use std::fs;
 
 use aether_bloomery_journal::{Batch, Draft, Journal, JournalError, MAX_CLOCK_BEHIND_MILLIS, Seq};
-use aether_bloomery_kinds::{Digest, Head, RecordedHeadMove, Ref, Tree};
-use aether_data::{Kind, Storage, StorageData, storage_kind_id_from_name};
+use aether_bloomery_kinds::{Head, RecordedHeadMove, Tree};
+use aether_data::{Digest, Kind, Ref, Storage, StorageData, storage_kind_id_from_name};
 use common::FixedClock;
 use rusqlite::params;
 

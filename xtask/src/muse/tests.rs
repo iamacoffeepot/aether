@@ -10,22 +10,23 @@ use std::{env, process};
 
 use aether_bloomery_journal::{Batch, Journal};
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Fault, FaultReason, JournalEntry, Name, NativeOrigin, Node, Path,
-    ProgramName, ProgramRef, ReactorName, ReadArtifacts, ReadArtifactsResult, ReadEvents, ReadEventsResult, Ref,
-    RequestSource, Requested, RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
+    Activated, ActivationRejected, ClosureArtifact, Detail, EncodedArtifact, Fault, FaultReason, JournalEntry, Name,
+    NativeOrigin, Node, Path, ProgramName, ProgramRef, ReactorName, ReadArtifacts, ReadArtifactsResult, ReadEvents,
+    ReadEventsResult, RequestSource, Requested, RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_muse::{
-    ContinueInput, Echo, Endpoint, InputLimit, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
-    ReasoningEffort, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult,
-    TurnSettings,
+    ContinueInput, Echo, Endpoint, InputLimit, MUSE, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
+    ReasoningEffort, RequiredProofs, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit,
+    TurnResult, TurnSettings,
 };
 use aether_bloomery_program::Program;
 use aether_bloomery_workspace::EnvVar;
 use aether_codec::encode_storage_schema;
-use aether_data::{Cites, Schema, Storage};
+use aether_data::{Cites, Digest, Ref, Schema, Storage};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
+use super::activation::{MuseActivation, muse_activation, verdict_after};
 use super::export::{Action, Change, export};
 use super::open::parse_test_env;
 use super::wait::{Usage, follow};
@@ -232,6 +233,7 @@ fn reference(digest: Digest) -> Value {
 /// A turn that completed after reporting `usage`.
 fn turn(batch: &mut Batch, usage: Usage) -> Result<Digest> {
     let outcome = json!({ "Completed": {
+        "reasoning": [],
         "text": reference(Ref::of_text("done").digest()),
         "usage": {
             "input_tokens": usage.input,
@@ -313,9 +315,17 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
         TurnLimit::new(4)?,
         a0,
         Vec::new(),
+        RequiredProofs::default(),
     ))?;
-    let open_b =
-        batch.stage_encoded(&OpenInput::new(settings, instructions, user, TurnLimit::new(4)?, b0, Vec::new()))?;
+    let open_b = batch.stage_encoded(&OpenInput::new(
+        settings,
+        instructions,
+        user,
+        TurnLimit::new(4)?,
+        b0,
+        Vec::new(),
+        RequiredProofs::default(),
+    ))?;
     let (session_a, session_b, session_b2) =
         (session(&mut batch, a1)?, session(&mut batch, b1)?, session(&mut batch, b2)?);
     let a_called = turn(&mut batch, usage(10, 1, 100, 5))?;
@@ -360,5 +370,73 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
     assert_eq!((rested.turns, rested.usage), (1, usage(30, 3, 300, 7)), "the continue's turns are B's");
     assert_eq!((rested.from, rested.session.tree()), (Some(b1.digest()), b2));
     assert!(rested.faults.is_empty());
+    Ok(())
+}
+
+/// The muse head brought live for `BUNDLE` from `live_from`, at `cause`.
+fn activated(reads: &mut JournalReads, live_from: u64, cause: Option<u64>) -> Result<u64> {
+    reads.push(&Activated::new(MUSE, BUNDLE, Seq(live_from))?, cause)
+}
+
+/// The muse head's activation rejected for `reason`, at `cause`.
+fn rejected(reads: &mut JournalReads, reason: &str, cause: u64) -> Result<u64> {
+    reads.push(&ActivationRejected { head: MUSE, bundle: BUNDLE, reason: Detail::new(reason) }, Some(cause))
+}
+
+#[test]
+fn an_owed_muse_head_refuses_with_the_rejection_reason_and_the_remedy() -> Result<()> {
+    // Catches a fold that keeps reporting the earlier activation as live, or loses the reason the driver recorded.
+    let (_root, mut reads) = scratch_journal()?;
+    let first = activated(&mut reads, 1, None)?;
+    let owed = rejected(&mut reads, "cannot decode session 7", first)?;
+
+    let state = muse_activation(&mut reads)?;
+    let error = state.refuse_unless_live("primary").expect_err("not live").to_string();
+
+    assert!(matches!(state, MuseActivation::Rejected { seq, .. } if seq == owed));
+    assert!(error.contains("cannot decode session 7"), "{error}");
+    assert!(error.contains(&format!("entry {owed}")), "{error}");
+    assert!(error.contains("--bloomery-units primary=<dir>"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn a_reactivated_muse_head_is_live_again() -> Result<()> {
+    // Catches a reader that latches the last rejection after the driver brought the reactor live again.
+    let (_root, mut reads) = scratch_journal()?;
+    let first = activated(&mut reads, 1, None)?;
+    let owed = rejected(&mut reads, "cannot decode session 7", first)?;
+    activated(&mut reads, owed, Some(owed))?;
+
+    let state = muse_activation(&mut reads)?;
+
+    assert_eq!(state, MuseActivation::Live { bundle: BUNDLE });
+    state.refuse_unless_live("primary")
+}
+
+#[test]
+fn the_verdict_after_a_fence_ignores_an_earlier_rejection() -> Result<()> {
+    // Catches a bind that fails on a rejection recorded before its own publish, after a rebind that came live.
+    let (_root, mut reads) = scratch_journal()?;
+    let first = activated(&mut reads, 1, None)?;
+    let owed = rejected(&mut reads, "cannot decode session 7", first)?;
+    activated(&mut reads, owed, Some(owed))?;
+
+    let verdict = verdict_after(&mut reads, first)?;
+
+    assert_eq!(verdict, MuseActivation::Live { bundle: BUNDLE });
+    Ok(())
+}
+
+#[test]
+fn a_journal_never_bound_refuses_naming_bind() -> Result<()> {
+    // Catches an open that proceeds, or blames a rejection, on a journal where the muse head was never activated.
+    let (_root, mut reads) = scratch_journal()?;
+
+    let state = muse_activation(&mut reads)?;
+    let error = state.refuse_unless_live("primary").expect_err("not live").to_string();
+
+    assert_eq!(state, MuseActivation::Never);
+    assert!(error.contains("muse bind"), "{error}");
     Ok(())
 }

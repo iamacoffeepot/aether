@@ -6,8 +6,8 @@ use core::fmt;
 
 use crate::view::contract::View;
 use crate::view::sequence::{SequenceError, check_next};
-use aether_bloomery_kinds::{Activated, ActivationRejected, DecodeError, Entry, Head, OpaqueBytes, Seq};
-use aether_data::Kind;
+use aether_bloomery_kinds::{Activated, ActivationRejected, DecodeError, Entry, Head, Seq};
+use aether_data::{Kind, OpaqueBytes};
 
 /// Per-head activation state over a contiguous log prefix.
 ///

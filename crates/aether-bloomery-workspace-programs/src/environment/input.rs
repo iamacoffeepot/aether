@@ -1,6 +1,7 @@
 //! `environment.merge.input`: the two imported trees an environment is merged from.
 
-use aether_bloomery_kinds::{Ref, Tree};
+use aether_bloomery_kinds::Tree;
+use aether_data::Ref;
 
 /// The two imported trees an environment is merged from (ADR-0237 decision 3).
 ///

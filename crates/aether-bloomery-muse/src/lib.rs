@@ -30,7 +30,11 @@
 //! program never runs a call. A later turn replays the call as
 //! [`TurnItem::Call`] and its [`ToolOutput`] as [`TurnItem::CallOutput`]:
 //! a stored result, which the program renders to JSON with the result schema
-//! the output cites, or the refusal text, sent as stored.
+//! the output cites, or the refusal text, sent as stored. The request asks
+//! for each reply's reasoning as encrypted content, and a called or completed
+//! reply keeps every reasoning item that carries it as a [`Reasoning`], which
+//! the next turn resends as [`TurnItem::Reasoning`] ahead of the reply's text
+//! and calls, so the model keeps its chain of thought across turns.
 //!
 //! The program links no tool's types; everything it decodes or renders with
 //! is cited. The rendering is deterministic, so the request a turn sends is a
@@ -58,7 +62,8 @@
 //! rest writes the conversation and
 //! the latest tree down as a [`Session`] (`muse.session`) through
 //! `muse.session.record`, moving the session's head to it. The bound tools are
-//! [`TreeEdit`] (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
+//! [`TreeEdit`] (`tree.edit`), [`TreeWrite`] (`tree.write`), and
+//! [`TreeRemove`] (`tree.remove`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
 //! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
@@ -66,10 +71,10 @@
 //! and the fixture [`Echo`] (`muse.echo`). A session opened with
 //! [`offered_with_proofs`] also offers `proof.clippy` and `proof.test` from
 //! the `workspace-programs` bundle, bound to its environment, vendor tree,
-//! and test env: the first formats the tree and checks it with clippy, the
-//! second formats the tree and runs its workspace tests with the session's
-//! test env, and each one's `Edited` tree the loop carries on like an edit's.
-//! It also offers [`VendorList`] (`vendor.list`), [`VendorRead`]
+//! cargo config, and test env: the first formats the tree and checks it with
+//! clippy, the second formats the tree and runs its workspace tests with the
+//! session's test env, and each one's `Edited` tree the loop carries on like
+//! an edit's. It also offers [`VendorList`] (`vendor.list`), [`VendorRead`]
 //! (`vendor.read`), and [`VendorGrep`] (`vendor.grep`), the read-only tools
 //! over the vendor tree that same bound cites, which return [`Viewed`] as
 //! their `tree.*` siblings do.
@@ -121,20 +126,21 @@ mod tools;
 pub use input::{
     CallId, CallIdError, Endpoint, EndpointError, FunctionName, FunctionNameError, InputLimit, InputLimitError,
     ModelName, ModelNameError, OfferedTool, OfferedTools, OfferedToolsError, OutputBudget, OutputBudgetError,
-    ReasoningEffort, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput, ToolOutput, TurnInput, TurnItem, TurnItems,
-    TurnItemsError,
+    Reasoning, ReasoningEffort, ReasoningId, ReasoningIdError, Role, ToolCall, ToolCalls, ToolCallsError, ToolInput,
+    ToolOutput, TurnInput, TurnItem, TurnItems, TurnItemsError,
 };
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, MAX_TOOL_RETRIES, MUSE,
-    MuseSession, OpenInput, Opened, RecordInput, RestReason, Session, SessionContinue, SessionExhausted, SessionItems,
+    Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, GateFailure, GateInput, Gated,
+    MAX_GATE_RUNS, MAX_TOOL_RETRIES, MUSE, MuseSession, OpenInput, Opened, RecordInput, RequiredProof, RequiredProofs,
+    RequiredProofsError, RestReason, Session, SessionContinue, SessionExhausted, SessionGate, SessionItems,
     SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
-    ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, VendorGrep, VendorList, VendorRead,
-    Viewed, WriteArgs, offered, offered_with_proofs,
+    ReadArgs, RemoveArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeRemove, TreeWrite, VIEW_MAX_BYTES, VendorGrep,
+    VendorList, VendorRead, Viewed, WriteArgs, offered, offered_with_proofs, proof_passed, required_proofs,
 };
 
 aether_actor::export!(
@@ -144,10 +150,12 @@ aether_actor::export!(
         SessionContinue,
         SessionRecord,
         SessionExhausted,
+        SessionGate,
         Echo,
         End,
         TreeEdit,
         TreeWrite,
+        TreeRemove,
         TreeList,
         TreeRead,
         TreeGrep,

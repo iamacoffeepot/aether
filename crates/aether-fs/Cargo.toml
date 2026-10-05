@@ -51,6 +51,11 @@ aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # and drives the chassis-wired `FsCapability` through `execute`.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 
+# The offload scenarios block a worker on a FIFO (`mkfifo`) and probe a
+# FIFO's reader with a non-blocking open (`O_NONBLOCK`).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 # cargo-machete (the CI unused-deps gate) scans source without resolving
 # features, so it cannot see that `clap` and `confique` are used only
 # through the `Config` derive's codegen under the optional `runtime`

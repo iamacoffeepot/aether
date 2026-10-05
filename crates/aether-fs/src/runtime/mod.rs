@@ -14,9 +14,16 @@ use super::{AdapterRegistry, FsFoldError, FsTransformError};
 // `HandlesKind<K>` markers through `pub use kinds::*`.
 use super::{
     Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsCapability, FsError, FsFetch, FsFetchError, FsFetchResult,
-    List, ListResult, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult, build_registry,
+    List, ListResult, Load, Loaded, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+    build_registry,
 };
 use aether_actor::runtime;
+use aether_data::Blob;
+use aether_substrate::actor::native::{BlobCheckIn, Pending, TaskDone, TaskQueue};
+
+mod load_queue;
+
+use load_queue::LoadQueue;
 
 pub use std::any::Any;
 pub use std::fs;
@@ -43,6 +50,32 @@ pub struct FsCapabilityState {
     /// Link-time native-transform registry (ADR-0048 §2). Built once
     /// at `init`; immutable thereafter.
     transforms: TransformRegistry,
+    /// Frame-bound reads on worker threads, each holding its request's
+    /// chain until it is answered.
+    reads: TaskQueue<ReadResult>,
+    /// Loads on worker threads, each owed through a `defer`red `Held` that
+    /// holds no chain: answered late, after the caller's chain has settled.
+    loads: LoadQueue,
+}
+
+/// How many `aether.fs.read`s read on worker threads at once; a read over
+/// the bound waits its turn in arrival order. Separate from the load
+/// bound so background loads never hold up a read a frame is waiting on.
+pub const MAX_READS_IN_FLIGHT: usize = 4;
+
+/// How many `aether.fs.load`s read on worker threads at once; a load over
+/// the bound waits its turn in arrival order and is never dropped.
+pub const MAX_LOADS_IN_FLIGHT: usize = 4;
+
+/// Read `addr` through its namespace's adapter and check the bytes into the
+/// engine blob store, on whichever thread calls it. The one read both the
+/// `read` and `load` workers run.
+fn read_blob(registry: &AdapterRegistry, addr: &NamespaceAddr, check_in: &BlobCheckIn) -> Result<Blob, FsError> {
+    registry
+        .get(&addr.namespace)
+        .ok_or(FsError::UnknownNamespace)?
+        .read(&addr.path)
+        .map(|bytes| check_in.check_in(bytes.into_boxed_slice()))
 }
 
 pub fn map_fold_error(e: &FoldError) -> FsFoldError {
@@ -106,21 +139,67 @@ impl NativeActor for FsCapability {
             transforms = transforms.len(),
             "adapters registered",
         );
-        Ok(FsCapabilityState { registry, transforms })
+        Ok(FsCapabilityState {
+            registry,
+            transforms,
+            reads: TaskQueue::new(MAX_READS_IN_FLIGHT),
+            loads: LoadQueue::new(MAX_LOADS_IN_FLIGHT),
+        })
     }
 
-    /// Read bytes from a logical namespace path.
+    /// Read bytes from a logical namespace path on a worker thread, so
+    /// several reads run at once. The request's chain stays held until its
+    /// reply goes out: a read sent on a `Tick` chain holds that frame.
     ///
     /// # Agent
     /// Reply: `ReadResult`. Echoes the address on both arms.
     #[handler::request]
-    fn on_read(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Read) -> ReadResult {
-        let bytes = state
-            .adapter(&mail.addr)
-            .and_then(|adapter| adapter.read(&mail.addr.path))
-            .map(|bytes| ctx.check_in(bytes.into_boxed_slice()));
+    fn on_read(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Read) -> Pending<ReadResult> {
+        let registry = Arc::clone(&state.registry);
+        let check_in = ctx.blob_check_in();
 
-        ReadResult::from_op(mail.addr, bytes)
+        state.reads.submit(ctx, move || {
+            let read = read_blob(&registry, &mail.addr, &check_in);
+            ReadResult::from_op(mail.addr, read)
+        })
+    }
+
+    /// Completion of a read: the queue answers the read's own caller, then
+    /// starts the next waiting read in the freed slot.
+    #[handler(task)]
+    fn on_read_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<ReadResult>) {
+        state.reads.complete(ctx, done);
+    }
+
+    /// Read bytes without holding the caller's chain. `ctx.defer` owes the
+    /// `Loaded` reply with no settlement hold, so the caller's chain (and a
+    /// `Tick` frame it rides) settles as soon as this handler returns; the
+    /// load reads on a worker, and its completion answers the caller late,
+    /// by its correlation, with the context the caller bound.
+    ///
+    /// # Agent
+    /// Reply: `Loaded`, sent after the file is read and after the request's
+    /// own chain has settled. Echoes the address on both arms. Over MCP the
+    /// call settles before the reply exists; use `aether.fs.read` there.
+    #[handler::request]
+    fn on_load(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Load) -> Pending<Loaded> {
+        let (pending, held) = ctx.defer::<Loaded>();
+        let registry = Arc::clone(&state.registry);
+        let check_in = ctx.blob_check_in();
+
+        state.loads.submit(ctx, held, move || {
+            let read = read_blob(&registry, &mail.addr, &check_in);
+            Loaded::from_op(mail.addr, read)
+        });
+
+        pending
+    }
+
+    /// Completion of a load: answer its caller late, then start the next
+    /// waiting load in the freed slot.
+    #[handler(task)]
+    fn on_load_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<Loaded>) {
+        state.loads.complete(ctx, done);
     }
 
     /// Write bytes to a logical namespace path. Atomic via tmp+rename
@@ -267,12 +346,11 @@ mod tests {
     };
     use aether_actor::{Addressable, HandlesKind};
     use aether_data::{Kind, SessionToken, Uuid, transform};
-    use aether_substrate::PumpedSlot;
-    use aether_substrate::chassis::builder::{Builder, PassiveChassis, ReplyTarget};
+    use aether_substrate::chassis::builder::{Builder, ReplyTarget};
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{
-        TestChassis, boot_bare_test_chassis, cleanup, decode_session_reply, fresh_substrate, fresh_substrate_and_rx,
-        scratch_dir,
+        PumpedDriver, TestChassis, boot_bare_test_chassis, cleanup, decode_session_reply, fresh_substrate,
+        fresh_substrate_and_rx, scratch_dir,
     };
     use aether_substrate::transform::TransformRegistry;
     use std::fs;
@@ -474,14 +552,14 @@ mod tests {
     /// A real `FsCapability` booted as a pumped actor over scratch namespace
     /// roots: its own `init` builds the adapters (`save` read-write, `assets`
     /// read-only), a request is pushed to its proven reference with a session
-    /// reply target, [`PumpedSlot::drain_available`] runs the production
-    /// dispatch body, and the reply is decoded off the loopback egress.
+    /// reply target, the [`PumpedDriver`] drains the actor on each mail wake
+    /// until the request's chain settles (a read's worker completion
+    /// included), and the reply is decoded off the loopback egress.
     struct PumpedFs {
         root: PathBuf,
         roots: NamespaceRoots,
         rx: Receiver<EgressEvent>,
-        chassis: PassiveChassis<TestChassis>,
-        cap: PumpedSlot<FsCapability>,
+        driver: PumpedDriver<FsCapability>,
     }
 
     impl PumpedFs {
@@ -490,10 +568,9 @@ mod tests {
             let roots = roots_under(&root);
             let (registry, mailer, rx) = fresh_substrate_and_rx();
             let chassis = boot_bare_test_chassis(&registry, &mailer);
-            let (cap, _wake) =
-                chassis.boot_pumped_actor::<FsCapability>(roots.clone(), ()).expect("FsCapability boots pumped");
+            let driver = PumpedDriver::boot(chassis, roots.clone(), ());
 
-            Self { root, roots, rx, chassis, cap }
+            Self { root, roots, rx, driver }
         }
 
         fn request<K, R>(&mut self, mail: &K) -> R
@@ -503,12 +580,8 @@ mod tests {
             FsCapability: HandlesKind<K>,
         {
             let session = SessionToken(Uuid::nil());
-            self.chassis.send_for_reply(
-                self.chassis.actor_ref::<FsCapability>(),
-                mail,
-                ReplyTarget::Session { session, correlation: 1 },
-            );
-            self.cap.drain_available();
+            let fs = self.driver.chassis().actor_ref::<FsCapability>();
+            self.driver.send_and_settle(fs, mail, Some(ReplyTarget::Session { session, correlation: 1 }));
 
             decode_session_reply(&self.rx)
         }
@@ -524,7 +597,6 @@ mod tests {
 
     impl Drop for PumpedFs {
         fn drop(&mut self) {
-            self.cap.shutdown();
             cleanup(&self.root);
         }
     }

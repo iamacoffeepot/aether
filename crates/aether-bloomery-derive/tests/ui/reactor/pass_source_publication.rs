@@ -1,7 +1,8 @@
 // Named current-head guard plus a direct Heads parameter. The generated
 // Arg chain must typecheck with Rust inferring roles.
 
-use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, SetHeads, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, Program, SetHeads, Tree};
+use aether_data::Ref;
 use aether_bloomery_program::{ArmVisitor, Guard, Output, Params, Reactor, Trigger, reactor, At, Heads};
 
 const CURRENT: Head<Program> = Head::new("current");

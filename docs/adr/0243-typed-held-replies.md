@@ -47,7 +47,7 @@ fn on_watch_head(.., m: WatchHead) -> Pending<WatchHeadResult> {
 held.answer(ctx, &WatchHeadResult { .. });
 ```
 
-1. **`ctx.hold::<R>()` returns `(Pending<R>, Held<R>)`.** It arms one entry in the in-flight ledger, the table `dispatch_arm` already fills for offload and spawn staging. The entry holds the current settlement hold and reply target, and has no worker. Both values carry the entry's `DispatchId`:
+1. **`ctx.hold::<R>()` returns `(Pending<R>, Held<R>)`.** It arms one entry in the in-flight ledger, the table `dispatch_arm` already fills for offload and spawn staging. The entry holds the current settlement hold and reply target, and has no worker. Its twin `ctx.defer::<R>()` arms the same entry with no settlement hold, for a request whose caller must not wait: the caller's chain settles when the handler returns, and the later answer reaches the caller by its correlation and joins no chain. Both values carry the entry's `DispatchId`:
 
    ```rust
    pub struct Pending<R> { id: DispatchId, _reply: PhantomData<fn() -> R> }   // the receipt

@@ -1,8 +1,9 @@
 //! Bundle whose one rule turns a move of a `test.program.summarize.input`
 //! head into a `CallProgram` for the summarize program.
 
-use aether_bloomery_kinds::{CallInput, CallProgram, Head, HeadMoved, ProgramName, Ref, Utf8Text};
+use aether_bloomery_kinds::{CallInput, CallProgram, Head, HeadMoved, ProgramName};
 use aether_bloomery_program::{At, Guard, NoViews, ViewCursor, reactor, view};
+use aether_data::{Ref, Utf8Text};
 use aether_test_fixtures_kinds::{SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 struct SummarizeName(ProgramName);

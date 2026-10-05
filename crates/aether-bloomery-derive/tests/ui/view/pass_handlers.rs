@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 
-use aether_bloomery_kinds::Ref;
+use aether_data::Ref;
 use aether_bloomery_program::{At, Cited, CitedError, View, ViewCursor, view};
 
 #[derive(Clone, aether_data::Storage)]

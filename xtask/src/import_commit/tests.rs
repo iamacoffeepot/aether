@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{env, process, str};
 
 use aether_bloomery_journal::{AppendError, Batch, Journal};
-use aether_bloomery_kinds::{
-    Digest, EncodedArtifact, Head, Name, Node, OpaqueBytes, Path, Publish, PublishResult, Ref, Seq, Tree,
-};
+use aether_bloomery_kinds::{EncodedArtifact, Head, Name, Node, Path, Publish, PublishResult, Seq, Tree};
+use aether_data::{Digest, OpaqueBytes, Ref};
 use anyhow::{Context, Result, bail};
 
 use super::batch::split;

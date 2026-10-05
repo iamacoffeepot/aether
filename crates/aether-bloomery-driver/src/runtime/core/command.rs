@@ -1,9 +1,10 @@
 //! The core's outbox: one [`Command`] per requested effect.
 
 use aether_bloomery_kinds::{
-    ApiCallResult, AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult,
+    ApiCallResult, AppendRecords, CallOutcome, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult,
     ReadArtifacts, ReadClosure, ReadEvents, Warm, WatchHead,
 };
+use aether_data::Digest;
 
 use super::ticket::{
     ApiTicket, AppendTicket, ArtifactTicket, ArtifactsTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket,

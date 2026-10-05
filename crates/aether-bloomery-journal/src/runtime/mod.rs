@@ -29,7 +29,7 @@
 //! [`ArtifactBatch`]es on any thread, which stream blobs into their files a
 //! chunk at a time ([`BlobFile`]) and commit their rows through the same row
 //! insert and citation check `append` runs (ADR-0237 open question 1).
-//! Citations are typed [`Ref`](crate::Ref) values collected by a derive-emitted walk.
+//! Citations are typed [`Ref`](aether_data::Ref) values collected by a derive-emitted walk.
 //! The one recognized exception is `bloomery.head_moved`: `append` decodes
 //! that kind from the draft as [`RecordedHeadMove`]
 //! and verifies that its destination exists with the recorded head's
@@ -122,7 +122,9 @@ use aether_bloomery_kinds::{
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 use aether_substrate::chassis::error::BootError;
 
-use crate::{Digest, JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
+use aether_data::Digest;
+
+use crate::{JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
 use cache::ReadCache;
 use watch::Watchers;
 use worker::ReadPrefix;

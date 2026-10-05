@@ -35,23 +35,25 @@ pub struct ModuleManifest {
     namespace: Option<String>,
     content_addressed: bool,
     asset_catalog: Vec<AssetInfo>,
+    asset_sections: Vec<AssetSection>,
 }
 
-/// Where one asset's payload sits in the wasm bytes, for the cache to check
-/// it in as its own blob.
-pub(super) struct AssetSection {
-    pub(super) name: AssetName,
-    pub(super) range: Range<usize>,
+/// Where one asset's payload sits in the wasm bytes, for a load window to
+/// read it from the code its opener brought (ADR-0163 §3).
+#[derive(Clone)]
+pub struct AssetSection {
+    pub name: AssetName,
+    pub range: Range<usize>,
 }
 
 impl ModuleManifest {
     /// Parse every section the engine reads from `wasm`, with each reader's
     /// own error. Readers run in the order a load reports them: kinds, the
     /// exported and private groups, boot, lineage, namespace, then assets.
-    /// The asset sections come back beside the manifest, as the byte ranges
-    /// the cache checks in. A content-addressed module exporting a namespace
-    /// too long to carry its hash in one segment is refused, naming it.
-    pub(super) fn parse(wasm: &[u8]) -> Result<(Self, Vec<AssetSection>), String> {
+    /// Each asset keeps its catalog entry and its byte range, never its
+    /// bytes. A content-addressed module exporting a namespace too long to
+    /// carry its hash in one segment is refused, naming it.
+    pub(super) fn parse(wasm: &[u8]) -> Result<Self, String> {
         let kinds = kind_manifest::read_from_bytes(wasm)?;
         let actors = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
         let private_actors = kind_manifest::read_private_actor_inputs_from_bytes(wasm)?;
@@ -60,7 +62,7 @@ impl ModuleManifest {
         let namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
         let records = asset_manifest::read_assets_from_bytes(wasm)?;
 
-        let sections = records
+        let asset_sections = records
             .iter()
             .map(|record| {
                 Ok(AssetSection {
@@ -82,6 +84,7 @@ impl ModuleManifest {
             namespace,
             content_addressed: kind_manifest::read_content_addressed_marker(wasm),
             asset_catalog: records.into_iter().map(|record| record.info).collect(),
+            asset_sections,
         };
         if manifest.content_addressed
             && let Some((namespace, _)) = manifest
@@ -95,7 +98,7 @@ impl ModuleManifest {
                 namespace.len()
             ));
         }
-        Ok((manifest, sections))
+        Ok(manifest)
     }
 
     /// Every kind the `aether.kinds` section declares, labels merged.
@@ -184,5 +187,13 @@ impl ModuleManifest {
     #[must_use]
     pub fn asset_catalog(&self) -> &[AssetInfo] {
         &self.asset_catalog
+    }
+
+    /// Each asset's name and the byte range of its payload in the module's
+    /// wasm bytes, in section order: what a load window reads from the code
+    /// its opener brought.
+    #[must_use]
+    pub fn asset_sections(&self) -> &[AssetSection] {
+        &self.asset_sections
     }
 }

@@ -13,10 +13,11 @@ use aether_http::{FetchResult, HttpError, HttpHeader};
 use serde::Deserialize;
 
 use crate::arguments;
-use crate::input::{CallId, FunctionName, OfferedTool, ToolCall, ToolCalls};
+use crate::input::{CallId, FunctionName, OfferedTool, Reasoning, ReasoningId, ToolCall, ToolCalls};
 use crate::result::{HttpStatus, TurnOutcome, TurnResult, TurnUsage};
 
-/// Stage the reply body and whatever text and call arguments it carries, and build the result that cites them.
+/// Stage the reply body and whatever text, reasoning, and call arguments it carries, and build the result that cites
+/// them.
 ///
 /// `offered` is the turn's offered tools, and `inputs[i]` is the read input schema of `offered[i]`. A call named for an
 /// offered tool decodes its arguments against that tool's schema and cites the staged input, or the staged refusal of
@@ -38,8 +39,10 @@ pub fn record(
 
     let staged_body = env.stage_bytes(&body);
     let outcome = match classify(status, vendor_verdict(&headers), retry_after_secs(&headers), &body, offered) {
-        Classified::Completed { text, usage } => TurnOutcome::Completed { text: env.stage_text(&text), usage },
-        Classified::Called { calls, text, usage } => {
+        Classified::Completed { reasoning, text, usage } => {
+            TurnOutcome::Completed { reasoning: stage_reasoning(env, reasoning), text: env.stage_text(&text), usage }
+        }
+        Classified::Called { reasoning, calls, text, usage } => {
             let calls = calls
                 .into_iter()
                 .map(|ReadCall { call_id, name, tool, arguments }| {
@@ -59,7 +62,12 @@ pub fn record(
                 })
                 .collect();
             let calls = ToolCalls::new(calls).expect("classify checked the call list's rules");
-            TurnOutcome::Called { calls, text: env.stage_text(&text), usage }
+            TurnOutcome::Called {
+                reasoning: stage_reasoning(env, reasoning),
+                calls,
+                text: env.stage_text(&text),
+                usage,
+            }
         }
         Classified::Incomplete { text, reason, usage } => {
             TurnOutcome::Incomplete { text: env.stage_text(&text), reason: Detail::new(reason), usage }
@@ -70,6 +78,15 @@ pub fn record(
         Classified::Unreadable => TurnOutcome::Unreadable,
     };
     Ok(TurnResult::received(code, staged_body, outcome))
+}
+
+/// Each read reasoning item with its encrypted content staged, in reply order. The content is base64 ASCII, so it is
+/// valid text.
+fn stage_reasoning(env: &mut Env<Async>, reasoning: Vec<ReadReasoning>) -> Vec<Reasoning> {
+    reasoning
+        .into_iter()
+        .map(|ReadReasoning { id, encrypted }| Reasoning::new(id, env.stage_text(&encrypted)))
+        .collect()
 }
 
 /// Sort a fetch that got no reply.
@@ -121,8 +138,8 @@ fn header<'a>(headers: &'a [HttpHeader], name: &str) -> Option<&'a str> {
 /// A reply read into plain values, before any artifact is staged.
 #[derive(Debug, PartialEq, Eq)]
 enum Classified {
-    Completed { text: String, usage: TurnUsage },
-    Called { calls: Vec<ReadCall>, text: String, usage: TurnUsage },
+    Completed { reasoning: Vec<ReadReasoning>, text: String, usage: TurnUsage },
+    Called { reasoning: Vec<ReadReasoning>, calls: Vec<ReadCall>, text: String, usage: TurnUsage },
     Incomplete { text: String, reason: String, usage: TurnUsage },
     Declined { refusal: String, usage: TurnUsage },
     Rejected,
@@ -147,11 +164,16 @@ enum Classified {
 ///    `ToolCalls::MAX_CALLS`.
 /// 10. A vendor status of `incomplete` is `Incomplete`; `completed` without a call is `Completed`, which the loop
 ///     answers with another turn; any other is `Unreadable`.
+/// 11. A `Called` or `Completed` reply keeps every `reasoning` output item that carries `encrypted_content`, in reply
+///     order, and skips one without it, since there is nothing to resend. It is `Unreadable` instead when a kept
+///     item's id is not a valid `ReasoningId`.
 ///
 /// A `Transient` outcome carries `retry_after_secs` as read. The text is every
 /// `output_text` part of every `message` output item, concatenated in order.
-/// Reasoning items never contribute. A call's arguments are kept verbatim;
-/// [`record`] decodes them after.
+/// Reasoning items contribute no text; they are kept beside it, and an
+/// `Incomplete` or `Declined` reply keeps none, since those turns rest the
+/// session and a resent reasoning item needs the item it produced after it.
+/// A call's arguments are kept verbatim; [`record`] decodes them after.
 fn classify(
     status: u16,
     verdict: Option<bool>,
@@ -187,16 +209,21 @@ fn classify(
         return Classified::Declined { refusal: refusals.concat(), usage };
     }
     let text: String = parts().filter_map(ContentPart::output_text).collect();
+    let reasoning = read_reasoning(&reply.output);
     let calls: Vec<_> = reply.output.into_iter().filter_map(OutputItem::into_call).collect();
     if reply.status == "completed" && !calls.is_empty() {
-        return read_calls(calls, offered).map_or(Classified::Unreadable, |calls| Classified::Called {
+        let read = reasoning.zip(read_calls(calls, offered));
+        return read.map_or(Classified::Unreadable, |(reasoning, calls)| Classified::Called {
+            reasoning,
             calls,
             text,
             usage,
         });
     }
     match reply.status.as_str() {
-        "completed" => Classified::Completed { text, usage },
+        "completed" => {
+            reasoning.map_or(Classified::Unreadable, |reasoning| Classified::Completed { reasoning, text, usage })
+        }
         "incomplete" => {
             let reason = reply.incomplete_details.and_then(|details| details.reason).unwrap_or_default();
             Classified::Incomplete { text, reason, usage }
@@ -215,6 +242,24 @@ struct ReadCall {
     tool: Option<usize>,
     /// The arguments, verbatim.
     arguments: String,
+}
+
+/// One reasoning item of a reply that carried encrypted content, read before any artifact is staged.
+#[derive(Debug, PartialEq, Eq)]
+struct ReadReasoning {
+    id: ReasoningId,
+    /// The encrypted content, verbatim.
+    encrypted: String,
+}
+
+/// Every reasoning item of `output` that carries encrypted content, in order, or `None` when a kept item's id breaks
+/// [`classify`]'s step 11.
+fn read_reasoning(output: &[OutputItem]) -> Option<Vec<ReadReasoning>> {
+    output
+        .iter()
+        .filter_map(OutputItem::reasoning)
+        .map(|(id, encrypted)| Some(ReadReasoning { id: ReasoningId::new(id?).ok()?, encrypted: encrypted.to_owned() }))
+        .collect()
 }
 
 /// Each call read against the offered tools, or `None` when any breaks a rule of [`classify`]'s step 9.
@@ -273,6 +318,11 @@ enum OutputItem {
         content: Vec<ContentPart>,
     },
     FunctionCall(FunctionCall),
+    /// A `reasoning` output item: the model's chain of thought, encrypted for the client to hand back.
+    Reasoning {
+        id: Option<String>,
+        encrypted_content: Option<String>,
+    },
     #[serde(other)]
     Other,
 }
@@ -289,14 +339,22 @@ impl OutputItem {
     fn parts(&self) -> &[ContentPart] {
         match self {
             Self::Message { content } => content,
-            Self::FunctionCall(_) | Self::Other => &[],
+            Self::FunctionCall(_) | Self::Reasoning { .. } | Self::Other => &[],
         }
     }
 
     fn into_call(self) -> Option<FunctionCall> {
         match self {
             Self::FunctionCall(call) => Some(call),
-            Self::Message { .. } | Self::Other => None,
+            Self::Message { .. } | Self::Reasoning { .. } | Self::Other => None,
+        }
+    }
+
+    /// A reasoning item's id as sent and its encrypted content, when it carries any.
+    fn reasoning(&self) -> Option<(Option<&str>, &str)> {
+        match self {
+            Self::Reasoning { id, encrypted_content: Some(encrypted) } => Some((id.as_deref(), encrypted)),
+            Self::Message { .. } | Self::FunctionCall(_) | Self::Reasoning { .. } | Self::Other => None,
         }
     }
 }
@@ -370,9 +428,9 @@ mod tests {
 
     use aether_bloomery_kinds::ProgramName;
 
-    use super::{Classified, ReadCall, classify, retry_after_secs, vendor_verdict};
+    use super::{Classified, ReadCall, ReadReasoning, classify, retry_after_secs, vendor_verdict};
     use crate::input::tests::offered_tool;
-    use crate::input::{CallId, FunctionName, OfferedTool, ToolCalls};
+    use crate::input::{CallId, FunctionName, OfferedTool, ReasoningId, ToolCalls};
     use crate::result::TurnUsage;
 
     const COMPLETED: &str = include_str!("../fixtures/completed.json");
@@ -391,17 +449,22 @@ mod tests {
         names.iter().map(|name| offered_tool(program(name))).collect()
     }
 
+    fn thought(id: &str, encrypted: &str) -> ReadReasoning {
+        ReadReasoning { id: ReasoningId::new(id).expect("reasoning id"), encrypted: encrypted.to_owned() }
+    }
+
     fn one_header(name: &str, value: &str) -> Vec<HttpHeader> {
         vec![HttpHeader { name: name.into(), value: value.into() }]
     }
 
     #[test]
     fn completed_reply_joins_message_text_and_reads_every_usage_count() {
-        // Catches reasoning text leaking into the answer, only the first part kept, and cached or
-        // reasoning tokens read from the wrong path.
+        // Catches reasoning text leaking into the answer, the reasoning item's encrypted content not kept, only the
+        // first part kept, and cached or reasoning tokens read from the wrong path.
         assert_eq!(
             classify(200, None, None, COMPLETED.as_bytes(), &[]),
             Classified::Completed {
+                reasoning: vec![thought("rs_0001", "gAAAAABcompleted-reasoning")],
                 text: "A bloomery is a furnace that smelts iron into a bloom.".into(),
                 usage: TurnUsage::new(1200, 1024, 340, 300),
             }
@@ -539,10 +602,12 @@ mod tests {
     #[test]
     fn a_reply_that_asks_for_calls_records_every_call_in_order() {
         // Catches a reply read as `Completed` with its calls dropped, only the first call kept, a call matched to
-        // the wrong tool, and arguments rewritten instead of kept verbatim.
+        // the wrong tool, arguments rewritten instead of kept verbatim, and the reasoning item dropped or its
+        // vendor-shaped `rs_…:rs_…` id refused.
         assert_eq!(
             classify(200, None, None, CALLED.as_bytes(), &offer(&["muse.turn", "workspace.read"])),
             Classified::Called {
+                reasoning: vec![thought("rs_0002:rs_0002", "gAAAAABcalled-reasoning")],
                 calls: vec![
                     read("call_read", "workspace-read", Some(1), READ_ARGUMENTS),
                     read("call_turn", "muse-turn", Some(0), TURN_ARGUMENTS),
@@ -570,6 +635,7 @@ mod tests {
             assert_eq!(
                 classify(200, None, None, body.as_bytes(), &offered),
                 Classified::Called {
+                    reasoning: vec![thought("rs_0002:rs_0002", "gAAAAABcalled-reasoning")],
                     calls: vec![
                         read("call_read", "workspace-read", read_tool, READ_ARGUMENTS),
                         read("call_turn", name, None, TURN_ARGUMENTS),
@@ -583,12 +649,34 @@ mod tests {
     }
 
     #[test]
+    fn a_reasoning_item_without_encrypted_content_is_skipped() {
+        // Catches a summary-only reasoning item recorded as resendable, which the next turn would send with no
+        // content, and one that makes the reply unreadable instead of skipped.
+        let mut reply: serde_json::Value = serde_json::from_str(CALLED).expect("fixture parses");
+        reply["output"][0].as_object_mut().expect("the reasoning item is an object").remove("encrypted_content");
+        reply["output"][0]["id"] = "rs 0002".into();
+
+        let classified =
+            classify(200, None, None, reply.to_string().as_bytes(), &offer(&["muse.turn", "workspace.read"]));
+
+        let Classified::Called { reasoning, calls, .. } = classified else {
+            panic!("a summary-only reasoning item leaves the reply called: {classified:?}");
+        };
+        assert_eq!((reasoning, calls.len()), (Vec::new(), 2));
+    }
+
+    #[test]
     fn a_call_the_turn_cannot_record_leaves_the_reply_unreadable() {
-        // Catches a `ToolCalls` built past its own rule on a repeated or invalid call id or too many calls, and a
-        // name past the cap stored as a call's name.
+        // Catches a `ToolCalls` built past its own rule on a repeated or invalid call id or too many calls, a
+        // name past the cap stored as a call's name, and a reasoning item kept under an id the next turn could not
+        // resend.
         let both = offer(&["muse.turn", "workspace.read"]);
         let repeated = CALLED.replace("call_turn", "call_read");
         let spaced = CALLED.replace("call_turn", "call turn");
+        let spaced_reasoning = CALLED.replace("rs_0002:rs_0002", "rs 0002");
+        let mut unnamed: serde_json::Value = serde_json::from_str(CALLED).expect("fixture parses");
+        unnamed["output"][0].as_object_mut().expect("the reasoning item is an object").remove("id");
+        let unnamed = unnamed.to_string();
         let too_long = CALLED.replace("muse-turn", &"a".repeat(FunctionName::MAX_BYTES + 1));
         let mut reply: serde_json::Value = serde_json::from_str(CALLED).expect("fixture parses");
         let call = reply["output"][2].clone();
@@ -605,6 +693,8 @@ mod tests {
             ("an invalid call id", spaced.as_str()),
             ("a name past the cap", too_long.as_str()),
             ("more calls than the cap", too_many.as_str()),
+            ("an invalid reasoning id", spaced_reasoning.as_str()),
+            ("a reasoning item without an id", unnamed.as_str()),
         ];
         for (label, body) in cases {
             assert_eq!(classify(200, None, None, body.as_bytes(), &both), Classified::Unreadable, "{label}");

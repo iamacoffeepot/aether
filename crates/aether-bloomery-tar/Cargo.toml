@@ -8,6 +8,7 @@ description = "The canonical tar codec for bloomery trees: encode a tree as a ca
 
 [dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data" }
 
 [lints]
 workspace = true

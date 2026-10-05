@@ -292,7 +292,7 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
             waiting: #program::__macro_internals::BTreeMap<u64, #program::__macro_internals::PendingCall>,
             next_call: u64,
             fetching: #program::__macro_internals::BTreeMap<
-                #program::kinds::Digest,
+                #program::__macro_internals::Digest,
                 #program::__macro_internals::PendingArtifact,
             >,
         }

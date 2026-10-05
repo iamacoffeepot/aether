@@ -146,8 +146,8 @@ them all.
 
 **A bounded queue holds each reply and stages each request's work.** A native
 capability that bounds its concurrent blocking calls uses `TaskQueue<R>`
-(`aether-http`'s per-sender egress and the workspace run queue are the same
-shape). `submit` runs in the request's own turn: it holds the reply with
+(`aether-http`'s per-sender egress, the workspace run queue, and `aether.fs`
+reads are the same shape). `submit` runs in the request's own turn: it holds the reply with
 `ctx.hold::<R>()`, keeps the `Held<R>`, and stages the work, so the task holds
 that request's chain whether it starts now or waits for a slot. The completion
 is one line:
@@ -164,6 +164,14 @@ correlated to, answers it with the output, and starts the next waiting task in
 the freed slot. The waiting task's chain is still its own request's, so a
 request's chain settles when that request is answered, never when another
 request's work finishes.
+
+A request the caller should not wait for is owed with `ctx.defer` (below)
+instead of `hold`. `aether.fs.load` defers its `Loaded` reply and keeps the
+`Held` on its own bounded queue; a started load's worker attaches to that debt
+with `dispatch_blocking_held_with`, and its completion `resolve`s it. The
+caller's chain settles as soon as the handler returns, and the late reply
+reaches the caller's response handler by its correlation, with the context the
+caller bound, joining no chain.
 
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the
@@ -202,6 +210,17 @@ parked while the engine keeps running answers each with its reply kind's
 `unanswered()` (the `HeldReply` trait) before releasing its hold, and an
 engine teardown releases them silently.
 
+**A reply owed later that the caller must not wait for → `ctx.defer`.**
+`ctx.defer::<R>()` is `hold` for a request whose caller's chain should settle
+now, such as a load sent from a `Tick` handler that must not hold the frame. It
+returns the same `Pending<R>` and `Held<R>` and parks the same ledger entry,
+but with no settlement hold: the caller's chain settles when the handler
+returns. `answer` later replies to the captured caller with its correlation, so
+the caller's response handler still gets the context it bound, and the reply
+joins no chain. A worker or bounded queue answers it through
+`dispatch_blocking_held_with`. The one-debt-per-dispatch rule, the drop panic,
+and the close-time `unanswered()` apply as for `hold`.
+
 ## The offload shapes, and the hold
 
 Settlement — how `send_mail_traced` knows a chain of mail is *fully* done rather
@@ -217,6 +236,7 @@ the causal chain open*:
 | `spawn_detached` | no — the worker holds no chain and sends no mail | true fire-and-forget background work |
 | `dispatch_blocking` (hold-until-resolve) | yes — until you `resolve`, *outliving* the worker | the "reply in a later turn" shape above |
 | `stage_blocking` (staged task) | yes — the staging turn's chain, until the completion handler ends | work that owes no reply, and a bounded queue's waiting work |
+| `ctx.defer` (a held reply with no hold) | no — the caller's chain settles when the handler returns, and the later answer joins no chain | a request answered later whose caller must not wait |
 
 A panic in any of them is fatal
 ([ADR-0063](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0063-fail-fast-on-abnormal-component-lifecycle.md)):

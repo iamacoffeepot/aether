@@ -4,11 +4,11 @@
 use std::str;
 
 use aether_bloomery_kinds::{
-    ArtifactDigests, ClosureArtifact, ClosureLimit, Digest, JournalEntry, ReadArtifacts, ReadArtifactsResult,
-    ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, WatchHead, WatchHeadResult,
+    ArtifactDigests, ClosureArtifact, ClosureLimit, JournalEntry, ReadArtifacts, ReadArtifactsResult, ReadEvents,
+    ReadEventsResult, RecordedHead, RecordedHeadMove, WatchHead, WatchHeadResult,
 };
 use aether_codec::frame::max_frame_size;
-use aether_data::Storage;
+use aether_data::{Digest, Storage};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::Reads;

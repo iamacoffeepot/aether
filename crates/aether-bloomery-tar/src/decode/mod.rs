@@ -10,7 +10,8 @@ use std::fmt;
 use std::io::{self, ErrorKind, Read};
 use std::mem;
 
-use aether_bloomery_kinds::{Node, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Node, Tree};
+use aether_data::{OpaqueBytes, Ref};
 
 pub use refusal::Refusal;
 pub use rules::{Limits, LimitsError, Rules};

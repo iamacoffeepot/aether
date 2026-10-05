@@ -2,7 +2,9 @@
 
 use aether_actor::HeldReply;
 
-use crate::{Detail, Digest, Fault, Head, NativeOrigin, OpaqueBytes, ProgramName, Transition};
+use aether_data::{Digest, OpaqueBytes};
+
+use crate::{Detail, Fault, Head, NativeOrigin, ProgramName, Transition};
 
 /// Ask the driver to run program `name` from the bundle `program` resolves to, over `input`.
 ///

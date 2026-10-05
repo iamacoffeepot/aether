@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 
-use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::{OpaqueBytes, Ref};
 
 fn name(value: &str) -> Name {
     Name::new(value).expect("valid name")

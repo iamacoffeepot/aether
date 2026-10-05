@@ -5,9 +5,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, Draft, Journal, OpaqueBytes, Seq, Utf8Text};
-use aether_bloomery_kinds::{Head, HeadMoved, Name, Node, RecordedHeadMove, Ref, Tree};
-use aether_data::{Kind, KindId, Storage, StorageData};
+use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
+use aether_bloomery_kinds::{Head, HeadMoved, Name, Node, RecordedHeadMove, Tree};
+use aether_data::{Digest, Kind, KindId, OpaqueBytes, Ref, Storage, StorageData, Utf8Text};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.head_note")]

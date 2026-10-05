@@ -6,18 +6,23 @@
 # `toolchain.Dockerfile` is built on, so both trees share one libc.
 FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
-# The packages the workspace's build scripts need, plus the CA roots a fetch
-# needs: `vendor.cargo` runs `cargo vendor` with the network on inside the
-# merged environment, so the environment itself must verify TLS.
+# The packages the workspace's build scripts need, the tools its tests spawn,
+# and the CA roots a fetch needs: `vendor.cargo` runs `cargo vendor` with the
+# network on inside the merged environment, so the environment itself must
+# verify TLS.
 #
 #   build-essential  cc, c++, make, and libc headers for the `cc` crate builds
 #   pkg-config       the `pkg-config` crate's probe for system libraries
 #   libasound2-dev   alsa-sys links libasound through pkg-config (cpal audio)
 #   ca-certificates  vendor.cargo fetches crates over HTTPS inside the environment
+#   git              xtask's tests and the verifier spawn git
+#   python3          the verifier's preflight requires it (xtask/src/transform/verify/mod.rs)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
       libasound2-dev \
       ca-certificates \
+      git \
+      python3 \
  && rm -rf /var/lib/apt/lists/*

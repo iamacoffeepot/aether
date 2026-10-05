@@ -5,8 +5,8 @@ use core::borrow::Borrow;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Detail, FaultReason, Head, ProgramName, Ref, Tree, Utf8Text};
-use aether_data::Invariant;
+use aether_bloomery_kinds::{Detail, FaultReason, Head, ProgramName, Tree};
+use aether_data::{Invariant, Ref, Utf8Text};
 
 use crate::input::{
     Endpoint, InputLimit, ModelName, OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, TurnInput,
@@ -372,13 +372,14 @@ invariant_errors!(TurnLimitError);
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Ref, Tree};
-    use aether_data::{Storage, StorageData};
+    use aether_bloomery_kinds::Tree;
+    use aether_data::{Ref, Storage, StorageData};
 
     use super::{RestReason, Session, SessionItems, SessionItemsError, TurnLimit, TurnLimitError};
     use crate::input::tests::call;
     use crate::input::{CallId, OfferedTools, OutputBudget, Role, ToolOutput, TurnItem, TurnItemsError};
     use crate::session::fixture::settings;
+    use crate::session::gate::RequiredProofs;
     use crate::session::open::OpenInput;
 
     fn message(role: Role, text: &str) -> TurnItem {
@@ -418,6 +419,7 @@ mod tests {
             TurnLimit(0),
             tree,
             Vec::new(),
+            RequiredProofs::default(),
         );
         let bytes = OpenInput::encode_storage(&StorageData::from_value(zero)).expect("encode");
         assert!(OpenInput::decode_storage(&bytes).is_err(), "a zero limit refuses on decode");

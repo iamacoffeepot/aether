@@ -4,8 +4,8 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Digest, GetError, OpaqueBytes, Seq, Utf8Text};
-use aether_data::Kind;
+use aether_bloomery_journal::{Batch, GetError, Seq};
+use aether_data::{Digest, Kind, OpaqueBytes, Utf8Text};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]

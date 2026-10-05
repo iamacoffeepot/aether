@@ -6,7 +6,8 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 
-use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::{OpaqueBytes, Ref};
 
 use crate::block::{BLOCK_BYTES, Header, NAME_FIELD_BYTES, chunk_len, padding_len, typeflag};
 use crate::store::{SourceBlob, TreeSource};

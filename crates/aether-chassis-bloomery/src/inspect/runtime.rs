@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use aether_actor::{ActorRef, ReplyMode, runtime};
 use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::JournalActor;
-use aether_bloomery_kinds::{
-    Declarations, DeclarationsResult, Digest, ReadArtifact, ReadArtifactResult, ReadEventsResult,
-};
+use aether_bloomery_kinds::{Declarations, DeclarationsResult, ReadArtifact, ReadArtifactResult, ReadEventsResult};
+use aether_data::Digest;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 

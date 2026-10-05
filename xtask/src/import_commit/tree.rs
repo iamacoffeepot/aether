@@ -12,7 +12,8 @@ use std::error::Error;
 use std::fmt;
 use std::str;
 
-use aether_bloomery_kinds::{Digest, EncodedArtifact, Name, NameError, Node, Path, PathError, Ref, Tree};
+use aether_bloomery_kinds::{EncodedArtifact, Name, NameError, Node, Path, PathError, Tree};
+use aether_data::{Digest, Ref};
 use anyhow::{Context, Result};
 
 use super::read::Listing;

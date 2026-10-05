@@ -5,13 +5,13 @@ use aether_actor::{ActorInitError, ActorRef};
 use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{
-    Call, ClosureArtifact, Digest, EncodedArtifact, HeadNameError, NativeOrigin, ProgramName, Publish, RecordedHead,
-    RecordedHeadMove, Ref, Tree,
+    Call, ClosureArtifact, EncodedArtifact, HeadNameError, NativeOrigin, ProgramName, Publish, RecordedHead,
+    RecordedHeadMove, Tree,
 };
 use aether_bloomery_workspace::Environment;
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_bloomery_workspace_programs::environment::MergeInput;
-use aether_data::{Kind, Storage, StorageError};
+use aether_data::{Digest, Kind, Ref, Storage, StorageError};
 
 /// The program that builds the environment.
 const MERGE: &str = "environment.merge";

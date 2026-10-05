@@ -2,9 +2,9 @@
 
 use alloc::vec;
 
-use aether_data::{Kind, KindId};
+use aether_data::{Digest, Kind, KindId};
 
-use crate::{Digest, HeadChange, RecordedHead, SetHeads};
+use crate::{HeadChange, RecordedHead, SetHeads};
 
 #[aether_data::kind(name = "aether.bloomery.driver.set_head", eq, no_serde)]
 struct LegacySetHead {

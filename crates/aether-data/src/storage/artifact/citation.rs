@@ -1,19 +1,22 @@
 //! Citations of a stored artifact: [`Ref`] with its kind in the type, and
 //! [`ErasedRef`] with its kind known only at runtime.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
-use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{
-    Citations, Cites, DocNode, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageLeaves,
+use super::{Digest, OpaqueBytes, Utf8Text, artifact_digest};
+use crate::storage::{
+    RecordReader, RecordWriter, StorageElement, StorageError, assemble_tagged_element, assemble_with_aliases,
+    contribute_tagged_element, fold_path_segment,
 };
-
-use crate::Digest;
-use crate::artifact::{OpaqueBytes, Utf8Text, artifact_digest};
+use crate::wire::{Decoder, Encoder, Error as WireError, WireDecode, WireEncode};
+use crate::{
+    Citations, Cites, Doc, DocCell, DocNode, FieldDoc, Kind, KindId, LabelNode, NamedField, Schema, SchemaType,
+    Storage, StorageData, StorageLeaves,
+};
 
 /// The only storable citation: 32 bytes, transparent leaf, kind in the type.
 pub struct Ref<K> {
@@ -39,7 +42,7 @@ impl<K: Kind> Ref<K> {
     /// The same citation with its kind moved from the type to a value.
     #[must_use]
     pub fn erase(self) -> ErasedRef {
-        ErasedRef { parts: ErasedParts { kind: K::ID, digest: self.digest } }
+        ErasedRef::new(K::ID, self.digest)
     }
 }
 
@@ -105,8 +108,8 @@ impl<K: Kind + 'static> Schema for Ref<K> {
     const LABEL_NODE: LabelNode = <[u8; 32] as Schema>::LABEL_NODE;
 }
 
-impl<K> aether_data::CrossesActors for Ref<K> {}
-impl<K> aether_data::CrossesWire for Ref<K> {}
+impl<K> crate::CrossesActors for Ref<K> {}
+impl<K> crate::CrossesWire for Ref<K> {}
 
 impl<K: Kind + 'static> StorageLeaves for Ref<K> {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
@@ -156,99 +159,152 @@ impl<K: Kind> Cites for Ref<K> {
 /// the cited kind. It cites like [`Ref`]: [`Cites`] pushes its kind and
 /// digest, so a closure walk injects the artifact and the store checks its
 /// prefix. [`Self::cast`] recovers the typed [`Ref`].
+///
+/// Its codecs are written by hand because this crate cannot use its own
+/// `#[derive(Storage)]`. They are the derive's expansion for a two-field
+/// struct `{ kind: KindId, digest: Digest }`: the same field names folded
+/// into the path carry, in the same order, with the same element tagging, so
+/// an `ErasedRef` stores exactly as a derived struct of that shape does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ErasedRef {
-    parts: ErasedParts,
-}
-
-/// The stored fields of an [`ErasedRef`]. Its derive emits the codecs;
-/// [`ErasedRef`] adds the one citation the derive cannot, since a
-/// [`KindId`] and a bare [`Digest`] each cite nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, aether_data::Storage)]
-struct ErasedParts {
     /// The kind the cited artifact is stored under.
     kind: KindId,
     /// The digest of the cited artifact.
     digest: Digest,
 }
 
+const KIND_FIELD: &str = "kind";
+const DIGEST_FIELD: &str = "digest";
+
 impl ErasedRef {
     /// Cite the artifact `digest` names, stored under `kind`. Unchecked, like
     /// [`Ref::from_digest`]; the store verifies the prefix.
     #[must_use]
     pub const fn new(kind: KindId, digest: Digest) -> Self {
-        Self { parts: ErasedParts { kind, digest } }
+        Self { kind, digest }
     }
 
     /// The kind the cited artifact is stored under.
     #[must_use]
     pub const fn kind(&self) -> KindId {
-        self.parts.kind
+        self.kind
     }
 
     /// The digest this citation names.
     #[must_use]
     pub const fn digest(&self) -> Digest {
-        self.parts.digest
+        self.digest
     }
 
     /// The typed citation, when the cited kind is `K`.
     #[must_use]
     pub fn cast<K: Kind>(self) -> Option<Ref<K>> {
-        (self.parts.kind == K::ID).then(|| Ref::from_digest(self.parts.digest))
+        (self.kind == K::ID).then(|| Ref::from_digest(self.digest))
     }
 }
 
 impl Schema for ErasedRef {
-    const SCHEMA: SchemaType = ErasedParts::SCHEMA;
+    const SCHEMA: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[
+            NamedField { name: Cow::Borrowed(KIND_FIELD), ty: <KindId as Schema>::SCHEMA },
+            NamedField { name: Cow::Borrowed(DIGEST_FIELD), ty: <Digest as Schema>::SCHEMA },
+        ]),
+        repr_c: false,
+    };
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::ErasedRef"));
-    const LABEL_NODE: LabelNode = ErasedParts::LABEL_NODE;
-    const DOC_NODE: DocNode = ErasedParts::DOC_NODE;
+    const LABEL_NODE: LabelNode = LabelNode::Struct {
+        type_label: Some(Cow::Borrowed(concat!(module_path!(), "::ErasedRef"))),
+        field_names: Cow::Borrowed(&[Cow::Borrowed(KIND_FIELD), Cow::Borrowed(DIGEST_FIELD)]),
+        fields: Cow::Borrowed(&[<KindId as Schema>::LABEL_NODE, <Digest as Schema>::LABEL_NODE]),
+    };
+    const DOC_NODE: DocNode = DocNode::Struct {
+        fields: Cow::Borrowed(&[
+            FieldDoc {
+                doc: Doc::Written(Cow::Borrowed("The kind the cited artifact is stored under.")),
+                node: DocCell::Static(&<KindId as Schema>::DOC_NODE),
+                opaque: "`ErasedRef.kind` has a struct or enum type with no doc tree (a hand-written `Schema`); a program input cannot expose it",
+            },
+            FieldDoc {
+                doc: Doc::Written(Cow::Borrowed("The digest of the cited artifact.")),
+                node: DocCell::Static(&<Digest as Schema>::DOC_NODE),
+                opaque: "`ErasedRef.digest` has a struct or enum type with no doc tree (a hand-written `Schema`); a program input cannot expose it",
+            },
+        ]),
+    };
 }
 
-impl aether_data::CrossesActors for ErasedRef {}
-impl aether_data::CrossesWire for ErasedRef {}
+impl crate::CrossesActors for ErasedRef {}
+impl crate::CrossesWire for ErasedRef {}
 
 impl StorageLeaves for ErasedRef {
     fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        self.parts.contribute(carry, depth, sink)
+        self.kind.contribute(fold_path_segment(carry, KIND_FIELD.as_bytes(), depth), depth + 1, sink)?;
+        self.digest.contribute(fold_path_segment(carry, DIGEST_FIELD.as_bytes(), depth), depth + 1, sink)
     }
 
     fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        Ok(Self { parts: ErasedParts::assemble(carry, depth, source)? })
+        let kind_carry = fold_path_segment(carry, KIND_FIELD.as_bytes(), depth);
+        let digest_carry = fold_path_segment(carry, DIGEST_FIELD.as_bytes(), depth);
+
+        Ok(Self {
+            kind: assemble_with_aliases::<KindId>(kind_carry, &[], depth + 1, source)?,
+            digest: assemble_with_aliases::<Digest>(digest_carry, &[], depth + 1, source)?,
+        })
     }
 
     fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
-        ErasedParts::is_absent(carry, depth, source)
+        let kind_absent = <KindId as StorageLeaves>::is_absent(
+            fold_path_segment(carry, KIND_FIELD.as_bytes(), depth),
+            depth + 1,
+            source,
+        );
+        let digest_absent = <Digest as StorageLeaves>::is_absent(
+            fold_path_segment(carry, DIGEST_FIELD.as_bytes(), depth),
+            depth + 1,
+            source,
+        );
+        kind_absent && digest_absent
     }
 }
 
 impl WireEncode for ErasedRef {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
-        self.parts.encode(out)
+        self.encode_to(out)
+    }
+
+    fn encode_to<E: Encoder + ?Sized>(&self, enc: &mut E) -> Result<(), WireError> {
+        self.kind.encode_to(enc)?;
+        self.digest.encode_to(enc)
     }
 }
 
 impl<'de> WireDecode<'de> for ErasedRef {
+    const PROVES_ROUTES: bool =
+        <KindId as WireDecode<'de>>::PROVES_ROUTES || <Digest as WireDecode<'de>>::PROVES_ROUTES;
+
     fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
-        Ok(Self { parts: ErasedParts::decode(cursor)? })
+        Self::decode_from(cursor)
+    }
+
+    fn decode_from<D: Decoder<'de> + ?Sized>(dec: &mut D) -> Result<Self, WireError> {
+        Ok(Self { kind: KindId::decode_from(dec)?, digest: Digest::decode_from(dec)? })
     }
 }
 
 impl StorageElement for ErasedRef {
-    const TAGGED: bool = ErasedParts::TAGGED;
+    const TAGGED: bool = true;
 
     fn contribute_element(&self, depth: u32, out: &mut Vec<u8>) -> Result<(), StorageError> {
-        self.parts.contribute_element(depth, out)
+        contribute_tagged_element(self, depth, out)
     }
 
     fn assemble_element(depth: u32, cursor: &mut &[u8]) -> Result<Self, StorageError> {
-        Ok(Self { parts: ErasedParts::assemble_element(depth, cursor)? })
+        assemble_tagged_element(depth, cursor)
     }
 }
 
 impl Cites for ErasedRef {
     fn cites(&self, sink: &mut Citations) {
-        sink.push(self.parts.kind, self.parts.digest.as_bytes());
+        sink.push(self.kind, self.digest.as_bytes());
     }
 }

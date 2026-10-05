@@ -4,13 +4,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery_kinds::{EncodedArtifact, Ref};
-use aether_bloomery_muse::{OpenInput, SessionOpen, offered, offered_with_proofs};
+use aether_bloomery_kinds::{EncodedArtifact, ProgramName};
+use aether_bloomery_muse::{OpenInput, RequiredProofs, SessionOpen, offered, offered_with_proofs, required_proofs};
+use aether_bloomery_program::function_name;
 use aether_bloomery_workspace::{EnvVar, TreePath};
 use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
+use aether_data::Ref;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
+use super::activation::muse_activation;
 use super::{EngineArgs, SettingsArgs, call, turn_limit};
 use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
@@ -38,7 +41,9 @@ pub(super) struct OpenArgs {
     brief: PathBuf,
     /// A file holding the session instructions, sent as the leading developer
     /// message ahead of the brief with [`PREFACE`] chained ahead of it, and
-    /// [`PROOFS`] after that when the session is offered the proof tools.
+    /// [`PROOFS`] after that when the session is offered the proof tools, and
+    /// what [`gate_preface`] says after that when its `Done` end must pass
+    /// any.
     #[arg(long)]
     instructions: PathBuf,
     /// A file naming one tree path per line, each read with `tree.read`
@@ -64,16 +69,26 @@ pub(super) struct OpenArgs {
     /// `--environment` / `--vendor`.
     #[arg(long, requires = "environment")]
     test_env: Vec<String>,
+    /// A proof tool a `Done` end must pass on the session's tree, by program
+    /// name (`proof.clippy`, `proof.test`), repeatable; each runs over the
+    /// whole workspace. Needs `--environment` / `--vendor`. None gates
+    /// nothing.
+    #[arg(long, requires = "environment")]
+    require: Vec<String>,
 }
 
 /// Open the session and print `tree=<digest>`, `session=<key>`, and
-/// `after=<seq>`, the boundary `wait` reads from.
+/// `after=<seq>`, the boundary `wait` reads from; refuse when the muse reactor
+/// is not live.
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
-    let ((tools, mut artifacts), preface) =
-        proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?.map_or_else(
-            || (offered(), PREFACE.to_owned()),
-            |proofs| (offered_with_proofs(&proofs), [PREFACE, PROOFS].concat()),
-        );
+    let proofs = proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?;
+    let ((tools, mut artifacts), preface) = proofs.as_ref().map_or_else(
+        || (offered(), PREFACE.to_owned()),
+        |proofs| (offered_with_proofs(proofs), [PREFACE, PROOFS].concat()),
+    );
+    let (required, required_args) = required(proofs.as_ref(), &args.require)?;
+    artifacts.extend(required_args);
+    let preface = format!("{preface}{}", gate_preface(&required)?);
     let brief =
         fs::read_to_string(&args.brief).with_context(|| format!("reading the brief {}", args.brief.display()))?;
     let instructions = fs::read_to_string(&args.instructions)
@@ -81,6 +96,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         .with_context(|| format!("reading the instructions {}", args.instructions.display()))?;
     let seeds = args.seeds.as_deref().map(seeds).transpose()?.unwrap_or_default();
     let mut engine = args.engine.connect()?;
+    muse_activation(&mut engine)?.refuse_unless_live(&args.engine.unit)?;
 
     let tree = match (&args.commit, &args.tree) {
         (Some(commit), _) => Imported::read(Path::new("."), commit)?.stage(&mut engine)?.root,
@@ -95,6 +111,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         turn_limit(args.max_turns)?,
         Ref::from_digest(tree),
         seeds,
+        required,
     );
     let open = EncodedArtifact::new(&input)?;
     let input = Ref::from_digest(open.digest());
@@ -118,6 +135,39 @@ fn proofs(environment: Option<&str>, vendor: Option<&str>, test_env: &[String]) 
         ))),
         _ => Ok(None),
     }
+}
+
+/// The proofs each `--require` value names among those offered over
+/// `proofs`, with the arguments to stage; none when no proof is offered,
+/// which `--require` needing `--environment` leaves only with no value.
+fn required(proofs: Option<&ProofBound>, names: &[String]) -> Result<(RequiredProofs, Vec<EncodedArtifact>)> {
+    let Some(proofs) = proofs else {
+        return Ok((RequiredProofs::default(), Vec::new()));
+    };
+    let names = names
+        .iter()
+        .map(|name| ProgramName::new(name.as_str()).map_err(|error| anyhow!("--require {name:?}: {error}")))
+        .collect::<Result<Vec<_>>>()?;
+    required_proofs(proofs, &names).map_err(|error| anyhow!("--require: {error}"))
+}
+
+/// What a session whose `Done` end must pass `required` is told after
+/// [`PROOFS`], naming each proof by its function name, or nothing when no
+/// proof is required.
+fn gate_preface(required: &RequiredProofs) -> Result<String> {
+    let proofs = required
+        .as_slice()
+        .iter()
+        .map(|proof| function_name(proof.program()).map(|function| format!("`{function}`")))
+        .collect::<Result<Vec<_>, _>>()?;
+    if proofs.is_empty() {
+        return Ok(String::new());
+    }
+    let proofs = proofs.join(" and ");
+    Ok(format!(
+        "Ending `Done` runs {proofs} on your tree, and the run ends only once each passes; a failure answers your \
+         `muse-end` call with what failed, and the session goes on.\n\n"
+    ))
 }
 
 /// The session-supplied test env: each `--test-env` value split at its first

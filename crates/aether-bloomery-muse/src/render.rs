@@ -1,16 +1,17 @@
 //! The text each conversation item sends.
 //!
-//! A message sends its text, a replayed call its verbatim arguments, and a
-//! refused output its stored text. A result is rendered: its stored payload
-//! decoded with the schema its output cites and serialized as JSON, with
-//! every 32-byte digest as lowercase hex. Object keys serialize sorted, so
-//! the rendered bytes depend only on the cited payload and schema, and the
-//! same input always sends the same request.
+//! A message sends its text, a replayed call its verbatim arguments, a
+//! reasoning item its encrypted content, and a refused output its stored
+//! text. A result is rendered: its stored payload decoded with the schema its
+//! output cites and serialized as JSON, with every 32-byte digest as
+//! lowercase hex. Object keys serialize sorted, so the rendered bytes depend
+//! only on the cited payload and schema, and the same input always sends the
+//! same request.
 
-use aether_bloomery_kinds::{Detail, Digest, ErasedRef, Refusal};
+use aether_bloomery_kinds::{Detail, Refusal};
 use aether_bloomery_program::{Async, Env, ToolSchema};
 use aether_codec::decode_storage_schema;
-use aether_data::{EnumVariant, Primitive, SchemaType};
+use aether_data::{Digest, EnumVariant, ErasedRef, Primitive, SchemaType};
 use serde_json::Value;
 
 use crate::input::{ToolOutput, TurnItem};
@@ -31,6 +32,7 @@ pub async fn item(env: &mut Env<Async>, item: &TurnItem) -> Result<String, Refus
             env.read_text(*text).await
         }
         TurnItem::Call(call) => env.read_text(call.arguments()).await,
+        TurnItem::Reasoning(reasoning) => env.read_text(reasoning.encrypted()).await,
         TurnItem::CallOutput { output: ToolOutput::Result { schema, result }, .. } => {
             let schema = env.read(*schema).await?;
             let result = of_kind(&schema, *result)?;
@@ -166,9 +168,8 @@ fn refused(reason: String) -> Refusal {
 mod tests {
     use core::array;
 
-    use aether_bloomery_kinds::{Digest, Ref};
     use aether_bloomery_program::{Edited, NoDetail, ToolSchema};
-    use aether_data::{Storage, StorageData};
+    use aether_data::{Digest, Ref, Storage, StorageData};
 
     use super::json;
 

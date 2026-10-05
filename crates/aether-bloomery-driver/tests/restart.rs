@@ -5,10 +5,10 @@ mod support;
 
 use aether_bloomery_driver::{Command, InvocationLimit, ProgramCore};
 use aether_bloomery_kinds::{
-    ActivationRejected, Detail, Digest, Evaluated, HeadChange, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead,
-    RecordedHeadMove, Ref, RuleName, SetHeads, Status,
+    ActivationRejected, Detail, Evaluated, HeadChange, ReactorIntent, ReactorName, RecordedHead, RecordedHeadMove,
+    RuleName, SetHeads, Status,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref};
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, digest, program_head};
 

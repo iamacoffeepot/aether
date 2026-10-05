@@ -18,15 +18,14 @@
 
 use std::collections::HashSet;
 
-use aether_bloomery_kinds::{
-    Digest, Fault, JournalEntry, ReactionFailed, RecordedHead, RecordedHeadMove, Transition, Utf8Text,
-};
+use aether_bloomery_kinds::{Fault, JournalEntry, ReactionFailed, RecordedHead, RecordedHeadMove, Transition};
 use aether_bloomery_muse::{
     ContinueInput, Exhaustion, Failure, MuseTurn, OpenInput, RestReason, Role, Session, SessionContinue,
-    SessionExhausted, SessionKey, SessionOpen, SessionRecord, TurnItem, TurnOutcome, TurnResult, TurnUsage,
+    SessionExhausted, SessionGate, SessionKey, SessionOpen, SessionRecord, TurnItem, TurnOutcome, TurnResult,
+    TurnUsage,
 };
 use aether_bloomery_program::Program;
-use aether_data::Kind;
+use aether_data::{Digest, Kind, Utf8Text};
 use anyhow::{Result, bail};
 use clap::Args;
 
@@ -256,7 +255,7 @@ impl Chain {
 /// memory.
 fn retried(fault: &Fault) -> bool {
     let program = fault.program.name().as_str();
-    let loops_own = [MuseTurn::NAME, SessionRecord::NAME, SessionExhausted::NAME].contains(&program);
+    let loops_own = [MuseTurn::NAME, SessionRecord::NAME, SessionExhausted::NAME, SessionGate::NAME].contains(&program);
     let exhausted = Exhaustion::of(&fault.reason).is_some();
     exhausted && !loops_own
 }

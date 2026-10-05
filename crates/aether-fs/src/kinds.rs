@@ -8,8 +8,13 @@
 //! both need these types, so they ride the target-agnostic build.
 //!
 //! ADR-0041 substrate file I/O. Request kinds on the `"aether.fs"`
-//! mailbox (read / write / copy / delete / list), paired 1:1 with
-//! reply kinds that carry a structured `FsError` on failure.
+//! mailbox (read / write / copy / delete / list / fetch), paired 1:1
+//! with reply kinds that carry a structured `FsError` on failure.
+//!
+//! `read` and `load` both reply with the file's bytes. A `read` holds the
+//! caller's chain (and so a `Tick` frame) until it is answered; a `load`
+//! is answered late without holding it, so the caller's chain settles at
+//! once and `Loaded` arrives afterwards, outside it.
 //!
 //! Every request and reply addresses its file through one
 //! [`NamespaceAddr`] — `{ namespace, path }` — rather than a loose pair
@@ -17,6 +22,7 @@
 //! constructor that folds an adapter `Result` into its `Ok` / `Err`
 //! arms so the echo is written once per family member.
 
+use aether_actor::HeldReply;
 use aether_data::{Blob, KindId, TransformId};
 use serde::{Deserialize, Serialize};
 
@@ -103,7 +109,19 @@ impl ReadResult {
     }
 }
 
-/// `aether.fs.write` — request the substrate write `bytes` to
+/// A read `aether.fs` holds on its bounded read queue, answered when the
+/// actor closes before the read finished (ADR-0243 §1). The request's
+/// address is gone with the queue, so the echo is empty.
+impl HeldReply for ReadResult {
+    fn unanswered() -> Self {
+        Self::Err {
+            addr: NamespaceAddr::new("", ""),
+            error: FsError::AdapterError("aether.fs closed before answering".to_owned()),
+        }
+    }
+}
+
+/// `aether.fs.write` —request the substrate write `bytes` to
 /// `namespace://path`. v1's local-file adapter stages to a
 /// temporary sibling and `rename`s on success so a crash
 /// mid-write leaves either the old contents or the new, never a
@@ -244,6 +262,54 @@ impl ListResult {
         match list {
             Ok(entries) => Self::Ok { addr, entries },
             Err(error) => Self::Err { addr, error },
+        }
+    }
+}
+
+/// `aether.fs.load` — read a file without holding the caller's chain.
+/// Mailed to the `"aether.fs"` mailbox like any request, its one reply is
+/// [`Loaded`]. Unlike `aether.fs.read`, `aether.fs` owes it through
+/// `ctx.defer` and answers it late without holding the caller's chain: the chain (and a `Tick` frame it
+/// rides) settles as soon as the request is handled, and `Loaded` arrives
+/// afterwards, outside it. Correlate it as any reply: bind a context with
+/// `send_with_context` and take it in the `#[handler::response]`. Use
+/// `aether.fs.read` instead when the caller's frame should wait for the
+/// bytes.
+#[aether_data::kind(name = "aether.fs.load")]
+pub struct Load {
+    pub addr: NamespaceAddr,
+}
+
+/// Reply to `Load`, sent once the file has been read. Both arms echo the
+/// load's `addr`. `Ok` carries the file contents as a blob, as
+/// `ReadResult::Ok` does; `Err` carries the same `FsError` a `read` of the
+/// address would.
+#[aether_data::kind(name = "aether.fs.loaded")]
+pub enum Loaded {
+    Ok { addr: NamespaceAddr, bytes: Blob },
+    Err { addr: NamespaceAddr, error: FsError },
+}
+
+impl Loaded {
+    /// Fold an adapter read into the reply, echoing the address on both
+    /// arms.
+    #[must_use]
+    pub fn from_op(addr: NamespaceAddr, read: Result<Blob, FsError>) -> Self {
+        match read {
+            Ok(bytes) => Self::Ok { addr, bytes },
+            Err(error) => Self::Err { addr, error },
+        }
+    }
+}
+
+/// A load `aether.fs` owes through its load queue, answered when the actor
+/// closes before the load finished (ADR-0243 §1). The request's address is
+/// gone with the queue, so the echo is empty.
+impl HeldReply for Loaded {
+    fn unanswered() -> Self {
+        Self::Err {
+            addr: NamespaceAddr::new("", ""),
+            error: FsError::AdapterError("aether.fs closed before answering".to_owned()),
         }
     }
 }

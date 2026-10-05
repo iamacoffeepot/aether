@@ -9,9 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{BundleDeclarations, Detail, Digest, ProgramDeclaration};
+use aether_bloomery_kinds::{BundleDeclarations, Detail, ProgramDeclaration};
 use aether_bloomery_program::Declaration;
-use aether_data::{SchemaType, wire};
+use aether_data::{Digest, SchemaType, wire};
 
 use super::{DeclaredRoles, LoadState};
 use crate::runtime::core::{LoadOutcome, RootRoles};

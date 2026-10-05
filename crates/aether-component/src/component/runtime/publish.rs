@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use aether_actor::ReplyMode;
+use aether_data::Blob;
 use aether_kinds::{ComponentCapabilities, LoadResult, Publish, PublishResult, PublishedType};
 use aether_substrate::actor::native::{Held, RegistryBatch, RegistryBatchResult};
 use aether_substrate::actor::wasm::module::Module;
@@ -47,6 +48,9 @@ impl Publisher {
 pub(super) struct PublishInFlight {
     held: Held<PublishResult>,
     module: Module,
+    /// The `Publish`'s bytes, held until it settles for the module boot's
+    /// load window (ADR-0163 §3).
+    code: Blob,
 }
 
 impl PublishInFlight {
@@ -93,6 +97,7 @@ impl ComponentHostCapabilityState {
         &mut self,
         ctx: &mut HostCtx<'_, M>,
         publisher: Publisher,
+        code: Blob,
         module: Module,
     ) {
         match publisher {
@@ -102,7 +107,7 @@ impl ComponentHostCapabilityState {
                 self.next_publish =
                     self.next_publish.checked_add(1).expect("the component host's publish ids cannot overflow");
                 let batch = RegistryBatch::publish_module(&module);
-                self.publishes.insert(id, PublishInFlight { held, module });
+                self.publishes.insert(id, PublishInFlight { held, module, code });
                 ctx.stage_registry_batch(batch, ModulePublished { publish: id });
             }
         }
@@ -117,12 +122,12 @@ impl ComponentHostCapabilityState {
         publish: u64,
         published: RegistryBatchResult,
     ) {
-        let PublishInFlight { held, module } =
+        let PublishInFlight { held, module, code } =
             self.publishes.remove(&publish).expect("a staged publish waits in state until it settles");
         match published {
             Ok(()) => {
                 self.record_published(&module);
-                self.boot_published(ctx, &module);
+                self.boot_published(ctx, &module, &code);
                 self.conclude_publish(ctx, Publisher::Publish(held), &module);
             }
             Err(error) => Publisher::Publish(held).refuse(ctx, &format!("module publish refused: {error}")),

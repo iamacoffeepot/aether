@@ -4,10 +4,12 @@
 //!
 //! Each proof is a tool: its input is `Tooled<A, ProofBound>`, the
 //! session's current tree, the empty arguments the model writes, and the
-//! [`ProofBound`] the session binds, the environment, the vendor tree, and
-//! the test env. It asks the workspace for one run of two steps over the
-//! tree at `/work`, with the network off and the vendor tree at `/vendor`
-//! replacing crates.io: `cargo fmt --all` writes its fixes and lists the
+//! [`ProofBound`] the session binds, the environment, the vendor tree, the
+//! cargo config, and the test env. It asks the workspace for one run of two
+//! steps over the tree at `/work`, with the network off, the vendor tree at
+//! `/vendor`, and the bound's cargo config at `/.cargo`, which replaces
+//! crates.io with the vendor tree for every cargo in the run, including the
+//! ones a test spawns: `cargo fmt --all` writes its fixes and lists the
 //! files it rewrote, then the proof's cargo step. The workspace stops after
 //! the first step that exits other than 0.
 //!
@@ -25,15 +27,18 @@
 //! failed run ends the invocation through the binding, and the program never
 //! sees it.
 
+mod config;
 mod input;
 mod report;
 mod result;
 mod run;
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree};
+use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
 use aether_bloomery_program::{Async, Edited, Env, Program, Tooled, Workspace, program};
 use aether_bloomery_workspace::StepOutcome;
+use aether_data::Ref;
 
+pub use config::cargo_config_artifacts;
 pub use input::{ClippyArgs, MAX_TEST_ENV, ProofBound, TestArgs, TestEnv, TestEnvError};
 pub use report::DIAGNOSTICS_MAX_BYTES;
 pub use result::ProofVerdict;

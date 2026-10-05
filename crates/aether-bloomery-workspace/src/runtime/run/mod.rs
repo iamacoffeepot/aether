@@ -64,8 +64,9 @@ use std::fmt;
 use std::io;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aether_bloomery_kinds::{Detail, Ref, Tree};
+use aether_bloomery_kinds::{Detail, Tree};
 use aether_bloomery_tar::{DecodeError, EncodeError, Limits, Stamp, encode, encode_stamped};
+use aether_data::Ref;
 
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
 use super::provision::{CpuSet, RunKey};
@@ -198,7 +199,11 @@ impl Runner {
         };
 
         let started_secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
-        let stamp = layer.as_ref().and_then(|layer| layer.stamp(started_secs));
+        let stamp = layer
+            .as_ref()
+            .map(|layer| layer.stamp_over(&mut session.reader(), &run.tree, started_secs))
+            .transpose()?
+            .flatten();
         let started = Instant::now();
         let deadline = started.checked_add(allotment.deadline).unwrap_or(started + FAR_FUTURE);
         let mut steps = Vec::with_capacity(run.steps.as_slice().len());

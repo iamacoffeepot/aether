@@ -8,9 +8,8 @@ use std::mem;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use aether_bloomery_journal::Batch;
-use aether_bloomery_kinds::{
-    Call, CallOutcome, Head, NativeOrigin, OpaqueBytes, ProgramName, RecordedHead, RecordedHeadMove, Ref, Utf8Text,
-};
+use aether_bloomery_kinds::{Call, CallOutcome, Head, NativeOrigin, ProgramName, RecordedHead, RecordedHeadMove};
+use aether_data::{OpaqueBytes, Ref, Utf8Text};
 use aether_harness_bloomery::BloomeryHarness;
 use aether_harness_substrate::test_helpers::require_wasm;
 use tracing::span::{Attributes, Id};

@@ -61,6 +61,9 @@ impl ComponentHostCapabilityState {
             Some(parent) => Self::placement_under(ctx, &parent)
                 .map_err(|error| format!("spawn parent {parent} did not resolve: {error}"))?,
         };
-        Self::prepare_load(ctx, Selection { module, export: Some(declared), name: key, config, placement })
+        // ADR-0163 §4: a spawn brings no bytes, so its guest's load window
+        // answers the catalog and refuses a catalogued asset.
+        let selection = Selection { module, code: None, export: Some(declared), name: key, config, placement };
+        Self::prepare_load(ctx, selection)
     }
 }

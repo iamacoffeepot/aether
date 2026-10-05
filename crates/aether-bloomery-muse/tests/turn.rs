@@ -3,17 +3,17 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Ref, Refusal, Utf8Text,
+    ClosureArtifact, DigestMismatch, EncodedArtifact, Invoke, Invoked, ProgramApi, ProgramName, Refusal,
 };
 use aether_bloomery_muse::{
     CallId, Echo, EchoArgs, EchoResult, Endpoint, FunctionName, HttpStatus, InputLimit, MUSE, ModelName, MuseTurn,
-    OfferedTool, OfferedTools, OutputBudget, ReasoningEffort, Role, ToolCall, ToolInput, ToolOutput, TurnInput,
-    TurnItem, TurnItems, TurnOutcome, TurnResult,
+    OfferedTool, OfferedTools, OutputBudget, Reasoning, ReasoningEffort, ReasoningId, Role, ToolCall, ToolInput,
+    ToolOutput, TurnInput, TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
 use aether_bloomery_program::{
     AsyncSession, NoBound, Pending, PendingCall, PollResult, Program, Started, ToolSchema, start_async, tool_definition,
 };
-use aether_data::{Cites, Kind, Storage, StorageData};
+use aether_data::{Cites, Kind, Ref, Storage, StorageData, Utf8Text};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
@@ -133,9 +133,11 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
 
     let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
     let recorded = TurnResult::decode_storage(&payload(result_artifact)?)?.value;
-    let TurnOutcome::Completed { text, usage } = recorded.outcome() else {
+    let TurnOutcome::Completed { reasoning, text, usage } = recorded.outcome() else {
         panic!("expected Completed, got {:?}", recorded.outcome());
     };
+    let encrypted = "gAAAAABcompleted-reasoning";
+    assert_eq!(*reasoning, [Reasoning::new(ReasoningId::new("rs_0001")?, Ref::of_text(encrypted))]);
     assert_eq!(recorded.status().map(HttpStatus::get), Some(200));
     assert_eq!(usage.cached_input_tokens(), 1024);
     assert_eq!(*text, Ref::of_text("A bloomery is a furnace that smelts iron into a bloom."));
@@ -143,10 +145,11 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
         staged,
         vec![
             EncodedArtifact::opaque_bytes(COMPLETED.as_bytes()),
+            EncodedArtifact::text(encrypted),
             EncodedArtifact::text("A bloomery is a furnace that smelts iron into a bloom."),
             EncodedArtifact::new(&recorded)?,
         ],
-        "the body and the text are staged, and the result cites them"
+        "the body, the reasoning, and the text are staged, and the result cites them"
     );
     assert_eq!(recorded.body(), Some(Ref::of_bytes(COMPLETED.as_bytes())));
     Ok(())

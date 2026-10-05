@@ -7,8 +7,13 @@
 //! its row, and keeps the [`Held<R>`] ticket in state or on a successor. The
 //! ticket answers exactly one `R`, from any handler on the same actor.
 //!
+//! [`NativeCtx::defer`] arms the same entry with no settlement hold, for a
+//! request whose caller must not wait: the caller's chain settles when the
+//! handler returns, and the answer later joins no chain.
+//!
 //! The ledger owns the obligation: the entry holds the caller's settlement
-//! hold and reply target, and the ticket names the entry. The ticket keeps a
+//! hold (none for a deferred entry) and reply target, and the ticket names
+//! the entry. The ticket keeps a
 //! weak link back to the ledger because its `Drop` and
 //! [`IntoDeferredReply::into_deferred_reply`] get no ctx, the precedent
 //! `DeferredCompletion` set.
@@ -318,6 +323,12 @@ mod tests {
     #[aether_data::kind(name = "test.held.hold_twice")]
     struct HoldTwice;
 
+    #[aether_data::kind(name = "test.held.defer")]
+    struct DeferReq;
+
+    #[aether_data::kind(name = "test.held.hold_then_defer")]
+    struct HoldThenDefer;
+
     /// A pumped root that holds its reply in one turn and answers it from a
     /// later one.
     #[derive(Default)]
@@ -352,6 +363,21 @@ mod tests {
             let (pending, first) = ctx.hold::<Answer>();
             self.held = Some(first);
             let _second = ctx.hold::<Answer>();
+            pending
+        }
+
+        #[handler::request]
+        fn on_defer(&mut self, ctx: &mut NativeCtx<'_>, _defer: DeferReq) -> Pending<Answer> {
+            let (pending, held) = ctx.defer::<Answer>();
+            self.held = Some(held);
+            pending
+        }
+
+        #[handler::request]
+        fn on_hold_then_defer(&mut self, ctx: &mut NativeCtx<'_>, _hold: HoldThenDefer) -> Pending<Answer> {
+            let (pending, first) = ctx.hold::<Answer>();
+            self.held = Some(first);
+            let _second = ctx.defer::<Answer>();
             pending
         }
     }
@@ -400,6 +426,18 @@ mod tests {
                 Some(ReplyTarget::Actor { to: caller, correlation: 77 }),
             );
             self.driver.pump_until("the probe holds the request", |probe| probe.held.is_some());
+            root
+        }
+
+        /// Send [`DeferReq`] as a root answered to `caller` under correlation
+        /// 77, and pump until the probe owes it.
+        fn defer(&mut self, caller: ErasedActorRef) -> MailId {
+            let root = self.driver.send_tracked(
+                self.probe(),
+                &DeferReq,
+                Some(ReplyTarget::Actor { to: caller, correlation: 77 }),
+            );
+            self.driver.pump_until("the probe owes the deferred request", |probe| probe.held.is_some());
             root
         }
 
@@ -503,8 +541,76 @@ mod tests {
             catch_unwind(AssertUnwindSafe(|| rig.driver.settle(&[root]))).expect_err("the second hold fails fast");
         assert!(
             panic_message(payload.as_ref())
-                .is_some_and(|message| message.starts_with("a second NativeCtx::hold in one dispatch")),
+                .is_some_and(|message| message.starts_with("a second NativeCtx::hold or defer in one dispatch")),
             "the panic names the second hold"
+        );
+    }
+
+    /// Catches `defer` taking the caller's settlement hold (a deferred load
+    /// would hold the caller's frame), answering to the answering turn's
+    /// reply target, or joining the late answer to a chain.
+    #[test]
+    fn deferred_request_settles_before_its_answer_and_the_answer_echoes_the_correlation() {
+        let mut rig = Rig::boot();
+        let (caller, replies) = rig.caller("test.held.defer.caller");
+        let (other, other_replies) = rig.caller("test.held.defer.other");
+
+        let root = rig.defer(caller);
+        assert_eq!(rig.held_open(root), 0, "a deferred entry holds no chain");
+        rig.driver.settle(&[root]);
+        assert!(replies.try_recv().is_err(), "the caller's chain settled before any answer");
+
+        let release = rig.driver.send_tracked(
+            rig.probe(),
+            &Release { value: 9 },
+            Some(ReplyTarget::Actor { to: other, correlation: 99 }),
+        );
+        rig.driver.settle(&[release]);
+
+        let reply = replies.try_recv().expect("the late answer reaches the captured caller");
+        assert_eq!(reply.sender.correlation_id, 77, "the captured correlation is echoed, not the answering turn's");
+        assert_eq!(reply.root, None, "the late answer joins no chain");
+        assert_eq!(Answer::decode_from_bytes(reply.payload.bytes()), Some(Answer { value: 9 }));
+        assert!(other_replies.try_recv().is_err(), "the answering turn's reply target hears nothing");
+    }
+
+    /// Catches a deferred entry, which carries no hold, leaking its debt
+    /// silently when its ticket is dropped unanswered.
+    #[test]
+    fn unanswered_deferred_drop_panics_and_removes_the_entry() {
+        let mut rig = Rig::boot();
+        let (caller, replies) = rig.caller("test.held.defer_unanswered.caller");
+
+        let root = rig.defer(caller);
+        let held = rig.take_held();
+        let id = held.dispatch_id();
+        let ledger = held.ledger().upgrade().expect("the probe's ledger is live");
+
+        let payload = catch_unwind(AssertUnwindSafe(|| drop(held))).expect_err("an unanswered Held fails fast");
+        assert!(
+            panic_message(payload.as_ref())
+                .is_some_and(|message| message.starts_with("Held dropped without an answer")),
+            "the panic names the lost reply"
+        );
+        assert_eq!(ledger.dispatch_state_of(id), None, "the dropped ticket removed its entry");
+
+        rig.driver.settle(&[root]);
+        assert!(replies.try_recv().is_err(), "the lost reply is never sent");
+    }
+
+    /// Catches the one-debt guard covering only `hold`: a `defer` after a
+    /// `hold` in one dispatch would owe two replies to one request.
+    #[test]
+    fn defer_after_hold_in_one_dispatch_panics() {
+        let mut rig = Rig::boot();
+        let root = rig.driver.send_tracked(rig.probe(), &HoldThenDefer, None);
+
+        let payload =
+            catch_unwind(AssertUnwindSafe(|| rig.driver.settle(&[root]))).expect_err("the defer after hold fails fast");
+        assert!(
+            panic_message(payload.as_ref())
+                .is_some_and(|message| message.starts_with("a second NativeCtx::hold or defer in one dispatch")),
+            "the panic names the second debt"
         );
     }
 }

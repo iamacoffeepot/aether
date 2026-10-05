@@ -4,8 +4,7 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::mem;
 
-use aether_bloomery_kinds::{ArtifactHasher, Digest, OpaqueBytes, Ref, artifact_prefix};
-use aether_data::{Citation, Kind, KindId};
+use aether_data::{ArtifactHasher, Citation, Digest, Kind, KindId, OpaqueBytes, Ref, artifact_prefix};
 use tempfile::NamedTempFile;
 
 use super::ArtifactBatch;

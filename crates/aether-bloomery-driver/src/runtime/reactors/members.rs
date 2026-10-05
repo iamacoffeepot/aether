@@ -1,8 +1,8 @@
 //! Membership: set reads, selection at the routing prefix, and served-head maps (ADR-0226 decision 5).
 
-use aether_bloomery_kinds::{Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult};
+use aether_bloomery_kinds::{Head, ReactorSet, ReadArtifact, ReadArtifactResult};
 use aether_bloomery_program::HeadActivation;
-use aether_data::{Kind, Storage};
+use aether_data::{Digest, Kind, OpaqueBytes, Storage};
 
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, ProgramCore};
 use crate::runtime::reactors::{Selection, Served};

@@ -17,9 +17,9 @@
 
 use std::mem;
 
-use aether_bloomery_kinds::{ArtifactHasher, EncodedArtifact, OpaqueBytes, Ref, Stage, StageResult, Tree};
+use aether_bloomery_kinds::{EncodedArtifact, Stage, StageResult, Tree};
 use aether_bloomery_tar::{BlobWriter, TreeSink};
-use aether_data::Kind;
+use aether_data::{ArtifactHasher, Kind, OpaqueBytes, Ref};
 use aether_substrate::actor::native::BlobCheckIn;
 
 use super::{StorageAnswer, StorageCall, StorageError, StoragePort};

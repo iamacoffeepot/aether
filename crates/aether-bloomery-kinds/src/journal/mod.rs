@@ -25,9 +25,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::HeldReply;
-use aether_data::KindId;
+use aether_data::{Digest, KindId};
 
-use crate::{ClosureArtifact, Digest, Entry, Seq};
+use crate::{ClosureArtifact, Entry, Seq};
 
 pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
@@ -67,7 +67,7 @@ mod digest_list {
 
     use serde::{Deserialize, Deserializer, Serializer};
 
-    use crate::Digest;
+    use aether_data::Digest;
 
     pub(super) fn serialize<S: Serializer>(digests: &[Digest], serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(digests.iter().map(Digest::as_bytes))

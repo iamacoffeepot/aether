@@ -2,8 +2,8 @@
 //!
 //! Four entry kinds, and why not fewer:
 //!
-//! - [`Node::Directory`] is forced by the citation rule. [`crate::Ref<Tree>`]
-//!   and [`crate::Ref<crate::OpaqueBytes>`] are different kinds, and `append`
+//! - [`Node::Directory`] is forced by the citation rule. [`aether_data::Ref<Tree>`]
+//!   and [`aether_data::Ref<aether_data::OpaqueBytes>`] are different kinds, and `append`
 //!   checks the prefix.
 //! - [`Node::Executable`] is the one pure mode bit. Drop it and every script
 //!   in the repository materializes non-runnable.

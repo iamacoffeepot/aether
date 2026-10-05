@@ -9,10 +9,10 @@ use std::time::Duration;
 use aether_actor::{ActorRef, ErasedActorRef};
 use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, ReadCacheBudget, Seq};
 use aether_bloomery_kinds::{
-    AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin,
-    ProgramName, ProgramRef, Publish, PublishResult, RecordedHeadMove, Ref, RequestSource, Requested, WatchHead,
-    WatchHeadResult,
+    AppendRecords, AppendRecordsResult, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin, ProgramName,
+    ProgramRef, Publish, PublishResult, RecordedHeadMove, RequestSource, Requested, WatchHead, WatchHeadResult,
 };
+use aether_data::{Digest, Ref};
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};

@@ -4,12 +4,12 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::Ref;
 use aether_bloomery_workspace::testing::{
     LAYER_OVERLAY, LAYER_UPPER, LAYER_WORK, LayerScript, RUN_COLLECTOR, RUN_CONTAINER, RUN_VOLUME, RunScript,
     StubDaemon, StubReply, StubRequest, mountpoint,
 };
 use aether_bloomery_workspace::{Resource, RunError, RunResult};
+use aether_data::Ref;
 
 use crate::run::{FLAGS, Inputs, built_work, outcome, over, run_against, script};
 use crate::support::{TestResult, answering, lines, serving};
@@ -42,6 +42,32 @@ fn layer_hex(requests: &[StubRequest]) -> Result<String, Box<dyn Error>> {
 /// The JSON body of the `index`th request.
 fn body(requests: &[StubRequest], index: usize) -> Result<serde_json::Value, Box<dyn Error>> {
     Ok(serde_json::from_slice(&requests.get(index).ok_or("the run made the request")?.body)?)
+}
+
+/// The mtime the archive writer gives a file the run did not change: `aether_bloomery_tar::CANONICAL_MTIME_SECS`.
+const CANONICAL_MTIME_SECS: u64 = 315_532_800;
+
+/// The mtime of every regular-file header in the tar the run uploaded to `/work`, in archive order.
+fn uploaded_file_mtimes(requests: &[StubRequest]) -> Result<Vec<u64>, Box<dyn Error>> {
+    const BLOCK: usize = 512;
+    let target = format!("/v1.44/containers/{RUN_CONTAINER}/archive?path=/work");
+    let upload = requests.iter().find(|request| request.method == "PUT" && request.target == target);
+    let tar = &upload.ok_or("the run uploaded its tree")?.body;
+
+    let octal = |field: &[u8]| -> Result<u64, Box<dyn Error>> {
+        let digits = str::from_utf8(field)?.trim_matches(|c: char| c == '\0' || c == ' ');
+        Ok(u64::from_str_radix(digits, 8)?)
+    };
+    let mut mtimes = Vec::new();
+    let mut at = 0;
+    while let Some(header) = tar.get(at..at + BLOCK).filter(|header| header[0] != 0) {
+        let size = usize::try_from(octal(&header[124..136])?)?;
+        if header[156] == b'0' {
+            mtimes.push(octal(&header[136..148])?);
+        }
+        at += BLOCK + size.div_ceil(BLOCK) * BLOCK;
+    }
+    Ok(mtimes)
 }
 
 /// The step's lines from its create to its last log read.
@@ -144,6 +170,7 @@ fn a_later_warm_run_builds_over_its_own_overlay_of_the_layer_and_removes_it() ->
     // bottom layer removed with the run.
     let inputs = locked()?;
     let (environment, request) = (inputs.hex(), inputs.request("tool", "target")?);
+    let tree = request.tree;
     let output = built_work();
     let stub = StubDaemon::bind()?;
     let mut harness = inputs.boot(&stub, &warm_flags())?;
@@ -153,7 +180,8 @@ fn a_later_warm_run_builds_over_its_own_overlay_of_the_layer_and_removes_it() ->
         answering(&stub, script(&environment, &output).layer_replies(&miss), || harness.run(&run))?;
     outcome(first)?;
     let hex = layer_hex(&first_requests)?;
-    let hit = LayerScript::Hit { hex: &hex, data_volume: DATA };
+    let recorded = tree.digest().to_string();
+    let hit = LayerScript::Hit { hex: &hex, data_volume: DATA, tree: Some(&recorded) };
 
     let (answer, requests) = serving(stub, script(&environment, &output).layer_replies(&hit), || harness.run(&run))?;
 
@@ -181,6 +209,47 @@ fn a_later_warm_run_builds_over_its_own_overlay_of_the_layer_and_removes_it() ->
         })
     );
     assert!(layered_at_target(&body(&requests, 8)?, LAYER_OVERLAY), "the step builds over its overlay");
+
+    // Catches a recorded tree the run's own tree equals, which the source stores, treated as missing: every file
+    // would carry the run's stamp and cargo would rebuild what did not change.
+    let mtimes = uploaded_file_mtimes(&requests)?;
+    let unchanged = mtimes.iter().all(|mtime| *mtime == CANONICAL_MTIME_SECS);
+    assert!(!mtimes.is_empty() && unchanged, "{mtimes:?}");
+    Ok(())
+}
+
+#[test]
+fn a_warm_hit_whose_recorded_tree_the_source_lacks_stamps_every_file() -> TestResult {
+    // Catches a run that fails on a replaced journal (the layer's recorded tree is in no store the new journal holds)
+    // and a fallback that uploads canonically, where cargo would trust the layer's stale output.
+    let inputs = locked()?;
+    let (environment, request) = (inputs.hex(), inputs.request("tool", "target")?);
+    let output = built_work();
+    let stub = StubDaemon::bind()?;
+    let mut harness = inputs.boot(&stub, &warm_flags())?;
+    let run = over(&harness, request);
+    let miss = LayerScript::Miss { data_volume: DATA, completes: true };
+    let (first, first_requests) =
+        answering(&stub, script(&environment, &output).layer_replies(&miss), || harness.run(&run))?;
+    outcome(first)?;
+    let hex = layer_hex(&first_requests)?;
+    let gone = Ref::of_bytes(b"gone").digest().to_string();
+    let hit = LayerScript::Hit { hex: &hex, data_volume: DATA, tree: Some(&gone) };
+
+    let (answer, requests) = serving(stub, script(&environment, &output).layer_replies(&hit), || harness.run(&run))?;
+
+    outcome(answer)?;
+    let layer = [
+        format!("GET /v1.44/volumes/{DATA}"),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/volumes/create".to_owned(),
+    ];
+    let expected = warm_lines(&hex, &environment, &layer, &[], &[LAYER_UPPER, LAYER_WORK, LAYER_OVERLAY]);
+    assert_eq!(lines(&requests), expected);
+    let mtimes = uploaded_file_mtimes(&requests)?;
+    let stamped = mtimes.iter().all(|mtime| *mtime != CANONICAL_MTIME_SECS);
+    assert!(!mtimes.is_empty() && stamped, "{mtimes:?}");
     Ok(())
 }
 

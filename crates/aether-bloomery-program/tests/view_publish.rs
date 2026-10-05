@@ -2,9 +2,9 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{Entry, Head, Program, Seq, Tree};
 use aether_bloomery_program::{Heads, Publish, View};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, Ref, Storage, StorageData};
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))

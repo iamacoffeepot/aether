@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 
-use aether_bloomery_kinds::{DeclarationsResult, Digest, ReadArtifactResult};
-use aether_data::KindId;
+use aether_bloomery_kinds::{DeclarationsResult, ReadArtifactResult};
+use aether_data::{Digest, KindId};
 use serde_json::{Map, Value};
 
 use super::kinds::{InspectArtifactResult, MAX_ARTIFACTS, MAX_DEPTH, MAX_VALUES};

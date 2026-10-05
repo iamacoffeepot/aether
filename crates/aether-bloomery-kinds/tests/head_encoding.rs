@@ -3,12 +3,10 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{
-    Digest, Head, HeadMoved, HeadNameError, Program, RecordedHead, RecordedHeadMove, Ref, Tree, artifact_digest,
-};
+use aether_bloomery_kinds::{Head, HeadMoved, HeadNameError, Program, RecordedHead, RecordedHeadMove, Tree};
 use aether_data::storage::{decode_derived, encode_derived};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{Kind, KindId, Storage, StorageData, StorageError};
+use aether_data::{Digest, Kind, KindId, Ref, Storage, StorageData, StorageError, artifact_digest};
 
 const MAIN: Head<Tree> = Head::new("main");
 

@@ -2,7 +2,8 @@
 
 use std::io::Read;
 
-use aether_bloomery_kinds::{OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::Tree;
+use aether_data::{OpaqueBytes, Ref};
 
 /// Loads what [`crate::encode()`] walks: trees by reference, and each blob as a
 /// reader whose length is known before the first byte is read.

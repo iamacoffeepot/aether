@@ -7,10 +7,10 @@ use std::io;
 use std::thread;
 
 use aether_bloomery_journal::{Batch, JournalReader};
-use aether_bloomery_kinds::{Digest, Name, Node, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
 use aether_bloomery_workspace::testing::{StubDaemon, StubReply, StubRequest};
 use aether_chassis_bloomery::BloomeryCli;
-use aether_data::Storage;
+use aether_data::{Digest, Ref, Storage};
 use aether_harness_bloomery::{BloomeryHarness, SeededJournal};
 use clap::Parser;
 

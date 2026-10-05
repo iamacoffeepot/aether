@@ -10,7 +10,9 @@ mod tools;
 
 use crate::session::TurnSettings;
 
-pub use items::{Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order};
+pub use items::{
+    Reasoning, ReasoningId, ReasoningIdError, Role, ToolOutput, TurnItem, TurnItems, TurnItemsError, check_order,
+};
 pub use limits::{
     Endpoint, EndpointError, InputLimit, InputLimitError, ModelName, ModelNameError, OutputBudget, OutputBudgetError,
     ReasoningEffort,
@@ -130,8 +132,9 @@ impl TurnInput {
 
 #[cfg(test)]
 pub mod tests {
-    use aether_bloomery_kinds::{ProgramName, Ref};
+    use aether_bloomery_kinds::ProgramName;
     use aether_bloomery_program::{NoBound, ToolSchema, function_name};
+    use aether_data::Ref;
 
     use super::{
         CallId, Endpoint, EndpointError, FunctionName, InputLimit, InputLimitError, ModelName, ModelNameError,

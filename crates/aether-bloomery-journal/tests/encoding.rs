@@ -1,7 +1,6 @@
 //! Tripwire: a `Ref<K>` field encodes like a `[u8; 32]` field.
 
-use aether_bloomery_journal::{Digest, OpaqueBytes, Ref};
-use aether_data::{Storage, StorageData};
+use aether_data::{Digest, OpaqueBytes, Ref, Storage, StorageData};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.with_ref")]

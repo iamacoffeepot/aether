@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use aether_actor::{ActorRef, ErasedActorRef, actor};
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, DigestMismatch, ReadArtifactResult, ReadArtifactsResult, ReadClosureResult,
+    ClosureArtifact, DigestMismatch, ReadArtifactResult, ReadArtifactsResult, ReadClosureResult,
 };
-use aether_data::{Kind, KindId, Source, SourceAddr};
+use aether_data::{Digest, Kind, KindId, Source, SourceAddr};
 use aether_substrate::BootError;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;

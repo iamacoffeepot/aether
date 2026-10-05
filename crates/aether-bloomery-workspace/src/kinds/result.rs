@@ -7,7 +7,8 @@
 use alloc::vec::Vec;
 
 use aether_actor::{HeldReply, PathRefused};
-use aether_bloomery_kinds::{Detail, Digest, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Detail, Tree};
+use aether_data::{Digest, OpaqueBytes, Ref};
 
 use crate::kinds::environment::{Platform, RustToolchain, ToolName};
 use crate::kinds::path::TreePath;

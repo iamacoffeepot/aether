@@ -14,10 +14,9 @@ use core::task::{Context, Poll};
 
 use aether_actor::{Addressable, CallerAddressable, Replies, Singleton};
 use aether_bloomery_kinds::{
-    ApiCall, ClosureArtifact, Digest, EncodedArtifact, ErasedRef, ExecutorFault, OpaqueBytes, ProgramApi,
-    ReadArtifactResult, Ref, Refusal, Utf8Text,
+    ApiCall, ClosureArtifact, EncodedArtifact, ExecutorFault, ProgramApi, ReadArtifactResult, Refusal,
 };
-use aether_data::{ActorMail, Cites, Kind, KindId, Storage};
+use aether_data::{ActorMail, Cites, Digest, ErasedRef, Kind, KindId, OpaqueBytes, Ref, Storage, Utf8Text};
 
 use crate::kinds::Detail;
 

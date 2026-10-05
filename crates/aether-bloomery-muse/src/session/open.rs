@@ -1,20 +1,23 @@
 //! `muse.session.open`: the one way a session starts.
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree, Utf8Text};
+use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
 use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::{Ref, Utf8Text};
 use serde_json::Value;
 
 use aether_bloomery_workspace_programs::proof::ProofBound;
 
 use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls, TurnInput};
+use crate::session::gate::{RequiredProof, RequiredProofs};
 use crate::session::state::{TurnLimit, TurnSettings};
 use crate::session::tools::program_name;
-use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered, proof_bound_offers};
+use crate::tools::{READ_MAX_LINES, ReadArgs, TreeRead, offered, proof_bound_offers, proof_offers};
 
 /// A session to open: what every turn sends, the session instructions, the
 /// first user message, how many turns it may make before it rests, the tree
-/// its tools work on, and the files it reads before its first turn.
+/// its tools work on, the files it reads before its first turn, and the
+/// proofs a `Done` end must pass.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "muse.session.open.input")]
 pub struct OpenInput {
@@ -36,12 +39,18 @@ pub struct OpenInput {
     /// session, so the first turn sends the instructions, the user message,
     /// then every seed's call, then every seed's output. Empty reads nothing.
     seeds: Vec<TreePath>,
+    /// The proofs a `Done` end must pass on the session's tree, in the order
+    /// the gate runs them. Each must be offered as a proof tool, with
+    /// arguments of the kind its offer's input schema names. Chosen by the
+    /// opener and never sent to the model; empty gates nothing.
+    required: RequiredProofs,
 }
 
 impl OpenInput {
     /// Open a session with `settings` on `tree`, starting from `instructions`,
     /// the user message `user`, and the reads of `seeds`, that makes at most
-    /// `max_turns` turns before it rests.
+    /// `max_turns` turns before it rests, and whose `Done` end must pass
+    /// `required`.
     #[must_use]
     pub const fn new(
         settings: TurnSettings,
@@ -50,8 +59,9 @@ impl OpenInput {
         max_turns: TurnLimit,
         tree: Ref<Tree>,
         seeds: Vec<TreePath>,
+        required: RequiredProofs,
     ) -> Self {
-        Self { settings, instructions, user, max_turns, tree, seeds }
+        Self { settings, instructions, user, max_turns, tree, seeds, required }
     }
 
     /// The cited text of the session instructions.
@@ -76,6 +86,12 @@ impl OpenInput {
     #[must_use]
     pub fn seeds(&self) -> &[TreePath] {
         &self.seeds
+    }
+
+    /// The proofs a `Done` end must pass, in the order the gate runs them.
+    #[must_use]
+    pub const fn required(&self) -> &RequiredProofs {
+        &self.required
     }
 
     /// The first turn: the settings with the instructions as the leading
@@ -123,9 +139,12 @@ pub struct SessionOpen;
 /// bound tool with a definition, schema, bundle head, or bound kind other than
 /// its own; the proof tools and the vendor view bind a `ProofBound`, the
 /// session's environment, vendor tree, and test env, whatever its value.
-/// Refuses seeds when `tree.read` is not offered, since a seed's output
-/// renders with the offered tool's result schema; and more than
-/// [`ToolCalls::MAX_CALLS`] seeds.
+/// Refuses a required proof that is not offered as a proof tool, since the
+/// gate runs it through its offer, and required arguments of another kind
+/// than the offer's input schema names, which the proof could not decode; a
+/// vendor tool is no proof. Refuses seeds when `tree.read` is not offered,
+/// since a seed's output renders with the offered tool's result schema; and
+/// more than [`ToolCalls::MAX_CALLS`] seeds.
 #[program]
 impl Program for SessionOpen {
     const NAME: &'static str = "muse.session.open";
@@ -141,6 +160,10 @@ impl Program for SessionOpen {
             let reason = format!("{} is not offered as a tool the session binds", tool.program().as_str());
             return Err(Refusal::Refused { reason: Detail::new(reason) });
         }
+        for proof in input.required.as_slice() {
+            gates(&input, proof, *env)?;
+        }
+
         let seeds = if input.seeds.is_empty() {
             None
         } else {
@@ -153,10 +176,44 @@ impl Program for SessionOpen {
 /// Whether the session binds `tool`: one of `own`, or a proof tool or vendor
 /// tool offered over a `ProofBound`, whatever its value.
 fn binds(own: &OfferedTools, tool: &OfferedTool) -> bool {
-    let proof = tool.bound().cast::<ProofBound>().map(proof_bound_offers).unwrap_or_default();
     let is_own = own.offers(tool);
-    let is_proof = proof.iter().any(|(offer, _)| offer.same_tool(tool));
-    is_own || is_proof
+    let is_proof_bound = proof_bound(tool);
+    is_own || is_proof_bound
+}
+
+/// Whether `tool` is a proof tool or a vendor tool offered over a
+/// `ProofBound`, whatever its value.
+fn proof_bound(tool: &OfferedTool) -> bool {
+    let offers = tool.bound().cast::<ProofBound>().map(proof_bound_offers).unwrap_or_default();
+    offers.iter().any(|(offer, _)| offer.same_tool(tool))
+}
+
+/// Whether `tool` is a proof tool offered over a `ProofBound`, whatever its
+/// value.
+fn proves(tool: &OfferedTool) -> bool {
+    let proof = tool.bound().cast::<ProofBound>().map(proof_offers).unwrap_or_default();
+    proof.iter().any(|offer| offer.tool.same_tool(tool))
+}
+
+/// Refuses `proof` unless `input` offers its program as a proof tool and its
+/// arguments are of the kind that offer's input schema names.
+fn gates(input: &OpenInput, proof: &RequiredProof, env: Env<Sync>) -> Result<(), Refusal> {
+    let program = proof.program().as_str();
+    let offer =
+        input.settings.tools().iter().find(|tool| tool.program() == proof.program()).filter(|tool| proves(tool));
+    let Some(offer) = offer else {
+        return Err(refused(format!("{program} is required but not offered as a proof tool")));
+    };
+    let schema = env.injected(offer.input())?;
+    let fits = proof.args().kind() == schema.kind_id();
+    if !fits {
+        return Err(refused(format!("{program} is required with arguments that are not a {}", schema.kind_name())));
+    }
+    Ok(())
+}
+
+fn refused(reason: String) -> Refusal {
+    Refusal::Refused { reason: Detail::new(reason) }
 }
 
 /// Each seed of `input` as a decoded `tree.read` call `seed-<i>`, its
@@ -183,22 +240,27 @@ fn seeded(input: &OpenInput, env: &mut Env<Sync>) -> Result<ToolCalls, Refusal> 
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Digest, ErasedRef, Head, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Head, ProgramName, Refusal, Tree};
     use aether_bloomery_program::Program;
     use aether_bloomery_workspace::TreePath;
     use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
     use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound};
-    use aether_data::Kind;
+    use aether_data::{Digest, ErasedRef, Kind, Ref};
 
     use super::{OpenInput, SessionOpen};
     use crate::input::tests::offered_tool;
     use crate::input::{OfferedTool, OfferedTools, Role, ToolInput, TurnInput, TurnItem};
     use crate::session::MUSE;
     use crate::session::fixture::{path, run_stored, settings};
+    use crate::session::gate::RequiredProofs;
     use crate::session::state::TurnLimit;
     use crate::tools::{ReadArgs, TreeRead, VendorGrep, VendorList, VendorRead, offered, offered_with_proofs};
 
     fn open(tools: OfferedTools, seeds: Vec<TreePath>) -> OpenInput {
+        open_requiring(tools, seeds, RequiredProofs::default())
+    }
+
+    fn open_requiring(tools: OfferedTools, seeds: Vec<TreePath>, required: RequiredProofs) -> OpenInput {
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
         OpenInput::new(
             settings(tools),
@@ -207,6 +269,7 @@ mod tests {
             TurnLimit::new(4).expect("limit"),
             tree,
             seeds,
+            required,
         )
     }
 
@@ -299,6 +362,54 @@ mod tests {
                 let refused = run_stored::<SessionOpen>(&open(tools, Vec::new()));
                 assert!(matches!(refused, Err(Refusal::Refused { .. })), "{name}: {:?}", refused.err());
             }
+        }
+    }
+
+    #[test]
+    fn a_required_proof_must_be_offered_as_a_proof_with_arguments_its_offer_decodes() {
+        // Catches a gate the model could dodge because the required proof is not offered so nothing runs, a
+        // required tool that is no proof (a vendor tool offered over the same bound included), and required
+        // arguments the proof cannot decode as its input.
+        use aether_bloomery_kinds::ClosureArtifact;
+        use aether_bloomery_workspace_programs::proof::{ClippyArgs, TestArgs, TestEnv};
+
+        use crate::session::fixture::run;
+        use crate::session::gate::RequiredProof;
+        use crate::tools::EchoArgs;
+
+        let digest = |byte| Digest::from_bytes([byte; 32]);
+        let proofs = ProofBound::new(Ref::from_digest(digest(1)), Ref::from_digest(digest(2)), TestEnv::default());
+        let (proving, artifacts) = offered_with_proofs(&proofs);
+        let closure: Vec<_> = artifacts
+            .into_iter()
+            .map(|artifact| {
+                let (kind, payload, _) = artifact.into_parts();
+                ClosureArtifact::new(kind, payload)
+            })
+            .collect();
+        let required = |program: &str, args| {
+            let program = ProgramName::new(program).expect("program");
+            RequiredProofs::new(vec![RequiredProof::new(program, args)]).expect("required")
+        };
+        let clippy_args = Ref::of_encoded(&ClippyArgs).expect("args").erase();
+        let opens = |tools: &OfferedTools, required| {
+            run::<SessionOpen>(&open_requiring(tools.clone(), Vec::new(), required), closure.clone())
+        };
+
+        opens(&proving, required("proof.clippy", clippy_args)).expect("a required proof over its offer opens");
+
+        let (own, _) = offered();
+        let echo_args = Ref::of_encoded(&EchoArgs::new("hi")).expect("args").erase();
+        let test_args = Ref::of_encoded(&TestArgs).expect("args").erase();
+        let read_args = Ref::of_encoded(&ReadArgs::new(path("README"), None, None)).expect("args").erase();
+        for (tools, required) in [
+            (&own, required("proof.clippy", clippy_args)),
+            (&proving, required("muse.echo", echo_args)),
+            (&proving, required("vendor.read", read_args)),
+            (&proving, required("proof.clippy", test_args)),
+        ] {
+            let refused = opens(tools, required);
+            assert!(matches!(refused, Err(Refusal::Refused { .. })), "{:?}", refused.err());
         }
     }
 

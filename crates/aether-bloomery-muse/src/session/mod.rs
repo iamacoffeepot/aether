@@ -32,7 +32,8 @@
 //!   `muse.session.record`. A run ends only through a `muse.end` call, which
 //!   rests it with [`RestReason::Completed`], [`RestReason::Blocked`], or
 //!   [`RestReason::Asked`] by the end call's variant, appending the summary,
-//!   reason, or question as the final assistant message. A reply without
+//!   reason, or question as the final assistant message; a `Done` end rests
+//!   only once its gate passes. A reply without
 //!   calls never rests the session below a limit: the loop sends another turn
 //!   with the reply text and a nudge, which counts against the turn limit. A
 //!   reply without calls at the turn limit, or past the input limit, is
@@ -62,6 +63,25 @@
 //!   `muse.session.exhausted`, which stages the text naming the tool, the
 //!   allotment, and the attempts, and `resume` answers the call with it as a
 //!   refusal and goes on. These retries count against no limit.
+//! - `resume` also gates a `Done` end (ADR-0234 decision 11). A session
+//!   opens with its [`RequiredProofs`], chosen by its opener and never seen
+//!   by the model; once every call of a turn whose end call answered `Done`
+//!   has its output, the loop runs each required proof whose latest passing
+//!   run, the model's own or the gate's, did not leave the current tree,
+//!   from the bundle its offer names, over that tree, the required
+//!   arguments, and the offer's bound. Each proof's tree becomes the
+//!   session's, pass or fail, so a changed tree reruns any proof that passed
+//!   on the old one, up to [`MAX_GATE_RUNS`] runs per proof. When every
+//!   required proof is proven on the current tree, the session rests
+//!   `Completed` with it. A failed proof, or proofs whose trees never agree,
+//!   run `muse.session.gate`, which stages the answer (the failed proof's own
+//!   summary, diagnostics included), and the end call is answered with it as
+//!   a refusal in place of its `Done`: the turn goes on as one that did not
+//!   end, so the next turn replays it, or the session rests at its limit,
+//!   and the failed gate spent its turn. A gate's proof that runs out of
+//!   time or memory is retried like a call, and at the cap its exhausted
+//!   answer answers the end call the same way. `Blocked` and `Asked` ends
+//!   are not gated, and a continue keeps the gate and the proven trees.
 //!
 //! A session opens on a tree, and a continue picks up the tree its record
 //! rested with. Every record holds the session's latest tree.
@@ -100,6 +120,7 @@ mod conversations;
 mod exhausted;
 #[cfg(test)]
 pub mod fixture;
+mod gate;
 mod open;
 mod record;
 mod replay;
@@ -107,12 +128,16 @@ mod retry;
 mod state;
 mod tools;
 
-use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, Ref, SetHeads, Transition};
+use aether_bloomery_kinds::{CallInput, CallProgram, Fault, ReactionFailed, SetHeads, Transition};
 use aether_bloomery_program::{At, ClockUntil, Guard, Ran, reactor};
+use aether_data::Ref;
 
 pub use continue_::{ContinueInput, SessionContinue};
 use conversations::Conversations;
 pub use exhausted::{Exhausted, ExhaustedInput, Exhaustion, MAX_TOOL_RETRIES, SessionExhausted};
+pub use gate::{
+    GateFailure, GateInput, Gated, MAX_GATE_RUNS, RequiredProof, RequiredProofs, RequiredProofsError, SessionGate,
+};
 pub use open::{OpenInput, Opened, SessionOpen};
 pub use record::{Answered, CallAnswer, RecordInput, SessionRecord, TurnEnd};
 pub use state::{

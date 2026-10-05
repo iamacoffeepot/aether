@@ -53,7 +53,19 @@ it and the reactor-set root (`core.reactors`) to a set holding `muse` beside
 every member the bound set already holds. A rebind of the same bundle prints
 `unchanged` and publishes nothing. Rebind after rebuilding the bundle.
 
+After the publish, `bind` waits for the driver to record the reactor's
+activation. If the driver rejected it, `bind` exits non-zero naming the
+rejection's reason, its journal entry, and the remedy: stop the engine, move
+the directory `--bloomery-units <unit>=<dir>` names aside, restart, and bind
+again. A journal recorded under an older stored encoding is expected to need a
+fresh directory this way. A rebind that publishes nothing fails the same way
+when the `muse` head is owed from an earlier rejection.
+
 ## 3. Open a session
+
+`open` first reads the journal and refuses, before staging anything, when the
+`muse` head is not live: it names the same recorded reason and remedy, or says
+to run `muse bind` when the head was never activated.
 
 ```sh
 cargo xtask muse open --rpc-port <port> --unit primary \
@@ -79,7 +91,8 @@ after=<seq>
   saying the session works only through the offered tools, makes every
   independent call in the same turn, and ends its run only by calling
   `muse-end`; with proofs offered, it also tells the model to run
-  `proof-clippy` and `proof-test` until each passes before ending `Done`.
+  `proof-clippy` and `proof-test` until each passes before ending `Done`, and
+  with proofs required, that ending `Done` runs them.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -87,8 +100,8 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.edit`, `tree.write`, `muse.echo`, and `muse.end`. A reply without a
-  tool call does not end the session: the loop nudges the model back for
+  `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. A
+  reply without a tool call does not end the session: the loop nudges the model back for
   another turn. The first turn sends the instructions as the developer
   message ahead of the brief.
 - `--environment <digest>` and `--vendor <digest>`, given together, also offer
@@ -118,11 +131,24 @@ after=<seq>
   `AETHER_HARNESS_FLEET_BIN_DIR=/work/target/debug`, so the FleetHarness
   suites that fork a chassis resolve the bins the test build already
   produced.
+- `--require <program>`, repeatable, needs `--environment` / `--vendor`: a
+  proof tool (`proof.clippy` or `proof.test`) a `Done` end must pass on the
+  session's tree, over the whole workspace. It is explicit: offering the
+  proofs requires none of them. When the model ends `Done`, the loop runs
+  each required proof it has not already passed on the current tree (the
+  model's own passing run on that tree counts), and the session rests
+  `completed` with the tree the proofs left, formatted by `cargo fmt`. A
+  failed proof answers the `muse-end` call with the proof's summary and
+  diagnostics instead, and the session goes on; that failed gate spends the
+  turn, so a session that cannot get green still rests at `--max-turns`. A
+  required proof that runs out of time or memory three times answers the end
+  call the same way. `Blocked` and `Asked` ends are not gated, and a continue
+  keeps the gate.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of
 opening a second one. The digest covers the instructions with the tree, brief,
-seeds, and settings. Keep `session=` and `after=` for the next step.
+seeds, settings, and required proofs. Keep `session=` and `after=` for the next step.
 
 ## 4. Wait for it to rest
 

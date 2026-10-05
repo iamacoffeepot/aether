@@ -6,10 +6,10 @@
 //! invocation, and no call in flight, only its heap entry.
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Detail, Digest, FaultReason, MAX_DUE_AHEAD_MILLIS, ReadArtifact, ReadArtifactResult, Seq, Until,
+    ClosureArtifact, Detail, FaultReason, MAX_DUE_AHEAD_MILLIS, ReadArtifact, ReadArtifactResult, Seq, Until,
 };
 use aether_bloomery_program::{ClockUntil, Program};
-use aether_data::{Kind, Storage};
+use aether_data::{Digest, Kind, Storage};
 
 use super::{Due, is_clock};
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, ProgramCore};

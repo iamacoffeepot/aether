@@ -12,15 +12,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use aether_bloomery_kinds::{ErasedRef, Ref, Tree};
+use aether_bloomery_kinds::Tree;
 use aether_data::storage::{
     RecordReader, RecordWriter, StorageElement, assemble_tagged_element, contribute_tagged_element, decode_derived,
     encode_derived,
 };
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{
-    Citations, Cites, DocNode, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageError,
-    StorageLeaves,
+    Citations, Cites, DocNode, ErasedRef, Kind, KindId, LabelNode, Ref, Schema, SchemaType, Storage, StorageData,
+    StorageError, StorageLeaves,
 };
 
 /// A tree-changing tool's result as the loop that runs the call reads it:
@@ -229,8 +229,8 @@ impl<D: Kind> Cites for Edited<D> {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, ErasedRef, Ref, Tree};
-    use aether_data::{Kind, Storage, StorageError};
+    use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Tree};
+    use aether_data::{ErasedRef, Kind, Ref, Storage, StorageError};
 
     use super::{Edited, ErasedEdited, NoDetail};
 

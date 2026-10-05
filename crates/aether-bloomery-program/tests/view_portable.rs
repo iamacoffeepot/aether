@@ -2,9 +2,9 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{Entry, Head, Program, Seq, Tree};
 use aether_bloomery_program::{Heads, View};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, Ref, Storage, StorageData};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.view.portable_note")]

@@ -4,8 +4,7 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ProgramName, ReadArtifactResult, Ref, Refusal, Tree,
-    Utf8Text,
+    ClosureArtifact, EncodedArtifact, Invoke, Invoked, ProgramName, ReadArtifactResult, Refusal, Tree,
 };
 use aether_bloomery_program::{AsyncProgram, Edited, Pending, PollResult, Program, Started, start_async, tooled};
 use aether_bloomery_workspace::{
@@ -14,7 +13,7 @@ use aether_bloomery_workspace::{
 use aether_bloomery_workspace_programs::proof::{
     ClippyArgs, ClippyProof, ProofBound, ProofVerdict, TestArgs, TestEnv, TestProof,
 };
-use aether_data::{Cites, Kind, Storage};
+use aether_data::{Cites, Digest, Kind, Ref, Storage, Utf8Text};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
