@@ -583,6 +583,10 @@ fn unknown_geometry_id_drops_and_frame_survives() {
     );
 }
 
+/// Dispatches of the second program in the many-passes scenario: past the
+/// 2,048 passes one Metal encoder holds.
+const RIGHT_DISPATCHES: usize = 2100;
+
 /// The frame's program passes span queue submissions: Metal loses the
 /// device once a frame holds more than about 2,048 passes in one encoder
 /// (two backend command buffers each, 4,096 unsubmitted), so the executor
@@ -598,7 +602,6 @@ fn a_frame_of_thousands_of_program_passes_draws_on_both_sides_of_a_submission() 
     if !require_wgpu_only() {
         return;
     }
-    const RIGHT_DISPATCHES: usize = 2100;
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
 
     let (left_positions, indices) = quad_geometry(-1.0, 0.0);
