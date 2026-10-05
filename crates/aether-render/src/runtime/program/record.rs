@@ -23,14 +23,14 @@ use aether_substrate::render::{
 use super::super::geometry::{GeometryRegistry, INDIRECT_CONTROL_BYTES};
 use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
-use super::super::texture::TextureRegistry;
+use super::super::texture::{BoundTexture, TextureRegistry};
 use super::cache::{BoundInput, BoundStorage, CacheParts};
 use super::sampler::{Filter, ProgramSamplers};
 use super::submit::FramePasses;
 use super::timing::FrameQueries;
 use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
-use crate::{GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureSampling, TextureUsage};
+use crate::{GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureUsage};
 
 /// What [`record_dispatch`] realizes, pools, and encodes against: the
 /// program, the sampler table, the transient pool, the two registries,
@@ -82,6 +82,9 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
     for &texture_id in &dispatch.bindings {
         if let Some(entry) = textures.entries.get_mut(&texture_id) {
             entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
+        }
+        if let Some(array) = textures.arrays.get_mut(&texture_id) {
+            array.ensure_realized(&gpu.device, &gpu.queue);
         }
     }
     for pass_plan in &plan.passes {
@@ -258,8 +261,12 @@ fn check_dispatch(
         return None;
     }
 
+    // Each binding id is resolved against the map its declared shape
+    // requires before anything reads the entry behind it: a `Target` or
+    // a `Texture` takes a plain texture and a `TextureArray` an array.
     for (binding, &texture_id) in dispatch.bindings.iter().enumerate() {
-        if !textures.entries.contains_key(&texture_id) {
+        let spec = plan.bindings[binding];
+        let Some(bound) = textures.resolve(texture_id) else {
             tracing::warn!(
                 target: "aether_render",
                 program_id,
@@ -268,51 +275,11 @@ fn check_dispatch(
                 "program dispatch binding names an unknown texture id; dropping the dispatch",
             );
             return None;
-        }
-    }
-    let reference = {
-        let entry = &textures.entries[&dispatch.bindings[plan.output_binding as usize]];
-        (entry.width, entry.height)
-    };
-    for (binding, &texture_id) in dispatch.bindings.iter().enumerate() {
-        let entry = &textures.entries[&texture_id];
-        let spec = plan.bindings[binding];
-        if entry.format != spec.format {
-            tracing::warn!(
-                target: "aether_render",
-                program_id,
-                binding,
-                texture_id,
-                declared = ?spec.format,
-                bound = ?entry.format,
-                "program dispatch binding format disagrees with the registered graph; dropping the dispatch",
-            );
-            return None;
-        }
-        match spec.shape {
-            SlotShape::Target(extent) => {
-                let expected = resolve_extent(extent, reference);
-                if (entry.width, entry.height) != expected {
-                    tracing::warn!(
-                        target: "aether_render",
-                        program_id,
-                        binding,
-                        texture_id,
-                        expected_width = expected.0,
-                        expected_height = expected.1,
-                        bound_width = entry.width,
-                        bound_height = entry.height,
-                        "program dispatch binding size disagrees with the registered graph; dropping the dispatch",
-                    );
-                    return None;
-                }
-            }
-            // Any size: the binding is read, never attached.
-            SlotShape::Texture => {}
-            // The registry holds no array texture, so whatever is bound
-            // here is a plain one, and its view cannot stand at an
-            // array-typed binding.
-            SlotShape::TextureArray => {
+        };
+        match (spec.shape, bound) {
+            (SlotShape::Target(_) | SlotShape::Texture, BoundTexture::Plain(_))
+            | (SlotShape::TextureArray, BoundTexture::Array(_)) => {}
+            (SlotShape::TextureArray, BoundTexture::Plain(_)) => {
                 tracing::warn!(
                     target: "aether_render",
                     program_id,
@@ -323,6 +290,58 @@ fn check_dispatch(
                 );
                 return None;
             }
+            (SlotShape::Target(_) | SlotShape::Texture, BoundTexture::Array(_)) => {
+                tracing::warn!(
+                    target: "aether_render",
+                    program_id,
+                    binding,
+                    texture_id,
+                    declared = ?spec.shape,
+                    "program dispatch binds a texture array at a binding that takes a plain texture; \
+                     dropping the dispatch",
+                );
+                return None;
+            }
+        }
+        if bound.format() != spec.format {
+            tracing::warn!(
+                target: "aether_render",
+                program_id,
+                binding,
+                texture_id,
+                declared = ?spec.format,
+                bound = ?bound.format(),
+                "program dispatch binding format disagrees with the registered graph; dropping the dispatch",
+            );
+            return None;
+        }
+    }
+    // The output binding is a `Target`, which the loop above proved
+    // plain, as it did every `Target` the size check below reads.
+    let reference = {
+        let entry = &textures.entries[&dispatch.bindings[plan.output_binding as usize]];
+        (entry.width, entry.height)
+    };
+    for (binding, &texture_id) in dispatch.bindings.iter().enumerate() {
+        // Any other shape takes any size: it is read, never attached.
+        let SlotShape::Target(extent) = plan.bindings[binding].shape else {
+            continue;
+        };
+        let entry = &textures.entries[&texture_id];
+        let expected = resolve_extent(extent, reference);
+        if (entry.width, entry.height) != expected {
+            tracing::warn!(
+                target: "aether_render",
+                program_id,
+                binding,
+                texture_id,
+                expected_width = expected.0,
+                expected_height = expected.1,
+                bound_width = entry.width,
+                bound_height = entry.height,
+                "program dispatch binding size disagrees with the registered graph; dropping the dispatch",
+            );
+            return None;
         }
     }
     for &binding in &plan.written_bindings {
@@ -525,9 +544,10 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
             for (input, slot) in pass_plan.inputs.iter().enumerate() {
                 let (view, nearest) = match slot {
                     ResolvedSlot::Binding(binding) => {
-                        let entry = &textures.entries[&dispatch.bindings[*binding as usize]];
-                        let nearest = entry.sampling == TextureSampling::Nearest || !entry.format.filterable();
-                        (cache.binding_view(*binding), nearest)
+                        let bound = textures
+                            .resolve(dispatch.bindings[*binding as usize])
+                            .expect("the dispatch check resolved every binding id");
+                        (cache.binding_view(*binding), bound.nearest())
                     }
                     ResolvedSlot::Transient(transient) => {
                         (transient_view(*transient), !plan.slot_format(*slot).filterable())
