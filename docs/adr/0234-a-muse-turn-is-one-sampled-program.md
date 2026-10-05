@@ -355,6 +355,71 @@ program is tested without spending money.
       (ADR-0237 decision 12), and a later gate reads the verdict without the
       loop linking a proof type.
 
+11. **A `Done` end passes the session's required proofs.** A session that
+    the model ends with `muse.end` as `Done` rests `Completed` only once the
+    proofs its opener requires pass on its tree; without a gate, a model that
+    skips a proof, or ends after a failing one, rests `Completed` on a tree
+    CI would reject, and that tree is what a Muse lane exports.
+    - **Where the list lives.** `OpenInput` (`muse.session.open.input`)
+      carries `required: RequiredProofs`, an ordered list of
+      `RequiredProof { program, args }` naming each proof tool with the
+      arguments its opener picked, chosen by whoever opens the session and
+      never by the model. `muse.session.open` refuses a program required
+      twice, a program the settings do not offer as a proof tool (the same
+      check that admits proof offers), and arguments of another kind than the
+      offer's input schema names. An empty list gates nothing. The list is
+      not on `OfferedTool` or `TurnSettings`: both ride every `muse.turn`
+      input and the model's request identity, and the gate is a loop rule
+      the model never sees. A continue keeps the gate: the session view
+      carries the list from the record to the continue beside the rested
+      tree, so `ContinueInput` and `Session` do not change. `cargo xtask muse
+      open --require <program>` sets it, repeatable and explicit: offering
+      the proofs requires none of them.
+    - **Reuse.** The session view records, per program, the tree left by
+      that program's latest passing run, the model's own calls included: a
+      result passes when it is an `Edited` whose detail cites exactly
+      `ProofVerdict::Passed`, which cites nothing, so the digest decides and
+      the loop links no proof type (`tools::proof_passed`). A passing proof
+      proves the tree it returns, not the one it was given, since a proof
+      formats before it checks. A required proof whose passing tree is the
+      current tree is not run again.
+    - **The gate runs in the end call's turn.** When an end call is answered
+      `Done`, its turn is gated: once every call has its output, the loop
+      runs the first required proof not proven on the current tree, from its
+      offer's bundle head over that tree, the required arguments, and the
+      offer's bound, exactly as it runs a call. When every required proof is
+      proven on the current tree, the turn settles and the session rests
+      `Completed`.
+    - **Adoption and the cap.** A gate proof's tree becomes the session's
+      tree whether it passes or fails, as a proof the model calls does, so a
+      `Completed` session rests with the formatted tree the proofs proved,
+      and after a failure the model works on the tree whose diagnostics it
+      read. A changed tree makes stale a proof that passed on the old one, so
+      the gate runs it again, up to `MAX_GATE_RUNS = 2` runs per proof per
+      end call, which stops two editing proofs that disagree from looping.
+    - **Failure.** A gate proof that does not pass stops the gate, and the
+      loop runs the Pure program `muse.session.gate`, as it runs
+      `muse.session.exhausted`. It stages "`muse-end` with `Done` needs
+      `<proof-fn>` to pass on the session's tree; it failed:" followed by the
+      proof's own summary (verdict, rewritten files, capped diagnostics), or,
+      at the cap, a sentence naming the proofs whose trees did not agree. The
+      end call's `Ending` output is replaced by that text as
+      `ToolOutput::Refused`, so the turn did not end: the loop sends the next
+      turn, or records the session at its turn limit or input limit. That is
+      the turn the failed gate spends, so a session that cannot get green
+      still rests at its limit.
+    - **Exhaustion.** A gate proof that runs out of time or memory is retried
+      like a call (decision 10), and at the cap the exhausted answer replaces
+      the end call's output the same way, so the session goes on and the
+      model can fix its work or end `Blocked`. Any other fault of a gate
+      proof fails the session, as a tool fault does.
+    - **Record.** `muse.session.record` reads an end call answered with
+      `ToolOutput::Refused` as one that did not end, so the turn rests by its
+      limits (`TurnLimit` or `ContextFull`); an end call answered with a
+      result that is not a readable `Ending` still refuses.
+    - **Not gated.** `Blocked` and `Asked` ends say the work is not done, so
+      they rest without a proof run.
+
 ## Consequences
 
 - The work lands in slices. Slice 1 is this ADR plus the
@@ -390,6 +455,10 @@ program is tested without spending money.
   name only (`storage_kind_id_from_name`), so a value recorded in an older
   shape keeps the same kind id and no longer decodes. This is accepted
   before 1.0, and nothing outside tests records them yet.
+- Adding `required` (decision 11) changed the shape of
+  `muse.session.open.input`. Its kind id hashes the name only, so an open
+  recorded in the older shape keeps its kind id and no longer decodes. This
+  is accepted before 1.0, as for the turn kinds.
 - A retried timeout may be billed twice: the vendor may have processed a
   request whose reply the adapter abandoned. Only a recorded reply counts,
   and the caller's retry cap bounds the cost.

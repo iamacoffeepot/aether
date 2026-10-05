@@ -17,7 +17,8 @@ use aether_bloomery_kinds::{
     Call, Name, NativeOrigin, Node, Path, ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Tree,
 };
 use aether_bloomery_muse::{
-    Endpoint, InputLimit, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings, offered,
+    Endpoint, InputLimit, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, RequiredProofs, TurnLimit,
+    TurnSettings, offered,
 };
 use aether_data::Ref;
 
@@ -108,6 +109,7 @@ impl Seed {
                     limit,
                     tree,
                     Vec::new(),
+                    RequiredProofs::default(),
                 ))?;
                 Ok(Call { program: MUSE, name: name.clone(), input: open.digest(), origin: origin.clone(), key })
             })

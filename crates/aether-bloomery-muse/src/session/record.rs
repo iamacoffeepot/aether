@@ -127,8 +127,11 @@ pub struct SessionRecord;
 /// A turn that ended the run through `muse.end` adds its text, every call,
 /// and the outputs, which must answer the calls exactly and in order, and
 /// rests with `Completed`, `Blocked`, or `Asked` by the end call's variant:
-/// `Done`, `Blocked`, or `Asked`. An end call without a readable `Ending`
-/// output refuses rather than resting with a guessed reason. A turn that answered,
+/// `Done`, `Blocked`, or `Asked`. An end call answered with a refusal, as a
+/// failed gate answers a `Done`, did not end the run, so the turn rests at
+/// its limit like any called turn; an end call answered with a result that is
+/// not a readable `Ending` refuses rather than resting with a guessed reason.
+/// A turn that answered,
 /// stopped early, or refused adds one assistant message with its text or
 /// refusal, except a turn that stopped early with no text, which adds nothing:
 /// the session then ends on what that turn sent, so a continue can resend it
@@ -192,8 +195,10 @@ fn session_items(items: Vec<TurnItem>) -> Result<SessionItems, Refusal> {
 
 /// The `Ending` of the turn's end call, read from the closure, when the
 /// outcome's calls include a decoded `muse.end` call, with its text staged for
-/// the closing message to cite. An end call without a readable result refuses
-/// rather than resting with a guessed reason.
+/// the closing message to cite. An end call answered with a refusal, as a
+/// failed gate or an exhausted run answers it, did not end the run: `None`.
+/// An end call whose result is not a readable `Ending` refuses rather than
+/// resting with a guessed reason.
 fn ended(env: &mut Env<Sync>, outcome: &TurnOutcome, outputs: &[CallAnswer]) -> Result<Option<Ending>, Refusal> {
     let TurnOutcome::Called { calls, .. } = outcome else {
         return Ok(None);
@@ -206,7 +211,7 @@ fn ended(env: &mut Env<Sync>, outcome: &TurnOutcome, outputs: &[CallAnswer]) -> 
     };
     let result = match outputs[position].output() {
         ToolOutput::Result { result, .. } => result.cast::<Ending>(),
-        ToolOutput::Refused(_) => None,
+        ToolOutput::Refused(_) => return Ok(None),
     };
     let Some(result) = result else {
         return Err(refused("the end call has no readable end result"));
@@ -548,7 +553,7 @@ mod tests {
 
     #[test]
     fn an_end_call_without_a_readable_result_refuses() {
-        // Catches a rest that guesses a reason when the end call's output is missing, refused, or of another kind.
+        // Catches a rest that guesses a reason when the end call's output is missing or of another kind.
         let turn = turn(vec![user()]);
         let ending = Ending::Done { summary: "All briefed changes are in the tree.".into() };
         let outcome = TurnOutcome::Called {
@@ -568,8 +573,35 @@ mod tests {
             record(&turn, &outcome, &input)
         };
 
-        assert!(matches!(rested(vec![answer("end")]), Err(Refusal::Refused { .. })), "a refused end output refuses");
+        let schema = Ref::of_encoded(&ToolSchema::of::<Ending>()).expect("schema");
+        let text = ToolOutput::Result { schema, result: Ref::of_text("hi").erase() };
+        let other = CallAnswer::new(CallId::new("end").expect("call id"), text);
+        assert!(matches!(rested(vec![other]), Err(Refusal::Refused { .. })), "an end output of another kind refuses");
         assert!(matches!(rested(vec![answer("other")]), Err(Refusal::Refused { .. })), "a missing end output refuses");
+    }
+
+    #[test]
+    fn a_refused_end_call_at_the_turn_limit_rests_turn_limit_with_the_refusal() {
+        // Catches a failed gate at the turn limit that fails the session's record instead of resting it, or rests it
+        // with the `Done` the gate refused.
+        let turn = turn(vec![user()]);
+        let ending = Ending::Done { summary: "All briefed changes are in the tree.".into() };
+        let outcome = result(TurnOutcome::Called {
+            reasoning: Vec::new(),
+            calls: end_calls("end", &ending),
+            text: Ref::of_text("Finishing up."),
+            usage: USAGE,
+        });
+        let input = RecordInput::rested(
+            Ref::of_encoded(&turn).expect("turn"),
+            Ref::of_encoded(&outcome).expect("result"),
+            vec![answer("end")],
+            tree(),
+        );
+
+        let session = record(&turn, &outcome, &input).expect("a refused end call rests");
+        assert_eq!(*session.rested(), RestReason::TurnLimit);
+        assert_eq!(session.items().last(), Some(&answer("end").item()), "the refusal is replayed last");
     }
 
     #[test]

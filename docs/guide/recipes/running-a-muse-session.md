@@ -91,7 +91,8 @@ after=<seq>
   saying the session works only through the offered tools, makes every
   independent call in the same turn, and ends its run only by calling
   `muse-end`; with proofs offered, it also tells the model to run
-  `proof-clippy` and `proof-test` until each passes before ending `Done`.
+  `proof-clippy` and `proof-test` until each passes before ending `Done`, and
+  with proofs required, that ending `Done` runs them.
 - `--seeds` is optional: a file naming one tree path per line, blank lines
   skipped. Each is read with `tree.read` before the first turn, so the model
   starts with those files in view.
@@ -126,11 +127,24 @@ after=<seq>
   `AETHER_HARNESS_FLEET_BIN_DIR=/work/target/debug`, so the FleetHarness
   suites that fork a chassis resolve the bins the test build already
   produced.
+- `--require <program>`, repeatable, needs `--environment` / `--vendor`: a
+  proof tool (`proof.clippy` or `proof.test`) a `Done` end must pass on the
+  session's tree, over the whole workspace. It is explicit: offering the
+  proofs requires none of them. When the model ends `Done`, the loop runs
+  each required proof it has not already passed on the current tree (the
+  model's own passing run on that tree counts), and the session rests
+  `completed` with the tree the proofs left, formatted by `cargo fmt`. A
+  failed proof answers the `muse-end` call with the proof's summary and
+  diagnostics instead, and the session goes on; that failed gate spends the
+  turn, so a session that cannot get green still rests at `--max-turns`. A
+  required proof that runs out of time or memory three times answers the end
+  call the same way. `Blocked` and `Asked` ends are not gated, and a continue
+  keeps the gate.
 
 The call key is derived from the open's input digest, so running the same
 `open` again (after a lost reply, say) prints the same session instead of
 opening a second one. The digest covers the instructions with the tree, brief,
-seeds, and settings. Keep `session=` and `after=` for the next step.
+seeds, settings, and required proofs. Keep `session=` and `after=` for the next step.
 
 ## 4. Wait for it to rest
 

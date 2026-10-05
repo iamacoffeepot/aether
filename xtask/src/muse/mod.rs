@@ -62,7 +62,7 @@ enum Verb {
     /// Open a session on a commit's tree, or a stored tree, with instructions,
     /// a brief, and seeded reads. Prints `tree=`, `session=`, and `after=`.
     /// Refuses when the muse reactor is not live.
-    Open(open::OpenArgs),
+    Open(Box<open::OpenArgs>),
     /// Continue a rested session with a message, or resend its conversation
     /// as it stands. Prints `after=`.
     Continue(continue_::ContinueArgs),

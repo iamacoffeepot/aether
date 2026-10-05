@@ -129,14 +129,15 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 pub use session::{
-    Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, MAX_TOOL_RETRIES, MUSE,
-    MuseSession, OpenInput, Opened, RecordInput, RestReason, Session, SessionContinue, SessionExhausted, SessionItems,
+    Answered, CallAnswer, ContinueInput, Exhausted, ExhaustedInput, Exhaustion, Failure, GateFailure, GateInput, Gated,
+    MAX_GATE_RUNS, MAX_TOOL_RETRIES, MUSE, MuseSession, OpenInput, Opened, RecordInput, RequiredProof, RequiredProofs,
+    RequiredProofsError, RestReason, Session, SessionContinue, SessionExhausted, SessionGate, SessionItems,
     SessionItemsError, SessionKey, SessionOpen, SessionRecord, TurnEnd, TurnLimit, TurnLimitError, TurnSettings,
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
     ReadArgs, RemoveArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeRemove, TreeWrite, VIEW_MAX_BYTES, Viewed,
-    WriteArgs, offered, offered_with_proofs,
+    WriteArgs, offered, offered_with_proofs, proof_passed, required_proofs,
 };
 
 aether_actor::export!(
@@ -146,6 +147,7 @@ aether_actor::export!(
         SessionContinue,
         SessionRecord,
         SessionExhausted,
+        SessionGate,
         Echo,
         End,
         TreeEdit,

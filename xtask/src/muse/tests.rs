@@ -16,8 +16,8 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_muse::{
     ContinueInput, Echo, Endpoint, InputLimit, MUSE, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
-    ReasoningEffort, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit, TurnResult,
-    TurnSettings,
+    ReasoningEffort, RequiredProofs, Session, SessionContinue, SessionKey, SessionOpen, SessionRecord, TurnLimit,
+    TurnResult, TurnSettings,
 };
 use aether_bloomery_program::Program;
 use aether_bloomery_workspace::EnvVar;
@@ -315,9 +315,17 @@ fn a_wait_sums_only_its_own_sessions_turns_and_stops_at_its_own_rest() -> Result
         TurnLimit::new(4)?,
         a0,
         Vec::new(),
+        RequiredProofs::default(),
     ))?;
-    let open_b =
-        batch.stage_encoded(&OpenInput::new(settings, instructions, user, TurnLimit::new(4)?, b0, Vec::new()))?;
+    let open_b = batch.stage_encoded(&OpenInput::new(
+        settings,
+        instructions,
+        user,
+        TurnLimit::new(4)?,
+        b0,
+        Vec::new(),
+        RequiredProofs::default(),
+    ))?;
     let (session_a, session_b, session_b2) =
         (session(&mut batch, a1)?, session(&mut batch, b1)?, session(&mut batch, b2)?);
     let a_called = turn(&mut batch, usage(10, 1, 100, 5))?;

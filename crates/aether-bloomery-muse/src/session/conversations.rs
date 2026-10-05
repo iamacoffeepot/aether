@@ -2,6 +2,13 @@
 //! session, what each waiting turn still owes, each session's current tree,
 //! and each session's latest record with the tree it rested with.
 //!
+//! A `Done` end call is gated (ADR-0234 decision 11): once every call of its
+//! turn has its output, the loop runs each required proof whose latest
+//! passing run did not leave the current tree, adopting each proof's tree,
+//! and settles only when every one is proven on it. A failed proof, or
+//! proofs whose trees do not settle, answer the end call with a staged
+//! refusal instead, and the turn goes on as one that did not end.
+//!
 //! Every hop of a session is one cause lookup. An entry the loop acts on is
 //! linked to its session's key; the `Requested` entry the loop's intent
 //! records is caused by that entry and takes the link over, and the run it
@@ -33,13 +40,14 @@ use crate::result::{TurnOutcome, TurnResult};
 use crate::session::MuseSession;
 use crate::session::continue_::SessionContinue;
 use crate::session::exhausted::{ExhaustedInput, Exhaustion, MAX_TOOL_RETRIES, SessionExhausted};
+use crate::session::gate::{GateInput, MAX_GATE_RUNS, RequiredProof, RequiredProofs, SessionGate};
 use crate::session::open::SessionOpen;
 use crate::session::record::{Answered, CallAnswer, RecordInput, SessionRecord};
 use crate::session::replay::replay;
 use crate::session::retry::{MAX_RETRIES, retry_wait, wait_call};
 use crate::session::state::{Failure, Session, SessionKey, TurnLimit};
 use crate::session::tools::call;
-use crate::tools::{NUDGE_TEXT, ends_run};
+use crate::tools::{Ending, NUDGE_TEXT, end_position, ends_run, proof_passed};
 
 /// Every live session and the journal entries linked to them.
 #[derive(Default)]
@@ -51,11 +59,22 @@ pub struct Conversations {
     sessions: BTreeMap<SessionKey, Conversation>,
     /// Each session's latest record, from its head's own moves.
     current: BTreeMap<SessionKey, Ref<Session>>,
-    /// Each session's last record the head moved to and the tree it rested
-    /// with, which a continue from that record works on.
-    rested: BTreeMap<SessionKey, (Ref<Session>, Ref<Tree>)>,
-    /// Each session's latest record and its tree, until the head moves to it.
-    recorded: BTreeMap<SessionKey, (Ref<Session>, Ref<Tree>)>,
+    /// Each session's last record the head moved to, with what a continue
+    /// from that record picks up.
+    rested: BTreeMap<SessionKey, Rested>,
+    /// Each session's latest record, with what a continue from it picks up,
+    /// until the head moves to it.
+    recorded: BTreeMap<SessionKey, Rested>,
+}
+
+/// A session's record and what a continue from it picks up: the tree it
+/// rested with, the proofs its `Done` end must pass, and the tree each
+/// proof's latest passing run left.
+struct Rested {
+    record: Ref<Session>,
+    tree: Ref<Tree>,
+    required: RequiredProofs,
+    proven: BTreeMap<ProgramName, Ref<Tree>>,
 }
 
 /// One session's activation in progress.
@@ -72,6 +91,11 @@ struct Conversation {
     /// The tree every call works on: the one the activation started from, or
     /// the one the last `Edited` result left, whatever its detail.
     tree: Ref<Tree>,
+    /// The proofs a `Done` end must pass on [`Self::tree`].
+    required: RequiredProofs,
+    /// The tree each proof's latest passing run left, the model's own runs
+    /// and the gate's alike: a proof proves the tree it returns.
+    proven: BTreeMap<ProgramName, Ref<Tree>>,
     /// The turn whose calls are running, if one asked for calls.
     waiting: Option<Waiting>,
     /// The seq of the tool run answered last.
@@ -101,9 +125,15 @@ struct Waiting {
     /// the session rests once every call has its output. `false` for seeds,
     /// which no turn asked for.
     full: bool,
+    /// Whether the turn's end call was answered with `Ending::Done`, so the
+    /// turn ends only once its gate passes.
+    done: bool,
+    /// The runs the gate made of each required proof for the end call.
+    gate_runs: BTreeMap<ProgramName, u32>,
 }
 
 /// What the loop runs after the entry linked to a session.
+#[derive(Clone)]
 enum Next {
     /// A called program from the bundle its offer names, over the session's
     /// tree and the arguments its call decoded to.
@@ -127,11 +157,39 @@ enum Next {
     /// The answer to the call now running, whose every attempt ran out of
     /// time or memory.
     Exhausted(ExhaustedInput),
+    /// A required proof the gate runs from the bundle its offer names, over
+    /// the session's tree, the required arguments, and the offer's bound.
+    Prove { head: Head<OpaqueBytes>, program: ProgramName, input: EncodedArtifact },
+    /// The answer to a `Done` end call whose gate did not pass.
+    Ungated(GateInput),
+}
+
+impl Next {
+    /// The program and input of the tool run this names: a call, or a
+    /// required proof the gate runs.
+    fn tool_run(&self) -> Option<(&ProgramName, &EncodedArtifact)> {
+        match self {
+            Self::Call { program, input, .. } | Self::Prove { program, input, .. } => Some((program, input)),
+            _ => None,
+        }
+    }
 }
 
 impl Conversation {
-    const fn new(limit: TurnLimit, turn: Ref<TurnInput>, tree: Ref<Tree>) -> Self {
-        Self { limit, turns: 0, turn, retries: 0, tree, waiting: None, answered: None, exhaustions: 0, next: None }
+    const fn new(limit: TurnLimit, turn: Ref<TurnInput>, tree: Ref<Tree>, required: RequiredProofs) -> Self {
+        Self {
+            limit,
+            turns: 0,
+            turn,
+            retries: 0,
+            tree,
+            required,
+            proven: BTreeMap::new(),
+            waiting: None,
+            answered: None,
+            exhaustions: 0,
+            next: None,
+        }
     }
 
     /// The record of this session failing with `failure`: the last turn it
@@ -147,8 +205,23 @@ impl Conversation {
     }
 
     /// Answer every refused call up to the next decoded one, and set what runs
-    /// next, or say why the loop cannot build it.
+    /// next: that call, the gate's next run when the turn ended `Done`, or
+    /// what follows the turn. Or say why the loop cannot build it.
     fn advance(&mut self) -> Result<(), Detail> {
+        let next = match self.next_call()? {
+            Some(call) => call,
+            None => match self.gate()? {
+                Some(gate) => gate,
+                None => self.after_calls()?,
+            },
+        };
+        self.next = Some(next);
+        Ok(())
+    }
+
+    /// Answer every refused call up to the next decoded one, and the call of
+    /// that one; `None` once every call has its output.
+    fn next_call(&mut self) -> Result<Option<Next>, Detail> {
         let waiting = self.waiting.as_mut().ok_or_else(|| Detail::new("no turn waits on calls"))?;
         let answered = waiting.outputs.len();
         for call in &waiting.calls.as_slice()[answered..] {
@@ -165,15 +238,61 @@ impl Conversation {
                         .ok_or_else(|| Detail::new(format!("{} is not an offered tool", program.as_str())))?;
                     let input = EncodedArtifact::new(&tooled(self.tree, *input, tool.bound()))
                         .map_err(|error| Detail::new(format!("a call's input did not encode: {error}")))?;
-                    self.next = Some(Next::Call { head: tool.head().clone(), program: program.clone(), input });
-                    return Ok(());
+                    return Ok(Some(Next::Call { head: tool.head().clone(), program: program.clone(), input }));
                 }
             }
         }
+        Ok(None)
+    }
+
+    /// The gate's next run, once every call has its output and the turn
+    /// ended `Done`: the first required proof whose latest passing run did not
+    /// leave the current tree, or the answer that the proofs did not settle
+    /// once it has run [`MAX_GATE_RUNS`] times. `None` when the turn did not
+    /// end `Done`, or every required proof is proven on the current tree.
+    fn gate(&mut self) -> Result<Option<Next>, Detail> {
+        let waiting = self.waiting.as_mut().ok_or_else(|| Detail::new("no turn waits on calls"))?;
+        let ended = ends_run(waiting.calls.as_slice(), &waiting.outputs);
+        let gated = ended && waiting.done;
+        if !gated {
+            return Ok(None);
+        }
+
+        let tree = self.tree;
+        let unproven = self.required.as_slice().iter().find(|proof| self.proven.get(proof.program()) != Some(&tree));
+        let Some(proof) = unproven else {
+            return Ok(None);
+        };
+        let program = proof.program();
+        let runs = waiting.gate_runs.get(program).copied().unwrap_or_default();
+        let capped = runs >= MAX_GATE_RUNS;
+        if capped {
+            let ran = self.required.as_slice().iter().map(RequiredProof::program);
+            let proofs = ran.filter(|program| waiting.gate_runs.contains_key(*program)).cloned().collect();
+            return Ok(Some(Next::Ungated(GateInput::unsettled(proofs))));
+        }
+        waiting.gate_runs.insert(program.clone(), runs + 1);
+
+        let tool = waiting
+            .input
+            .tools()
+            .iter()
+            .find(|tool| tool.program() == program)
+            .ok_or_else(|| Detail::new(format!("{} is required but not an offered tool", program.as_str())))?;
+        let input = EncodedArtifact::new(&tooled(tree, proof.args(), tool.bound()))
+            .map_err(|error| Detail::new(format!("a required proof's input did not encode: {error}")))?;
+        Ok(Some(Next::Prove { head: tool.head().clone(), program: program.clone(), input }))
+    }
+
+    /// What follows a turn whose every call has its output and whose gate,
+    /// if any, passed: its record when it ended or reached a limit, and the
+    /// next turn otherwise.
+    fn after_calls(&self) -> Result<Next, Detail> {
+        let waiting = self.waiting.as_ref().ok_or_else(|| Detail::new("no turn waits on calls"))?;
         let ended = ends_run(waiting.calls.as_slice(), &waiting.outputs);
         let spent = self.turns >= self.limit.get();
         let settles = ended || waiting.full || spent;
-        self.next = Some(match waiting.result {
+        Ok(match waiting.result {
             Some(result) if settles => {
                 Next::Settled(RecordInput::rested(waiting.turn, result, waiting.outputs.clone(), self.tree))
             }
@@ -186,42 +305,80 @@ impl Conversation {
                         .map_err(|error| Detail::new(format!("the next turn's items: {error}")))?,
                 )
             }
-        });
-        Ok(())
+        })
     }
 
-    /// Whether `run` is the run of the call the loop runs next.
+    /// Whether `run` is the run of the call or the required proof the loop
+    /// runs next.
     fn awaits(&self, run: &Transition) -> bool {
-        matches!(
-            &self.next,
-            Some(Next::Call { program, input, .. }) if program == run.program.name() && input.digest() == run.input
-        )
+        let Some((program, input)) = self.next.as_ref().and_then(Next::tool_run) else {
+            return false;
+        };
+        let same_program = program == run.program.name();
+        let same_input = input.digest() == run.input;
+        same_program && same_input
     }
 
     /// Record `result`, the result of the tool run at `seq`, as the output of
-    /// the call the loop ran, citing the result schema its turn offered.
+    /// the call the loop ran, citing the result schema its turn offered, and
+    /// mark the turn `done` when that call is its end call and `ends_done`.
     /// `None` when the call does not run or the turn offered no such tool.
-    fn answer(&mut self, result: ErasedRef, seq: Seq) -> Option<()> {
+    fn answer(&mut self, result: ErasedRef, ends_done: bool, seq: Seq) -> Option<()> {
         let waiting = self.waiting.as_mut()?;
-        let call = waiting.calls.as_slice().get(waiting.outputs.len())?;
+        let position = waiting.outputs.len();
+        let call = waiting.calls.as_slice().get(position)?;
         let program = call.program()?;
         let schema = waiting.input.tools().iter().find(|tool| tool.program() == program)?.result();
+        let is_end = end_position(waiting.calls.as_slice()) == Some(position);
         waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Result { schema, result }));
+        waiting.done |= is_end && ends_done;
         self.answered = Some(seq);
         self.exhaustions = 0;
         Some(())
     }
 
+    /// Take `edited`, the result of `program`'s run, as the session's tree,
+    /// and as the tree `program` proves when the result says it passed.
+    fn adopt(&mut self, program: &ProgramName, edited: &ErasedEdited) {
+        self.tree = edited.tree();
+        let passed = proof_passed(edited.detail());
+        if passed {
+            self.proven.insert(program.clone(), edited.tree());
+        }
+    }
+
     /// Answer the call now running with `refusal`, the staged answer to its
     /// exhausted attempts, at `seq`; whether a call waited for an answer.
+    /// When the run was the gate's required proof, every call already has
+    /// its output, and the end call is answered with `refusal` instead.
     fn refuse(&mut self, refusal: Ref<Utf8Text>, seq: Seq) -> bool {
         let Some(waiting) = self.waiting.as_mut() else {
             return false;
         };
-        let Some(call) = waiting.calls.as_slice().get(waiting.outputs.len()) else {
+        match waiting.calls.as_slice().get(waiting.outputs.len()) {
+            Some(call) => waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(refusal))),
+            None if waiting.done => return self.refuse_end(refusal, seq),
+            None => return false,
+        }
+        self.answered = Some(seq);
+        self.exhaustions = 0;
+        true
+    }
+
+    /// Answer the turn's end call with `refusal` in place of its `Done`, at
+    /// `seq`, so the turn goes on as one that did not end; whether the turn
+    /// has an answered end call.
+    fn refuse_end(&mut self, refusal: Ref<Utf8Text>, seq: Seq) -> bool {
+        let Some(waiting) = self.waiting.as_mut() else {
             return false;
         };
-        waiting.outputs.push(CallAnswer::new(call.call_id().clone(), ToolOutput::Refused(refusal)));
+        let Some(answer) =
+            end_position(waiting.calls.as_slice()).and_then(|position| waiting.outputs.get_mut(position))
+        else {
+            return false;
+        };
+        *answer = CallAnswer::new(answer.call_id().clone(), ToolOutput::Refused(refusal));
+        waiting.done = false;
         self.answered = Some(seq);
         self.exhaustions = 0;
         true
@@ -232,20 +389,19 @@ impl Conversation {
     /// staged answer to its attempts at the cap. `None` for any other fault.
     fn exhausted(&mut self, fault: &Fault) -> Option<Next> {
         let resource = Exhaustion::of(&fault.reason)?;
-        let Some(Next::Call { head, program, input }) = &self.next else {
-            return None;
-        };
+        let (program, input) = self.next.as_ref().and_then(Next::tool_run)?;
         let same_program = program == fault.program.name();
         let same_input = input.digest() == fault.input;
         let answers_the_call = same_program && same_input;
         if !answers_the_call {
             return None;
         }
+        let program = program.clone();
         self.exhaustions += 1;
         if self.exhaustions <= MAX_TOOL_RETRIES {
-            return Some(Next::Call { head: head.clone(), program: program.clone(), input: input.clone() });
+            return self.next.clone();
         }
-        Some(Next::Exhausted(ExhaustedInput::new(program.clone(), resource, self.exhaustions)))
+        Some(Next::Exhausted(ExhaustedInput::new(program, resource, self.exhaustions)))
     }
 }
 
@@ -254,7 +410,7 @@ impl Conversations {
     /// or a call that did not rest the session.
     pub fn step(&self, at: At) -> Option<CallProgram> {
         match self.next(at)? {
-            Next::Call { head, program, input } => Some(CallProgram {
+            Next::Call { head, program, input } | Next::Prove { head, program, input } => Some(CallProgram {
                 program: head.clone(),
                 name: program.clone(),
                 input: CallInput::Value(input.clone()),
@@ -268,6 +424,7 @@ impl Conversations {
             Next::Exhausted(exhausted) => {
                 Some(call::<SessionExhausted>(CallInput::Value(EncodedArtifact::new(exhausted).ok()?)))
             }
+            Next::Ungated(gate) => Some(call::<SessionGate>(CallInput::Value(EncodedArtifact::new(gate).ok()?))),
             Next::Rest(_) => None,
         }
     }
@@ -289,7 +446,9 @@ impl Conversations {
             | Next::Fail(_)
             | Next::Wait { .. }
             | Next::Retry(_)
-            | Next::Exhausted(_) => None,
+            | Next::Exhausted(_)
+            | Next::Prove { .. }
+            | Next::Ungated(_) => None,
         }
     }
 
@@ -333,6 +492,37 @@ impl Conversations {
         }
     }
 
+    /// The gate's run of the required proof `program` at `seq` answered
+    /// `result`: its tree becomes the session's, pass or fail. A pass gates
+    /// on, and a failure answers the end call through `muse.session.gate`. A
+    /// result that is no `Edited` fails the session.
+    fn proved(
+        &mut self,
+        key: SessionKey,
+        mut conversation: Conversation,
+        program: &ProgramName,
+        result: ErasedRef,
+        edited: Option<&ErasedEdited>,
+        seq: Seq,
+    ) {
+        conversation.answered = Some(seq);
+        conversation.exhaustions = 0;
+        let (Some(edited), Some(cited)) = (edited, result.cast::<ErasedEdited>()) else {
+            let failure = Failure::Unbuilt { reason: Detail::new("a required proof's result is not an edited tree") };
+            self.fail(key, conversation, failure, seq);
+            return;
+        };
+        conversation.adopt(program, edited);
+        let passed = proof_passed(edited.detail());
+        if passed {
+            self.advance(key, conversation, seq);
+        } else {
+            let gate = GateInput::failed(program.clone(), cited);
+            conversation.next = Some(Next::Ungated(gate));
+            self.keep(key, conversation, seq);
+        }
+    }
+
     /// Record `key` failing with `failure` after the entry at `seq`, or drop
     /// the session when the failure is of its failed record: that session
     /// cannot record itself.
@@ -354,7 +544,7 @@ impl View for Conversations {
     fn opened(&mut self, run: Ran<SessionOpen>, cited: &Cited, at: At) -> Result<(), CitedError> {
         let (input, opened) = (cited.get(run.input())?, cited.get(run.result())?);
         let (key, turn) = (SessionKey::new(at.seq.0), opened.turn());
-        let mut conversation = Conversation::new(input.max_turns(), turn, input.tree());
+        let mut conversation = Conversation::new(input.max_turns(), turn, input.tree(), input.required().clone());
         match opened.seeds() {
             None => self.keep(key, conversation, at.seq),
             Some(seeds) => {
@@ -368,6 +558,8 @@ impl View for Conversations {
                     calls,
                     outputs: Vec::new(),
                     full: false,
+                    done: false,
+                    gate_runs: BTreeMap::new(),
                 };
                 conversation.waiting = Some(waiting);
                 self.advance(key, conversation, at.seq);
@@ -380,12 +572,15 @@ impl View for Conversations {
     fn continued(&mut self, run: Ran<SessionContinue>, cited: &Cited, at: At) -> Result<(), CitedError> {
         let input = cited.get(run.input())?;
         let key = input.session();
-        let rested = self.rested.get(&key).filter(|(from, _)| *from == input.from());
-        if let Some(&(_, tree)) = rested
+        let rested = self.rested.get(&key).filter(|rested| rested.record == input.from());
+        if let Some(rested) = rested
             && self.current.get(&key) == Some(&input.from())
             && !self.sessions.contains_key(&key)
         {
-            self.keep(key, Conversation::new(input.max_turns(), run.result(), tree), at.seq);
+            let required = rested.required.clone();
+            let mut conversation = Conversation::new(input.max_turns(), run.result(), rested.tree, required);
+            conversation.proven.clone_from(&rested.proven);
+            self.keep(key, conversation, at.seq);
         }
         Ok(())
     }
@@ -409,8 +604,18 @@ impl View for Conversations {
                 conversation.retries = 0;
                 let (turn, result) = (run.input(), Some(run.result()));
                 let full = input.input_limit().reached(usage.input_tokens());
-                let outputs = Vec::new();
-                conversation.waiting = Some(Waiting { input, turn, result, reasoning, text, calls, outputs, full });
+                conversation.waiting = Some(Waiting {
+                    input,
+                    turn,
+                    result,
+                    reasoning,
+                    text,
+                    calls,
+                    outputs: Vec::new(),
+                    full,
+                    done: false,
+                    gate_runs: BTreeMap::new(),
+                });
                 self.advance(key, conversation, at.seq);
             }
             TurnOutcome::Completed { reasoning, text, usage } => {
@@ -449,11 +654,13 @@ impl View for Conversations {
         Ok(())
     }
 
-    /// Any program's run: the output of a tool call when the run answers the
-    /// `Requested` the loop recorded for the call it runs next. A result that
-    /// is an `Edited`, of any detail, moves the session to its tree before the
-    /// next call: the loop reads it as [`ErasedEdited`], so it links no tool's
-    /// detail kind.
+    /// Any program's run: the output of a tool call, or the gate's run of a
+    /// required proof, when the run answers the `Requested` the loop recorded
+    /// for what it runs next. A result that is an `Edited`, of any detail,
+    /// moves the session to its tree before the next call: the loop reads it
+    /// as [`ErasedEdited`], so it links no tool's detail kind, and a passing
+    /// proof's result proves that tree. An end call answered `Done` gates its
+    /// turn.
     /// Every other run, `muse.turn` and the session programs included, is
     /// left to its own fold.
     #[fold]
@@ -464,15 +671,28 @@ impl View for Conversations {
         }
         let result = ErasedRef::new(cited.kind(run.result)?, run.result);
         let edited = result.cast::<ErasedEdited>().map(|edited| cited.get(edited)).transpose()?;
-        if let Some((key, mut conversation)) = self.take(at.cause) {
-            if conversation.answer(result, at.seq).is_some() {
-                conversation.tree = edited.map_or(conversation.tree, |edited| edited.tree());
-                self.advance(key, conversation, at.seq);
-            } else {
-                conversation.answered = Some(at.seq);
-                let failure = Failure::Unbuilt { reason: Detail::new("the run's result answers no offered call") };
-                self.fail(key, conversation, failure, at.seq);
+        let ending = result.cast::<Ending>().map(|ending| cited.get(ending)).transpose()?;
+        let ends_done = matches!(ending, Some(Ending::Done { .. }));
+        let Some((key, mut conversation)) = self.take(at.cause) else {
+            return Ok(());
+        };
+
+        let program = run.program.name().clone();
+        let proving = matches!(conversation.next, Some(Next::Prove { .. }));
+        if proving {
+            self.proved(key, conversation, &program, result, edited.as_ref(), at.seq);
+            return Ok(());
+        }
+        let answered = conversation.answer(result, ends_done, at.seq).is_some();
+        if answered {
+            if let Some(edited) = &edited {
+                conversation.adopt(&program, edited);
             }
+            self.advance(key, conversation, at.seq);
+        } else {
+            conversation.answered = Some(at.seq);
+            let failure = Failure::Unbuilt { reason: Detail::new("the run's result answers no offered call") };
+            self.fail(key, conversation, failure, at.seq);
         }
         Ok(())
     }
@@ -496,7 +716,8 @@ impl View for Conversations {
     #[fold]
     fn recorded(&mut self, run: Ran<SessionRecord>, at: At) {
         if let Some((key, conversation)) = self.take(at.cause) {
-            self.recorded.insert(key, (run.result(), conversation.tree));
+            let Conversation { tree, required, proven, .. } = conversation;
+            self.recorded.insert(key, Rested { record: run.result(), tree, required, proven });
             self.links.insert(at.seq, key);
         }
     }
@@ -539,10 +760,37 @@ impl View for Conversations {
         Ok(())
     }
 
-    /// A run the loop requested faulted. A tool run that ran out of time or
-    /// memory runs again, up to [`MAX_TOOL_RETRIES`] times, and is then
-    /// answered with the staged text saying so; any other fault fails the
-    /// session, or, when the run was its failed record, drops it.
+    /// The staged answer to a `Done` end call whose gate did not pass: it
+    /// replaces the end call's output, when the run answers the `Requested`
+    /// the loop recorded for it, so the turn goes on as one that did not end.
+    /// The `resume` rule then sends the next turn, or records the session at
+    /// a limit: the failed gate spent its turn.
+    #[fold]
+    fn ungated(&mut self, run: Ran<SessionGate>, cited: &Cited, at: At) -> Result<(), CitedError> {
+        let linked = at.cause.and_then(|cause| self.sessions.get(self.links.get(&cause)?));
+        let awaits_answer = linked.is_some_and(|conversation| matches!(conversation.next, Some(Next::Ungated(_))));
+        if !awaits_answer {
+            return Ok(());
+        }
+        let refusal = cited.get(run.result())?.refusal();
+        if let Some((key, mut conversation)) = self.take(at.cause) {
+            let refused = conversation.refuse_end(refusal, at.seq);
+            if refused {
+                self.advance(key, conversation, at.seq);
+            } else {
+                conversation.answered = Some(at.seq);
+                let failure = Failure::Unbuilt { reason: Detail::new("the gate's answer answers no end call") };
+                self.fail(key, conversation, failure, at.seq);
+            }
+        }
+        Ok(())
+    }
+
+    /// A run the loop requested faulted. A tool run, or a required proof the
+    /// gate runs, that ran out of time or memory runs again, up to
+    /// [`MAX_TOOL_RETRIES`] times, and is then answered with the staged text
+    /// saying so (a gate's proof answers the end call); any other fault fails
+    /// the session, or, when the run was its failed record, drops it.
     #[fold]
     fn faulted(&mut self, fault: Fault, at: At) {
         let Some((key, mut conversation)) = self.take(at.cause) else {
@@ -575,7 +823,7 @@ impl View for Conversations {
             return;
         };
         self.current.insert(key, event.to());
-        if self.recorded.get(&key).is_some_and(|(record, _)| *record == event.to())
+        if self.recorded.get(&key).is_some_and(|rested| rested.record == event.to())
             && let Some(recorded) = self.recorded.remove(&key)
         {
             self.rested.insert(key, recorded);
@@ -592,9 +840,12 @@ mod tests {
     use aether_bloomery_program::At;
     use aether_data::Ref;
 
+    use std::collections::BTreeMap;
+
     use super::{Conversation, Conversations, Waiting};
     use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls};
     use crate::session::fixture::settings;
+    use crate::session::gate::RequiredProofs;
     use crate::session::state::{SessionKey, TurnLimit};
     use crate::tools::offered;
 
@@ -621,7 +872,8 @@ mod tests {
             ToolCall::decoded(CallId::new("call-1").expect("id"), program.clone(), Ref::of_text("{}"), echo.bound());
         let calls = ToolCalls::new(vec![call]).expect("calls");
         let (turn, tree) = (Ref::of_encoded(&input).expect("turn"), Ref::of_encoded(&Tree::empty()).expect("tree"));
-        let mut conversation = Conversation::new(TurnLimit::new(4).expect("limit"), turn, tree);
+        let mut conversation =
+            Conversation::new(TurnLimit::new(4).expect("limit"), turn, tree, RequiredProofs::default());
         let text = Ref::of_text("");
         conversation.waiting = Some(Waiting {
             input,
@@ -632,6 +884,8 @@ mod tests {
             calls,
             outputs: Vec::new(),
             full: false,
+            done: false,
+            gate_runs: BTreeMap::new(),
         });
 
         let mut conversations = Conversations::default();
