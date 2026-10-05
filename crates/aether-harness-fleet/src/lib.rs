@@ -1305,8 +1305,8 @@ mod tests {
         // a test binary can run in a tree it was not compiled in — dispatch
         // 3177 failed 84 scenarios at once on a compile-time dist path into a
         // checkout whose dist was gone. Resolution walks up from the caller's
-        // directory instead: the nearest checkout root wins, and a directory
-        // outside any checkout resolves to nothing rather than to a guess.
+        // directory instead: the nearest checkout root wins, and the scratch
+        // root resolves as its own ancestors do.
         let scratch = env::temp_dir().join(format!("aether-dist-resolve-{}", process::id()));
         let checkout = scratch.join("outer").join("checkout");
         let nested = checkout.join("crates").join("some-crate");
@@ -1314,7 +1314,11 @@ mod tests {
         fs::write(checkout.join("Cargo.lock"), "").expect("checkout marker");
 
         assert_eq!(runtime_dist_dir(&nested), Some(checkout.join("dist")));
-        assert_eq!(runtime_dist_dir(&scratch), None, "no ancestor checkout, no resolution");
+        assert_eq!(
+            runtime_dist_dir(&scratch),
+            runtime_dist_dir(&env::temp_dir()),
+            "a directory above the checkout resolves as the temp directory does, never down into the checkout",
+        );
 
         fs::remove_dir_all(&scratch).expect("scratch removed");
     }

@@ -3,13 +3,9 @@
 //! the core no longer links wgpu, so the tests that capture live with
 //! the GPU crate.
 
-// Test-only skip diagnostics emit `eprintln!` so `cargo test` runners
-// surface a visible "skipping: ..." line alongside `test ... ok`
-// (issue 891).
-#![allow(clippy::print_stderr)]
-
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
+use aether_harness_substrate_capture::test_helpers::require_wgpu_adapter;
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
 use aether_render::RenderCapability;
 
@@ -18,18 +14,15 @@ use aether_render::RenderCapability;
 /// uniformly. The test asserts the PNG is well-formed; deeper visual
 /// assertions live in the scenario suites.
 ///
-/// The test lets the boot fail naturally on driverless runners and
-/// skips on any boot error rather than pulling in the wgpu probe —
-/// same skip semantics, keyed off the boot result.
+/// The test gates on the wgpu adapter probe: a driverless runner skips,
+/// and under `AETHER_REQUIRE_RUNTIME=1` it fails.
 #[test]
 fn boot_advance_capture_round_trip() {
-    let mut tb = match SubstrateHarness::builder().size(64, 48).with_render().build() {
-        Ok(tb) => tb,
-        Err(e) => {
-            eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
-            return;
-        }
-    };
+    if !require_wgpu_adapter() {
+        return;
+    }
+
+    let mut tb = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot render harness");
     let result =
         tb.execute(vec![("tick", HarnessOp::advance(1)), ("snap", HarnessOp::capture())]).expect("advance + capture");
     let png = result.captured("snap").expect("snap step ran");
@@ -54,13 +47,11 @@ fn boot_advance_capture_round_trip() {
 /// correlation-id round-trip the MCP harness uses, but in-process.
 #[test]
 fn capture_frame_send_and_await_reply_returns_png() {
-    let mut tb = match SubstrateHarness::builder().size(64, 48).with_render().build() {
-        Ok(tb) => tb,
-        Err(e) => {
-            eprintln!("skipping: SubstrateHarness boot failed (likely no wgpu adapter): {e}");
-            return;
-        }
-    };
+    if !require_wgpu_adapter() {
+        return;
+    }
+
+    let mut tb = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot render harness");
     let render = tb.actor_ref::<RenderCapability>();
     let result = tb
         .execute(vec![
