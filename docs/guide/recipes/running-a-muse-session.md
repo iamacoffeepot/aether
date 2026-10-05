@@ -87,8 +87,8 @@ after=<seq>
   `--input-limit` is the most input tokens a turn may be billed for before the
   session rests `context-full`; a value of 0 is refused.
 - Every bound tool is offered: `tree.list`, `tree.read`, `tree.grep`,
-  `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. A reply without a
-  tool call does not end the session: the loop nudges the model back for
+  `tree.edit`, `tree.write`, `tree.remove`, `muse.echo`, and `muse.end`. A
+  reply without a tool call does not end the session: the loop nudges the model back for
   another turn. The first turn sends the instructions as the developer
   message ahead of the brief.
 - `--environment <digest>` and `--vendor <digest>`, given together, also offer

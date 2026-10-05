@@ -4,8 +4,8 @@
 //! bound value `B` its offer carries, which the loop binds, and the arguments
 //! `A` the model writes. Every tool here lives in the bundle [`MUSE`] resolves
 //! to and binds `NoBound`. [`offered`] is the set every session offers:
-//! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree nodes and blobs they
-//! touch and return an `Edited` tree;
+//! `tree.edit`, `tree.write`, and `tree.remove`, which read only the tree
+//! nodes and blobs they touch and return an `Edited` tree;
 //! `tree.list`, `tree.read`, and `tree.grep`, which only read the tree and
 //! return its text as [`Viewed`], capped at [`VIEW_MAX_BYTES`] with the cut
 //! marked; `muse.echo`, a value-only fixture; and `muse.end`, which ends the

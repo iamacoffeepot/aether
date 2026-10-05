@@ -178,19 +178,19 @@ pub async fn remove(
 fn rebuild(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Ref<Tree>, Refusal> {
     let Spine { names, dirs } = spine;
     let mut child = last;
-    let mut root = None;
     for (name, dir) in names.into_iter().zip(dirs).rev() {
         let mut entries = dir.entries().clone();
         match child {
             Some(node) => entries.insert(name, node),
             None => entries.remove(&name),
         };
-
-        let staged = env.stage_encoded(&Tree::new(entries))?;
-        child = Some(Node::Directory(staged));
-        root = Some(staged);
+        child = Some(Node::Directory(env.stage_encoded(&Tree::new(entries))?));
     }
-    Ok(root.expect("a spine has at least the root directory"))
+
+    let Some(Node::Directory(root)) = child else {
+        unreachable!("the last rebuilt node is the root directory");
+    };
+    Ok(root)
 }
 
 #[cfg(test)]

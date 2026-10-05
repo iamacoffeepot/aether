@@ -58,7 +58,8 @@
 //! rest writes the conversation and
 //! the latest tree down as a [`Session`] (`muse.session`) through
 //! `muse.session.record`, moving the session's head to it. The bound tools are
-//! [`TreeEdit`] (`tree.edit`), [`TreeWrite`] (`tree.write`), and [`TreeRemove`] (`tree.remove`), which return an `Edited`
+//! [`TreeEdit`] (`tree.edit`), [`TreeWrite`] (`tree.write`), and
+//! [`TreeRemove`] (`tree.remove`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
 //! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
