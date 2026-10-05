@@ -65,14 +65,17 @@ macro_rules! chassis_accessors {
         /// [`Self::resolve_address`] does, so a test that holds only the path
         /// of an actor it did not spawn itself, such as an autoloaded guest,
         /// can wait on it. The first call takes the settlement, and every
-        /// later call on the same actor returns at once.
+        /// later call on the same actor returns at once. The wait covers an
+        /// actor that is still open: an actor's subscription to its wire
+        /// root is released with its slot when it closes.
         ///
         /// # Panics
         /// Panics naming the `chassis.wire_settled` gate when `address`
         /// resolves to no live mailbox, when it names no pooled instanced
-        /// actor, when the actor's `wire` ran under the boot's root (await
-        /// `await_boot_settled` for it), or when the root does not settle
-        /// within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+        /// actor, when the actor closed before the wait, when the actor's
+        /// `wire` ran under the boot's root (await `await_boot_settled` for
+        /// it), or when the root does not settle within the settlement cap
+        /// (`AETHER_SETTLEMENT_CAP_SECS`).
         #[cfg(any(test, feature = "test-support"))]
         pub fn await_wire_settled(&self, address: &aether_data::ErasedActorPath) {
             self.booted.spawner.await_wire_settled(
@@ -621,14 +624,16 @@ impl<C: Chassis> PassiveChassis<C> {
     ///
     /// It waits on the slot's own close-done signal and then on an empty
     /// barrier batch through the FIFO registry owner, never on the clock. An
-    /// actor that has already closed returns at once. One waiter per actor
-    /// at a time: a second concurrent call on the same actor displaces the
-    /// first.
+    /// actor that has already closed has released its slot, so the call
+    /// waits on the barrier alone, which lands behind the route drop the
+    /// close queued. One waiter per actor at a time: a second concurrent
+    /// call on the same actor displaces the first.
     ///
     /// # Panics
-    /// Panics when `actor` is not a pooled instanced actor (a singleton or a
-    /// pumped slot has no close-done signal here), or when the close does not
-    /// apply within the settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
+    /// Panics when `actor` is neither a pooled instanced actor that is still
+    /// open nor one that has closed (a singleton or a pumped slot has no
+    /// close-done signal here), or when the close does not apply within the
+    /// settlement cap (`AETHER_SETTLEMENT_CAP_SECS`).
     #[cfg(any(test, feature = "test-support"))]
     pub fn await_closed(&self, actor: ErasedActorRef) {
         self.booted.spawner.await_closed(actor.id(), "testing.await_closed");

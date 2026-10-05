@@ -355,9 +355,9 @@ impl Spawner {
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this
         // instanced actor's `Inbox` entry so the burst demuxer dispatches
-        // its fan-out in place (ADR-0087 §4). The registry holds the
-        // strong slot ref via `instanced_slots` below; the demuxer's
-        // `Weak` upgrade fails cleanly once the actor is torn down.
+        // its fan-out in place (ADR-0087 §4). The spawner holds the
+        // strong slot ref in `instanced_slots` below until the actor
+        // closes; the demuxer's `Weak` upgrade fails cleanly after that.
         self.registry.install_seize_handle(
             authority,
             id,
@@ -367,9 +367,10 @@ impl Spawner {
         // Stash the slot's strong Arc so wakes can upgrade their `Weak`.
         // PR C dropped it here, which broke every wake after spawn (the
         // registry only holds the inbox sender, not the slot — the
-        // comment claiming otherwise was wrong). Slots live until the
-        // Spawner itself drops at chassis teardown. Issue 685 also
-        // stashes a wake clone so chassis teardown can fire one wake per
+        // comment claiming otherwise was wrong). The entry lives until
+        // the actor's close cycle releases it, or until chassis teardown
+        // drains it. Issue 685 also stashes a wake clone so chassis
+        // teardown can fire one wake per
         // slot after signaling shutdown. Its `wire` ran under the boot's
         // wire root, so it keeps no wire root of its own (ADR-0244).
         drop(slot);

@@ -13,7 +13,9 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnError, SpawnOutcome, Subname};
-use crate::config::RegistryQueueCapacities;
+use crate::chassis::frame_loop;
+use crate::chassis::settlement::{TerminalDisposition, await_internal_signal};
+use crate::config::{RegistryQueueCapacities, SettlementConfig};
 use crate::mail::registry::effect::{
     ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
 };
@@ -230,8 +232,8 @@ fn successful_prepared_activation_enters_ordinary_dispatch_once() {
 /// `SubnameRetired`, and the parent's key comes back at the child's own
 /// close path rather than at chassis teardown. Issue 4152's two
 /// independent regressions, in the order a caller meets them: the live
-/// key rode the child's binding inside `Spawner::instanced_slots`,
-/// which only `shutdown_instanced` ever empties, so the re-stage was
+/// key rode the child's binding, which at the time stayed in
+/// `Spawner::instanced_slots` until chassis teardown, so the re-stage was
 /// rejected locally as `SubnameInUse` and one table entry leaked per
 /// dead child; and the owner then rejected the birth on its surviving
 /// route — also as `SubnameInUse` — before
@@ -281,10 +283,6 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
         assert!(Instant::now() < deadline, "the closed child's close path released its parent-local key");
         thread::yield_now();
     };
-    assert!(
-        spawner.instanced_slots.lock().expect("instanced_slots mutex poisoned").contains_key(&child_id),
-        "the key came back from the actor's close path — its slot is still parked for chassis teardown"
-    );
     drop(restaged);
 
     let (events_tx, _events_rx) = crossbeam_channel::unbounded();
@@ -304,6 +302,65 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
     drop(owner);
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
+/// Issue #7402: an instanced actor that closes leaves nothing of itself in
+/// the spawner, and its slot is freed once the worker that ran the close
+/// cycle is done with it. The slot carries the actor's log and trace rings
+/// and its binding, so a close path that left the entry in
+/// `Spawner::instanced_slots` (the map still has the id), or any other
+/// holder that kept the dead slot alive (the `Weak` still upgrades), grows
+/// by one slot for every actor ever born: every load and drop of a
+/// component.
+#[test]
+fn closed_actor_slot_is_released_and_freed() {
+    let (spawner, registry, mailer, pool) = activation_fixture();
+    let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let (events_tx, _events_rx) = crossbeam_channel::unbounded();
+    let commit = prepared_probe(&spawner, "released", events_tx);
+    let child_id = commit.id;
+    let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+    owner.apply_once_then_observe_before_next_apply_for_test(|| {});
+    completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+
+    let slot = Arc::clone(
+        &spawner
+            .instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned")
+            .get(&child_id)
+            .expect("a live pooled actor's slot is retained")
+            .slot,
+    );
+    let (closed_tx, closed_rx) = crossbeam_channel::bounded(1);
+    slot.set_close_done_tx(closed_tx);
+    let freed = Arc::downgrade(&slot);
+    drop(slot);
+
+    mailer.push(Mail::new(child_id, ActivationClose::ID, ActivationClose.encode_into_bytes(), 1));
+    let _ = await_internal_signal(
+        &closed_rx,
+        "test.activation.close_done",
+        frame_loop::DRAIN_BUDGET,
+        SettlementConfig::from_env().to_cap(),
+        TerminalDisposition::Panic,
+        None,
+    );
+    assert!(
+        !spawner.instanced_slots.lock().expect("instanced_slots mutex poisoned").contains_key(&child_id),
+        "the close cycle released the spawner's entry before it signalled close-done"
+    );
+
+    drop(owner);
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+    assert!(freed.upgrade().is_none(), "nothing holds the closed actor's slot once the workers have joined");
 }
 
 #[test]

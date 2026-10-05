@@ -165,6 +165,21 @@ impl ActorRegistry {
         matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
 
+    /// Has the actor at `id` run its registry close? True only for a
+    /// `Dead` slot, which [`Self::close_actor`] leaves before the route
+    /// drop is queued. An id that never owned a slot (a singleton that is
+    /// still up, an inline-child alias, a name nothing was born at) answers
+    /// `false`, which is what lets the test-support close wait tell an
+    /// actor that closed and was released from one it never covered.
+    ///
+    /// # Panics
+    /// Panics if the `actors` `RwLock` is poisoned (see [`Self::is_live`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn is_closed_at(&self, id: MailboxId) -> bool {
+        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
+        matches!(actors.get(&id), Some(ActorEntry::Dead))
+    }
+
     /// Has this id been tombstoned (its actor closed)? `spawn_child`
     /// uses this in Phase 3 to reject reuse of retired full names.
     ///

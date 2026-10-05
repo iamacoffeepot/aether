@@ -82,8 +82,10 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
 /// actor's route drop has been applied at the registry owner. The close tail
 /// queues that drop after the closing chain settles, so a wait that returned
 /// on the close cycle alone, or on settlement, would still read the route
-/// `Live` here. A second call on the already-closed actor takes the slot's
-/// fast path and returns rather than parking on a signal that already fired.
+/// `Live` here. A second call finds the actor closed and its slot released
+/// (issue #7402): it reads the close off the actor registry and waits on the
+/// registry barrier alone, where a wait that still looked for the slot would
+/// panic, and one that parked for a close-done signal would never return.
 #[test]
 fn await_closed_returns_once_the_route_drop_applies() {
     use crate::actor::native::spawn::Subname;
@@ -106,6 +108,10 @@ fn await_closed_returns_once_the_route_drop_applies() {
     assert!(chassis.published_contract(closer.erase()).is_none(), "the closed actor's route drop has applied");
 
     chassis.await_closed(closer.erase());
+    assert!(
+        chassis.published_contract(closer.erase()).is_none(),
+        "the wait on a released actor leaves its route dropped"
+    );
 }
 
 /// Issue 685: chassis teardown drives `unwire` on every spawned
