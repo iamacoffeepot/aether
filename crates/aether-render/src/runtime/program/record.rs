@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    PROGRAM_DEPTH_FORMAT, ProgramComputePass, ProgramDepthAttachment, ProgramDrawCommand, ProgramDrawPass,
-    ProgramDrawPassOpen, ProgramPassDraw, begin_program_draw_pass, create_program_depth_transient,
+    PROGRAM_DEPTH_FORMAT, ProgramColorAttachment, ProgramComputePass, ProgramDepthAttachment, ProgramDrawCommand,
+    ProgramDrawPass, ProgramDrawPassOpen, ProgramPassDraw, begin_program_draw_pass, create_program_depth_transient,
     create_program_transient, record_program_compute_pass, record_program_draw_pass, record_program_pass,
 };
 
@@ -667,6 +667,18 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
             let timestamps = bracket.and_then(|query| {
                 queries.as_ref().and_then(|queries| queries.timestamps(query, iteration, iterations))
             });
+            // The color attachment of a rasterizing pass under its
+            // declared load semantic, or none for a depth-only pass.
+            let color_attachment = |load: PassLoad| {
+                pass_plan.output.map(|output| ProgramColorAttachment {
+                    view: match output {
+                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
+                        ResolvedSlot::Transient(transient) => transient_view(transient),
+                    },
+                    resolve_target: resolve_view(pass, output, last_iteration),
+                    clear: load == PassLoad::Clear && iteration == 0,
+                })
+            };
             match (&pass_plan.stage, &pass_gpu.pipeline) {
                 (PassPlanStage::Fragment, PassPipeline::Render(pipeline)) => {
                     let output = pass_plan.output.expect("fragment pass has an output");
@@ -694,12 +706,6 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw),
                     PassPipeline::Render(pipeline),
                 ) => {
-                    let output = pass_plan.output.expect("draw pass has an output");
-                    let target_view = match output {
-                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
-                        ResolvedSlot::Transient(transient) => transient_view(transient),
-                    };
-                    let resolve_target = resolve_view(pass, output, last_iteration);
                     let depth = draw.depth.map(|slot| ProgramDepthAttachment {
                         view: depth_view(slot),
                         clear: layout.clears_depth[pass] && iteration == 0,
@@ -719,9 +725,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         &ProgramDrawPass {
                             open: ProgramDrawPassOpen {
                                 pipeline,
-                                target_view,
-                                resolve_target,
-                                clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                                color: color_attachment(draw.load),
                                 depth,
                                 uniform_bind_group,
                                 uniform_offset,
@@ -735,12 +739,6 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                     );
                 }
                 (PassPlanStage::DrawSets(draw_sets), PassPipeline::Render(pipeline)) => {
-                    let output = pass_plan.output.expect("draw-sets pass has an output");
-                    let target_view = match output {
-                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
-                        ResolvedSlot::Transient(transient) => transient_view(transient),
-                    };
-                    let resolve_target = resolve_view(pass, output, last_iteration);
                     let depth = draw_sets.depth.map(|depth| ProgramDepthAttachment {
                         view: depth_view(depth.slot),
                         clear: layout.clears_depth[pass] && iteration == 0,
@@ -750,9 +748,7 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         encoder,
                         &ProgramDrawPassOpen {
                             pipeline,
-                            target_view,
-                            resolve_target,
-                            clear_color: draw_sets.load == PassLoad::Clear && iteration == 0,
+                            color: color_attachment(draw_sets.load),
                             depth,
                             uniform_bind_group,
                             uniform_offset,

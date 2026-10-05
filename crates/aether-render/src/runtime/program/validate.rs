@@ -14,9 +14,9 @@ use naga::{
 use super::super::surface::render_limits;
 use super::draw_sets::validate::{DrawSetsPlan, list_slots, validate_draw_sets};
 use crate::{
-    Blend, ComputeBufferBinding, ComputePass, DepthSpec, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, Mips,
-    OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Samples, Sampling, SlotExtent, SlotShape, SlotSpec,
-    StorageAccess, TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
+    Blend, ComputeBufferBinding, ComputePass, DepthExtent, DepthSpec, DrawPass, GeometryBuffer, GeometrySlotSpec,
+    InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Samples, Sampling, SlotExtent,
+    SlotShape, SlotSpec, StorageAccess, TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
 };
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -54,8 +54,9 @@ pub enum ResolvedSlot {
 
 /// One validated pass: explicit stage, the blend it declared, entry
 /// point, resolved texture slots, uniform window, and flattened repeat
-/// (`repeat_count` is 1 for an unrepeated pass). Compute carries no
-/// texture output and declares `Blend::Replace`.
+/// (`repeat_count` is 1 for an unrepeated pass). `output` is `None` for
+/// a pass with no color output, which declares `Blend::Replace`: a
+/// compute pass, or a rasterizing pass that is depth-only.
 #[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
@@ -127,7 +128,7 @@ impl PassPlanStage {
 /// One validated draw pass (ADR-0171): the authored vertex entry, the
 /// geometry slot the dispatch fills, the depth slot it clears and tests
 /// against (`None` for a pass that does not depth-test), and the color
-/// load semantic it declared.
+/// load semantic it declared (`Load` for a depth-only pass).
 #[derive(Debug)]
 pub struct DrawPlan {
     pub vertex_entry_point: String,
@@ -164,8 +165,8 @@ pub struct ProgramPlan {
     pub transients: Vec<TransientPlan>,
     /// Declared geometry slots (ADR-0171), in dispatch-supply order.
     pub geometries: Vec<GeometrySlotSpec>,
-    /// Declared depth transients (ADR-0171), by extent and sample
-    /// count — the format is fixed at `Depth32Float`.
+    /// Declared depth transients (ADR-0171, ADR-0246 decision 9), by
+    /// extent and sample count — the format is fixed at `Depth32Float`.
     pub depth_transients: Vec<DepthSpec>,
     pub passes: Vec<PassPlan>,
     /// The dispatch binding the final pass writes — the program's
@@ -199,12 +200,21 @@ impl ProgramPlan {
 
     /// How many samples a resolved slot holds per texel: a binding is a
     /// registry texture and always has one, and a transient has what it
-    /// declares. A pass's pipeline is built with its output's count.
+    /// declares.
     pub fn samples(&self, slot: ResolvedSlot) -> Samples {
         match slot {
             ResolvedSlot::Binding(_) => Samples::One,
             ResolvedSlot::Transient(index) => self.transients[index as usize].spec.samples,
         }
+    }
+
+    /// How many samples per texel a pass rasterizes at, which is what
+    /// its pipeline is built with: its color output's count, or its
+    /// depth slot's for a depth-only pass. A compute pass attaches
+    /// nothing and answers `One`.
+    pub fn pass_samples(&self, pass: &PassPlan) -> Samples {
+        let depth_samples = || pass.stage.depth_slot().map(|slot| self.depth_transients[slot as usize].samples);
+        pass.output.map(|output| self.samples(output)).or_else(depth_samples).unwrap_or(Samples::One)
     }
 
     /// The declared extent of a slot a pass writes or the pool
@@ -251,6 +261,26 @@ pub fn resolve_extent(extent: SlotExtent, reference: (u32, u32)) -> (u32, u32) {
     }
 }
 
+/// Resolve a depth slot's declared extent against the reference size:
+/// an `Output` extent as [`resolve_extent`] does, and a `Fixed` one to
+/// its own square whatever the reference is.
+pub fn resolve_depth_extent(extent: DepthExtent, reference: (u32, u32)) -> (u32, u32) {
+    match extent {
+        DepthExtent::Output(extent) => resolve_extent(extent, reference),
+        DepthExtent::Fixed { side } => (side, side),
+    }
+}
+
+/// The divisor a timing row reports for a depth slot's extent: the
+/// declared divisor of an `Output` extent (`1` for `Full`), and `1` for
+/// a `Fixed` one, which is divided from nothing.
+pub fn depth_divisor(extent: DepthExtent) -> u32 {
+    match extent {
+        DepthExtent::Output(SlotExtent::Divided { divisor }) => divisor,
+        DepthExtent::Output(SlotExtent::Full) | DepthExtent::Fixed { .. } => 1,
+    }
+}
+
 /// Validate a register mail: naga (parse + validation), then the graph.
 /// Returns the plan, or the `Err { reason }` string for the first
 /// failing check.
@@ -281,7 +311,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         }
     }
     for (index, spec) in mail.depth_transients.iter().enumerate() {
-        check_extent(spec.extent, || format!("depth transient {index}"))?;
+        check_depth_extent(index, spec.extent)?;
     }
     for (index, slot) in mail.geometries.iter().enumerate() {
         check_geometry_slot(index, slot)?;
@@ -377,6 +407,27 @@ fn check_extent(extent: SlotExtent, slot: impl Fn() -> String) -> Result<(), Str
     }
 }
 
+/// A depth slot's extent must be one a texture can be created at: an
+/// `Output` extent as any other, and a `Fixed` side inside the limit
+/// set texture creation is checked against, so a side the device would
+/// refuse is refused here and not at the first dispatch.
+fn check_depth_extent(index: usize, extent: DepthExtent) -> Result<(), String> {
+    match extent {
+        DepthExtent::Output(extent) => check_extent(extent, || format!("depth transient {index}")),
+        DepthExtent::Fixed { side } => {
+            let limit = render_limits().max_texture_dimension_2d;
+            if (1..=limit).contains(&side) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "depth transient {index}: fixed side {side} is outside 1..={limit}, the device limit \
+                     max_texture_dimension_2d",
+                ))
+            }
+        }
+    }
+}
+
 /// A declared geometry slot must be a layout a vertex buffer can be
 /// built from: at least one attribute, and no location claimed twice.
 /// Both would otherwise surface as an opaque `pipeline creation failed`
@@ -409,7 +460,7 @@ struct PassValidation<'a> {
 // that would each re-thread the same pass context.
 #[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass) -> Result<PassPlan, String> {
-    let &PassValidation { mail, module, info, earlier, transients } = context;
+    let &PassValidation { mail, module, info, earlier, .. } = context;
     let entry_stage = if matches!(&pass.stage, PassStage::Compute(_)) {
         ShaderStage::Compute
     } else {
@@ -430,7 +481,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
 
     let mut inputs = Vec::with_capacity(pass.inputs.len());
     for (input_index, input) in pass.inputs.iter().enumerate() {
-        inputs.push(resolve_input(mail, earlier, transients, index, input_index, *input)?);
+        inputs.push(resolve_input(context, index, &pass.stage, input_index, *input)?);
     }
     let output = match pass.output {
         OutputSlot::Binding { index: binding } => {
@@ -454,6 +505,13 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
         return Err(format!("pass {index} reads its own output slot"));
     }
 
+    let raster = RasterPass {
+        index,
+        fragment_entry_index: entry_index,
+        fragment_entry_point: &pass.entry_point,
+        blend: pass.blend,
+        attached: attached_output(mail, output),
+    };
     let (stage, vertex_entry_index) = match &pass.stage {
         PassStage::Fragment => {
             if output.is_none() {
@@ -462,8 +520,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             (PassPlanStage::Fragment, None)
         }
         PassStage::Draw(draw) | PassStage::DrawIndexedIndirect(draw) => {
-            let attached = attached_output(mail, index, output, "draw")?;
-            let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), attached)?;
+            let validated = validate_draw(mail, module, draw, &raster)?;
             if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
                 check_indirect_writer(earlier, index, draw.geometry)?;
             }
@@ -489,9 +546,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             (PassPlanStage::Compute(validate_compute(mail, module, info, index, entry_index, compute)?), None)
         }
         PassStage::DrawSets(draw_sets) => {
-            let attached = attached_output(mail, index, output, "draw-sets")?;
-            let fragment_entry = (entry_index, pass.entry_point.as_str());
-            let validated = validate_draw_sets(mail, module, index, draw_sets, fragment_entry, attached)?;
+            let validated = validate_draw_sets(mail, module, draw_sets, &raster)?;
             (PassPlanStage::DrawSets(validated.plan), Some(validated.vertex_entry_index))
         }
     };
@@ -548,28 +603,34 @@ pub struct Attached {
     pub samples: Samples,
 }
 
-/// What the color output of a rasterizing pass attaches as: a binding
-/// at its declared extent and one sample, a transient as it declares.
-/// `stage` names the stage in the refusal of a pass that declares no
-/// texture output.
-fn attached_output(
-    mail: &ProgramRegister,
-    index: usize,
-    output: Option<ResolvedSlot>,
-    stage: &str,
-) -> Result<Attached, String> {
-    let attached = match output {
-        None => return Err(format!("pass {index}: a {stage} pass must declare a texture output")),
-        Some(ResolvedSlot::Binding(binding)) => Attached {
+/// What the color output of a pass attaches as: a binding at its
+/// declared extent and one sample, a transient as it declares, and
+/// nothing for a pass with no color output, which on a rasterizing
+/// stage is a depth-only pass.
+fn attached_output(mail: &ProgramRegister, output: Option<ResolvedSlot>) -> Option<Attached> {
+    let attached = match output? {
+        ResolvedSlot::Binding(binding) => Attached {
             extent: target_extent(mail.bindings[binding as usize]).expect("a written binding was checked a Target"),
             samples: Samples::One,
         },
-        Some(ResolvedSlot::Transient(transient)) => {
+        ResolvedSlot::Transient(transient) => {
             let spec = mail.transients[transient as usize];
             Attached { extent: spec.extent, samples: spec.samples }
         }
     };
-    Ok(attached)
+    Some(attached)
+}
+
+/// What the validation of a rasterizing stage reads from the pass that
+/// declares it: its index, its fragment entry point by naga index and
+/// by name, its blend, and the color output it attaches (`None` for a
+/// depth-only pass).
+pub struct RasterPass<'a> {
+    pub index: usize,
+    pub fragment_entry_index: usize,
+    pub fragment_entry_point: &'a str,
+    pub blend: Blend,
+    pub attached: Option<Attached>,
 }
 
 /// A validated draw declaration plus the naga entry index of its vertex
@@ -703,16 +764,16 @@ fn check_indirect_writer(earlier: &[PassPlan], index: usize, geometry: u32) -> R
 /// The `PassStage::Draw` half of pass validation (ADR-0171), in check
 /// order: the vertex entry exists, the geometry slot the dispatch fills
 /// is declared, the vertex stage's interface agrees with that slot's
-/// layout, and the depth declaration is coherent with the pass
-/// ([`check_depth`]).
+/// layout, the depth declaration is coherent with the pass
+/// ([`check_depth`]), and a pass with no color output is a well-formed
+/// depth-only pass ([`check_depth_only`]).
 fn validate_draw(
     mail: &ProgramRegister,
     module: &Module,
-    index: usize,
     draw: &DrawPass,
-    fragment_entry: (usize, &str),
-    attached: Attached,
+    pass: &RasterPass<'_>,
 ) -> Result<ValidatedDraw, String> {
+    let index = pass.index;
     let vertex_entry_index = vertex_entry(module, index, &draw.vertex_entry_point)?;
 
     let slot = mail.geometries.get(draw.geometry as usize).ok_or_else(|| {
@@ -720,7 +781,8 @@ fn validate_draw(
     })?;
     let declared_by = format!("geometry slot {}'s layout", draw.geometry);
     check_vertex_interface(module, index, vertex_entry_index, &slot.layout, &declared_by)?;
-    check_depth(mail, module, index, draw.depth, fragment_entry, attached)?;
+    check_depth(mail, module, draw.depth, pass)?;
+    check_depth_only(module, draw.load, pass)?;
 
     Ok(ValidatedDraw {
         plan: DrawPlan {
@@ -742,23 +804,35 @@ pub(super) fn vertex_entry(module: &Module, index: usize, name: &str) -> Result<
         .ok_or_else(|| format!("pass {index}: no vertex entry point named `{name}` in the module"))
 }
 
-/// The depth rule every rasterizing pass shares: a pass depth-tests
-/// exactly when it names a depth slot, so the ways to be wrong are
-/// naming a slot that does not exist, naming one that does not share
-/// the color output's extent or its sample count (wgpu requires the
-/// attachments of one pass to agree on both), and writing
-/// `@builtin(frag_depth)` from the fragment stage with no depth
-/// attachment to write it into.
+/// The depth rule every rasterizing pass shares, in its two halves
+/// (ADR-0246 decision 9).
+///
+/// A pass with a color output depth-tests exactly when it names a depth
+/// slot, so the ways to be wrong are naming a slot that does not exist,
+/// naming a `Fixed` one (the output's size is the size of the texture a
+/// dispatch binds, so whether the two agree is not known here), naming
+/// one that does not share the color output's extent or its sample
+/// count (wgpu requires the attachments of one pass to agree on both),
+/// and writing `@builtin(frag_depth)` from the fragment stage with no
+/// depth attachment to write it into.
+///
+/// A pass with no color output is depth-only: its depth slot is all it
+/// attaches, so it must name one, and the slot may be of either extent
+/// and either sample count.
 pub(super) fn check_depth(
     mail: &ProgramRegister,
     module: &Module,
-    index: usize,
     depth: Option<u32>,
-    fragment_entry: (usize, &str),
-    attached: Attached,
+    pass: &RasterPass<'_>,
 ) -> Result<(), String> {
-    let (fragment_entry_index, fragment_entry_point) = fragment_entry;
+    let &RasterPass { index, fragment_entry_index, fragment_entry_point, attached, .. } = pass;
     let Some(depth) = depth else {
+        if attached.is_none() {
+            return Err(format!(
+                "pass {index}: a rasterizing pass with OutputSlot::None is depth-only, so it must name a depth \
+                 transient — with neither it would write nothing",
+            ));
+        }
         if writes_frag_depth(module, fragment_entry_index) {
             return Err(format!(
                 "pass {index}: entry point `{fragment_entry_point}` writes @builtin(frag_depth), so the pass must \
@@ -771,11 +845,24 @@ pub(super) fn check_depth(
     let slot = *mail.depth_transients.get(depth as usize).ok_or_else(|| {
         format!("pass {index}: depth transient {depth} is out of range ({} declared)", mail.depth_transients.len())
     })?;
-    if slot.extent != attached.extent {
+    let Some(attached) = attached else {
+        return Ok(());
+    };
+    let extent = match slot.extent {
+        DepthExtent::Output(extent) => extent,
+        DepthExtent::Fixed { side } => {
+            return Err(format!(
+                "pass {index}: depth transient {depth} declares a fixed side {side}, but the pass has a color \
+                 output, whose size is not known at register — a Fixed depth slot attaches only under a depth-only \
+                 pass",
+            ));
+        }
+    };
+    if extent != attached.extent {
         return Err(format!(
-            "pass {index}: depth transient {depth} declares extent {:?}, which does not match its color output's \
-             extent {:?} — a depth attachment must be the size of the color attachment it tests for",
-            slot.extent, attached.extent,
+            "pass {index}: depth transient {depth} declares extent {extent:?}, which does not match its color \
+             output's extent {:?} — a depth attachment must be the size of the color attachment it tests for",
+            attached.extent,
         ));
     }
     if slot.samples != attached.samples {
@@ -783,6 +870,40 @@ pub(super) fn check_depth(
             "pass {index}: depth transient {depth} declares samples {:?}, which does not match its color output's \
              samples {:?} — the attachments of one pass share one sample count",
             slot.samples, attached.samples,
+        ));
+    }
+    Ok(())
+}
+
+/// What a rasterizing pass with no color output must also declare
+/// (ADR-0246 decision 9), checked after [`check_depth`] has made sure
+/// it names a depth slot. `Blend` and `PassLoad` both describe a color
+/// output the pass does not have, so any value but the neutral one is
+/// refused, as a compute pass's blend is; and the fragment entry point
+/// returns no color, since the pipeline has no color target to take
+/// one. A pass with a color output passes untouched.
+pub(super) fn check_depth_only(module: &Module, load: PassLoad, pass: &RasterPass<'_>) -> Result<(), String> {
+    let &RasterPass { index, fragment_entry_index, fragment_entry_point, blend, attached } = pass;
+    if attached.is_some() {
+        return Ok(());
+    }
+
+    if blend != Blend::Replace {
+        return Err(format!(
+            "pass {index}: a depth-only pass has no color output to blend onto, so it declares Blend::Replace, not \
+             {blend:?}",
+        ));
+    }
+    if load != PassLoad::Load {
+        return Err(format!(
+            "pass {index}: a depth-only pass has no color output to clear, so it declares PassLoad::Load, not \
+             {load:?}",
+        ));
+    }
+    if !returns_no_color(module, fragment_entry_index) {
+        return Err(format!(
+            "pass {index}: entry point `{fragment_entry_point}` returns a color, but a depth-only pass has no \
+             color target — its fragment entry point returns nothing or @builtin(frag_depth) alone",
         ));
     }
     Ok(())
@@ -852,14 +973,36 @@ fn writes_frag_depth(module: &Module, entry_index: usize) -> bool {
         return false;
     };
     if let Some(binding) = &result.binding {
-        return matches!(binding, Binding::BuiltIn(BuiltIn::FragDepth));
+        return is_frag_depth(binding);
     }
     match &module.types[result.ty].inner {
         TypeInner::Struct { members, .. } => {
-            members.iter().any(|member| matches!(member.binding, Some(Binding::BuiltIn(BuiltIn::FragDepth))))
+            members.iter().any(|member| member.binding.as_ref().is_some_and(is_frag_depth))
         }
         _ => false,
     }
+}
+
+/// Whether a fragment entry point returns nothing a color target would
+/// take: it has no result, its result is `@builtin(frag_depth)`, or its
+/// result is a struct whose every member is that builtin.
+fn returns_no_color(module: &Module, entry_index: usize) -> bool {
+    let Some(result) = &module.entry_points[entry_index].function.result else {
+        return true;
+    };
+    if let Some(binding) = &result.binding {
+        return is_frag_depth(binding);
+    }
+    match &module.types[result.ty].inner {
+        TypeInner::Struct { members, .. } => {
+            members.iter().all(|member| member.binding.as_ref().is_some_and(is_frag_depth))
+        }
+        _ => false,
+    }
+}
+
+fn is_frag_depth(binding: &Binding) -> bool {
+    matches!(binding, Binding::BuiltIn(BuiltIn::FragDepth))
 }
 
 /// Whether a WGSL type is the one a declared attribute format is
@@ -924,14 +1067,17 @@ fn scalar_name(scalar: Scalar) -> String {
     format!("{prefix}{}", u32::from(scalar.width) * 8)
 }
 
+/// Resolve one declared input of the pass at `index`, whose stage is
+/// `stage`, to the slot it binds. `InputSlot::Depth` resolves to
+/// nothing yet: see [`depth_input_refusal`].
 fn resolve_input(
-    mail: &ProgramRegister,
-    earlier: &[PassPlan],
-    transients: &[TransientPlan],
+    context: &PassValidation<'_>,
     index: usize,
+    stage: &PassStage,
     input_index: usize,
     input: InputSlot,
 ) -> Result<ResolvedSlot, String> {
+    let &PassValidation { mail, earlier, transients, .. } = context;
     match input {
         InputSlot::Binding { index: binding } => {
             check_binding_index(mail, index, binding)?;
@@ -943,7 +1089,8 @@ fn resolve_input(
             .output
             .ok_or_else(|| {
                 format!(
-                    "pass {index} reads pass {pass} through PassOutput, but that compute pass has no texture output"
+                    "pass {index} reads pass {pass} through PassOutput, but that pass has no texture output — a \
+                     compute pass and a depth-only pass write none"
                 )
             }),
         InputSlot::Transient { index: transient } => {
@@ -955,7 +1102,58 @@ fn resolve_input(
             }
             Ok(ResolvedSlot::Transient(transient))
         }
+        InputSlot::Depth { index: slot, .. } => {
+            let attached_here = declared_depth_slot(stage);
+            Err(depth_input_refusal(context, index, input_index, slot, attached_here))
+        }
     }
+}
+
+/// The depth slot a pass's stage declares it attaches, read from the
+/// mail: what [`PassPlanStage::depth_slot`] answers for a validated
+/// pass, for the pass still being validated.
+fn declared_depth_slot(stage: &PassStage) -> Option<u32> {
+    match stage {
+        PassStage::Draw(draw) | PassStage::DrawIndexedIndirect(draw) => draw.depth,
+        PassStage::DrawSets(draw_sets) => draw_sets.depth.map(|depth| depth.slot),
+        PassStage::Fragment | PassStage::Compute(_) => None,
+    }
+}
+
+/// Why a pass may not read depth slot `slot` (ADR-0246 decision 9), in
+/// check order: the slot does not exist; it is `Four`, which can be
+/// neither compared nor sampled; the pass reading it also attaches it
+/// (`attached_here`), which the device refuses; or no earlier pass
+/// attaches it, so it would hold nothing. A depth input that passes all
+/// four is still refused, with a reason of its own, until
+/// iamacoffeepot/aether#7451 binds one at dispatch: no registered
+/// program holds a depth input, so the dispatch path never meets one.
+fn depth_input_refusal(
+    context: &PassValidation<'_>,
+    index: usize,
+    input_index: usize,
+    slot: u32,
+    attached_here: Option<u32>,
+) -> String {
+    let reads = format!("pass {index} input {input_index} reads depth transient {slot}");
+    let declared = &context.mail.depth_transients;
+    let Some(spec) = declared.get(slot as usize) else {
+        return format!("{reads}, which is out of range ({} declared)", declared.len());
+    };
+    if spec.samples == Samples::Four {
+        return format!(
+            "{reads}, which is declared Four — a multisampled depth slot can be neither compared nor sampled, so a \
+             pass reads a One slot",
+        );
+    }
+    if attached_here == Some(slot) {
+        return format!("{reads}, which the same pass attaches — a pass cannot read the depth slot it draws into");
+    }
+    let attached_earlier = context.earlier.iter().any(|earlier| earlier.stage.depth_slot() == Some(slot));
+    if !attached_earlier {
+        return format!("{reads} before any earlier pass attaches it");
+    }
+    format!("{reads}, and reading a depth slot from a pass is not bound yet (iamacoffeepot/aether#7451)")
 }
 
 fn check_binding_index(mail: &ProgramRegister, pass: usize, binding: u32) -> Result<(), String> {
@@ -994,7 +1192,7 @@ fn uniform_block_bytes(module: &Module, info: &ModuleInfo, entry_index: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PassRepeat;
+    use crate::{DepthRead, PassRepeat};
 
     const MODULE: &str = r"
 struct WindowParams { value: f32 }
@@ -1036,7 +1234,7 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     /// A full-extent depth slot of `samples` samples per texel.
     fn depth_slot(samples: Samples) -> DepthSpec {
-        DepthSpec { extent: SlotExtent::Full, samples }
+        DepthSpec { extent: DepthExtent::Output(SlotExtent::Full), samples }
     }
 
     /// A ping-pong chain writes each hop to a fresh transient; the plan's
@@ -1260,7 +1458,9 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// to see. `vs_flat` reads position alone and takes its clip depth
     /// from the uniform window (the vertex stage reading group 0 is what
     /// makes the window's visibility load-bearing); `vs_tinted` reads a
-    /// second location; `fs_depth_writer` writes `@builtin(frag_depth)`.
+    /// second location; `fs_depth_writer` writes `@builtin(frag_depth)`
+    /// beside a color. `fs_nothing` and `fs_depth_alone` return no
+    /// color, which is what a depth-only pass's entry point does.
     const DRAW_MODULE: &str = r"
 struct DrawParams { color: vec4<f32>, depth: f32 }
 @group(0) @binding(0) var<uniform> draw_params: DrawParams;
@@ -1293,6 +1493,14 @@ struct DepthOut {
 @fragment
 fn fs_depth_writer() -> DepthOut {
     return DepthOut(draw_params.color, draw_params.depth);
+}
+
+@fragment
+fn fs_nothing() {}
+
+@fragment
+fn fs_depth_alone() -> @builtin(frag_depth) f32 {
+    return draw_params.depth;
 }
 ";
 
@@ -1400,7 +1608,8 @@ fn fs_depth_writer() -> DepthOut {
         });
         assert!(bad_depth.contains("depth transient 4 is out of range"), "depth-range class: {bad_depth}");
 
-        let halved = DepthSpec { extent: SlotExtent::Divided { divisor: 2 }, ..depth_slot(Samples::One) };
+        let halved =
+            DepthSpec { extent: DepthExtent::Output(SlotExtent::Divided { divisor: 2 }), ..depth_slot(Samples::One) };
         let mismatched_depth = rejection(&ProgramRegister { depth_transients: vec![halved], ..base() });
         assert!(
             mismatched_depth.contains("does not match its color output's extent"),
@@ -1488,6 +1697,179 @@ fn fs_depth_writer() -> DepthOut {
         let reason = rejection(&declares(TextureFormat::R32Float));
         assert!(reason.contains("transient 0"), "the refusal names the transient: {reason}");
         assert!(reason.contains("R32Float cannot be resolved"), "and the format: {reason}");
+    }
+
+    /// A depth-only draw of geometry slot 0 into depth slot 0 through
+    /// the fragment entry point `entry`.
+    fn depth_only_pass(entry: &str) -> ProgramPass {
+        ProgramPass {
+            stage: PassStage::Draw(DrawPass {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 0,
+                depth: Some(0),
+                load: PassLoad::Load,
+            }),
+            blend: Blend::Replace,
+            entry_point: entry.to_owned(),
+            output: OutputSlot::None,
+            ..draw_pass()
+        }
+    }
+
+    /// A draw into binding 0 with no depth: the final pass a program
+    /// whose other passes are depth-only still needs.
+    fn color_pass() -> ProgramPass {
+        ProgramPass { stage: draw_stage("vs_flat", 0, None), ..draw_pass() }
+    }
+
+    /// `passes` over one binding, one geometry slot and `depth_transients`.
+    fn depth_program(depth_transients: Vec<DepthSpec>, passes: Vec<ProgramPass>) -> ProgramRegister {
+        ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8)],
+            transients: Vec::new(),
+            geometries: vec![position_slot()],
+            depth_transients,
+            passes,
+        }
+    }
+
+    /// The bugs: a rasterizing pass with no color output still refused
+    /// as "must declare a texture output", so no shadow map registers;
+    /// and its pipeline built at one sample because it has no output to
+    /// ask, which wgpu refuses against a `Four` depth attachment on
+    /// every dispatch. A `Fixed` slot stands in for the shadow map: a
+    /// depth-only pass attaches either extent.
+    #[test]
+    fn depth_only_passes_validate_and_rasterize_at_their_depth_slots_samples() {
+        let shadow_map = DepthSpec { extent: DepthExtent::Fixed { side: 512 }, samples: Samples::Four };
+        let passes = vec![depth_only_pass("fs_nothing"), depth_only_pass("fs_depth_alone"), color_pass()];
+
+        let plan = validate(&depth_program(vec![shadow_map], passes)).expect("depth-only passes validate");
+
+        assert_eq!(plan.passes[0].output, None);
+        assert_eq!(plan.passes[1].output, None);
+        assert_eq!(plan.pass_samples(&plan.passes[0]), Samples::Four, "a depth-only pass takes its depth slot's count");
+        assert_eq!(plan.pass_samples(&plan.passes[2]), Samples::One, "a pass with an output takes the output's");
+        assert_eq!(plan.output_binding, 0);
+    }
+
+    /// Each way a rasterizing pass with no color output can be
+    /// malformed has its own reason. The bugs, one per class: a pass
+    /// that attaches nothing at all reaching wgpu; a blend or a color
+    /// clear that registers and then silently does nothing; and an
+    /// entry point returning a color into a pipeline with no color
+    /// target, which comes back as an opaque `pipeline creation failed`
+    /// (`fs_depth_writer` returns one beside `frag_depth`, so a check
+    /// that only asked "does it write depth" would let it through).
+    #[test]
+    fn depth_only_refusal_classes_have_distinguishable_reasons() {
+        let refused =
+            |pass: ProgramPass| rejection(&depth_program(vec![depth_slot(Samples::One)], vec![pass, color_pass()]));
+
+        let no_slot = refused(ProgramPass {
+            stage: PassStage::Draw(DrawPass {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 0,
+                depth: None,
+                load: PassLoad::Load,
+            }),
+            ..depth_only_pass("fs_nothing")
+        });
+        assert!(no_slot.contains("pass 0") && no_slot.contains("must name a depth transient"), "no-slot: {no_slot}");
+
+        let blended = refused(ProgramPass { blend: Blend::Additive, ..depth_only_pass("fs_nothing") });
+        assert!(blended.contains("Blend::Replace, not Additive"), "depth-only blend class: {blended}");
+
+        let cleared =
+            refused(ProgramPass { stage: draw_stage("vs_flat", 0, Some(0)), ..depth_only_pass("fs_nothing") });
+        assert!(cleared.contains("PassLoad::Load, not Clear"), "depth-only load class: {cleared}");
+
+        let colored = refused(depth_only_pass("fs_flat"));
+        assert!(colored.contains("`fs_flat` returns a color"), "depth-only entry class: {colored}");
+
+        let colored_beside_depth = refused(depth_only_pass("fs_depth_writer"));
+        assert!(
+            colored_beside_depth.contains("`fs_depth_writer` returns a color"),
+            "a color beside frag_depth is still a color: {colored_beside_depth}",
+        );
+    }
+
+    /// The bug: a `Fixed` slot registers beside a color output, and the
+    /// first dispatch whose output is not that exact square fails at
+    /// `begin_render_pass` and drops, with the reason only in a log.
+    #[test]
+    fn a_fixed_depth_slot_under_a_color_output_is_refused() {
+        let fixed = DepthSpec { extent: DepthExtent::Fixed { side: 64 }, samples: Samples::One };
+
+        let reason = rejection(&depth_program(vec![fixed], vec![draw_pass()]));
+
+        assert!(reason.contains("pass 0: depth transient 0 declares a fixed side 64"), "names the slot: {reason}");
+        assert!(reason.contains("not known at register"), "fixed-under-color class: {reason}");
+    }
+
+    /// The bug: a side of zero or past the device limit registers, and
+    /// texture creation fails inside the first dispatch.
+    #[test]
+    fn a_fixed_side_outside_the_texture_limit_is_refused() {
+        let limit = render_limits().max_texture_dimension_2d;
+        let sided = |side: u32| {
+            let slot = DepthSpec { extent: DepthExtent::Fixed { side }, samples: Samples::One };
+            depth_program(vec![slot], vec![depth_only_pass("fs_nothing"), color_pass()])
+        };
+        validate(&sided(limit)).expect("a side at the limit validates");
+
+        let zero = rejection(&sided(0));
+        assert!(zero.contains("depth transient 0: fixed side 0 is outside"), "zero-side class: {zero}");
+
+        let oversized = rejection(&sided(limit + 1));
+        assert!(oversized.contains(&format!("is outside 1..={limit}")), "names the limit: {oversized}");
+    }
+
+    /// The bug: `PassOutput` naming a depth-only pass resolves to
+    /// nothing and the reason blames a compute pass the graph does not
+    /// have.
+    #[test]
+    fn pass_output_cannot_name_a_depth_only_pass() {
+        let reader = ProgramPass { inputs: vec![InputSlot::PassOutput { pass: 0 }], ..color_pass() };
+
+        let reason =
+            rejection(&depth_program(vec![depth_slot(Samples::One)], vec![depth_only_pass("fs_nothing"), reader]));
+
+        assert!(reason.contains("pass 1 reads pass 0 through PassOutput"), "names both passes: {reason}");
+        assert!(reason.contains("a depth-only pass"), "outputless alias class: {reason}");
+    }
+
+    /// The refusals of a depth input, in the order decision 9 lists
+    /// them, then the one that stands until the read is bound. The
+    /// bugs, one per class: an index past the list panicking the
+    /// lookup; a `Four` slot registering though nothing can sample it;
+    /// a pass reading the slot it attaches, which the device refuses on
+    /// every dispatch; a read of a slot nothing has drawn; and a
+    /// well-formed depth input registering `Ok` and then meeting a
+    /// dispatch path that cannot bind it.
+    #[test]
+    fn depth_input_refusals_have_distinguishable_reasons() {
+        let reads = |index: u32| vec![InputSlot::Depth { index, read: DepthRead::Compare }];
+        let slots = || vec![depth_slot(Samples::One), depth_slot(Samples::Four)];
+        let refused = |passes: Vec<ProgramPass>| rejection(&depth_program(slots(), passes));
+
+        let past_list = refused(vec![ProgramPass { inputs: reads(7), ..color_pass() }]);
+        assert!(past_list.contains("reads depth transient 7, which is out of range"), "range class: {past_list}");
+
+        let multisampled = refused(vec![ProgramPass { inputs: reads(1), ..color_pass() }]);
+        assert!(multisampled.contains("which is declared Four"), "four-slot class: {multisampled}");
+
+        let self_read = refused(vec![ProgramPass { inputs: reads(0), ..draw_pass() }]);
+        assert!(self_read.contains("which the same pass attaches"), "same-pass class: {self_read}");
+
+        let unwritten = refused(vec![ProgramPass { inputs: reads(0), ..color_pass() }]);
+        assert!(unwritten.contains("before any earlier pass attaches it"), "sequence class: {unwritten}");
+
+        let well_formed =
+            refused(vec![depth_only_pass("fs_nothing"), ProgramPass { inputs: reads(0), ..color_pass() }]);
+        assert!(well_formed.contains("pass 1 input 0 reads depth transient 0"), "names the input: {well_formed}");
+        assert!(well_formed.contains("not bound yet (iamacoffeepot/aether#7451)"), "unbound class: {well_formed}");
     }
 
     const COMPUTE_MODULE: &str = r"
@@ -1667,6 +2049,6 @@ fn fs_red() -> @location(0) vec4<f32> {
             },
         );
         let reason = rejection(&mail);
-        assert!(reason.contains("compute pass has no texture output"), "outputless alias class: {reason}");
+        assert!(reason.contains("that pass has no texture output"), "outputless alias class: {reason}");
     }
 }

@@ -25,8 +25,8 @@ use aether_substrate::mail::CostCell;
 use aether_substrate::render::PassTimestamps;
 
 use super::RegisteredProgram;
-use super::validate::{PassPlanStage, ProgramPlan, resolve_extent};
-use crate::{PassStageKind, PassTimingRow, SlotExtent};
+use super::validate::{PassPlan, PassPlanStage, ProgramPlan, depth_divisor, resolve_depth_extent};
+use crate::{DepthExtent, PassStageKind, PassTimingRow};
 
 /// Queries per set. wgpu caps a single set at
 /// [`wgpu::QUERY_SET_MAX_QUERIES`]; a graph needing more than that is
@@ -134,6 +134,27 @@ impl PassCosts {
         self.reference = Some(reference);
     }
 
+    /// The `(width, height, divisor)` a pass's row reports: the size of
+    /// what it attaches, resolved against the last dispatch's reference
+    /// extent, and the divisor that size was declared by. A pass with a
+    /// color output reports that output's, a depth-only pass its depth
+    /// slot's (`1` for a `Fixed` one), and a compute pass, which
+    /// attaches nothing, `0 / 0 / 1`. Before the first accepted
+    /// dispatch nothing has resolved and every size is `0 / 0`, a
+    /// `Fixed` slot's included, so an unrun program reads the same in
+    /// every row.
+    fn attached_size(&self, plan: &ProgramPlan, pass: &PassPlan) -> (u32, u32, u32) {
+        // A color output is sized as an `Output` depth slot is, so the
+        // two share the one resolution.
+        let extent = match (pass.output, pass.stage.depth_slot()) {
+            (Some(output), _) => DepthExtent::Output(plan.target_extent(output)),
+            (None, Some(slot)) => plan.depth_transients[slot as usize].extent,
+            (None, None) => return (0, 0, 1),
+        };
+        let (width, height) = self.reference.map_or((0, 0), |reference| resolve_depth_extent(extent, reference));
+        (width, height, depth_divisor(extent))
+    }
+
     /// The program's timing table, one row per declared pass in graph
     /// order — including passes never measured (`samples: 0`), so the
     /// reply always describes the whole graph rather than only the part
@@ -144,15 +165,7 @@ impl PassCosts {
             .zip(&self.cells)
             .enumerate()
             .map(|(index, (pass, cell))| {
-                let (width, height, divisor) = pass.output.map_or((0, 0, 1), |output| {
-                    let extent = plan.target_extent(output);
-                    let (width, height) = self.reference.map_or((0, 0), |reference| resolve_extent(extent, reference));
-                    let divisor = match extent {
-                        SlotExtent::Full => 1,
-                        SlotExtent::Divided { divisor } => divisor,
-                    };
-                    (width, height, divisor)
-                });
+                let (width, height, divisor) = self.attached_size(plan, pass);
                 PassTimingRow {
                     pass: u32::try_from(index).expect("pass index fits u32"),
                     label: pass.entry_point.clone(),
@@ -480,12 +493,30 @@ fn nanos_of(ticks: u64, period_nanos: f32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::validate::{ComputePlan, DrawPlan};
     use super::*;
-    use crate::{Blend, Mips, Sampling, SlotShape, SlotSpec, TextureFormat, Wrap};
+    use crate::{
+        Blend, DepthSpec, Mips, PassLoad, Samples, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, Wrap,
+    };
 
-    #[test]
-    fn compute_timing_row_has_stage_and_no_texture_extent() {
-        let plan = ProgramPlan {
+    /// An outputless pass of `stage`.
+    fn outputless(entry_point: &str, stage: PassPlanStage) -> PassPlan {
+        PassPlan {
+            entry_point: entry_point.to_owned(),
+            stage,
+            blend: Blend::Replace,
+            inputs: Vec::new(),
+            output: None,
+            uniform_offset: 0,
+            uniform_length: 0,
+            repeat_count: 1,
+            uniform_stride: 0,
+        }
+    }
+
+    /// A plan of `passes` over one full binding and `depth_transients`.
+    fn plan(depth_transients: Vec<DepthSpec>, passes: Vec<PassPlan>) -> ProgramPlan {
+        ProgramPlan {
             bindings: vec![SlotSpec {
                 format: TextureFormat::Rgba8,
                 shape: SlotShape::Target(SlotExtent::Full),
@@ -493,25 +524,18 @@ mod tests {
             }],
             transients: Vec::new(),
             geometries: Vec::new(),
-            depth_transients: Vec::new(),
-            passes: vec![super::super::validate::PassPlan {
-                entry_point: "cs_derive".to_owned(),
-                stage: PassPlanStage::Compute(super::super::validate::ComputePlan {
-                    buffers: Vec::new(),
-                    workgroups: [4, 2, 1],
-                }),
-                blend: Blend::Replace,
-                inputs: Vec::new(),
-                output: None,
-                uniform_offset: 0,
-                uniform_length: 0,
-                repeat_count: 1,
-                uniform_stride: 0,
-            }],
+            depth_transients,
+            passes,
             output_binding: 0,
             written_bindings: Vec::new(),
             draw_set_lists: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn compute_timing_row_has_stage_and_no_texture_extent() {
+        let compute = PassPlanStage::Compute(ComputePlan { buffers: Vec::new(), workgroups: [4, 2, 1] });
+        let plan = plan(Vec::new(), vec![outputless("cs_derive", compute)]);
         let mut costs = PassCosts::new(&plan);
         costs.observe_reference((128, 96));
 
@@ -520,5 +544,38 @@ mod tests {
         assert_eq!((row.width, row.height, row.divisor), (0, 0, 1));
         assert_eq!(row.iterations, 1);
         assert_eq!(row.samples, 0);
+    }
+
+    /// The bug: a depth-only pass has no color output, so its row reads
+    /// `0 / 0 / 1` as a compute pass's does and a shadow pass's cost
+    /// cannot be set against the size it drew at. A `Fixed` slot
+    /// reports its own side and divisor `1`, an `Output` one the
+    /// reference divided by its declared divisor, and neither reports a
+    /// size before a dispatch has resolved one.
+    #[test]
+    fn a_depth_only_row_reports_its_depth_slots_size() {
+        let depth_only = |slot: u32| {
+            let draw = DrawPlan {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 0,
+                depth: Some(slot),
+                load: PassLoad::Load,
+            };
+            outputless("fs_nothing", PassPlanStage::Draw(draw))
+        };
+        let slots = vec![
+            DepthSpec { extent: DepthExtent::Fixed { side: 2048 }, samples: Samples::One },
+            DepthSpec { extent: DepthExtent::Output(SlotExtent::Divided { divisor: 2 }), samples: Samples::One },
+        ];
+        let plan = plan(slots, vec![depth_only(0), depth_only(1)]);
+        let mut costs = PassCosts::new(&plan);
+        let sizes = |costs: &PassCosts| -> Vec<(PassStageKind, u32, u32, u32)> {
+            costs.rows(&plan).iter().map(|row| (row.stage, row.width, row.height, row.divisor)).collect()
+        };
+        assert_eq!(sizes(&costs), vec![(PassStageKind::Draw, 0, 0, 1), (PassStageKind::Draw, 0, 0, 2)]);
+
+        costs.observe_reference((128, 96));
+
+        assert_eq!(sizes(&costs), vec![(PassStageKind::Draw, 2048, 2048, 1), (PassStageKind::Draw, 64, 48, 2)]);
     }
 }

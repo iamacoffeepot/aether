@@ -23,10 +23,10 @@ use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::{
     Blend, CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances,
-    CreateInstancesResult, CreateTexture, CreateTextureResult, Cull, DepthSpec, DepthUse, DepthWrite, DestroyGeometry,
-    DrawSetsPass, DrawSpec, DrawTexturedQuads, IndexRange, InstanceRange, Mips, OutputSlot, PassLoad, PassStage,
-    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability, Samples,
-    Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    CreateInstancesResult, CreateTexture, CreateTextureResult, Cull, DepthExtent, DepthSpec, DepthUse, DepthWrite,
+    DestroyGeometry, DrawSetsPass, DrawSpec, DrawTexturedQuads, IndexRange, InstanceRange, Mips, OutputSlot, PassLoad,
+    PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, QuadBlend, RenderCapability,
+    Samples, Sampling, SlotExtent, SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
     VertexAttribute, VertexFormat, Wrap,
 };
 
@@ -55,7 +55,8 @@ const CLOCKWISE: [u32; 6] = [0, 2, 1, 0, 3, 2];
 
 /// The vertex stage adds a record's offset to each corner and hands its
 /// colour on: location 0 comes from vertex buffer 0, locations 4 and 5
-/// from the instance buffer at vertex buffer 1.
+/// from the instance buffer at vertex buffer 1. `fs_nothing` returns no
+/// colour: the fragment entry point of a depth-only pass.
 const MODULE: &str = r"
 struct Placed {
     @builtin(position) position: vec4<f32>,
@@ -71,6 +72,9 @@ fn vs_placed(@location(0) corner: vec3<f32>, @location(4) offset: vec3<f32>, @lo
 fn fs_color(in: Placed) -> @location(0) vec4<f32> {
     return in.color;
 }
+
+@fragment
+fn fs_nothing() {}
 ";
 
 fn vertex_layout() -> Vec<VertexAttribute> {
@@ -189,41 +193,68 @@ fn create_output(harness: &mut SubstrateHarness, label: &'static str) -> u32 {
     }
 }
 
-/// What one `DrawSets` pass of a scenario program varies.
+/// What one `DrawSets` pass of a scenario program varies. A
+/// `depth_only` pass declares no output, `Blend::Replace` and the
+/// fragment entry point that returns nothing; any other pass writes
+/// binding 0 through `fs_color`.
 struct PassShape {
     list: u32,
     cull: Cull,
     depth: Option<DepthWrite>,
     load: PassLoad,
+    depth_only: bool,
 }
 
 /// A pass drawing list 0 over a cleared output, with no depth.
 fn plain_pass(cull: Cull) -> PassShape {
-    PassShape { list: 0, cull, depth: None, load: PassLoad::Clear }
+    PassShape { list: 0, cull, depth: None, load: PassLoad::Clear, depth_only: false }
 }
 
-/// Register a program of `DrawSets` passes writing binding 0, with one
-/// full-extent depth slot for the passes that name it.
+/// A depth-only pass drawing `list` into the depth slot.
+fn depth_only_pass(list: u32) -> PassShape {
+    PassShape { list, cull: Cull::None, depth: Some(DepthWrite::Write), load: PassLoad::Load, depth_only: true }
+}
+
+/// Register a program of `DrawSets` passes, with one full-extent depth
+/// slot for the passes that name it.
 fn register(harness: &mut SubstrateHarness, label: &'static str, passes: &[PassShape]) -> u32 {
+    register_over(harness, label, DepthExtent::Output(SlotExtent::Full), passes)
+}
+
+/// Register a program of `DrawSets` passes whose one depth slot is
+/// sized by `depth_extent`.
+fn register_over(
+    harness: &mut SubstrateHarness,
+    label: &'static str,
+    depth_extent: DepthExtent,
+    passes: &[PassShape],
+) -> u32 {
     let passes = passes
         .iter()
-        .map(|shape| ProgramPass {
-            stage: PassStage::DrawSets(DrawSetsPass {
-                vertex_entry_point: "vs_placed".to_owned(),
-                vertex_layout: vertex_layout(),
-                instance_layout: instance_layout(),
-                draw_sets: shape.list,
-                cull: shape.cull,
-                depth: shape.depth.map(|write| DepthUse { slot: 0, write }),
-                load: shape.load,
-            }),
-            blend: Blend::Alpha,
-            entry_point: "fs_color".to_owned(),
-            inputs: Vec::new(),
-            output: OutputSlot::Binding { index: 0 },
-            uniform_offset: 0,
-            uniform_length: 0,
-            repeat: None,
+        .map(|shape| {
+            let (blend, entry_point, output) = if shape.depth_only {
+                (Blend::Replace, "fs_nothing", OutputSlot::None)
+            } else {
+                (Blend::Alpha, "fs_color", OutputSlot::Binding { index: 0 })
+            };
+            ProgramPass {
+                stage: PassStage::DrawSets(DrawSetsPass {
+                    vertex_entry_point: "vs_placed".to_owned(),
+                    vertex_layout: vertex_layout(),
+                    instance_layout: instance_layout(),
+                    draw_sets: shape.list,
+                    cull: shape.cull,
+                    depth: shape.depth.map(|write| DepthUse { slot: 0, write }),
+                    load: shape.load,
+                }),
+                blend,
+                entry_point: entry_point.to_owned(),
+                inputs: Vec::new(),
+                output,
+                uniform_offset: 0,
+                uniform_length: 0,
+                repeat: None,
+            }
         })
         .collect();
     let mail = ProgramRegister {
@@ -235,7 +266,7 @@ fn register(harness: &mut SubstrateHarness, label: &'static str, passes: &[PassS
         }],
         transients: Vec::new(),
         geometries: Vec::new(),
-        depth_transients: vec![DepthSpec { extent: SlotExtent::Full, samples: Samples::One }],
+        depth_transients: vec![DepthSpec { extent: depth_extent, samples: Samples::One }],
         passes,
     };
     let registered: ProgramRegisterResult =
@@ -418,8 +449,20 @@ fn a_test_only_pass_tests_depth_and_leaves_it_as_it_was() {
         &mut harness,
         "register",
         &[
-            PassShape { list: 0, cull: Cull::None, depth: Some(DepthWrite::Write), load: PassLoad::Clear },
-            PassShape { list: 1, cull: Cull::None, depth: Some(DepthWrite::TestOnly), load: PassLoad::Load },
+            PassShape {
+                list: 0,
+                cull: Cull::None,
+                depth: Some(DepthWrite::Write),
+                load: PassLoad::Clear,
+                depth_only: false,
+            },
+            PassShape {
+                list: 1,
+                cull: Cull::None,
+                depth: Some(DepthWrite::TestOnly),
+                load: PassLoad::Load,
+                depth_only: false,
+            },
         ],
     );
 
@@ -428,6 +471,72 @@ fn a_test_only_pass_tests_depth_and_leaves_it_as_it_was() {
 
     assert!(shows(&img, 16, LEFT, RED), "both later quads are behind the near one and fail the test");
     assert!(shows(&img, 16, RIGHT, BLUE), "the middle quad left no depth for the far one to fail against");
+}
+
+/// A depth-only pass draws a near quad on the left into the depth slot
+/// and no colour anywhere; a colour pass attaching the same slot
+/// `TestOnly` then draws a farther quad on both halves. The left is
+/// unlit and the right shows the far colour (ADR-0246 decision 9). The
+/// named bugs: the depth-only pass recording nothing or not writing
+/// depth, which shows the far colour on the left; and the depth-only
+/// pass raising a GPU error that drops the rest of the dispatch, which
+/// leaves the right unlit.
+#[test]
+fn a_depth_only_pass_hides_what_a_later_pass_draws_behind_it() {
+    if !require_wgpu_adapter() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let quad = create_quad(&mut harness, "create_quad", COUNTER_CLOCKWISE);
+    let near = create_records(&mut harness, "create_near", &[Record { depth: 0.2, ..left(RED) }]);
+    let far = create_records(
+        &mut harness,
+        "create_far",
+        &[Record { depth: 0.8, ..left(BLUE) }, Record { depth: 0.8, ..right(BLUE) }],
+    );
+    let near_set = create_set(&mut harness, "create_near_set", vec![draw(quad, near, (0, 1))]);
+    let far_set = create_set(&mut harness, "create_far_set", vec![draw(quad, far, (0, 2))]);
+    let output = create_output(&mut harness, "create_output");
+    let color_pass = PassShape {
+        list: 1,
+        cull: Cull::None,
+        depth: Some(DepthWrite::TestOnly),
+        load: PassLoad::Clear,
+        depth_only: false,
+    };
+    let program = register(&mut harness, "register", &[depth_only_pass(0), color_pass]);
+
+    let img = capture(&mut harness, &[dispatch(program, output, vec![vec![near_set], vec![far_set]])], &[(output, 16)]);
+
+    assert!(unlit(&img, 16, LEFT), "the depth-only pass drew no colour, and its depth hides the far quad");
+    assert!(shows(&img, 16, RIGHT, BLUE), "nothing was drawn in front of the far quad on the right");
+}
+
+/// A depth-only pass draws into a `Fixed` depth slot twice the output's
+/// side, and a colour pass with no depth then draws a quad on the left;
+/// the quad shows. The named bug: a pass with no colour attachment
+/// whose one attachment is not the output's size failing when it is
+/// encoded, which drops the rest of the dispatch and leaves the output
+/// empty.
+#[test]
+fn a_depth_only_pass_draws_into_a_fixed_slot_larger_than_the_output() {
+    if !require_wgpu_adapter() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let quad = create_quad(&mut harness, "create_quad", COUNTER_CLOCKWISE);
+    let records = create_records(&mut harness, "create_records", &[left(RED)]);
+    let set = create_set(&mut harness, "create_set", vec![draw(quad, records, (0, 1))]);
+    let output = create_output(&mut harness, "create_output");
+    let shadow_map = DepthExtent::Fixed { side: u32::from(OUTPUT_SIDE) * 2 };
+    let color_pass = PassShape { list: 1, ..plain_pass(Cull::None) };
+    let program = register_over(&mut harness, "register", shadow_map, &[depth_only_pass(0), color_pass]);
+
+    let img = capture(&mut harness, &[dispatch(program, output, vec![vec![set], vec![set]])], &[(output, 16)]);
+
+    assert!(shows(&img, 16, LEFT, RED), "the colour pass after the depth-only pass must still draw");
 }
 
 /// One set draws a clockwise quad on the left and a counter-clockwise

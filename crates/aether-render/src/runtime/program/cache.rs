@@ -14,7 +14,9 @@
 //!   dispatch.
 //! - [`ExtentLayout`] — the transient and depth-slot pool assignments —
 //!   depends additionally on the reference extent, so it is keyed on it
-//!   and rebuilt when the output binding's size changes (a resize).
+//!   and rebuilt when the output binding's size changes (a resize). A
+//!   `DepthExtent::Fixed` depth slot is the one assignment the rebuild
+//!   leaves where it was: its class is its own side.
 //! - A binding's texture view is keyed on the texture id it was created
 //!   from. Ids are never recycled by [`super::super::texture::TextureRegistry`],
 //!   so a given id names one texture for the session; `ensure_realized`
@@ -41,7 +43,7 @@ use std::collections::{BinaryHeap, HashMap};
 use aether_substrate::render::PROGRAM_DEPTH_FORMAT;
 
 use super::super::texture::{TextureRegistry, wgpu_texture_format};
-use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
+use super::validate::{ProgramPlan, ResolvedSlot, resolve_depth_extent, resolve_extent};
 use super::{PassGpu, TransientKey};
 use crate::{GeometryBuffer, Samples, StorageAccess};
 
@@ -149,9 +151,12 @@ fn resolves_output(plan: &ProgramPlan, index: usize) -> bool {
         .is_some_and(|next| next.reads(output))
 }
 
-/// The pool assignments for one reference extent. Every declared extent
-/// resolves against the output binding's size, so a resize is the one
-/// event that moves a transient to a different pool class.
+/// The pool assignments for one reference extent. Every transient and
+/// every `DepthExtent::Output` depth slot resolves against the output
+/// binding's size, so a resize is the one event that moves one to a
+/// different pool class. A `DepthExtent::Fixed` depth slot is sized by
+/// its own side and keeps its class, and so its pooled texture, across
+/// a resize.
 pub(super) struct ExtentLayout {
     pub reference: (u32, u32),
     /// Per transient, the texture a pass that writes it attaches.
@@ -535,6 +540,8 @@ fn assign_transients(plan: &ProgramPlan, reference: (u32, u32)) -> TransientAssi
 
 /// Assign each depth slot a physical `Depth32Float` texture in its
 /// resolved (extent, sample count) class, skipping slots no pass names.
+/// An `Output` extent resolves against `reference` and a `Fixed` one to
+/// its own square.
 /// Unlike color transients these are not liveness-packed: sharing a
 /// depth buffer is the declaration's whole point (two passes naming one
 /// slot is how occlusion agrees between them), so two *distinct* slots
@@ -549,7 +556,7 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
             let slot = u32::try_from(slot).expect("depth slot index fits u32");
             let named = plan.passes.iter().any(|pass| pass.stage.depth_slot() == Some(slot));
             named.then(|| {
-                let (width, height) = resolve_extent(spec.extent, reference);
+                let (width, height) = resolve_depth_extent(spec.extent, reference);
                 let key =
                     TransientKey { width, height, format: PROGRAM_DEPTH_FORMAT, sample_count: spec.samples.count() };
                 let physical = allocated.entry(key).or_insert(0);
@@ -565,8 +572,8 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
 mod tests {
     use super::*;
     use crate::{
-        Blend, Cull, DepthSpec, DepthUse, DepthWrite, DrawPass, DrawSetsPass, GeometrySlotSpec, InputSlot, Mips,
-        OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
+        Blend, Cull, DepthExtent, DepthSpec, DepthUse, DepthWrite, DrawPass, DrawSetsPass, GeometrySlotSpec, InputSlot,
+        Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
         TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
     };
 
@@ -739,11 +746,14 @@ fn vs_placed(@location(0) position: vec3<f32>, @location(1) offset: vec3<f32>) -
 fn fs_opaque() -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 1.0, 1.0, 1.0);
 }
+
+@fragment
+fn fs_nothing() {}
 ";
 
     /// A full-extent single-sample depth slot.
     fn full_depth() -> DepthSpec {
-        DepthSpec { extent: SlotExtent::Full, samples: Samples::One }
+        DepthSpec { extent: DepthExtent::Output(SlotExtent::Full), samples: Samples::One }
     }
 
     /// A draw-sets pass testing against depth slot `slot` without
@@ -814,6 +824,48 @@ fn fs_opaque() -> @location(0) vec4<f32> {
             assignments[1].as_ref().expect("slot 1 named").key,
             "same-extent depth slots share a pool class, so only the physical index may separate them",
         );
+    }
+
+    /// The bug: a `Fixed` slot resolved against the output as every
+    /// other extent is, which sizes a shadow map from the window and
+    /// moves it to a new pool class, reallocating it, on every resize.
+    /// An `Output` slot beside it must still follow the reference.
+    #[test]
+    fn a_fixed_depth_slot_keeps_its_pool_class_across_a_resize() {
+        let shadow_map = DepthSpec { extent: DepthExtent::Fixed { side: 1024 }, samples: Samples::One };
+        let depth_only = ProgramPass {
+            stage: PassStage::Draw(DrawPass {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 0,
+                depth: Some(0),
+                load: PassLoad::Load,
+            }),
+            blend: Blend::Replace,
+            entry_point: "fs_nothing".to_owned(),
+            output: OutputSlot::None,
+            ..draw_pass(None)
+        };
+        let mail = ProgramRegister {
+            wgsl: DRAW_MODULE.to_owned(),
+            bindings: vec![full_binding()],
+            transients: Vec::new(),
+            geometries: vec![GeometrySlotSpec {
+                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+            }],
+            depth_transients: vec![shadow_map, full_depth()],
+            passes: vec![depth_only, draw_pass(Some(1))],
+        };
+        let plan = super::super::validate::validate(&mail).expect("depth-only graph validates");
+        let sizes = |reference: (u32, u32)| -> Vec<(u32, u32)> {
+            assign_depth_transients(&plan, reference)
+                .iter()
+                .map(|slot| slot.as_ref().expect("both slots are named").key)
+                .map(|key| (key.width, key.height))
+                .collect()
+        };
+
+        assert_eq!(sizes((64, 48)), vec![(1024, 1024), (64, 48)]);
+        assert_eq!(sizes((128, 96)), vec![(1024, 1024), (128, 96)]);
     }
 
     /// The clear/load sequencing the encode used to rediscover per

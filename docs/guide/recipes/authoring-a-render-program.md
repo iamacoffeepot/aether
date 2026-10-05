@@ -395,8 +395,9 @@ to make them agree on occlusion:
     { "layout": [ { "location": 0, "format": "Float32x3" } ] }
   ],
   // The depth slot shares its passes' output's extent and sample count; the
-  // output is a binding, which has one sample.
-  "depth_transients": [ { "extent": "Full", "samples": "One" } ],
+  // output is a binding, which has one sample. "Output" sizes the slot from
+  // the program's output, which is what a slot beside a color output declares.
+  "depth_transients": [ { "extent": { "Output": "Full" }, "samples": "One" } ],
   "passes": [
     { "stage": { "Draw": { "vertex_entry_point": "vs_flat", "geometry": 0,
                            "depth": 0, "load": "Clear" } },
