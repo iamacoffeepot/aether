@@ -18,6 +18,7 @@ runtime = [
   "dep:aether-substrate",
   "dep:aether-bloomery-journal",
   "dep:aether-bloomery-program",
+  "dep:getrandom",
   "dep:wasmparser",
   "dep:tracing",
 ]
@@ -42,6 +43,9 @@ aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true }
 aether-bloomery-program = { path = "../aether-bloomery-program", optional = true }
+# Native-only runtime half: the shell answers `Entropy` draws itself from the
+# operating system's randomness.
+getrandom = { workspace = true, optional = true }
 wasmparser = { version = "0.246", optional = true }
 # Native-only runtime half: the shell opens one span per ticketed step under
 # the `aether.bloomery.step` target, closed at its reply.

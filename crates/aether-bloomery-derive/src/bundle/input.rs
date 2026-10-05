@@ -45,7 +45,7 @@ pub struct ProgramMeta {
     pub intent: LitStr,
     pub async_run: bool,
     pub sampled: bool,
-    /// Canonical API names (`Http`, `Process`, `Workspace`): each names a
+    /// Canonical API names (`Http`, `Process`, `Workspace`, `Entropy`): each names a
     /// `ProgramApi` variant the program's section record lists.
     pub apis: Vec<Ident>,
 }

@@ -4,6 +4,7 @@
 - **Date:** 2026-09-21
 - **Amended:** 2026-09-24 — program APIs are the closed, sealed set `Http` / `Process`, which `#[program]` maps by name to concrete target capabilities through an SDK table; the generated invocation relays a captured call through its bundle root to the driver that invoked it, which maps the API to a provider it holds, and the driver refuses a program whose API has no provider before it runs (#6594).
 - **Amended:** 2026-09-24 — the closed set gains `Workspace`, the program-side binding of the `aether.workspace` run contract, required beside `Mode::Sampled` ([ADR-0237](0237-workspaces-run-steps-over-trees.md)).
+- **Amended:** 2026-10-05 — the closed set gains `Entropy`, a sampled API the driver answers itself from the operating system's randomness, with no provider capability.
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (async
 programs await only named `Env<Async>` methods; HTTP and a `Caps` type
@@ -42,9 +43,13 @@ without editing the invocation child.
    before `env` do not compile.
 
    *(Amended 2026-09-24: a trailing binding is one of the closed set of
-   program APIs, `Http` or `Process`, named in the signature in whatever
+   program APIs, `Http`, `Process`, or `Workspace`, named in the signature in whatever
    path the author writes it. Any other type is refused at the parameter.
    `Binding<A>` is no longer an author-facing type.)*
+
+   *(Amended 2026-10-05: the closed set gains `Entropy`, a sampled API the
+   driver answers itself from the operating system's randomness, with no
+   provider capability.)*
 
 2. **The allowlist is those actors.** `#[program]` does not match the
    name `Http`. Each trailing parameter is `InjectedApi`; the target is
@@ -55,8 +60,8 @@ without editing the invocation child.
    both the journal read `Env<Async>` already uses and each API call. The
    driver maps each API to a provider it holds and refuses any other.
 
-   *(Amended 2026-09-24: `#[program]` matches the name. It maps `Http` and
-   `Process` to their target capabilities through the SDK table
+   *(Amended 2026-09-24: `#[program]` matches the name. It maps `Http`,
+   `Process`, and `Workspace` to their target capabilities through the SDK table
    `__macro_internals::api_target`, and emits a check at the program's
    parameter that the type's `InjectedApi::Target` is the table's type, so
    `use aether_bloomery_program::Http as Process;` does not compile. The
@@ -64,6 +69,13 @@ without editing the invocation child.
    sends to none of them. The export descriptor carries the canonical
    names, and the bundle generator writes each into the program's section
    record.)*
+
+   *(Amended 2026-10-05: the closed set gains `Entropy`, a sampled API the
+   driver answers itself from the operating system's randomness, with no
+   provider capability. Capability-backed handles keep their target inside
+   their own `Binding`; `InjectedApi` loses `Target`, and the SDK table
+   `__macro_internals::api` names this crate's handle of each name while its
+   check pairs the author's type with that handle directly.)*
 
 3. **Generic `call`, Http is sugar.** `Binding<A: Addressable>` shares
    the `EnvOwner` pointer with `Env<Async>`. `Binding<A>::call<K>(mail)`
@@ -104,8 +116,11 @@ without editing the invocation child.
    does not compile. `Mode::Sampled` with synchronous `run` still does
    not compile. Journal `read` stays on `Env` as the Pure-legal method.
 
-   *(Amended 2026-09-24: Pure + `Http` or `Process` does not compile;
-   `Binding<HttpCapability>` is no longer a binding an author can write.)*
+   *(Amended 2026-09-24: Pure + `Http`, `Process`, or `Workspace` does not
+   compile; `Binding<HttpCapability>` is no longer a binding an author can write.)*
+
+   *(Amended 2026-10-05: Pure + `Entropy` does not compile either; `Entropy`
+   is sampled.)*
 
 6. **Export mode.** `export_desc` and bundle `ProgramMeta` carry
    `mode: Pure` or `mode: Sampled`. `expand_section` writes `MODE_SAMPLED`
@@ -115,8 +130,8 @@ without editing the invocation child.
 
 - ADR-0228's deferred HTTP / `Caps` parameter become trailing `Binding<A>`
   plus an actor allowlist derived from the signature. *(Amended
-  2026-09-24: they become trailing `Http` / `Process` bindings, and the
-  allowlist is the set of APIs the driver maps to a provider it holds,
+  2026-09-24: they become trailing `Http` / `Process` / `Workspace` bindings, and the
+  allowlist is the set of APIs the driver maps to a provider it holds or answers itself,
   checked against each program's section record before the run.)*
 - Generic unscoped `env.request` stays rejected; the signature names
   allowed `A`.

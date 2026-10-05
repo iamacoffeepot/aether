@@ -1,11 +1,8 @@
-error[E0271]: type mismatch resolving `<Http as InjectedApi>::Target == ProcessCapability`
-  --> tests/ui/program/fail_api_target_mismatch.rs:29:71
+error[E0599]: no associated function or constant named `OK` found for struct `aether_bloomery_program::__macro_internals::CheckHandle<aether_bloomery_program::Http, aether_bloomery_program::Process>` in the current scope
+  --> tests/ui/program/fail_api_target_mismatch.rs:21:1
    |
-29 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _process: Process) -> Result<Self::Result, Refusal> {
-   |                                                                       ^^^^^^^ expected `ProcessCapability`, found `HttpCapability`
+21 | #[program]
+   | ^^^^^^^^^^ associated function or constant not found in `aether_bloomery_program::__macro_internals::CheckHandle<aether_bloomery_program::Http, aether_bloomery_program::Process>`
    |
-note: required by a bound in `aether_bloomery_program::__macro_internals::check_target`
-  --> $WORKSPACE/crates/aether-bloomery-program/src/program/mod.rs
-   |
-   |     pub const fn check_target<Api: InjectedApi<Target = T>, T>() {}
-   |                                                ^^^^^^^^^^ required by this bound in `check_target`
+   = note: the associated function or constant was found for `aether_bloomery_program::__macro_internals::CheckHandle<T, T>`
+   = note: this error originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -39,6 +39,7 @@ fn program_ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/program/pass_async_run.rs");
     t.pass("tests/ui/program/pass_sampled_http.rs");
+    t.pass("tests/ui/program/pass_sampled_entropy.rs");
     t.compile_fail("tests/ui/program/fail_async_run_sync_env.rs");
     t.compile_fail("tests/ui/program/fail_async_run_no_return.rs");
     t.compile_fail("tests/ui/program/fail_sync_run_async_env.rs");
@@ -46,6 +47,7 @@ fn program_ui() {
     t.compile_fail("tests/ui/program/fail_non_pure_mode.rs");
     t.compile_fail("tests/ui/program/fail_invalid_name.rs");
     t.compile_fail("tests/ui/program/fail_http_on_pure.rs");
+    t.compile_fail("tests/ui/program/fail_entropy_on_pure.rs");
     t.compile_fail("tests/ui/program/fail_binding_before_env.rs");
     t.compile_fail("tests/ui/program/fail_binding_on_sync.rs");
     t.compile_fail("tests/ui/program/fail_unknown_api.rs");

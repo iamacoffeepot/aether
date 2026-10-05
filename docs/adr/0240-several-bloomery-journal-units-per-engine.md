@@ -425,9 +425,10 @@ fold of one log and one driver's `seq` space, so units do not share one:
 | Invocation → its root | the parent proof | the invocation's `waiting`, by request id, as today |
 | Root → the `Invoke`'s sender | `invokers`, as the fetch-on-miss relay already does | a deferred reply per relayed call, answered once |
 | Driver → provider | its declared dependencies, `WorkspaceCapability` and `HttpCapability`; for a `Workspace` call it builds the `Run` with its journal as `source` (D7) | the driver's `callers`, as for a fetch |
+| Driver answers itself | the operating system's randomness, with no capability behind it | the driver's `callers`, as for a fetch |
 
 This is the one path for every program API (`Http`, `Process`,
-`Workspace`). The invocation declares no dependency. The closed API set
+`Workspace`, `Entropy`). The invocation declares no dependency. The closed API set
 moves its check from the invocation's `depends(api_target::…)` to the
 driver:
 
@@ -437,17 +438,20 @@ driver:
   this unit faults `BundleUnavailable` before `Invoke`. This keeps today's
   refusal-before-run, which the invocation's `depends` gave at bundle load.
   On the bloomery engine `Process` has no provider, since `aether.process`
-  is not composed.
+  is not composed. `Entropy` has no provider capability either: the driver
+  answers it itself from the operating system's randomness.
 - The driver maps `Http` to `HttpCapability` and `Workspace` to
-  `WorkspaceCapability`, and refuses anything else with `Refusal::Refused`,
-  as the invocation does today.
+  `WorkspaceCapability`, answers `Entropy` itself, and refuses anything else
+  with `Refusal::Refused`, as the invocation does today.
 - The driver declares `depends(ComponentHostCapability, HttpCapability,
   WorkspaceCapability)`, so a missing HTTP capability or workspace refuses
   the driver's birth.
 
 This amends ADR-0229 decision 2 and its 2026-09-24 amendment: bindings no
 longer resolve through `A::NAMESPACE`. The sealed `InjectedApi` set and the
-SDK table stay; the table now names what the driver maps.
+SDK table stay; the table now names what the driver maps, and `Entropy` —
+a sampled API the driver answers itself from the operating system's
+randomness, with no provider capability — rides the same relay path.
 
 No hop drops or evicts a parked reply; each is answered exactly once or
 abandoned when its actor closes, as the driver's `Drop` does today.

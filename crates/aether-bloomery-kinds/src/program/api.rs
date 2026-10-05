@@ -10,7 +10,7 @@ use crate::Detail;
 use crate::program::refusal::Refusal;
 
 /// The closed set of APIs a program's `run` may bind. The driver maps each
-/// to a provider it holds, or refuses it.
+/// to a provider it holds, answers it itself, or refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, aether_data::Schema)]
 pub enum ProgramApi {
     /// `aether.http`.
@@ -19,6 +19,9 @@ pub enum ProgramApi {
     Process,
     /// The unit's workspace.
     Workspace,
+    /// The driver's own randomness, answered from the operating system with no
+    /// capability behind it.
+    Entropy,
 }
 
 /// One captured API call, sent by an invocation to its root and relayed by
@@ -45,6 +48,23 @@ pub enum ApiCallResult {
     Replied { call: u64, kind: KindId, payload: Vec<u8> },
     /// A hop refused the call; no provider saw it.
     Refused { call: u64, refusal: Refusal },
+}
+
+/// One draw of randomness: how many bytes the program asked the driver to
+/// fill from the operating system.
+#[aether_data::kind(name = "aether.bloomery.program.entropy_draw", eq, no_serde)]
+pub struct EntropyDraw {
+    /// How many random bytes the program asked for.
+    pub count: u8,
+}
+
+/// The driver's answer to one [`EntropyDraw`].
+#[aether_data::kind(name = "aether.bloomery.program.entropy_result", eq, no_serde)]
+pub enum EntropyResult {
+    /// The drawn bytes, exactly as many as the draw asked for.
+    Drawn { bytes: Vec<u8> },
+    /// The operating system yielded no randomness.
+    Unavailable,
 }
 
 impl HeldReply for ApiCallResult {

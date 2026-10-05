@@ -1,17 +1,18 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::{DependsOn, ProtocolRef, ReplyMode, Target};
-use aether_bloomery_kinds::StatusQuery;
+use aether_bloomery_kinds::{EntropyResult, StatusQuery};
 use aether_bloomery_workspace::Run;
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorMail, Digest, Kind};
 use aether_http::HttpCapability;
 use aether_kinds::{Publish, Spawn};
 use aether_substrate::actor::native::NativeCtx;
+use std::collections::VecDeque;
 use tracing::debug_span;
 
 use super::steps::{STEP_TARGET, purpose};
-use super::{BundleDriverState, BundleRoot, Caller, CallerId, Command, LoadTicket};
+use super::{ApiReply, BundleDriverState, BundleRoot, Caller, CallerId, Command, LoadTicket};
 
 impl BundleDriverState {
     /// Perform each [`Command`] in order, then return.
@@ -23,13 +24,14 @@ impl BundleDriverState {
     /// reactor commands to it as its
     /// [`ReactorRoot`](aether_bloomery_kinds::ReactorRoot), each cast from its
     /// spawn reply when it loaded, a program's
-    /// relayed `Http` call goes to the http capability and its `Workspace` call
-    /// to the held workspace reference, and answers, fetch answers, and API
-    /// answers release the held reply, and a tick waits on a worker. Every send carries its ticket as the request
-    /// context, so the reply routes back to the core continuation that issued
-    /// it. The head watch rides a fresh chain: the journal parks it until the
-    /// head moves, and the chain that happens to re-arm it did not cause the
-    /// wait.
+    /// relayed `Http` call goes to the http capability, its `Workspace` call
+    /// to the held workspace reference, and its `Entropy` draw is answered
+    /// here from the operating system's randomness, and answers, fetch
+    /// answers, and API answers release the held reply, and a tick waits on a
+    /// worker. Every send carries its ticket as the request context, so the
+    /// reply routes back to the core continuation that issued it. The head
+    /// watch rides a fresh chain: the journal parks it until the head moves,
+    /// and the chain that happens to re-arm it did not cause the wait.
     ///
     /// Every ticketed send but the head watch opens its step's span first,
     /// which the reply handler that takes the ticket back closes.
@@ -38,7 +40,8 @@ impl BundleDriverState {
         ctx: &mut NativeCtx<'_, A, M>,
         commands: Vec<Command>,
     ) {
-        for command in commands {
+        let mut queue: VecDeque<Command> = commands.into();
+        while let Some(command) = queue.pop_front() {
             match command {
                 Command::ReadEvents { ticket, request } => {
                     self.steps.open(ticket, debug_span!(target: STEP_TARGET, "read_events"));
@@ -123,6 +126,10 @@ impl BundleDriverState {
                     let run = Run { source: self.source.clone(), request };
                     let _ = ctx.send_to_with_context(self.workspace, &run, ticket);
                 }
+                Command::DrawEntropy { ticket, count } => {
+                    let reply = draw_entropy(count);
+                    queue.extend(self.core.on_api_reply(ticket, ApiReply::Entropy(reply)));
+                }
                 Command::ApiAnswered { caller, result } => match self.callers.remove(&caller) {
                     Some(Caller::Api(held)) => held.answer(ctx, &result),
                     Some(_) => owed_other(ctx, caller, "ApiCallResult"),
@@ -168,6 +175,17 @@ impl BundleDriverState {
             ctx.fatal_abort(format!("the core addressed bundle {bundle} as a {role} root the driver never kept"));
         };
         let _ = ctx.send_to_with_context(root, request, ticket);
+    }
+}
+
+/// Fill `count` bytes from the operating system's randomness. A failure
+/// yields [`EntropyResult::Unavailable`]; the draw is never short.
+fn draw_entropy(count: u8) -> EntropyResult {
+    let mut bytes = vec![0u8; usize::from(count)];
+    let filled = getrandom::fill(&mut bytes);
+    match filled {
+        Ok(()) => EntropyResult::Drawn { bytes },
+        Err(_) => EntropyResult::Unavailable,
     }
 }
 

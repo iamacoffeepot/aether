@@ -9,10 +9,11 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
+use aether_bloomery_driver::{ApiReply, Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     ApiCall, ApiCallResult, AppendRecords, CallOutcome, CallRefusal, ClosureArtifact, Detail, DriverRecord,
-    EncodedArtifact, ExecutorFault, FaultReason, Invoked, ProgramApi, ReadEventsResult, Refusal,
+    EncodedArtifact, EntropyDraw, EntropyResult, ExecutorFault, FaultReason, Invoked, ProgramApi, ReadEventsResult,
+    Refusal,
 };
 use aether_data::{Digest, Kind, OpaqueBytes, Ref, Utf8Text, artifact_digest};
 use program_world::{call, fault, requested, transition};
@@ -893,4 +894,51 @@ fn an_api_with_no_provider_is_refused_at_once() {
     };
     assert_eq!(*answered, caller);
     assert!(matches!(refusal, Refusal::Refused { .. }), "unexpected refusal: {refusal:?}");
+}
+
+#[test]
+fn an_entropy_draw_parks_and_relays_its_bytes_once() {
+    // Catches a core that refuses an entropy draw it answers itself, that
+    // drops the count, that relays the reply under the wrong kind, that
+    // answers twice, and a zero draw that parks instead of refusing at once.
+    let (mut world, initial) = World::open();
+    world.drive(initial);
+
+    let draw = EntropyDraw { count: 4 };
+    let call = ApiCall { call: 7, api: ProgramApi::Entropy, kind: EntropyDraw::ID, payload: draw.encode_into_bytes() };
+    let (caller, commands) = world.core.call_api(call);
+
+    let [Command::DrawEntropy { ticket, count }] = commands.as_slice() else {
+        panic!("expected exactly one entropy draw, got {commands:?}");
+    };
+    assert_eq!(*count, 4);
+
+    let bytes = vec![1, 2, 3, 4];
+    let answered = world.core.on_api_reply(*ticket, ApiReply::Entropy(EntropyResult::Drawn { bytes: bytes.clone() }));
+    let [Command::ApiAnswered { caller: answered, result: ApiCallResult::Replied { call: 7, kind, payload } }] =
+        answered.as_slice()
+    else {
+        panic!("expected exactly one relayed reply, got {answered:?}");
+    };
+    assert_eq!(*answered, caller);
+    assert_eq!(*kind, EntropyResult::ID);
+    assert_eq!(
+        EntropyResult::decode_from_bytes(payload).expect("the relayed reply decodes"),
+        EntropyResult::Drawn { bytes }
+    );
+    assert!(world.core.on_api_reply(*ticket, ApiReply::Entropy(EntropyResult::Unavailable)).is_empty());
+
+    let zero = EntropyDraw { count: 0 };
+    let call = ApiCall { call: 8, api: ProgramApi::Entropy, kind: EntropyDraw::ID, payload: zero.encode_into_bytes() };
+    let (caller, commands) = world.core.call_api(call);
+    let [Command::ApiAnswered { caller: answered, result: ApiCallResult::Refused { call: 8, refusal } }] =
+        commands.as_slice()
+    else {
+        panic!("expected exactly one refusal for a zero draw, got {commands:?}");
+    };
+    assert_eq!(*answered, caller);
+    let Refusal::Refused { reason } = refusal else {
+        panic!("expected a refused zero draw, got {refusal:?}");
+    };
+    assert!(reason.as_str().contains("zero"), "the refusal names the zero count: {reason:?}");
 }
