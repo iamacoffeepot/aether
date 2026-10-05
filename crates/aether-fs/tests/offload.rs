@@ -3,15 +3,11 @@
 //!
 //! A worker is held mid-read by pointing it at a FIFO: `fs::read` blocks in
 //! `open` until a writer opens the other end, so a test decides exactly when
-//! each read can finish. Writers open their end on helper threads, so a bug
-//! that never starts a read fails the test at the settlement cap rather than
-//! hanging it. Every wait is a settlement wait or a pump on mail wakes, never
-//! a sleep.
+//! each read can finish. A test opens a FIFO's write end only once the read
+//! behind it has been started, so the open returns as soon as that worker
+//! reaches its own `open`. Every wait is a settlement wait, a pump on mail
+//! wakes, or that FIFO rendezvous, never a sleep.
 #![cfg(unix)]
-// Deliberate embedders: the scenarios build a bare `TestChassis` through
-// `Builder::new`, and spawn the FIFO writer threads that stand in for a slow
-// disk.
-#![allow(clippy::disallowed_methods)]
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -19,9 +15,7 @@ use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::thread;
 
 use aether_actor::actor;
 use aether_data::{MailId, SessionToken, Uuid};
@@ -29,11 +23,12 @@ use aether_fs::{
     FsCapability, Load, LoadResult, Loaded, MAX_LOADS_IN_FLIGHT, NamespaceAddr, NamespaceRoots, Read, ReadResult,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::chassis::builder::{Builder, PassiveChassis, ReplyTarget};
+use aether_substrate::chassis::builder::{PassiveChassis, ReplyTarget};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::outbound::EgressEvent;
 use aether_substrate::testing::{
-    PumpedDriver, TestChassis, await_settled, cleanup, decode_session_reply, fresh_substrate_and_rx, scratch_dir,
+    PumpedDriver, TestChassis, await_settled, boot_test_chassis_with, cleanup, decode_session_reply,
+    fresh_substrate_and_rx, scratch_dir,
 };
 
 /// Ask the requester to load `addr` under `tag`.
@@ -123,15 +118,12 @@ impl Drop for Sandbox {
     }
 }
 
-/// Write `bytes` into `fifo` from a helper thread: the open blocks until the
-/// worker reading the FIFO opens its end, then the write and close let that
-/// read finish.
-fn feed(fifo: &Path, bytes: &'static [u8]) {
-    let fifo = fifo.to_path_buf();
-    thread::spawn(move || {
-        let mut writer = OpenOptions::new().write(true).open(&fifo).expect("open the FIFO's write end");
-        writer.write_all(bytes).expect("write the FIFO");
-    });
+/// Write `bytes` into `fifo` and close it, letting the read blocked on it
+/// finish. Call only once that read's worker has been started: the open
+/// blocks until the worker opens its end.
+fn feed(fifo: &Path, bytes: &[u8]) {
+    let mut writer = OpenOptions::new().write(true).open(fifo).expect("open the FIFO's write end");
+    writer.write_all(bytes).expect("write the FIFO");
 }
 
 /// Whether a reader has the FIFO open right now: a non-blocking write-open
@@ -142,10 +134,7 @@ fn has_reader(fifo: &Path) -> bool {
 
 fn chassis_with_fs(roots: &NamespaceRoots) -> (PassiveChassis<TestChassis>, Receiver<EgressEvent>) {
     let (registry, mailer, rx) = fresh_substrate_and_rx();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor_configured::<FsCapability>((), roots.clone())
-        .build_passive()
-        .expect("aether.fs boots");
+    let chassis = boot_test_chassis_with::<FsCapability>(&registry, &mailer, roots.clone(), ());
 
     (chassis, rx)
 }
