@@ -1,5 +1,5 @@
 //! Code as a value (ADR-0241 §2): a [`Module`] is a compiled cache entry made
-//! from a [`Blob`] of wasm bytes.
+//! from a [`Blob`](aether_data::Blob) of wasm bytes.
 //!
 //! Checking code in through the engine's one [`ModuleCache`] derives
 //! everything the engine needs from the bytes once per content hash:
