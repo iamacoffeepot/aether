@@ -1,0 +1,39 @@
+{
+  "id": "resp_0021",
+  "object": "response",
+  "created_at": 1790000500,
+  "status": "completed",
+  "error": null,
+  "incomplete_details": null,
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "fc_00210",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_rewrite",
+      "name": "tree-write",
+      "arguments": "{\"path\": \"docs/notes.md\", \"text\": \"Iron blooms.\\nSlag floats.\\n\"}"
+    },
+    {
+      "id": "fc_00211",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_diff",
+      "name": "tree-diff",
+      "arguments": "{}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 80,
+    "output_tokens_details": {
+      "reasoning_tokens": 20
+    },
+    "total_tokens": 1280
+  }
+}

@@ -15,9 +15,9 @@ use aether_bloomery_muse::{
     Answered, CallId, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, MUSE, ModelName,
     MuseSession, MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, Reasoning,
     ReasoningEffort, ReasoningId, RecordInput, RequiredProofs, RestReason, Role, Session, SessionContinue,
-    SessionExhausted, SessionGate, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeEdit,
-    TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome, TurnResult,
-    TurnSettings, VendorRead, Viewed, offered, offered_with_proofs, required_proofs,
+    SessionExhausted, SessionGate, SessionKey, SessionOpen, SessionRecord, ToolCall, ToolInput, ToolOutput, TreeDiff,
+    TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems, TurnLimit, TurnOutcome,
+    TurnResult, TurnSettings, VendorRead, Viewed, offered, offered_with_proofs, required_proofs,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -35,6 +35,7 @@ const CALLED_ECHO_MORE: &str = include_str!("../fixtures/called_echo_more.json")
 const CALLED_EDIT_WRITE: &str = include_str!("../fixtures/called_edit_write.json");
 const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_read_edit_grep.json");
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
+const CALLED_WRITE_DIFF: &str = include_str!("../fixtures/called_write_diff.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const CALLED_PROOF: &str = include_str!("../fixtures/called_proof.json");
 const CALLED_VENDOR_READ: &str = include_str!("../fixtures/called_vendor_read.json");
@@ -272,6 +273,7 @@ impl Driver {
             name if name == TreeList::NAME => self.run_async::<TreeList>(invocation),
             name if name == TreeRead::NAME => self.run_async::<TreeRead>(invocation),
             name if name == TreeGrep::NAME => self.run_async::<TreeGrep>(invocation),
+            name if name == TreeDiff::NAME => self.run_async::<TreeDiff>(invocation),
             name if name == VendorRead::NAME => self.run_async::<VendorRead>(invocation),
             name if name == ClippyProof::NAME => self.prove(invocation),
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
@@ -407,8 +409,8 @@ fn encoded<K: Storage + Clone + Cites>(value: &K) -> EncodedArtifact {
 }
 
 /// Settings posting to the test endpoint and offering every bound tool, staging what they cite.
-fn settings(driver: &mut Driver) -> Result<TurnSettings, Box<dyn Error>> {
-    let (tools, artifacts) = offered();
+fn settings(driver: &mut Driver, tree: Ref<Tree>) -> Result<TurnSettings, Box<dyn Error>> {
+    let (tools, artifacts) = offered(tree);
     driver.stage(artifacts);
     let (endpoint, model, budget) = (Endpoint::new(URL)?, ModelName::new("muse-spark-1.3")?, OutputBudget::new(512)?);
     let limit = InputLimit::new(u64::MAX).expect("limit");
@@ -458,7 +460,8 @@ fn open(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn
 /// Open a session on the small tree like [`open`], but resting `ContextFull`
 /// once a turn is billed `tokens` input tokens; the open run's seq and the tree.
 fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
-    let (tools, artifacts) = offered();
+    let tree = small_tree(driver);
+    let (tools, artifacts) = offered(tree);
     driver.stage(artifacts);
     let settings = TurnSettings::new(
         Endpoint::new(URL)?,
@@ -468,7 +471,6 @@ fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64
         ReasoningEffort::Low,
         InputLimit::new(tokens)?,
     );
-    let tree = small_tree(driver);
     driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
     let input = OpenInput::new(
         settings,
@@ -485,8 +487,8 @@ fn open_limited(driver: &mut Driver, max_turns: u32, tokens: u64) -> Result<(u64
 /// Open a session on the small tree that reads `seeds` before its first turn and makes at most `max_turns` turns;
 /// the open run's seq and the tree.
 fn open_seeded(driver: &mut Driver, max_turns: u32, seeds: Vec<TreePath>) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
-    let settings = settings(driver)?;
     let tree = small_tree(driver);
+    let settings = settings(driver, tree)?;
     driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
     let input = OpenInput::new(
         settings,
@@ -528,7 +530,8 @@ fn open_gated_over(
     proofs: &ProofBound,
     required: &[&str],
 ) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
-    let (tools, artifacts) = offered_with_proofs(proofs);
+    let tree = small_tree(driver);
+    let (tools, artifacts) = offered_with_proofs(tree, proofs);
     let names = required.iter().map(|name| ProgramName::new(*name)).collect::<Result<Vec<_>, _>>()?;
     let (required, args) = required_proofs(proofs, &names)?;
     driver.stage(artifacts.into_iter().chain(args));
@@ -540,7 +543,6 @@ fn open_gated_over(
         ReasoningEffort::Low,
         InputLimit::new(u64::MAX)?,
     );
-    let tree = small_tree(driver);
     driver.stage([EncodedArtifact::text(INSTRUCTIONS), EncodedArtifact::text(QUESTION)]);
     let input = OpenInput::new(
         settings,
@@ -634,7 +636,7 @@ fn decoded(call: &ToolCall) -> ErasedRef {
 
 /// The input the loop runs `call` over: `tree`, the arguments the call decoded to, and the offered bound.
 fn bound(tree: Ref<Tree>, call: &ToolCall) -> CallInput {
-    let (tools, _) = offered();
+    let (tools, _) = offered(tree);
     let tool = tools.as_slice().iter().find(|tool| Some(tool.program()) == call.program()).expect("an offered tool");
     CallInput::Value(encoded(&tooled(tree, decoded(call), tool.bound())))
 }
@@ -708,7 +710,7 @@ fn an_opened_session_runs_its_calls_then_ends_done_and_moves_its_head() -> TestR
         trigger = driver.follow(trigger);
         assert_eq!(driver.intent(trigger).rule().as_str(), "resume", "a tool's run resumes the loop");
         let result = ErasedRef::new(EchoResult::ID, driver.transition(trigger).result);
-        let output = ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result };
+        let output = ToolOutput::Result { schema: offered(tree).0.as_slice()[0].result(), result };
         outputs.push(TurnItem::CallOutput { call_id: call.call_id().clone(), output });
     }
 
@@ -856,7 +858,7 @@ fn a_call_to_an_unoffered_tool_is_answered_with_its_refusal_and_the_next_turn_en
         TurnItem::Call(call_b.clone()),
         TurnItem::CallOutput {
             call_id: call_a.call_id().clone(),
-            output: ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result },
+            output: ToolOutput::Result { schema: offered(tree).0.as_slice()[0].result(), result },
         },
         TurnItem::CallOutput { call_id: call_b.call_id().clone(), output: ToolOutput::Refused(*refusal) },
     ];
@@ -927,7 +929,7 @@ fn a_faulted_call_rests_the_session_failed_with_the_calls_answered_before_it() -
     assert_eq!(*session.rested(), RestReason::Failed(Failure::Faulted { program, reason }));
     let (text, calls) = called(&driver.result(first_turn));
     let result = ErasedRef::new(EchoResult::ID, driver.transition(echoed).result);
-    let output = ToolOutput::Result { schema: offered().0.as_slice()[0].result(), result };
+    let output = ToolOutput::Result { schema: offered(tree).0.as_slice()[0].result(), result };
     let first: TurnInput = driver.value(driver.first_turn(opened));
     let answered = [
         TurnItem::Reasoning(echo_thought()),
@@ -1094,7 +1096,8 @@ fn a_refused_head_move_ends_the_activation_and_the_previous_head_still_continues
 fn a_bare_turn_is_never_a_session() -> TestResult {
     // Catches a loop that guesses a session from a turn's content, so any turn offering bound tools would run them.
     let mut driver = Driver::new(&[CALLED_ECHO]);
-    let settings = settings(&mut driver)?;
+    let tree = small_tree(&mut driver);
+    let settings = settings(&mut driver, tree)?;
     driver.stage([EncodedArtifact::text(QUESTION)]);
     let input = TurnInput::new(
         Endpoint::new(URL)?,
@@ -1367,6 +1370,45 @@ fn a_vendor_read_runs_over_the_bound_vendor_tree_and_leaves_the_sessions_tree_as
     driver.settle(read_run);
     let session: Session = driver.value(driver.head(SessionKey::new(opened)));
     assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, opened_tree));
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+#[test]
+fn a_write_then_a_diff_shows_what_changed_and_leaves_the_sessions_tree_as_it_was() -> TestResult {
+    // Catches an offer bound to a tree other than the opened one, the current tree bound on both sides (the diff
+    // would say no change), and a `Viewed` diff that moves the session's tree.
+    let mut driver = Driver::new(&[CALLED_WRITE_DIFF, ENDED]);
+    let (opened, opened_tree) = open(&mut driver, 2)?;
+    let first_turn = driver.follow(opened);
+
+    let (_, calls) = called(&driver.result(first_turn));
+    let [write, _diff] = calls.as_slice() else {
+        panic!("expected two calls, got {calls:?}");
+    };
+    let writing = asked(&driver, first_turn);
+    assert_eq!(writing.name.as_str(), TreeWrite::NAME);
+    assert_eq!(writing.input, bound(opened_tree, write), "the write runs over the opened tree");
+    let written_run = driver.follow(first_turn);
+    let written: Edited = driver.result(written_run);
+
+    let reading = asked(&driver, written_run);
+    assert_eq!((&reading.program, reading.name.as_str()), (&MUSE, TreeDiff::NAME));
+    let CallInput::Value(input) = &reading.input else {
+        panic!("expected the diff's input as a value");
+    };
+    let input = ErasedTooled::decode_storage(&payload(input))?.value;
+    assert_eq!(input.bound(), opened_tree.erase(), "the diff binds the opened tree");
+    assert_eq!(input.tree(), written.tree(), "the diff runs over the written tree, not the opened one");
+
+    let diffed_run = driver.follow(written_run);
+    let viewed: Viewed = driver.result(diffed_run);
+    assert!(viewed.text().starts_with("A docs/notes.md"), "{}", viewed.text());
+
+    driver.settle(diffed_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, written.tree()));
 
     assert_warm_and_live_agree(&driver);
     Ok(())

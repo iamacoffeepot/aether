@@ -233,9 +233,33 @@ impl SmallTree {
         let input = tooled(session, cited(&args), cited(&bound));
         (input, self.artifacts.iter().cloned().chain([args, bound]).collect())
     }
+
+    /// A diff call over the current tree `current` with `args`, bound to this
+    /// tree as the base, and the artifacts it could read with `extra` for
+    /// what the current tree adds.
+    pub fn diff_call<A: Storage + Clone + Cites>(
+        &self,
+        current: Ref<Tree>,
+        args: &A,
+        extra: Vec<ClosureArtifact>,
+    ) -> (ErasedTooled, Vec<ClosureArtifact>) {
+        let (input, mut closure) = self.called_over(current, stored(args), stored(&self.root));
+        closure.extend(extra);
+        (input, closure)
+    }
+
+    /// The root of this tree with `change` applied to its entries, and the
+    /// artifact staging it.
+    pub fn changed(&self, change: impl FnOnce(&mut BTreeMap<Name, Node>)) -> (Ref<Tree>, ClosureArtifact) {
+        let mut entries = self.root.entries().clone();
+        change(&mut entries);
+        let root = Tree::new(entries);
+        let cited = Ref::of_encoded(&root).expect("a changed root encodes");
+        (cited, stored(&root))
+    }
 }
 
-fn stored_bytes(bytes: &[u8]) -> ClosureArtifact {
+pub fn stored_bytes(bytes: &[u8]) -> ClosureArtifact {
     let (kind, payload, _) = EncodedArtifact::opaque_bytes(bytes).into_parts();
     ClosureArtifact::new(kind, payload)
 }

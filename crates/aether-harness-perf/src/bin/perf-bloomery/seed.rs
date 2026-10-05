@@ -82,7 +82,7 @@ impl Seed {
     /// its turns to `endpoint`.
     pub fn open(self, knobs: &Knobs, endpoint: &str) -> Result<Seeded, Box<dyn Error>> {
         let Self { mut batch, set, tree, .. } = self;
-        let (tools, artifacts) = offered();
+        let (tools, artifacts) = offered(tree);
         for artifact in artifacts {
             batch.stage_artifact(artifact);
         }
