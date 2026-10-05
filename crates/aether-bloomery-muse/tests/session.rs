@@ -13,11 +13,11 @@ use aether_bloomery_kinds::{
     decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
-    Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
-    MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort, RecordInput,
-    RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen, SessionRecord, ToolCall,
-    ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
-    TurnLimit, TurnOutcome, TurnResult, TurnSettings, Viewed, offered, offered_with_proofs,
+    Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, MUSE, ModelName,
+    MuseSession, MuseTurn, NUDGE_TEXT, OfferedTools, OpenInput, Opened, OutputBudget, ReadArgs, ReasoningEffort,
+    RecordInput, RestReason, Role, Session, SessionContinue, SessionExhausted, SessionKey, SessionOpen, SessionRecord,
+    ToolCall, ToolInput, ToolOutput, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, TurnInput, TurnItem, TurnItems,
+    TurnLimit, TurnOutcome, TurnResult, TurnSettings, VendorRead, Viewed, offered, offered_with_proofs,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
@@ -37,6 +37,7 @@ const CALLED_LIST_READ_EDIT_GREP: &str = include_str!("../fixtures/called_list_r
 const CALLED_WRITE: &str = include_str!("../fixtures/called_write.json");
 const CALLED_UNOFFERED: &str = include_str!("../fixtures/called_unoffered.json");
 const CALLED_PROOF: &str = include_str!("../fixtures/called_proof.json");
+const CALLED_VENDOR_READ: &str = include_str!("../fixtures/called_vendor_read.json");
 const ENDED: &str = include_str!("../fixtures/ended.json");
 const CONTEXT_FULL: &str = include_str!("../fixtures/context_full.json");
 const INCOMPLETE_BUDGET: &str = include_str!("../fixtures/incomplete_budget.json");
@@ -271,6 +272,7 @@ impl Driver {
             name if name == TreeList::NAME => self.run_async::<TreeList>(invocation),
             name if name == TreeRead::NAME => self.run_async::<TreeRead>(invocation),
             name if name == TreeGrep::NAME => self.run_async::<TreeGrep>(invocation),
+            name if name == VendorRead::NAME => self.run_async::<VendorRead>(invocation),
             name if name == ClippyProof::NAME => self.prove(invocation),
             name if name == SessionOpen::NAME => invoke::<SessionOpen>(invocation),
             name if name == SessionContinue::NAME => invoke::<SessionContinue>(invocation),
@@ -507,7 +509,16 @@ fn proofs() -> ProofBound {
 /// Open a session on the small tree that offers every bound tool and the proofs bound to [`proofs`], and makes at
 /// most `max_turns` turns; the open run's seq and the tree.
 fn open_proving(driver: &mut Driver, max_turns: u32) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
-    let (tools, artifacts) = offered_with_proofs(&proofs());
+    open_proving_with(driver, max_turns, &proofs())
+}
+
+/// Open a session on the small tree like [`open_proving`], but offering the proofs bound to `proofs`.
+fn open_proving_with(
+    driver: &mut Driver,
+    max_turns: u32,
+    proofs: &ProofBound,
+) -> Result<(u64, Ref<Tree>), Box<dyn Error>> {
+    let (tools, artifacts) = offered_with_proofs(proofs);
     driver.stage(artifacts);
     let settings = TurnSettings::new(
         Endpoint::new(URL)?,
@@ -1275,6 +1286,51 @@ fn a_proof_runs_in_its_bundle_over_the_bound_environment_and_its_tree_becomes_th
     let session: Session = driver.value(driver.head(SessionKey::new(opened)));
     assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, formatted_tree));
     assert_eq!(file(&driver, session.tree(), "src/lib.rs"), b"pub fn smelt() {}\n\npub fn bloom() {}\n");
+
+    assert_warm_and_live_agree(&driver);
+    Ok(())
+}
+
+/// Stage a vendor tree holding the one crate `serde`, whose `src/lib.rs` reads `VENDORED`, and cite it.
+fn vendor_tree(driver: &mut Driver) -> Ref<Tree> {
+    let name = |name: &str| Name::new(name).expect("name");
+    let src = Tree::new([(name("lib.rs"), Node::File(Ref::of_bytes(VENDORED.as_bytes())))].into());
+    let serde = Tree::new([(name("src"), Node::Directory(Ref::of_encoded(&src).expect("src")))].into());
+    let root = Tree::new([(name("serde"), Node::Directory(Ref::of_encoded(&serde).expect("serde")))].into());
+    driver.stage([EncodedArtifact::opaque_bytes(VENDORED.as_bytes()), encoded(&src), encoded(&serde), encoded(&root)]);
+    Ref::of_encoded(&root).expect("root")
+}
+
+/// The text of `serde/src/lib.rs` in the vendor tree.
+const VENDORED: &str = "pub trait Serialize {}\n";
+
+#[test]
+fn a_vendor_read_runs_over_the_bound_vendor_tree_and_leaves_the_sessions_tree_as_it_was() -> TestResult {
+    // Catches a vendor read run in the bundle of the proofs instead of the muse bundle that holds it, over the
+    // session's tree instead of the vendor tree its bound cites, without the session's proofs bound, a `Viewed`
+    // result whose tree the loop carries on as an edit's, and folds that diverge between warm-up and live delivery.
+    let mut driver = Driver::new(&[CALLED_VENDOR_READ, ENDED]);
+    let vendor = vendor_tree(&mut driver);
+    let bound = ProofBound::new(proofs().environment(), vendor, TestEnv::default());
+    let (opened, opened_tree) = open_proving_with(&mut driver, 4, &bound)?;
+    let first_turn = driver.follow(opened);
+
+    let reading = asked(&driver, first_turn);
+    assert_eq!((&reading.program, reading.name.as_str()), (&MUSE, VendorRead::NAME));
+    let CallInput::Value(input) = &reading.input else {
+        panic!("expected the read's input as a value");
+    };
+    let input = ErasedTooled::decode_storage(&payload(input))?.value;
+    assert_eq!(input.tree(), opened_tree, "the read runs over the session's tree");
+    assert_eq!(input.bound(), Ref::of_encoded(&bound)?.erase(), "the read binds the session's proofs");
+
+    let read_run = driver.follow(first_turn);
+    let viewed: Viewed = driver.result(read_run);
+    assert_eq!(viewed.text(), "1\tpub trait Serialize {}", "the text is the vendor tree's");
+
+    driver.settle(read_run);
+    let session: Session = driver.value(driver.head(SessionKey::new(opened)));
+    assert_eq!((session.rested(), session.tree()), (&RestReason::Completed, opened_tree));
 
     assert_warm_and_live_agree(&driver);
     Ok(())

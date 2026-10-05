@@ -69,6 +69,10 @@
 //! and test env: the first formats the tree and checks it with clippy, the
 //! second formats the tree and runs its workspace tests with the session's
 //! test env, and each one's `Edited` tree the loop carries on like an edit's.
+//! It also offers [`VendorList`] (`vendor.list`), [`VendorRead`]
+//! (`vendor.read`), and [`VendorGrep`] (`vendor.grep`), the read-only tools
+//! over the vendor tree that same bound cites, which return [`Viewed`] as
+//! their `tree.*` siblings do.
 //! Only a `muse.end` call ends a run:
 //! a reply without a call is nudged back for another turn. Each open and
 //! continue states its own [`TurnLimit`]; a session that reaches it rests with
@@ -129,8 +133,8 @@ pub use session::{
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
-    ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
-    offered_with_proofs,
+    ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, VendorGrep, VendorList, VendorRead,
+    Viewed, WriteArgs, offered, offered_with_proofs,
 };
 
 aether_actor::export!(
@@ -147,6 +151,9 @@ aether_actor::export!(
         TreeList,
         TreeRead,
         TreeGrep,
+        VendorList,
+        VendorRead,
+        VendorGrep,
         MuseSession,
     ],
     generators = [aether_bloomery_program::bundle],

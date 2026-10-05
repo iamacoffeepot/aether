@@ -10,6 +10,8 @@ use aether_bloomery_kinds::{Name, Node, Ref, Refusal, Tree};
 use aether_bloomery_program::{Async, Env};
 use aether_bloomery_workspace::TreePath;
 
+use crate::tools::view::Family;
+
 /// Why a path names no entry the tool can use: the first prefix of the path
 /// that is missing or is not a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +101,8 @@ pub async fn leaf(env: &mut Env<Async>, root: Ref<Tree>, path: &TreePath) -> Res
 
 /// The directory `path` names in `root`, or `root` itself when `path` is
 /// `None`, with the path it is shown under: empty for the root. A path that
-/// is blocked or names no directory is a message.
+/// is blocked or names no directory is a message, whose hint names `family`'s
+/// reading tool.
 ///
 /// # Errors
 ///
@@ -108,6 +111,7 @@ pub async fn directory(
     env: &mut Env<Async>,
     root: Ref<Tree>,
     path: Option<&TreePath>,
+    family: Family,
 ) -> Result<Result<(String, Tree), String>, Refusal> {
     let Some(path) = path else {
         return Ok(Ok((String::new(), env.read(root).await?)));
@@ -115,7 +119,7 @@ pub async fn directory(
     let shown = path.as_str();
     Ok(match leaf(env, root, path).await? {
         Ok(Node::Directory(dir)) => Ok((shown.into(), env.read(dir).await?)),
-        Ok(Node::File(_) | Node::Executable(_)) => Err(format!("{shown} is a file; use tree.read.")),
+        Ok(Node::File(_) | Node::Executable(_)) => Err(format!("{shown} is a file; use {}.", family.read())),
         Ok(Node::Symlink(target)) => Err(format!("{shown} is a symlink to {}.", target.as_str())),
         Err(blocked) => Err(blocked.describe()),
     })
