@@ -6,7 +6,7 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog, AssetWindow};
+use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
@@ -608,7 +608,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // traps, so the type-fence (`asset` lives only on the init/wire ctx) is
     // backed by a loud runtime failure for a hand-rolled guest, never a
     // silent empty. Not-found vs closed is thus a returned sentinel vs a
-    // trap — two unambiguous outcomes.
+    // trap — two unambiguous outcomes. A catalogued asset fetched by an
+    // instance spawned from its publication, whose window holds no code to
+    // read it from, also traps, naming `load_component` (ADR-0163 §4).
     linker.func_wrap(
         "aether",
         "asset_fetch_p32",
@@ -625,7 +627,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                          returns (ADR-0163 §3)",
                     ));
                 }
-                window.asset(&name)
+                window.fetch(&name).map_err(|error| wasmtime::Error::msg(format!("asset_fetch: {error}")))?
             };
             bytes.map_or_else(|| Ok(ASSET_NOT_FOUND), |bytes| deliver_bytes_to_guest(&mut caller, &bytes))
         },

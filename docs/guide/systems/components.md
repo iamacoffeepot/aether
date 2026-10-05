@@ -170,9 +170,16 @@ module's namespaces are the group it binds, or, for a successor, republishes.
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
 and publish of the same bytes shares that one entry, which lives
-while its publication or any of them holds it. The wasm bytes are not kept once
-the module is built, and each `aether.asset.*` section is checked in as its own
-blob ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
+while its publication or any of them holds it. Neither the wasm bytes nor any
+`aether.asset.*` payload is kept once the module is built; the entry keeps each
+asset's catalog entry and byte range
+([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
+A guest's load window (`init` + `wire`) reads its assets from the bytes the
+load or republish brought and lets go of them when `wire` returns
+([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md) §3).
+A `spawn` of a published type brings no bytes: its guest sees the catalog, and
+a fetch of a catalogued asset traps naming `load_component`, the door that
+brings them.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the

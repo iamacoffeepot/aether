@@ -1,5 +1,5 @@
 //! Code as a value (ADR-0241 §2): a [`Module`] is a compiled cache entry made
-//! from a [`Blob`] of wasm bytes.
+//! from a [`Blob`](aether_data::Blob) of wasm bytes.
 //!
 //! Checking code in through the engine's one [`ModuleCache`] derives
 //! everything the engine needs from the bytes once per content hash:
@@ -7,15 +7,16 @@
 //! - the compiled `wasmtime::Module`;
 //! - the [`ModuleManifest`], every custom section the host reads (kinds,
 //!   exported and private actor groups, lineage, boot, namespace, the
-//!   no-default and content-addressed markers, and the asset catalog), parsed
-//!   once;
-//! - each `aether.asset.*` section, checked into the blob store as its own
-//!   [`Blob`].
+//!   no-default and content-addressed markers, and the asset catalog with
+//!   each asset's byte range), parsed once.
 //!
 //! The wasm bytes are used to compile and to parse, and are then let go:
-//! nothing here holds the code blob, so the bytes leave the store once the
-//! caller drops its value. Every later load, boot and replace of the same
-//! bytes reads the entry instead of the bytes.
+//! nothing here holds the code blob or any asset's payload, so the bytes
+//! leave the store once the caller drops its value. Every later load, boot
+//! and replace of the same bytes reads the entry instead of the bytes. An
+//! asset's payload passes only through a load window, which reads its range
+//! from the code the window's opener brought and lets go of it when the
+//! window closes (ADR-0163 §3).
 //!
 //! A module publishes the namespaces [`Module::published_groups`] names
 //! (ADR-0241 §3): its exported groups' declared namespaces, each qualified by
@@ -29,7 +30,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
-use aether_data::{Blob, BlobHash};
+use aether_data::BlobHash;
 
 use crate::actor::wasm::kind_manifest::ActorInputs;
 
@@ -39,7 +40,7 @@ mod manifest;
 mod tests;
 
 pub use cache::ModuleCache;
-pub use manifest::ModuleManifest;
+pub use manifest::{AssetSection, ModuleManifest};
 
 /// The length of a module hash in lowercase hex, as a content-addressed
 /// module's published namespaces carry it.
@@ -58,7 +59,6 @@ struct ModuleEntry {
     hash: BlobHash,
     compiled: wasmtime::Module,
     manifest: ModuleManifest,
-    assets: Arc<[(AssetName, Blob)]>,
 }
 
 impl Module {
@@ -94,19 +94,6 @@ impl Module {
                 hash.map_or(Cow::Borrowed(namespace), |hash| Cow::Owned(format!("{namespace}.{}", hash.to_hex())));
             (published, group)
         })
-    }
-
-    /// Each `aether.asset.*` section by asset name, in section order, as its
-    /// own blob.
-    #[must_use]
-    pub fn assets(&self) -> &[(AssetName, Blob)] {
-        &self.entry.assets
-    }
-
-    /// The asset blobs as one shared handle, for a load window to hold and
-    /// then let go of.
-    pub(crate) fn shared_assets(&self) -> Arc<[(AssetName, Blob)]> {
-        Arc::clone(&self.entry.assets)
     }
 }
 

@@ -44,6 +44,11 @@ pub(super) struct PreparedLoad {
     /// The checked-in module. Its hash is, for a module that declares a boot
     /// slot, the key its boot spawns once under.
     module: Module,
+    /// The bytes the module was checked in from, which the guest's load
+    /// window reads its assets from (ADR-0163 §3); `None` for a spawn of a
+    /// published type, which brings none. Held only while the load is in
+    /// flight.
+    code: Option<Blob>,
     config: Vec<u8>,
     /// The selected type's declared namespace, which names it in a refusal.
     namespace: String,
@@ -75,9 +80,11 @@ impl LoadKey {
 
 /// What a load or a spawn asks for: the type `export` selects from `module`
 /// (its default when `None`), keyed by `name`, placed at `placement`, and
-/// built with `config`.
+/// built with `config`; `code` is the bytes `module` was checked in from,
+/// when the door brought them.
 pub(super) struct Selection {
     pub(super) module: Module,
+    pub(super) code: Option<Blob>,
     pub(super) export: Option<String>,
     pub(super) name: Option<String>,
     pub(super) config: Vec<u8>,
@@ -106,6 +113,7 @@ impl PreparedLoad {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
+            code: self.code.clone(),
             modules: state.modules.clone(),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
@@ -159,12 +167,15 @@ pub(super) struct PreparedBoot {
     capabilities: ComponentCapabilities,
     dependencies: Vec<Dependency>,
     module: Module,
+    /// The bytes of the load or publish staging the boot, which its load
+    /// window reads assets from; `None` when a spawn stages it.
+    code: Option<Blob>,
 }
 
 impl PreparedBoot {
     /// The boot plan of `module`, or `None` when it declares no boot slot.
     /// Reads the boot namespace and its group from the parsed manifest.
-    fn of(module: &Module) -> Option<Self> {
+    fn of(module: &Module, code: Option<&Blob>) -> Option<Self> {
         let manifest = module.manifest();
         let namespace = manifest.boot()?;
         let group = manifest.actors().iter().find(|actor| actor.namespace.as_deref() == Some(namespace));
@@ -174,6 +185,7 @@ impl PreparedBoot {
             capabilities: group.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
             dependencies: group.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
             module: module.clone(),
+            code: code.cloned(),
         })
     }
 
@@ -187,6 +199,7 @@ impl PreparedBoot {
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
+            code: self.code.clone(),
             modules: state.modules.clone(),
             outbound: Arc::clone(&state.outbound),
             capabilities: self.capabilities.clone(),
@@ -294,12 +307,13 @@ impl ComponentHostCapabilityState {
 
         // ADR-0241 §2: check the bytes in and take the module from the
         // engine's one cache, which compiles and parses them once per content
-        // hash. The code blob is kept for a republish's prepare.
+        // hash. The code blob is kept for a republish's prepare and for the
+        // guest's load window, which reads its assets from it (ADR-0163 §3).
         let code = ctx.check_in(wasm.into_boxed_slice());
-        let prepared = self
-            .modules
-            .check_in(&ctx.blob_check_in(), &code)
-            .and_then(|module| Self::prepare_load(ctx, Selection { module, export, name, config, placement }));
+        let prepared = self.modules.check_in(&ctx.blob_check_in(), &code).and_then(|module| {
+            let selection = Selection { module, code: Some(code.clone()), export, name, config, placement };
+            Self::prepare_load(ctx, selection)
+        });
         let load = match prepared {
             Ok(load) => load,
             Err(error) => {
@@ -379,7 +393,7 @@ impl ComponentHostCapabilityState {
         ctx: &HostCtx<'_, M>,
         selection: Selection,
     ) -> Result<Arc<PreparedLoad>, String> {
-        let Selection { module, export, name, config, placement } = selection;
+        let Selection { module, code, export, name, config, placement } = selection;
         let manifest = module.manifest();
         let actors = manifest.actors();
 
@@ -456,6 +470,7 @@ impl ComponentHostCapabilityState {
             dependencies,
             type_tag,
             module,
+            code,
             config,
             namespace,
             published,
@@ -553,9 +568,10 @@ impl ComponentHostCapabilityState {
 
     /// Stage `module`'s boot, which no spawn waits on, when it declares one
     /// that is neither born nor staged: a `Publish` spawns it once, when the
-    /// module is first published (ADR-0147, ADR-0241 §8).
-    pub(super) fn boot_published<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, module: &Module) {
-        if let Some(plan) = PreparedBoot::of(module).filter(|plan| {
+    /// module is first published (ADR-0147, ADR-0241 §8). `code` is the
+    /// `Publish`'s bytes, which the boot's load window reads assets from.
+    pub(super) fn boot_published<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, module: &Module, code: &Blob) {
+        if let Some(plan) = PreparedBoot::of(module, Some(code)).filter(|plan| {
             !self.booted_modules.contains(&plan.hash()) && !self.pending_boots.contains_key(&plan.hash())
         }) {
             self.stage_module_boot(ctx, &plan, Vec::new());
@@ -563,11 +579,13 @@ impl ComponentHostCapabilityState {
     }
 
     fn continue_load<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, id: LoadId) {
-        let module = self.loads.get(&id).expect("a published load waits in state").load.module.clone();
+        let load = Arc::clone(&self.loads.get(&id).expect("a published load waits in state").load);
         // ADR-0147, ADR-0241 §8: a module's boot spawns once. A later spawn,
         // including one after the boot was dropped, proceeds without one,
         // and one that arrives while it is staged waits for it.
-        let Some(plan) = PreparedBoot::of(&module).filter(|plan| !self.booted_modules.contains(&plan.hash())) else {
+        let Some(plan) = PreparedBoot::of(&load.module, load.code.as_ref())
+            .filter(|plan| !self.booted_modules.contains(&plan.hash()))
+        else {
             self.stage_requested(ctx, id);
             return;
         };

@@ -69,16 +69,20 @@ needs from it once, and then lets the bytes go:
 pub struct Module {
     hash: BlobHash,                   // identity: the hash of the wasm bytes it was made from
     compiled: Arc<wasmtime::Module>,  // compiled once per hash per engine
-    manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds
-    assets: Arc<[(AssetName, Blob)]>, // each `aether.asset.*` section, checked in as its own blob
+    manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds,
+                                      // and each asset's catalog entry and byte range
 }
 ```
 
-The wasm bytes are used once, to compile and to parse, and are not retained.
-Nothing re-parses a section per load or per replace: every reader today that
-re-reads the bytes (a replace's predecessor kinds and boot namespace, the
-inline contracts, the asset window) reads the manifest or an asset blob
-instead. An entry lives while anything holds it: a publication, a running
+The wasm bytes are used once, to compile and to parse, and are not retained,
+and neither is any asset's payload. Nothing re-parses a section per load or
+per replace: every reader today that re-reads the bytes (a replace's
+predecessor kinds and boot namespace, the inline contracts) reads the manifest
+instead. An asset's payload passes only through a load window (ADR-0163 §3),
+which reads the asset's recorded range from the code its opener brought (a
+load's or a republish's bytes) and lets go of that code when the window
+closes. A spawn from a publication brings no bytes, so its window answers the
+catalog and refuses a catalogued asset, naming `load_component`. An entry lives while anything holds it: a publication, a running
 instance, or a held `Module`.
 
 A `Module` never leaves its engine. Compiled code is tied to the engine's

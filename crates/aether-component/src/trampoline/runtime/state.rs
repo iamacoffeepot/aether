@@ -107,12 +107,12 @@ impl WasmTrampolineState {
         if let Err(e) = component.wire(root) {
             tracing::error!(
                 target: "aether_component",
-                error = %e,
+                error = format!("{e:#}"),
                 "wasm guest `wire` hook returned error",
             );
         }
         // ADR-0163 §3 (#3984): the asset load window closes when `wire`
-        // returns — it lets go of the asset blobs so
+        // returns — it lets go of the module's code so
         // `asset_fetch_p32` traps thereafter, retaining the catalog
         // metadata for the instance's life. Runs whether or not `wire`
         // errored; the window's job (init + wire) is done either way.

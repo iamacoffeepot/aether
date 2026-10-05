@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use aether_data::Blob;
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
@@ -18,11 +19,18 @@ pub struct WasmTrampolineConfig {
     /// The module this trampoline instantiates: its compiled code, its
     /// manifest (every exported type's capability group, read by a
     /// `spawn_child::<Sibling>` request for the spawned sibling's own
-    /// handler set), and its asset blobs, which `init` opens the load window
-    /// over (ADR-0163 §3). Holding it keeps the engine module cache's entry
-    /// for this content hash alive (ADR-0240 D5, ADR-0241 §2), so a sibling
-    /// spawn or a same-hash load reuses it until every holder drops.
+    /// handler set, and its asset catalog and ranges). Holding it keeps the
+    /// engine module cache's entry for this content hash alive (ADR-0240 D5,
+    /// ADR-0241 §2), so a sibling spawn or a same-hash load reuses it until
+    /// every holder drops.
     pub module: Module,
+    /// The wasm bytes `module` was checked in from, which `init` opens the
+    /// load window over (ADR-0163 §3): the window reads each asset's range
+    /// out of them and lets go of them when `wire` returns, so the state
+    /// never keeps them. `None` for an instance spawned from its
+    /// publication, which brought no bytes: its window answers the catalog
+    /// and refuses a catalogued asset, naming `load_component`.
+    pub code: Option<Blob>,
     /// The engine's one module cache, through which a republish's prepare
     /// checks its candidate module in (ADR-0241 §2).
     pub modules: ModuleCache,

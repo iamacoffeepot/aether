@@ -25,8 +25,8 @@ use aether_data::{Blob, BlobHash};
 use rustc_hash::FxHashMap;
 use wasmtime::Engine;
 
-use super::manifest::{AssetSection, ModuleManifest};
-use super::{AssetName, Module, ModuleEntry};
+use super::manifest::ModuleManifest;
+use super::{Module, ModuleEntry};
 use crate::actor::native::BlobCheckIn;
 
 /// Every module a live holder still references, by content hash. A clone is
@@ -52,11 +52,10 @@ impl ModuleCache {
     ///
     /// Returns the live module for the bytes' hash when one exists. Otherwise
     /// it parses the manifest first, so a section it cannot read refuses
-    /// before any compile time is spent, then compiles, then checks the asset
-    /// sections in through `blobs` as one slab, since a module's assets live
-    /// and die together (ADR-0238 decision 8). `code` is read where it
-    /// already sits in the store, or checked in once when it is `Owned`, and
-    /// is never kept: its bytes leave the store when the caller drops it.
+    /// before any compile time is spent, then compiles. `code` is read where
+    /// it already sits in the store, or checked in once when it is `Owned`,
+    /// and is never kept, nor is any asset section's payload: the bytes
+    /// leave the store when the caller drops `code` (ADR-0163 §3).
     ///
     /// # Errors
     ///
@@ -71,11 +70,10 @@ impl ModuleCache {
             return Ok(Module { entry });
         }
 
-        let (manifest, sections) = ModuleManifest::parse(stored.bytes())?;
+        let manifest = ModuleManifest::parse(stored.bytes())?;
         let compiled = wasmtime::Module::new(&self.shared.engine, stored.bytes())
             .map_err(|error| format!("invalid wasm module: {error}"))?;
-        let assets = check_in_assets(blobs, stored.bytes(), sections);
-        let fresh = Arc::new(ModuleEntry { hash, compiled, manifest, assets });
+        let fresh = Arc::new(ModuleEntry { hash, compiled, manifest });
 
         // A concurrent check-in of the same hash that finished first wins, so
         // one hash never answers two entries; the losing entry drops once the
@@ -102,19 +100,4 @@ impl ModuleCache {
     pub(super) fn len(&self) -> usize {
         self.lock().len()
     }
-}
-
-/// Check each asset section of `wasm` in as its own blob, all in one slab,
-/// paired with its name in section order.
-fn check_in_assets(blobs: &BlobCheckIn, wasm: &[u8], sections: Vec<AssetSection>) -> Arc<[(AssetName, Blob)]> {
-    if sections.is_empty() {
-        return Arc::from([]);
-    }
-
-    let lens: Vec<usize> = sections.iter().map(|section| section.range.len()).collect();
-    let mut slab = blobs.slab(&lens);
-    for (region, section) in slab.regions().zip(&sections) {
-        region.copy_from_slice(&wasm[section.range.clone()]);
-    }
-    sections.into_iter().map(|section| section.name).zip(slab.finish()).collect()
 }
