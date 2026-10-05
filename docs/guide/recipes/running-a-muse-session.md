@@ -53,7 +53,19 @@ it and the reactor-set root (`core.reactors`) to a set holding `muse` beside
 every member the bound set already holds. A rebind of the same bundle prints
 `unchanged` and publishes nothing. Rebind after rebuilding the bundle.
 
+After the publish, `bind` waits for the driver to record the reactor's
+activation. If the driver rejected it, `bind` exits non-zero naming the
+rejection's reason, its journal entry, and the remedy: stop the engine, move
+the directory `--bloomery-units <unit>=<dir>` names aside, restart, and bind
+again. A journal recorded under an older stored encoding is expected to need a
+fresh directory this way. A rebind that publishes nothing fails the same way
+when the `muse` head is owed from an earlier rejection.
+
 ## 3. Open a session
+
+`open` first reads the journal and refuses, before staging anything, when the
+`muse` head is not live: it names the same recorded reason and remedy, or says
+to run `muse bind` when the head was never activated.
 
 ```sh
 cargo xtask muse open --rpc-port <port> --unit primary \
