@@ -13,7 +13,7 @@
 //! input:       u64 little-endian KindId
 //! result:      u64 little-endian KindId
 //! mode:        u8  (0 = Pure, 1 = Sampled)
-//! apis:        u8  bit set (bit 0 = Http, bit 1 = Process, bit 2 = Workspace)
+//! apis:        u8  bit set (bit 0 = Http, bit 1 = Process, bit 2 = Workspace, bit 3 = Entropy)
 //! intent_len:  u16 little-endian
 //! intent:      intent_len UTF-8 bytes
 //! doc_len:     u32 little-endian
@@ -56,7 +56,7 @@ pub const MODE_SAMPLED: u8 = 1;
 
 /// Bit `i` of a record's `apis` byte names `API_BITS[i]`; [`api_mask`] sets
 /// the same bits.
-const API_BITS: [ProgramApi; 3] = [ProgramApi::Http, ProgramApi::Process, ProgramApi::Workspace];
+const API_BITS: [ProgramApi; 4] = [ProgramApi::Http, ProgramApi::Process, ProgramApi::Workspace, ProgramApi::Entropy];
 
 /// The `apis` byte for a program whose `run` binds `apis`.
 #[must_use]
@@ -68,6 +68,7 @@ pub const fn api_mask(apis: &[ProgramApi]) -> u8 {
             ProgramApi::Http => 1,
             ProgramApi::Process => 1 << 1,
             ProgramApi::Workspace => 1 << 2,
+            ProgramApi::Entropy => 1 << 3,
         };
         index += 1;
     }
@@ -474,7 +475,7 @@ mod tests {
             b"test.program.two",
             3,
             4,
-            api_mask(&[ProgramApi::Http, ProgramApi::Workspace]),
+            api_mask(&[ProgramApi::Http, ProgramApi::Entropy]),
             b"second",
             b"Do second.",
             &LEAF,
@@ -508,7 +509,7 @@ mod tests {
         assert_eq!(decoded[1].input_docs, DocNode::Leaf);
         assert_eq!(decoded[1].input_kind.schema, SchemaType::Unit);
         assert_eq!(decoded[1].result_kind.name, "test.unit.result");
-        assert_eq!(decoded[1].apis, [ProgramApi::Http, ProgramApi::Workspace]);
+        assert_eq!(decoded[1].apis, [ProgramApi::Http, ProgramApi::Entropy]);
     }
 
     #[test]
@@ -532,10 +533,10 @@ mod tests {
     fn a_record_with_an_unknown_api_bit_is_refused() {
         // Catches a decoder that silently drops an unknown bit, which would let a program bind an API the driver never
         // checks.
-        const RECORD: ProgramRecord<'static> = record(b"test.program.api", 1, 2, 0b1000, b"api", b"Api.", &LEAF);
+        const RECORD: ProgramRecord<'static> = record(b"test.program.api", 1, 2, 0b1_0000, b"api", b"Api.", &LEAF);
         const LEN: usize = program_record_len(&RECORD);
         let bytes = write_program_record::<LEN>(&RECORD);
 
-        assert_eq!(declarations(&bytes), Err(DeclarationsError::UnknownApi(0b1000)));
+        assert_eq!(declarations(&bytes), Err(DeclarationsError::UnknownApi(0b1_0000)));
     }
 }

@@ -64,11 +64,12 @@
 //!
 //! A program API call relays the same way as a fetch (ADR-0240 D6): the
 //! invocation sends [`ApiCall`] to its bundle root, the root relays it here,
-//! and the core maps `Http` to the http capability and `Workspace` to the
-//! held workspace, refusing any other API; the provider's reply comes back
-//! under an [`ApiTicket`] and answers the held call. The shell sends a
-//! relayed workspace run over the unit's own journal as its `source`, written
-//! once at `init` from the unit key (ADR-0240 D7).
+//! and the core maps `Http` to the http capability, `Workspace` to the
+//! held workspace, and answers `Entropy` itself from the operating system's
+//! randomness, refusing any other API; the provider's reply, or the driver's
+//! own entropy answer, comes back under an [`ApiTicket`] and answers the held
+//! call. The shell sends a relayed workspace run over the unit's own journal
+//! as its `source`, written once at `init` from the unit key (ADR-0240 D7).
 
 mod bundles;
 mod clock;
@@ -321,8 +322,8 @@ impl NativeActor for BundleDriver {
     }
 
     /// Serves a bundle root's relayed program API call: the core sends it to
-    /// the API's provider or refuses it, and the held reply carries the
-    /// answer back to the root with the root's correlation.
+    /// the API's provider, answers it itself, or refuses it, and the held
+    /// reply carries the answer back to the root with the root's correlation.
     #[handler::request]
     fn on_api_call(state: &mut Self::State, ctx: &mut NativeCtx<'_>, request: ApiCall) -> Pending<ApiCallResult> {
         let (pending, held) = ctx.hold::<ApiCallResult>();

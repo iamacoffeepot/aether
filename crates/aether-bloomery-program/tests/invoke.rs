@@ -2,14 +2,15 @@
 
 use std::cell::Cell;
 use std::error::Error;
+use std::num::NonZeroU8;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Detail, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, ProgramApi, ProgramName,
-    ReadArtifactResult, Refusal, Tree,
+    ClosureArtifact, Detail, EncodedArtifact, EntropyDraw, EntropyResult, ExecutorFault, Invoke, Invoked, Mode,
+    ProgramApi, ProgramName, ReadArtifactResult, Refusal, Tree,
 };
 use aether_bloomery_program::{
-    Async, AsyncProgram, AsyncSession, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process, Program,
-    Started, Sync, SyncProgram, Workspace, invoke, start_async,
+    Async, AsyncProgram, AsyncSession, Entropy, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process,
+    Program, Started, Sync, SyncProgram, Workspace, invoke, start_async,
 };
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_data::{Cites, Digest, Kind, MAX_READ_BYTES, OpaqueBytes, Ref, Storage, Utf8Text};
@@ -715,4 +716,93 @@ fn an_exhausted_or_failed_run_ends_the_invocation_unseen_by_the_program() -> Res
         assert!(!after_await, "the program ran past the await of {reply:?}");
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_entropy.input")]
+struct EntropyInput {
+    marker: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_entropy.result")]
+struct EntropyOut {
+    bytes: Ref<OpaqueBytes>,
+}
+
+struct SampledEntropy;
+
+impl Program for SampledEntropy {
+    const NAME: &'static str = "sampled.entropy";
+    const MODE: Mode = Mode::Sampled;
+    const INTENT: &'static str = "Draw randomness and stage it.";
+    const DOC: &'static str = "Draw randomness and stage it.";
+    type Input = EntropyInput;
+    type Result = EntropyOut;
+}
+
+impl AsyncProgram for SampledEntropy {
+    async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
+        let _ = input;
+        let mut entropy = Entropy::from_env(&mut env);
+        let bytes = entropy.draw(NonZeroU8::new(4).expect("non-zero draw")).await?;
+        Ok(EntropyOut { bytes: env.stage_bytes(&bytes) })
+    }
+}
+
+/// A started [`SampledEntropy`] at seq 7 and the one call its first poll captured.
+fn start_entropy() -> Result<(AsyncSession, PendingCall), Box<dyn Error>> {
+    let input = EntropyInput { marker: 1 };
+    let input_artifact = closure_of(&input)?;
+    let started = start_async::<SampledEntropy>(Invoke::new(
+        7,
+        program_name::<SampledEntropy>(),
+        input_artifact.claimed().unverified(),
+        vec![input_artifact],
+    ));
+    let Started::Live { session, waiting: Some(Pending::Send(pending)) } = started else {
+        return Err("expected the first poll to capture one entropy send".into());
+    };
+    Ok((session, pending))
+}
+
+#[test]
+fn an_entropy_draw_relays_its_count_and_returns_only_a_full_draw() -> Result<(), Box<dyn Error>> {
+    // Catches a wrong `api` row or reply kind, a captured payload that is not
+    // the asked count, a full draw that does not reach the program, and a
+    // short draw or an unavailable draw that resolves as if it were whole.
+    let (mut session, pending) = start_entropy()?;
+    assert_eq!(pending.api, ProgramApi::Entropy);
+    assert_eq!(pending.kind_id, EntropyDraw::ID);
+    assert_eq!(pending.expected_reply, EntropyResult::ID);
+    let call = pending.api_call(7);
+    assert_eq!(call.kind, EntropyDraw::ID);
+    let draw = EntropyDraw::decode_from_bytes(&call.payload).expect("the captured draw decodes");
+    assert_eq!(draw.count, 4);
+
+    let reply = EntropyResult::Drawn { bytes: vec![1, 2, 3, 4] };
+    session.fulfill_send(&pending, EntropyResult::ID, reply.encode_into_bytes());
+    match session.poll() {
+        PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) => {
+            let expected = encoded(&EntropyOut { bytes: Ref::of_bytes(&[1, 2, 3, 4]) })?;
+            assert_eq!(result, expected.digest());
+            assert_eq!(staged, vec![EncodedArtifact::opaque_bytes(&[1, 2, 3, 4]), expected]);
+        }
+        other => return Err(format!("expected Completed after a full draw, got {other:?}").into()),
+    }
+
+    let (mut session, pending) = start_entropy()?;
+    let short = EntropyResult::Drawn { bytes: vec![1, 2] };
+    session.fulfill_send(&pending, EntropyResult::ID, short.encode_into_bytes());
+    match session.poll() {
+        PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { .. } }) => {}
+        other => return Err(format!("expected Refused for a short draw, got {other:?}").into()),
+    }
+
+    let (mut session, pending) = start_entropy()?;
+    session.fulfill_send(&pending, EntropyResult::ID, EntropyResult::Unavailable.encode_into_bytes());
+    match session.poll() {
+        PollResult::Finished(Invoked::Refused { seq: 7, refusal: Refusal::Refused { .. } }) => Ok(()),
+        other => Err(format!("expected Refused for an unavailable draw, got {other:?}").into()),
+    }
 }

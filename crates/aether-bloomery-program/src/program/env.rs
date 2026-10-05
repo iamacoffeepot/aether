@@ -9,12 +9,14 @@ use core::cell::RefCell;
 use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
+use core::num::NonZeroU8;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
 use aether_actor::{Addressable, CallerAddressable, Replies, Singleton};
 use aether_bloomery_kinds::{
-    ApiCall, ClosureArtifact, EncodedArtifact, ExecutorFault, ProgramApi, ReadArtifactResult, Refusal,
+    ApiCall, ClosureArtifact, EncodedArtifact, EntropyDraw, EntropyResult, ExecutorFault, ProgramApi,
+    ReadArtifactResult, Refusal,
 };
 use aether_data::{ActorMail, Cites, Digest, ErasedRef, Kind, KindId, OpaqueBytes, Ref, Storage, Utf8Text};
 
@@ -53,9 +55,9 @@ pub struct PendingArtifact {
 ///
 /// The invocation sends it to its bundle root as [`ApiCall`] (see
 /// [`Self::api_call`]); the root relays it to the driver that sent the
-/// `Invoke`, which maps [`Self::api`] to a provider it holds or refuses it
-/// (ADR-0240 D6). The request was encoded once, at capture, where
-/// `A: Replies<K>` typed it.
+/// `Invoke`, which maps [`Self::api`] to a provider it holds, answers it
+/// itself, or refuses it (ADR-0240 D6). The request was encoded once, at
+/// capture, alongside the reply kind it expects.
 pub struct PendingCall {
     /// The API the program's binding captured the call through.
     pub api: ProgramApi,
@@ -78,6 +80,15 @@ impl PendingCall {
         P: ActorMail,
     {
         Self { api, kind_id: P::ID, expected_reply: <A as Replies<K>>::Reply::ID, payload: mail.encode_into_bytes() }
+    }
+
+    /// Capture `mail` for an API the driver answers itself, expecting the
+    /// reply kind `reply` without a target capability behind it.
+    fn direct<P>(api: ProgramApi, mail: &P, reply: KindId) -> Self
+    where
+        P: ActorMail,
+    {
+        Self { api, kind_id: P::ID, expected_reply: reply, payload: mail.encode_into_bytes() }
     }
 
     /// The mail that relays this call as the invocation's `call`th.
@@ -113,21 +124,19 @@ mod sealed {
     impl Sealed for super::Http {}
     impl Sealed for super::Process {}
     impl Sealed for super::Workspace {}
+    impl Sealed for super::Entropy {}
 }
 
 /// Trailing `run` argument constructed from [`Env<Async>`].
 ///
-/// The set is closed: [`Http`], [`Process`], and [`Workspace`] are its only
-/// members, and the trait is sealed. `#[program]` accepts a trailing binding
-/// only by one of those names, maps the name to its target capability through
-/// the table in `__macro_internals::api_target`, and emits a check at the
-/// parameter that this trait's [`Self::Target`] is the table's type. The
+/// The set is closed: [`Http`], [`Process`], [`Workspace`], and [`Entropy`]
+/// are its only members, and the trait is sealed. `#[program]` accepts a
+/// trailing binding only by one of those names, and emits a check at the
+/// parameter that the author's type is this crate's handle of that name. The
 /// bundle's invocation declares no dependency: it relays a captured call
 /// through its root to the driver that invoked it, which maps the API to a
-/// provider it holds (ADR-0240 D6).
+/// provider it holds, answers it itself, or refuses it (ADR-0240 D6).
 pub trait InjectedApi: sealed::Sealed + Sized {
-    /// Actor whose reply contract types this binding's calls.
-    type Target: Addressable;
     /// Sampled APIs cannot pair with [`crate::kinds::Mode::Pure`].
     const SAMPLED: bool;
     /// Build an unforgeable handle from the invocation's environment.
@@ -173,7 +182,6 @@ impl<A: Addressable> Binding<A> {
 pub struct Http(Binding<aether_http::HttpCapability>);
 
 impl InjectedApi for Http {
-    type Target = aether_http::HttpCapability;
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
@@ -195,7 +203,6 @@ impl Http {
 pub struct Process(Binding<aether_process::ProcessCapability>);
 
 impl InjectedApi for Process {
-    type Target = aether_process::ProcessCapability;
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
@@ -218,7 +225,6 @@ impl Process {
 pub struct Workspace(Binding<aether_bloomery_workspace::WorkspaceCapability>);
 
 impl InjectedApi for Workspace {
-    type Target = aether_bloomery_workspace::WorkspaceCapability;
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
@@ -247,6 +253,81 @@ impl Workspace {
     > + Send
     + 'static {
         RunCall { call: self.0.relay::<aether_bloomery_workspace::Run, _>(run) }
+    }
+}
+
+/// Sampled entropy API: draws randomness the driver answers itself from the
+/// operating system, with no capability behind it.
+pub struct Entropy(Env<Async>);
+
+impl InjectedApi for Entropy {
+    const SAMPLED: bool = true;
+
+    fn from_env(env: &mut Env<Async>) -> Self {
+        Self(*env)
+    }
+}
+
+impl Entropy {
+    /// Await `count` random bytes from the driver.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Refused`] when the operating system yields no randomness or
+    /// the draw answers fewer bytes than asked; [`Refusal::InputDecode`] when
+    /// the reply is not an [`EntropyResult`]; the pump's refusal when the call
+    /// could not be sent.
+    pub fn draw(&mut self, count: NonZeroU8) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send + 'static {
+        Draw { env: self.0, count: count.get(), mail: Some(EntropyDraw { count: count.get() }) }
+    }
+}
+
+/// [`Entropy::draw`]'s future: the drawn bytes resolve; an unavailable draw
+/// or a draw of the wrong length refuses.
+struct Draw {
+    env: Env<Async>,
+    count: u8,
+    mail: Option<EntropyDraw>,
+}
+
+impl Future for Draw {
+    type Output = Result<Vec<u8>, Refusal>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(result) = this.env.take_call_reply() {
+            let (kind, bytes) = match result {
+                Err(refusal) => return Poll::Ready(Err(refusal)),
+                Ok(ok) => ok,
+            };
+            if kind != EntropyResult::ID {
+                return Poll::Ready(Err(Refusal::InputDecode));
+            }
+            let Some(reply) = EntropyResult::decode_from_bytes(&bytes) else {
+                return Poll::Ready(Err(Refusal::InputDecode));
+            };
+            match reply {
+                EntropyResult::Drawn { bytes } => {
+                    let asked = usize::from(this.count);
+                    let got = bytes.len();
+                    let whole = got == asked;
+                    if whole {
+                        return Poll::Ready(Ok(bytes));
+                    }
+                    return Poll::Ready(Err(Refusal::Refused {
+                        reason: Detail::new(format!("entropy draw returned {got} bytes for {asked} asked")),
+                    }));
+                }
+                EntropyResult::Unavailable => {
+                    return Poll::Ready(Err(Refusal::Refused { reason: Detail::new("entropy unavailable") }));
+                }
+            }
+        }
+        if let Some(mail) = this.mail.take() {
+            this.env.request_send(PendingCall::direct(ProgramApi::Entropy, &mail, EntropyResult::ID));
+            return Poll::Pending;
+        }
+        Poll::Pending
     }
 }
 

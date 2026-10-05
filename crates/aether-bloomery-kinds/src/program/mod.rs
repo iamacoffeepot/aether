@@ -22,7 +22,7 @@ use alloc::string::String;
 
 use aether_data::KindId;
 
-pub use api::{ApiCall, ApiCallResult, ProgramApi};
+pub use api::{ApiCall, ApiCallResult, EntropyDraw, EntropyResult, ProgramApi};
 pub use clock::{CLOCK, CLOCK_BUNDLE, Fired, MAX_DUE_AHEAD_MILLIS, Until};
 pub use events::{ProgramHeadMoved, Transition};
 pub use executor::ExecutorFault;

@@ -40,8 +40,8 @@ pub fn reject_run_receiver(sig: &Signature) -> syn::Result<()> {
 }
 
 /// Names `#[program]` accepts for a trailing binding: the closed set of program
-/// APIs, each a row in `aether_bloomery_program::__macro_internals::api_target`.
-const API_NAMES: [&str; 3] = ["Http", "Process", "Workspace"];
+/// APIs, each a row in `aether_bloomery_program::__macro_internals::api`.
+const API_NAMES: [&str; 4] = ["Http", "Process", "Workspace", "Entropy"];
 
 /// One trailing binding: the parameter, the type the author wrote, and the
 /// canonical API name that type ends in.
@@ -78,7 +78,8 @@ pub fn trailing_apis(sig: &Signature, async_run: bool) -> syn::Result<Vec<ApiBin
 /// The canonical API name a binding's type ends in, in whatever path the author
 /// wrote it.
 fn api_name(ty: &Type) -> syn::Result<Ident> {
-    let not_an_api = || syn::Error::new_spanned(ty, "#[program] cap bindings are `Http`, `Process`, or `Workspace`");
+    let not_an_api =
+        || syn::Error::new_spanned(ty, "#[program] cap bindings are `Http`, `Process`, `Workspace`, or `Entropy`");
     let Type::Path(path) = peel(ty) else {
         return Err(not_an_api());
     };

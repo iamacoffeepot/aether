@@ -225,6 +225,9 @@ sha2 = { version = "0.10", default-features = false }
 # ADR-0238 blob store: BLAKE3 keys the in-memory dedup index (a dedup key,
 # never a capability). Default features off; the native consumer re-adds `std`.
 blake3 = { version = "1", default-features = false }
+# Bloomery program entropy: the driver answers `Entropy` draws itself from the
+# operating system's randomness, with no capability behind it.
+getrandom = "0.3"
 # ADR-0220 Bloomery names (issue 6094): refuse a directory entry that is
 # not Unicode NFC. Default features off keeps the kinds crate no_std.
 unicode-normalization = { version = "0.1", default-features = false }

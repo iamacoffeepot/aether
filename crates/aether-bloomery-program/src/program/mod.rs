@@ -12,11 +12,12 @@
 //! plus the live-seq table.
 //!
 //! An async program may take trailing API bindings after `env`, from the
-//! closed set [`Http`], [`Process`], and [`Workspace`]; each is Sampled. A
-//! call through one relays like a fetch: through the bundle root to the
-//! driver, which maps the API to a provider it holds or refuses it. A
-//! [`Workspace`] run that exhausts its allotment or fails in the executor
-//! ends the invocation as [`Invoked::Faulted`] without the program seeing it.
+//! closed set [`Http`], [`Process`], [`Workspace`], and [`Entropy`]; each is
+//! Sampled. A call through one relays like a fetch: through the bundle root
+//! to the driver, which maps the API to a provider it holds, answers it
+//! itself, or refuses it. A [`Workspace`] run that exhausts its allotment or
+//! fails in the executor ends the invocation as [`Invoked::Faulted`] without
+//! the program seeing it.
 //!
 //! [`Ran<P>`](Ran) is the typed view of one recorded run of `P`: a
 //! `bloomery.transition` whose program is `P`, citing its input and result,
@@ -46,7 +47,9 @@ pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
 pub use declare::Program;
 #[doc(hidden)]
 pub use declare::{AsyncProgram, SyncProgram};
-pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync, Workspace};
+pub use env::{
+    Async, Entropy, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync, Workspace,
+};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use ran::Ran;
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
@@ -62,7 +65,9 @@ pub mod __macro_internals {
     pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
+    use core::marker::PhantomData;
 
+    use super::env::{Entropy, Http, Process, Workspace};
     pub use crate::program::declare::{AsyncProgram, SyncProgram};
     pub use crate::program::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
     pub use crate::program::invoke::{PollResult, Started};
@@ -71,23 +76,29 @@ pub mod __macro_internals {
         MODE_PURE, MODE_SAMPLED, ProgramRecord, api_mask, program_record_len, write_program_record,
     };
 
-    /// The provider the driver maps each program API to, by the name
-    /// `#[program]` accepts. Each row's `Replies` impls type the calls the
-    /// API's binding captures; the invocation sends to none of them itself
-    /// (ADR-0240 D6).
-    pub mod api_target {
-        /// Target of [`crate::Http`].
-        pub type Http = aether_http::HttpCapability;
-        /// Target of [`crate::Process`].
-        pub type Process = aether_process::ProcessCapability;
-        /// Target of [`crate::Workspace`].
-        pub type Workspace = aether_bloomery_workspace::WorkspaceCapability;
+    /// The handle `#[program]` maps each API name to, by the name it
+    /// accepts. Capability-backed handles keep their target inside their own
+    /// `Binding`; [`crate::Entropy`] has none, and the driver answers it
+    /// itself from the operating system's randomness.
+    pub mod api {
+        /// Handle of the `Http` API.
+        pub type Http = super::Http;
+        /// Handle of the `Process` API.
+        pub type Process = super::Process;
+        /// Handle of the `Workspace` API.
+        pub type Workspace = super::Workspace;
+        /// Handle of the `Entropy` API.
+        pub type Entropy = super::Entropy;
     }
 
-    /// Compiles only when `Api`'s [`InjectedApi::Target`] is `T`. `#[program]`
-    /// emits one per trailing binding, pairing the author's type with the
-    /// [`api_target`] row its name selects.
-    pub const fn check_target<Api: InjectedApi<Target = T>, T>() {}
+    /// Compiles only when `Api` is the handle `Expected`. `#[program]` emits
+    /// one per trailing binding, pairing the author's type with the [`api`]
+    /// row its name selects.
+    pub struct CheckHandle<Api, Expected>(PhantomData<fn() -> (Api, Expected)>);
+
+    impl<T> CheckHandle<T, T> {
+        pub const OK: () = ();
+    }
 
     pub struct RejectSampledOnPure<const SAMPLED: bool>;
 

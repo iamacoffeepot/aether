@@ -1,8 +1,8 @@
 //! The core's outbox: one [`Command`] per requested effect.
 
 use aether_bloomery_kinds::{
-    ApiCallResult, AppendRecords, CallOutcome, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult,
-    ReadArtifacts, ReadClosure, ReadEvents, Warm, WatchHead,
+    ApiCallResult, AppendRecords, CallOutcome, EntropyResult, Event, Invoke, Processed, ReadArtifact,
+    ReadArtifactResult, ReadArtifacts, ReadClosure, ReadEvents, Warm, WatchHead,
 };
 use aether_data::Digest;
 
@@ -14,8 +14,9 @@ use super::ticket::{
 /// One effect the shell performs on the core's behalf.
 ///
 /// `ReadEvents`, `ReadArtifact`, `ReadArtifacts`, `ReadClosure`, `Append`, `Load`,
-/// `Invoke`, `WatchHead`, `Warm`, `Evaluate`, `QueryStatus`, `Fetch`, and
-/// `RunWorkspace` each carry the ticket the shell hands back with the reply.
+/// `Invoke`, `WatchHead`, `Warm`, `Evaluate`, `QueryStatus`, `Fetch`,
+/// `RunWorkspace`, and `DrawEntropy` each carry the ticket the shell hands
+/// back with the reply.
 /// `Answer` delivers a [`Call`'s](aether_bloomery_kinds::Call) one outcome
 /// to a waiting caller, `Processed` delivers an
 /// [`AwaitProcessed`](aether_bloomery_kinds::AwaitProcessed) barrier reply,
@@ -155,6 +156,14 @@ pub enum Command {
         /// unit's.
         request: aether_bloomery_workspace::RunRequest,
     },
+    /// Answer one program's relayed `Entropy` draw from the operating system's
+    /// randomness, with no capability behind it.
+    DrawEntropy {
+        /// Ticket the matching [`EntropyResult`] arrives under.
+        ticket: ApiTicket,
+        /// How many random bytes to fill.
+        count: u8,
+    },
     /// Deliver the answer to one relayed program API call.
     ApiAnswered {
         /// The relayed call to answer.
@@ -208,12 +217,15 @@ pub enum LoadOutcome {
     },
 }
 
-/// A provider's reply to [`Command::Fetch`] or [`Command::RunWorkspace`],
-/// which the core relays back to the program as its kind and bytes.
+/// A provider's reply to [`Command::Fetch`], [`Command::RunWorkspace`], or
+/// [`Command::DrawEntropy`], which the core relays back to the program as its
+/// kind and bytes.
 #[derive(Debug, Clone)]
 pub enum ApiReply {
     /// The http capability's answer to a relayed `Http` call.
     Fetch(aether_http::FetchResult),
     /// The workspace's answer to a relayed `Workspace` call.
     Workspace(aether_bloomery_workspace::RunResult),
+    /// The driver's own answer to a relayed `Entropy` draw.
+    Entropy(EntropyResult),
 }

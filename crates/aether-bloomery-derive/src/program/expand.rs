@@ -76,12 +76,12 @@ fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[Ap
     let ReturnType::Type(_, output) = &run.sig.output else {
         unreachable!("parse requires an async run's return type");
     };
-    let target_checks = apis.iter().map(|ApiBinding { ty, name, .. }| {
+    let handle_checks = apis.iter().map(|ApiBinding { ty, name, .. }| {
         quote! {
-            const _: () = ::aether_bloomery_program::__macro_internals::check_target::<
+            const _: () = ::aether_bloomery_program::__macro_internals::CheckHandle::<
                 #ty,
-                ::aether_bloomery_program::__macro_internals::api_target::#name,
-            >();
+                ::aether_bloomery_program::__macro_internals::api::#name,
+            >::OK;
         }
     });
     let pure_checks = apis.iter().filter(|_| !sampled).map(|ApiBinding { ty, .. }| {
@@ -97,7 +97,7 @@ fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[Ap
         }
     });
     quote! {
-        #(#target_checks)*
+        #(#handle_checks)*
         #(#pure_checks)*
         impl ::aether_bloomery_program::AsyncProgram for #self_ty {
             fn run(

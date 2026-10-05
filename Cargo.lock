@@ -142,6 +142,7 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "aether-test-fixtures-kinds",
+ "getrandom 0.3.4",
  "tracing",
  "tracing-subscriber",
  "wasmparser 0.246.2",

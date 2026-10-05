@@ -328,6 +328,7 @@ impl World {
             }
             command @ (Command::Fetch { .. }
             | Command::RunWorkspace { .. }
+            | Command::DrawEntropy { .. }
             | Command::ApiAnswered { .. }
             | Command::ArmTick) => Step::Manual(command),
         }

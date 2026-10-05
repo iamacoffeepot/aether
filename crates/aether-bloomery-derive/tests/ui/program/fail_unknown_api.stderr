@@ -1,4 +1,4 @@
-error: #[program] cap bindings are `Http`, `Process`, or `Workspace`
+error: #[program] cap bindings are `Http`, `Process`, `Workspace`, or `Entropy`
   --> tests/ui/program/fail_unknown_api.rs:30:69
    |
 30 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _other: Other) -> Result<Self::Result, Refusal> {
