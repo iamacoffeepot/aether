@@ -1,6 +1,7 @@
-//! The samplers a program's inputs bind (ADR-0246 decision 5): one per
-//! combination of the bound texture's filter and the binding's declared
-//! wrap and mips, built once per device.
+//! The samplers a program's inputs bind (ADR-0246 decisions 5 and 9):
+//! one per combination of the bound texture's filter and the binding's
+//! declared wrap and mips, and the comparison sampler of a depth read,
+//! built once per device.
 //!
 //! The substrate's shared pair (`TextureBindings::sampler` /
 //! `nearest_sampler`) clamps and reads no mip chain, which is all the
@@ -21,11 +22,14 @@ const FILTERS: [Filter; 2] = [Filter::Linear, Filter::Nearest];
 const WRAPS: [Wrap; 2] = [Wrap::Clamp, Wrap::Repeat];
 const MIPS: [Mips; 2] = [Mips::Base, Mips::Chain];
 
-/// Every sampler a program input can ask for, held in build order. A `Nearest` sampler is non-filtering in
-/// all three of its filters, so it binds under a filtering layout entry
-/// and a non-filtering one alike.
+/// Every sampler a program input can ask for: the ones a color input
+/// declares, held in build order, and the one comparison sampler a
+/// `DepthRead::Compare` input binds. A `Nearest` sampler is
+/// non-filtering in all three of its filters, so it binds under a
+/// filtering layout entry and a non-filtering one alike.
 pub(super) struct ProgramSamplers {
     samplers: Vec<wgpu::Sampler>,
+    comparison: wgpu::Sampler,
 }
 
 impl ProgramSamplers {
@@ -38,13 +42,18 @@ impl ProgramSamplers {
                 }
             }
         }
-        Self { samplers }
+        Self { samplers, comparison: build_comparison_sampler(device) }
     }
 
     /// The sampler for a texture filtered `filter` at a binding that
     /// declared `wrap` and `mips`.
     pub(super) fn get(&self, filter: Filter, wrap: Wrap, mips: Mips) -> &wgpu::Sampler {
         &self.samplers[Self::index(filter, wrap, mips)]
+    }
+
+    /// The sampler a `DepthRead::Compare` input binds.
+    pub(super) fn comparison(&self) -> &wgpu::Sampler {
+        &self.comparison
     }
 
     /// Position in build order: filter outermost, mips innermost.
@@ -93,6 +102,28 @@ fn build_sampler(device: &wgpu::Device, filter: Filter, wrap: Wrap, mips: Mips) 
         mipmap_filter,
         lod_min_clamp: 0.0,
         lod_max_clamp,
+        ..Default::default()
+    })
+}
+
+/// The comparison sampler of a depth read (ADR-0246 decision 9). It
+/// compares `LessEqual`, the test a pass attaches a depth slot under,
+/// so a reference depth passes exactly where a fragment at that depth
+/// would have been drawn into the slot. It is linear, so the result at
+/// the edge of what was drawn is filtered from the comparisons around
+/// the coordinate, and it clamps and reads the slot's one level.
+fn build_comparison_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("aether program depth comparison sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        lod_min_clamp: 0.0,
+        lod_max_clamp: 0.0,
+        compare: Some(wgpu::CompareFunction::LessEqual),
         ..Default::default()
     })
 }

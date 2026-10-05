@@ -14,9 +14,10 @@ use naga::{
 use super::super::surface::render_limits;
 use super::draw_sets::validate::{DrawSetsPlan, list_slots, validate_draw_sets};
 use crate::{
-    Blend, ComputeBufferBinding, ComputePass, DepthExtent, DepthSpec, DrawPass, GeometryBuffer, GeometrySlotSpec,
-    InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Samples, Sampling, SlotExtent,
-    SlotShape, SlotSpec, StorageAccess, TextureFormat, TransientSpec, VertexAttribute, VertexFormat, Wrap,
+    Blend, ComputeBufferBinding, ComputePass, DepthExtent, DepthRead, DepthSpec, DrawPass, GeometryBuffer,
+    GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, Samples,
+    Sampling, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat, TransientSpec, VertexAttribute,
+    VertexFormat, Wrap,
 };
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -52,17 +53,31 @@ pub enum ResolvedSlot {
     Transient(u32),
 }
 
+/// What one input of a validated pass binds (ADR-0246 decision 9): a
+/// color slot, or a depth slot with the read the input declared. A
+/// depth slot is never a color output, so it is a form of an input and
+/// not of a [`ResolvedSlot`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ResolvedInput {
+    /// A binding or a transient, read as its declaration says.
+    Slot(ResolvedSlot),
+    /// The depth transient at `slot`, which an earlier pass attaches
+    /// and this one does not, and which holds one sample per texel.
+    Depth { slot: u32, read: DepthRead },
+}
+
 /// One validated pass: explicit stage, the blend it declared, entry
-/// point, resolved texture slots, uniform window, and flattened repeat
-/// (`repeat_count` is 1 for an unrepeated pass). `output` is `None` for
-/// a pass with no color output, which declares `Blend::Replace`: a
-/// compute pass, or a rasterizing pass that is depth-only.
+/// point, resolved inputs and color output, uniform window, and
+/// flattened repeat (`repeat_count` is 1 for an unrepeated pass).
+/// `output` is `None` for a pass with no color output, which declares
+/// `Blend::Replace`: a compute pass, or a rasterizing pass that is
+/// depth-only.
 #[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
     pub stage: PassPlanStage,
     pub blend: Blend,
-    pub inputs: Vec<ResolvedSlot>,
+    pub inputs: Vec<ResolvedInput>,
     pub output: Option<ResolvedSlot>,
     pub uniform_offset: u32,
     pub uniform_length: u32,
@@ -71,9 +86,9 @@ pub struct PassPlan {
 }
 
 impl PassPlan {
-    /// Whether the pass samples `slot`.
+    /// Whether the pass samples the color slot `slot`.
     pub fn reads(&self, slot: ResolvedSlot) -> bool {
-        self.inputs.contains(&slot)
+        self.inputs.contains(&ResolvedInput::Slot(slot))
     }
 
     /// Whether the pass attaches `slot` as its color output.
@@ -331,7 +346,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
             live.last_use = Some(sequence);
         }
         for input in &plan.inputs {
-            if let ResolvedSlot::Transient(transient) = input {
+            if let ResolvedInput::Slot(ResolvedSlot::Transient(transient)) = input {
                 transients[*transient as usize].last_use = Some(sequence);
             }
         }
@@ -501,7 +516,7 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
         }
         OutputSlot::None => None,
     };
-    if output.is_some_and(|output| inputs.contains(&output)) {
+    if output.is_some_and(|output| inputs.contains(&ResolvedInput::Slot(output))) {
         return Err(format!("pass {index} reads its own output slot"));
     }
 
@@ -1068,20 +1083,21 @@ fn scalar_name(scalar: Scalar) -> String {
 }
 
 /// Resolve one declared input of the pass at `index`, whose stage is
-/// `stage`, to the slot it binds. `InputSlot::Depth` resolves to
-/// nothing yet: see [`depth_input_refusal`].
+/// `stage`, to what it binds: a color slot, or for an
+/// `InputSlot::Depth` that [`check_depth_input`] does not refuse, the
+/// depth slot with its declared read.
 fn resolve_input(
     context: &PassValidation<'_>,
     index: usize,
     stage: &PassStage,
     input_index: usize,
     input: InputSlot,
-) -> Result<ResolvedSlot, String> {
+) -> Result<ResolvedInput, String> {
     let &PassValidation { mail, earlier, transients, .. } = context;
-    match input {
+    let slot = match input {
         InputSlot::Binding { index: binding } => {
             check_binding_index(mail, index, binding)?;
-            Ok(ResolvedSlot::Binding(binding))
+            ResolvedSlot::Binding(binding)
         }
         InputSlot::PassOutput { pass } => earlier
             .get(pass as usize)
@@ -1092,7 +1108,7 @@ fn resolve_input(
                     "pass {index} reads pass {pass} through PassOutput, but that pass has no texture output — a \
                      compute pass and a depth-only pass write none"
                 )
-            }),
+            })?,
         InputSlot::Transient { index: transient } => {
             check_transient_index(mail, index, transient)?;
             if transients[transient as usize].first_write.is_none() {
@@ -1100,13 +1116,14 @@ fn resolve_input(
                     "pass {index} input {input_index} reads transient {transient} before any earlier pass writes it",
                 ));
             }
-            Ok(ResolvedSlot::Transient(transient))
+            ResolvedSlot::Transient(transient)
         }
-        InputSlot::Depth { index: slot, .. } => {
-            let attached_here = declared_depth_slot(stage);
-            Err(depth_input_refusal(context, index, input_index, slot, attached_here))
+        InputSlot::Depth { index: slot, read } => {
+            check_depth_input(context, index, input_index, slot, declared_depth_slot(stage))?;
+            return Ok(ResolvedInput::Depth { slot, read });
         }
-    }
+    };
+    Ok(ResolvedInput::Slot(slot))
 }
 
 /// The depth slot a pass's stage declares it attaches, read from the
@@ -1124,36 +1141,36 @@ fn declared_depth_slot(stage: &PassStage) -> Option<u32> {
 /// check order: the slot does not exist; it is `Four`, which can be
 /// neither compared nor sampled; the pass reading it also attaches it
 /// (`attached_here`), which the device refuses; or no earlier pass
-/// attaches it, so it would hold nothing. A depth input that passes all
-/// four is still refused, with a reason of its own, until
-/// iamacoffeepot/aether#7451 binds one at dispatch: no registered
-/// program holds a depth input, so the dispatch path never meets one.
-fn depth_input_refusal(
+/// attaches it, so it would hold nothing. The dispatch path relies on
+/// each: the slot was assigned a pooled texture because a pass attaches
+/// it, that texture is single-sample and so was created bindable, and
+/// an earlier pass of the same dispatch cleared it.
+fn check_depth_input(
     context: &PassValidation<'_>,
     index: usize,
     input_index: usize,
     slot: u32,
     attached_here: Option<u32>,
-) -> String {
+) -> Result<(), String> {
     let reads = format!("pass {index} input {input_index} reads depth transient {slot}");
     let declared = &context.mail.depth_transients;
     let Some(spec) = declared.get(slot as usize) else {
-        return format!("{reads}, which is out of range ({} declared)", declared.len());
+        return Err(format!("{reads}, which is out of range ({} declared)", declared.len()));
     };
     if spec.samples == Samples::Four {
-        return format!(
+        return Err(format!(
             "{reads}, which is declared Four — a multisampled depth slot can be neither compared nor sampled, so a \
              pass reads a One slot",
-        );
+        ));
     }
     if attached_here == Some(slot) {
-        return format!("{reads}, which the same pass attaches — a pass cannot read the depth slot it draws into");
+        return Err(format!("{reads}, which the same pass attaches — a pass cannot read the depth slot it draws into"));
     }
     let attached_earlier = context.earlier.iter().any(|earlier| earlier.stage.depth_slot() == Some(slot));
     if !attached_earlier {
-        return format!("{reads} before any earlier pass attaches it");
+        return Err(format!("{reads} before any earlier pass attaches it"));
     }
-    format!("{reads}, and reading a depth slot from a pass is not bound yet (iamacoffeepot/aether#7451)")
+    Ok(())
 }
 
 fn check_binding_index(mail: &ProgramRegister, pass: usize, binding: u32) -> Result<(), String> {
@@ -1192,7 +1209,7 @@ fn uniform_block_bytes(module: &Module, info: &ModuleInfo, entry_index: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DepthRead, PassRepeat};
+    use crate::PassRepeat;
 
     const MODULE: &str = r"
 struct WindowParams { value: f32 }
@@ -1841,13 +1858,15 @@ fn fs_depth_alone() -> @builtin(frag_depth) f32 {
     }
 
     /// The refusals of a depth input, in the order decision 9 lists
-    /// them, then the one that stands until the read is bound. The
-    /// bugs, one per class: an index past the list panicking the
-    /// lookup; a `Four` slot registering though nothing can sample it;
-    /// a pass reading the slot it attaches, which the device refuses on
-    /// every dispatch; a read of a slot nothing has drawn; and a
-    /// well-formed depth input registering `Ok` and then meeting a
-    /// dispatch path that cannot bind it.
+    /// them, then an input that passes them. The bugs, one per class:
+    /// an index past the list panicking the lookup; a `Four` slot
+    /// registering though nothing can sample it; a pass reading the
+    /// slot it attaches, which the device refuses on every dispatch;
+    /// and a read of a slot nothing has drawn. An input none of the
+    /// four applies to validates to the depth slot with the read it
+    /// declared: the read dropped or swapped between the mail and the
+    /// plan would bind a comparison sampler the shader does not
+    /// declare, or leave out one it does.
     #[test]
     fn depth_input_refusals_have_distinguishable_reasons() {
         let reads = |index: u32| vec![InputSlot::Depth { index, read: DepthRead::Compare }];
@@ -1866,10 +1885,19 @@ fn fs_depth_alone() -> @builtin(frag_depth) f32 {
         let unwritten = refused(vec![ProgramPass { inputs: reads(0), ..color_pass() }]);
         assert!(unwritten.contains("before any earlier pass attaches it"), "sequence class: {unwritten}");
 
-        let well_formed =
-            refused(vec![depth_only_pass("fs_nothing"), ProgramPass { inputs: reads(0), ..color_pass() }]);
-        assert!(well_formed.contains("pass 1 input 0 reads depth transient 0"), "names the input: {well_formed}");
-        assert!(well_formed.contains("not bound yet (iamacoffeepot/aether#7451)"), "unbound class: {well_formed}");
+        let both_reads = vec![
+            InputSlot::Depth { index: 0, read: DepthRead::Compare },
+            InputSlot::Depth { index: 0, read: DepthRead::Texel },
+        ];
+        let well_formed = vec![depth_only_pass("fs_nothing"), ProgramPass { inputs: both_reads, ..color_pass() }];
+        let plan = validate(&depth_program(slots(), well_formed)).expect("a well-formed depth input validates");
+        assert_eq!(
+            plan.passes[1].inputs,
+            [
+                ResolvedInput::Depth { slot: 0, read: DepthRead::Compare },
+                ResolvedInput::Depth { slot: 0, read: DepthRead::Texel },
+            ],
+        );
     }
 
     const COMPUTE_MODULE: &str = r"

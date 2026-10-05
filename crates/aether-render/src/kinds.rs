@@ -1225,10 +1225,9 @@ pub enum InputSlot {
     /// attaches; and a slot no earlier pass attaches, since a depth
     /// slot gets its contents only from the passes that attach it.
     ///
-    /// Binding a depth input at dispatch is not implemented yet
-    /// (iamacoffeepot/aether#7451). Until it is, a depth input that
-    /// passes those four checks is refused at register with a reason
-    /// that says so, so no registered program holds one.
+    /// The slot holds what the passes before this one drew into it in
+    /// the same dispatch, and the far plane where they drew nothing:
+    /// the first pass of a dispatch to attach a slot clears it.
     Depth { index: u32, read: DepthRead },
 }
 
@@ -1577,9 +1576,9 @@ pub struct ProgramPass {
 /// color output is a well-formed depth-only pass (it names a depth slot
 /// and writes it, declares [`Blend::Replace`] and [`PassLoad::Load`],
 /// and its fragment entry point returns no color), every
-/// [`InputSlot::Depth`] is refused (out of range, a `Four` slot, a slot
-/// the same pass attaches, a slot no earlier pass attaches, and
-/// otherwise as not bound yet), every compute pass declares
+/// [`InputSlot::Depth`] names a declared [`Samples::One`] depth slot
+/// that an earlier pass attaches and its own pass does not, every
+/// compute pass declares
 /// [`Blend::Replace`], every uniform window covers the uniform block its
 /// entry point declares, the graph's per-dispatch cost stays inside the
 /// executor's budget (the render passes it encodes and the uniform bytes
