@@ -18,7 +18,8 @@ use aether_render::{
 
 use crate::visual::Image;
 
-/// Probe for any usable wgpu adapter. Used by [`require_wgpu_adapter`].
+/// Probe for any usable wgpu adapter. Used by [`require_wgpu_adapter`] and
+/// by visual tests that carry their own gate.
 #[must_use]
 pub fn has_wgpu_adapter() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
