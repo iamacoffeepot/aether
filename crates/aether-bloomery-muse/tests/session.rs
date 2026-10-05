@@ -1677,7 +1677,7 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
         trigger = driver.follow(trigger);
         let viewed: Viewed = driver.result(trigger);
         assert_eq!(viewed.text(), text);
-        outputs.push(serde_json::json!({ "text": viewed.text() }));
+        outputs.push(viewed.text().to_owned());
     }
     let first_turn = asked(&driver, trigger);
     assert_eq!(first_turn.name.as_str(), MuseTurn::NAME, "the first turn follows the last seed");
@@ -1703,8 +1703,7 @@ fn a_seeded_session_reads_its_seeds_as_calls_before_the_first_turn_and_replays_t
     for (output, (id, viewed)) in [output_0, output_1].into_iter().zip(["seed-0", "seed-1"].into_iter().zip(&outputs)) {
         assert_eq!(output["type"], "function_call_output");
         assert_eq!(output["call_id"], id);
-        let rendered: serde_json::Value = serde_json::from_str(output["output"].as_str().expect("a rendered output"))?;
-        assert_eq!(&rendered, viewed, "{id} sends what its read returned");
+        assert_eq!(output["output"], viewed.as_str(), "{id} sends what its read returned");
     }
     let replayed = second_sent["input"].as_array().expect("items are sent");
     assert_eq!(replayed.get(..sent.len()), Some(sent.as_slice()), "a later turn replays the seeds unchanged");

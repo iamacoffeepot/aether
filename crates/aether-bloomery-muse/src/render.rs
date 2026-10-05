@@ -2,19 +2,24 @@
 //!
 //! A message sends its text, a replayed call its verbatim arguments, a
 //! reasoning item its encrypted content, and a refused output its stored
-//! text. A result is rendered: its stored payload decoded with the schema its
-//! output cites and serialized as JSON, with every 32-byte digest as
-//! lowercase hex. Object keys serialize sorted, so the rendered bytes depend
-//! only on the cited payload and schema, and the same input always sends the
-//! same request.
+//! text. A result the model reads as text is sent as that text, byte for
+//! byte: a `Viewed` sends its text and an `Edited` its summary, so what a
+//! read shows is what an edit matches. Any other result is rendered: its
+//! stored payload decoded with the schema its output cites and serialized as
+//! JSON, with every 32-byte digest as lowercase hex. Object keys serialize
+//! sorted. Either way the sent bytes depend only on the cited payload and
+//! schema, and the same input always sends the same request.
+
+use core::fmt::Display;
 
 use aether_bloomery_kinds::{Detail, Refusal};
-use aether_bloomery_program::{Async, Env, ToolSchema};
+use aether_bloomery_program::{Async, Env, ErasedEdited, ToolSchema};
 use aether_codec::decode_storage_schema;
-use aether_data::{Digest, EnumVariant, ErasedRef, Primitive, SchemaType};
+use aether_data::{Digest, EnumVariant, ErasedRef, Kind, Primitive, SchemaType, Storage};
 use serde_json::Value;
 
 use crate::input::{ToolOutput, TurnItem};
+use crate::tools::Viewed;
 
 /// Most JSON values one rendered result may hold.
 pub const RENDER_MAXIMUM_VALUES: usize = 65_536;
@@ -36,7 +41,7 @@ pub async fn item(env: &mut Env<Async>, item: &TurnItem) -> Result<String, Refus
         TurnItem::CallOutput { output: ToolOutput::Result { schema, result }, .. } => {
             let schema = env.read(*schema).await?;
             let result = of_kind(&schema, *result)?;
-            json(&schema, &env.read_payload(result).await?)
+            text(&schema, &env.read_payload(result).await?)
         }
     }
 }
@@ -50,12 +55,26 @@ fn of_kind(schema: &ToolSchema, result: ErasedRef) -> Result<ErasedRef, Refusal>
     }
 }
 
+/// What `payload`, stored under `schema`'s kind, sends: a `Viewed`'s text or
+/// an `Edited`'s summary as it is, and any other result as JSON.
+fn text(schema: &ToolSchema, payload: &[u8]) -> Result<String, Refusal> {
+    let kind = schema.kind_id();
+    if kind == <Viewed as Kind>::ID {
+        let viewed = Viewed::decode_storage(payload).map_err(|error| undecoded(schema, &error))?.value;
+        return Ok(viewed.text().to_owned());
+    }
+    if kind == <ErasedEdited as Kind>::ID {
+        let edited = ErasedEdited::decode_storage(payload).map_err(|error| undecoded(schema, &error))?.value;
+        return Ok(edited.summary().to_owned());
+    }
+    json(schema, payload)
+}
+
 /// `payload` decoded with `schema`, as JSON.
 fn json(schema: &ToolSchema, payload: &[u8]) -> Result<String, Refusal> {
     let schema_type = schema.schema();
-    let mut value = decode_storage_schema(payload, &schema_type, RENDER_MAXIMUM_VALUES).map_err(|error| {
-        refused(format!("a call output's result does not decode as {}: {error}", schema.kind_name()))
-    })?;
+    let mut value = decode_storage_schema(payload, &schema_type, RENDER_MAXIMUM_VALUES)
+        .map_err(|error| undecoded(schema, &error))?;
     hex_digests(&schema_type, &mut value);
     Ok(serde_json::to_string(&value).expect("a decoded JSON value always serializes"))
 }
@@ -160,6 +179,11 @@ fn child_pointer(pointer: &str, token: &str) -> String {
     format!("{pointer}/{}", token.replace('~', "~0").replace('/', "~1"))
 }
 
+/// The refusal of a result `schema` cannot decode.
+fn undecoded(schema: &ToolSchema, error: &dyn Display) -> Refusal {
+    refused(format!("a call output's result does not decode as {}: {error}", schema.kind_name()))
+}
+
 fn refused(reason: String) -> Refusal {
     Refusal::Refused { reason: Detail::new(reason) }
 }
@@ -171,7 +195,8 @@ mod tests {
     use aether_bloomery_program::{Edited, NoDetail, ToolSchema};
     use aether_data::{Digest, Ref, Storage, StorageData};
 
-    use super::json;
+    use super::{json, text};
+    use crate::tools::Viewed;
 
     #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
     #[kind(name = "test.muse.render.shape")]
@@ -244,17 +269,24 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_tree_and_detail_digest_render_as_hex() {
-        // Catches a tree or detail digest rendered as 32 numbers, which spends tokens on every edit and tells the
-        // model nothing.
-        let (tree, detail) = (digest(0), Ref::<NoDetail>::of_encoded(&NoDetail).expect("detail"));
-        let edited = Edited::new(Ref::from_digest(tree), "Edited path.", detail);
+    fn an_edit_sends_its_summary_as_it_is() {
+        // Catches a summary sent JSON-escaped, so a quoted file line or a compiler error reads in a form no edit
+        // matches, and tree and detail digests spent on every edit.
+        let summary = "The old text continues with:\n\t{{\\\"ending\\\": \"x\"}}";
+        let detail = Ref::<NoDetail>::of_encoded(&NoDetail).expect("detail");
+        let edited = Edited::new(Ref::from_digest(digest(0)), summary, detail);
         let payload = Edited::encode_storage(&StorageData::from_value(edited)).expect("an edit encodes");
 
-        let rendered = json(&ToolSchema::of::<Edited>(), &payload).expect("an edit renders");
-        let rendered: serde_json::Value = serde_json::from_str(&rendered).expect("a render is JSON");
+        assert_eq!(text(&ToolSchema::of::<Edited>(), &payload).as_deref(), Ok(summary));
+    }
 
-        assert_eq!((&rendered["summary"], &rendered["tree"]), (&"Edited path.".into(), &tree.to_string().into()));
-        assert_eq!(rendered["detail"]["digest"], serde_json::json!(detail.digest().to_string()));
+    #[test]
+    fn a_view_sends_its_text_as_it_is() {
+        // Catches a read sent JSON-escaped: the model then copies `\\\"` where the file holds `\"`, and `tree.edit`
+        // matches the file's bytes.
+        let read = "897\t{{\\\"ending\\\": \"x\"}}\n898\t}";
+        let payload = Viewed::encode_storage(&StorageData::from_value(Viewed::new(read))).expect("a view encodes");
+
+        assert_eq!(text(&ToolSchema::of::<Viewed>(), &payload).as_deref(), Ok(read));
     }
 }
