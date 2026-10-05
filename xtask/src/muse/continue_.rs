@@ -14,7 +14,8 @@ use aether_data::Ref;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
-use super::{EngineArgs, budget, call, turn_limit};
+use super::call::call;
+use super::{EngineArgs, budget, turn_limit};
 use crate::bloomery::latest_moves;
 
 /// Arguments for `cargo xtask muse continue`.

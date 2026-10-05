@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
 use super::EngineArgs;
-use super::call_in;
+use super::call::call_in;
 use crate::bloomery::{load, parse_digest, read_each, read_value};
 use crate::import_commit::Imported;
 
