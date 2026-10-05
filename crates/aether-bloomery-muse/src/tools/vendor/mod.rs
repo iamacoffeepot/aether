@@ -4,10 +4,10 @@
 //!
 //! Each is its `tree.*` sibling's body run over the vendor tree its call's
 //! [`ProofBound`] cites instead of the session's tree, so it takes the same
-//! arguments, returns the same [`Viewed`] text, and leaves the session's tree
-//! as it was. Paths are relative to the vendor tree's root, which holds one
-//! directory per vendored crate. The hints in a result name the `vendor.*`
-//! sibling.
+//! arguments, returns the same [`Viewed`](crate::tools::Viewed) text, and
+//! leaves the session's tree as it was. Paths are relative to the vendor
+//! tree's root, which holds one directory per vendored crate. The hints in a
+//! result name the `vendor.*` sibling.
 
 mod grep;
 mod list;
