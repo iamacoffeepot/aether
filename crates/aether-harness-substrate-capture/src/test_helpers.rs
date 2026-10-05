@@ -13,7 +13,8 @@ pub use aether_harness_substrate::test_helpers::{
     envelope, init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
 use aether_render::{
-    InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat,
+    InputSlot, Mips, OutputSlot, PassStage, ProgramPass, ProgramRegister, Sampling, SlotExtent, SlotShape, SlotSpec,
+    TextureFormat, Wrap,
 };
 
 use crate::visual::Image;
@@ -147,7 +148,11 @@ pub fn append_capture_probe(
 
     register.wgsl.push('\n');
     register.wgsl.push_str(probe_wgsl);
-    register.bindings.push(SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full });
+    register.bindings.push(SlotSpec {
+        format: TextureFormat::Rgba8,
+        shape: SlotShape::Target(SlotExtent::Full),
+        sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+    });
     register.passes.push(ProgramPass {
         stage: PassStage::Fragment,
         entry_point: "fs_probe".to_owned(),
@@ -167,7 +172,11 @@ mod tests {
 
     #[test]
     fn append_capture_probe_adds_the_declared_binding_and_pass() {
-        let initial = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let initial = SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        };
         let inputs = vec![InputSlot::Binding { index: 0 }];
         let mut register = ProgramRegister {
             wgsl: "base".to_owned(),
