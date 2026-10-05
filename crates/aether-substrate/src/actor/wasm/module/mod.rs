@@ -28,7 +28,7 @@
 //! way to get one. A clone shares its entry, and the entry lives while any
 //! clone does.
 
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::fmt;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ mod manifest;
 mod tests;
 
 pub use cache::ModuleCache;
-pub use manifest::{AssetSection, ModuleManifest};
+pub use manifest::{AssetIndex, AssetSection, ModuleManifest};
 
 /// The length of a module hash in lowercase hex, as a content-addressed
 /// module's published namespaces carry it.
@@ -129,6 +129,12 @@ impl AssetName {
 
     #[must_use]
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for AssetName {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }

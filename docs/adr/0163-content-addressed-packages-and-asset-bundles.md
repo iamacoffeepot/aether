@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-22
+- **Amended:** 2026-10-04 — Section 3: `AssetInfo` drops `sha256` (nothing read it, and the catalog outlives the bytes, so it could not be computed lazily); the module's assets are indexed once into a name map shared by every window, so indexing and fetching are linear (issue 7403).
 - **Amended:** 2026-10-04 — Section 3: `AssetWindow` gains `asset_blob`, which hands an asset over as a `Blob` the guest holds by handle, a range of the module's code where it already sits in the engine blob store; a blob the actor keeps or sends on holds that code resident until it drops, while the window itself still lets go when `wire` returns (issue 7393).
 
 ## Context
@@ -74,10 +75,10 @@ The bytes land in a custom section named for the asset — the same emission pat
 
 ### 3. Payload access is a load window; the catalog is for life
 
-At component load, `aether-component` indexes `aether.asset.*` sections alongside the existing kinds parse, recording per-asset name, length, sha256, and byte range into the module file. Payload access is served only during the load window — `init` plus `wire` — by reading the recorded range straight from the store file:
+At component load, `aether-component` indexes `aether.asset.*` sections alongside the existing kinds parse, recording per-asset name, length, and byte range into the module file. Payload access is served only during the load window — `init` plus `wire` — by reading the recorded range straight from the store file:
 
 ```rust
-pub struct AssetInfo { pub name: String, pub len: u64, pub sha256: [u8; 32] }
+pub struct AssetInfo { pub name: String, pub len: u64 }
 
 pub trait AssetCatalog {                      // on every ctx, for the instance's life
     fn assets(&self) -> &[AssetInfo];
