@@ -4,8 +4,9 @@
 //! Pure over the arguments and the schema. A refusal is a fixed sentence
 //! naming the input's kind plus either a correction from the scalar walk in
 //! [`coerce`] (which also reads a canonical decimal string as the integer
-//! the schema wants) or the parser's or the codec's own message, so the same
-//! arguments always refuse with the same text.
+//! the schema wants, and names the variants a unit enum takes) or the
+//! parser's or the codec's own message, so the same arguments always refuse
+//! with the same text.
 
 mod coerce;
 

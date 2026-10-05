@@ -179,7 +179,9 @@ sessions on one engine are each followed by their own `wait`.
   ended `Done` with a summary, `blocked` that it ended `Blocked` with what
   stopped it, and `asked` that it ended `Asked` with the one question it
   cannot go on without. The final message follows for all three end reasons:
-  the summary, reason, or question.
+  the summary, reason, or question. The `muse-end` call takes `ending`, one of
+  `Done`, `Blocked`, or `Asked`, and `text`, a plain string. A journal that
+  holds end calls from before this change does not replay them.
 - `turns` counts the session's `muse.turn` runs read, and `usage` sums the
   token counts they reported.
 - `from` is the tree the activation started on (the open's tree, or the tree

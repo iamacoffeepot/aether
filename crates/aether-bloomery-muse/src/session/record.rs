@@ -342,6 +342,9 @@ mod tests {
     }
 
     /// A call list of one decoded `muse.end` call `id` over `ending`.
+    ///
+    /// `EndArgs::new` splits the ending into the flat tag-and-text arguments, so
+    /// the helper keeps taking the recorded `Ending`.
     fn end_calls(id: &str, ending: &Ending) -> ToolCalls {
         let args = Ref::of_encoded(&EndArgs::new(ending.clone())).expect("end arguments encode");
         let input = ErasedRef::new(EndArgs::ID, args.digest());

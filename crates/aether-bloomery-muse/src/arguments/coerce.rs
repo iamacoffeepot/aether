@@ -1,16 +1,18 @@
 //! The pass over argument JSON that runs before the codec: a canonical
-//! decimal string at an integer position becomes the integer, and a scalar
-//! of the wrong JSON type is refused with how to fix it.
+//! decimal string at an integer position becomes the integer, a scalar
+//! of the wrong JSON type is refused with how to fix it, and a unit-variant
+//! enum that names no variant is refused with the names it takes.
 //!
 //! The walk is iterative, over an explicit stack, and descends only where
 //! the JSON already has the shape the schema wants. Every other position
-//! (a missing or unknown key, an enum, a map, a type id, bytes, a non-object
-//! at a struct, a non-array at a container) is left for the codec.
+//! (a missing or unknown key, a non-unit enum, an object at a unit enum, a
+//! map, a type id, bytes, a non-object at a struct, a non-array at a
+//! container) is left for the codec.
 
 use core::cmp::Reverse;
 use core::fmt::{self, Display};
 
-use aether_data::{Primitive, SchemaType};
+use aether_data::{EnumVariant, Primitive, SchemaType};
 use serde_json::Value;
 
 /// The most bytes of a sent value a correction quotes.
@@ -23,6 +25,7 @@ enum Wanted {
     Float,
     Bool,
     String,
+    Variant { names: Vec<String> },
 }
 
 /// A scalar of the wrong JSON type, and what to send instead.
@@ -50,6 +53,10 @@ impl Display for Correction {
             Wanted::Float => write!(f, "`{field}` must be a JSON number, e.g. `1.5`, not `{sent}`"),
             Wanted::Bool => write!(f, "`{field}` must be `true` or `false`, not `{sent}`"),
             Wanted::String => write!(f, "`{field}` must be a JSON string, e.g. `\"text\"`, not `{sent}`"),
+            Wanted::Variant { names } => {
+                let listed = names.iter().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ");
+                write!(f, "`{field}` must be one of {listed}, not `{sent}`")
+            }
         }
     }
 }
@@ -105,6 +112,20 @@ pub(super) fn scalars(value: &mut Value, schema: &SchemaType) -> Result<(), Corr
                         .collect();
                     children.sort_by_key(|(at, ..)| Reverse(*at));
                     stack.extend(children.into_iter().map(|(_, child, ty, path)| (child, ty, path)));
+                }
+            }
+            SchemaType::Enum { variants } => {
+                let all_unit = variants.iter().all(|variant| matches!(variant, EnumVariant::Unit { .. }));
+                let is_string = value.is_string();
+                let is_object = value.is_object();
+                let sent = value.as_str();
+                let known = sent.is_some_and(|name| variants.iter().any(|variant| variant.name() == name));
+                let unknown_name = is_string && !known;
+                let neither_string_nor_object = !is_string && !is_object;
+                let refuses = all_unit && (unknown_name || neither_string_nor_object);
+                if refuses {
+                    let names = variants.iter().map(|variant| variant.name().to_owned()).collect();
+                    return Err(correction(&field, Wanted::Variant { names }, value));
                 }
             }
             _ => {}
@@ -196,7 +217,7 @@ fn correction(field: &str, wanted: Wanted, sent: &Value) -> Correction {
 mod tests {
     use std::borrow::Cow;
 
-    use aether_data::{NamedField, Primitive, SchemaType};
+    use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
     use serde_json::{Value, json};
 
     use super::scalars;
@@ -208,6 +229,39 @@ mod tests {
                 ty: SchemaType::Scalar(Primitive::I32),
             }]),
             repr_c: false,
+        }
+    }
+
+    fn ending_enum() -> SchemaType {
+        SchemaType::Enum {
+            variants: Cow::Owned(vec![
+                EnumVariant::Unit { name: Cow::Borrowed("Done"), discriminant: 0 },
+                EnumVariant::Unit { name: Cow::Borrowed("Blocked"), discriminant: 1 },
+                EnumVariant::Unit { name: Cow::Borrowed("Asked"), discriminant: 2 },
+            ]),
+        }
+    }
+
+    fn ending_struct() -> SchemaType {
+        SchemaType::Struct {
+            fields: Cow::Owned(vec![NamedField { name: Cow::Borrowed("ending"), ty: ending_enum() }]),
+            repr_c: false,
+        }
+    }
+
+    fn mixed_enum() -> SchemaType {
+        SchemaType::Enum {
+            variants: Cow::Owned(vec![
+                EnumVariant::Unit { name: Cow::Borrowed("Done"), discriminant: 0 },
+                EnumVariant::Struct {
+                    name: Cow::Borrowed("Named"),
+                    discriminant: 1,
+                    fields: Cow::Owned(vec![NamedField {
+                        name: Cow::Borrowed("depth"),
+                        ty: SchemaType::Scalar(Primitive::U8),
+                    }]),
+                },
+            ]),
         }
     }
 
@@ -240,5 +294,44 @@ mod tests {
         let mut value = json!([1, "x"]);
         let text = scalars(&mut value, &shape).expect_err("refused").to_string();
         assert!(text.starts_with("`[1]` must be a JSON number"), "{text}");
+    }
+
+    #[test]
+    fn a_unit_enum_takes_its_variant_name_unchanged() {
+        // Catches a correction that fires on a valid name, and one that disturbs the object form the codec reads.
+        let mut named = json!({"ending": "Done"});
+        assert_eq!(scalars(&mut named, &ending_struct()), Ok(()));
+        assert_eq!(named, json!({"ending": "Done"}));
+
+        let mut object = json!({"ending": {"Done": null}});
+        assert_eq!(scalars(&mut object, &ending_struct()), Ok(()));
+        assert_eq!(object, json!({"ending": {"Done": null}}));
+    }
+
+    #[test]
+    fn an_unknown_unit_name_is_refused_with_the_names_it_takes() {
+        // Catches the terse codec text reaching the model instead of the names.
+        let listed = "`ending` must be one of \"Done\", \"Blocked\", \"Asked\"";
+        for sent in [json!({"ending": "done"}), json!({"ending": "{\"Done\": {}}"})] {
+            let mut value = sent;
+            let text = scalars(&mut value, &ending_struct()).expect_err("refused").to_string();
+            assert!(text.starts_with(listed), "{text}");
+            assert!(text.contains("must be one of"), "{text}");
+        }
+        let mut lower = json!({"ending": "done"});
+        let text = scalars(&mut lower, &ending_struct()).expect_err("refused").to_string();
+        assert_eq!(text, "`ending` must be one of \"Done\", \"Blocked\", \"Asked\", not `\"done\"`");
+    }
+
+    #[test]
+    fn an_enum_with_a_struct_variant_is_left_for_the_codec() {
+        // Catches a correction that preempts the codec at an enum it does not understand.
+        let mut named = json!("done");
+        assert_eq!(scalars(&mut named, &mixed_enum()), Ok(()));
+        assert_eq!(named, json!("done"));
+
+        let mut number = json!(7);
+        assert_eq!(scalars(&mut number, &mixed_enum()), Ok(()));
+        assert_eq!(number, json!(7));
     }
 }

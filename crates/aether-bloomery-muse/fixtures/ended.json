@@ -37,7 +37,7 @@
       "status": "completed",
       "call_id": "call_end",
       "name": "muse-end",
-      "arguments": "{\"ending\": {\"Done\": {\"summary\": \"Every briefed change is in the tree.\"}}}"
+      "arguments": "{\"ending\":\"Done\",\"text\":\"Every briefed change is in the tree.\"}"
     }
   ],
   "usage": {
