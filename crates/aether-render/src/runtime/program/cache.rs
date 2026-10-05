@@ -29,7 +29,8 @@
 //!   kept across frames and the bind groups built once per slot — a
 //!   staging buffer's size is fixed by the plan, so nothing rebuilds
 //!   them — and [`DispatchCache::begin_frame`] releases the slots a
-//!   frame stopped using.
+//!   frame that dispatched the program stopped using; a frame that did
+//!   not dispatch it leaves its slots alone.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -219,9 +220,14 @@ impl DispatchCache {
 
     /// Open a frame's dispatches of this program: release the uniform
     /// slots the previous frame did not use and restart the count, so
-    /// the first dispatch stages into slot 0 again.
+    /// the first dispatch stages into slot 0 again. A program the
+    /// previous frame did not dispatch at all keeps every slot, so one
+    /// dispatched intermittently does not rebuild its buffers and bind
+    /// groups each time it returns.
     pub fn begin_frame(&mut self) {
-        self.uniforms.truncate(self.uniforms_used);
+        if self.uniforms_used > 0 {
+            self.uniforms.truncate(self.uniforms_used);
+        }
         self.uniforms_used = 0;
     }
 
