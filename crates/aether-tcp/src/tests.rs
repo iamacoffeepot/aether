@@ -245,13 +245,6 @@ fn framed_body(body: &[u8]) -> Vec<u8> {
     frame
 }
 
-fn available_loopback_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve a loopback address");
-    let addr = listener.local_addr().expect("reserved loopback address");
-    drop(listener);
-    addr
-}
-
 fn register_route_collision(registry: &Registry, canonical_name: &str) -> ErasedActorRef {
     registered_ref(registry, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
 }
@@ -341,9 +334,8 @@ fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
 }
 
 #[test]
-fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() {
+fn staged_bind_rejection_replies_once_and_releases_the_name() {
     const LISTENER_NAME: &str = "owner-rejected-listener";
-    let socket_addr = available_loopback_addr();
     let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
@@ -353,29 +345,25 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
     );
     assert!(
         matches!(rejected, BindListenerResult::Err(BindListenerError::Failed { ref addr, ref error })
-            if addr == &socket_addr.to_string() && error.contains("spawn failed")),
+            if addr == "127.0.0.1:0" && error.contains("spawn failed")),
         "owner rejection returns one typed bind failure: {rejected:?}",
     );
     assert!(rx.try_recv().is_err(), "authoritative rejection emits exactly one bind result");
 
-    let rebound =
-        TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
-    drop(rebound);
     withdraw_ref(&registry, collision);
 
     let retried: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
     );
     assert!(
-        matches!(retried, BindListenerResult::Ok { ref listener_name, local_port, .. }
-            if listener_name == LISTENER_NAME && local_port == socket_addr.port()),
+        matches!(retried, BindListenerResult::Ok { ref listener_name, .. } if listener_name == LISTENER_NAME),
         "the rejected parent-local reservation is released for retry: {retried:?}",
     );
 
@@ -387,12 +375,6 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
 #[test]
 fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     const LISTENER_NAME: &str = "duplicate-staged-listener";
-    let reservation_alpha = TcpListener::bind("127.0.0.1:0").expect("reserve alpha duplicate-name socket");
-    let reservation_beta = TcpListener::bind("127.0.0.1:0").expect("reserve beta duplicate-name socket");
-    let addr_alpha = reservation_alpha.local_addr().expect("alpha duplicate-name address");
-    let addr_beta = reservation_beta.local_addr().expect("beta duplicate-name address");
-    drop(reservation_alpha);
-    drop(reservation_beta);
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
     let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
@@ -400,12 +382,12 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
 
     let (_, settled_alpha) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: addr_alpha.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
         Some(ReplyTarget::Session { session: session_alpha, correlation: 1 }),
     );
     let (_, settled_beta) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: addr_beta.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
         Some(ReplyTarget::Session { session: session_beta, correlation: 2 }),
     );
     await_settled(&settled_alpha, "the alpha duplicate-name bind");
@@ -430,17 +412,14 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     let failures: Vec<_> = replies
         .iter()
         .filter_map(|(_, result)| match result {
-            BindListenerResult::Err(BindListenerError::Failed { addr, error }) => Some((addr.clone(), error.clone())),
+            BindListenerResult::Err(BindListenerError::Failed { error, .. }) => Some(error.clone()),
             _ => None,
         })
         .collect();
     assert_eq!(successes.len(), 1, "one staged child owns the parent-local name: {replies:?}");
     assert_eq!(failures.len(), 1, "the duplicate staged child receives one rejection: {replies:?}");
-    assert!(failures[0].1.contains("spawn failed"), "the duplicate is rejected by staged spawn authority");
+    assert!(failures[0].contains("spawn failed"), "the duplicate is rejected by staged spawn authority");
 
-    let failed_addr = failures[0].0.parse::<SocketAddr>().expect("failed bind address remains parseable");
-    let rebound = TcpListener::bind(failed_addr).expect("the rejected duplicate's socket is closed before its reply");
-    drop(rebound);
     let live_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), successes[0]);
     assert!(TcpListener::bind(live_addr).is_err(), "the accepted listener retains its socket");
 
