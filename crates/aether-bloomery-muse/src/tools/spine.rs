@@ -2,9 +2,9 @@
 //! path's parent, read on the way down and rebuilt on the way up.
 //!
 //! Both walks are iterative, one frame per segment; a [`TreePath`] has at
-//! most 512. Every entry off the spine keeps its citation, so a placed node
-//! restages only the directories it passes through, and every artifact it
-//! stages is reachable from the root it returns.
+//! most 512. Every entry off the spine keeps its citation, so a placed or
+//! removed node restages only the directories it passes through, and every
+//! artifact it stages is reachable from the root it returns.
 
 use aether_bloomery_kinds::{Name, Node, Refusal, Tree};
 use aether_bloomery_program::{Async, Env};
@@ -138,20 +138,60 @@ pub async fn place(
     node: Node,
     create_dirs: bool,
 ) -> Result<Result<Ref<Tree>, Blocked>, Refusal> {
-    let Spine { names, dirs } = match descend(env, root, path, create_dirs).await? {
+    let spine = match descend(env, root, path, create_dirs).await? {
         Ok(spine) => spine,
         Err(blocked) => return Ok(Err(blocked)),
     };
-    let mut child = node;
+
+    Ok(Ok(rebuild(env, spine, Some(node))?))
+}
+
+/// The root of `root` without the entry at `path`, whatever it is, a
+/// directory with its whole subtree: the inverse of [`place`]. A directory
+/// left empty stays. Nothing is staged when the path is blocked or names
+/// nothing.
+///
+/// # Errors
+///
+/// The [`Refusal`] of a directory on the spine that the store cannot read,
+/// or of a rebuilt directory that does not encode.
+pub async fn remove(
+    env: &mut Env<Async>,
+    root: Ref<Tree>,
+    path: &TreePath,
+) -> Result<Result<Ref<Tree>, Blocked>, Refusal> {
+    let spine = match descend(env, root, path, false).await? {
+        Ok(spine) => spine,
+        Err(blocked) => return Ok(Err(blocked)),
+    };
+
+    let (dir, name) = spine.parent();
+    let present = dir.entries().contains_key(name);
+    if !present {
+        return Ok(Err(Blocked::Missing { at: path.as_str().into() }));
+    }
+
+    Ok(Ok(rebuild(env, spine, None)?))
+}
+
+/// The root of the spine with its last entry set to `last`, or removed when
+/// `last` is `None`, staging every directory rebuilt on the way up.
+fn rebuild(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Ref<Tree>, Refusal> {
+    let Spine { names, dirs } = spine;
+    let mut child = last;
     for (name, dir) in names.into_iter().zip(dirs).rev() {
         let mut entries = dir.entries().clone();
-        entries.insert(name, child);
-        child = Node::Directory(env.stage_encoded(&Tree::new(entries))?);
+        match child {
+            Some(node) => entries.insert(name, node),
+            None => entries.remove(&name),
+        };
+        child = Some(Node::Directory(env.stage_encoded(&Tree::new(entries))?));
     }
-    let Node::Directory(root) = child else {
+
+    let Some(Node::Directory(root)) = child else {
         unreachable!("the last rebuilt node is the root directory");
     };
-    Ok(Ok(root))
+    Ok(root)
 }
 
 #[cfg(test)]
@@ -164,6 +204,7 @@ mod tests {
 
     use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
     use crate::tools::edit::{EditArgs, TreeEdit};
+    use crate::tools::remove::{RemoveArgs, TreeRemove};
     use crate::tools::write::{TreeWrite, WriteArgs};
 
     #[test]
@@ -200,6 +241,42 @@ mod tests {
         ] {
             let (input, closure) = small.call(&EditArgs::new(path(at), "a", "b"));
             let (edited, _) = run_async::<TreeEdit>(&input, closure).expect("a result");
+            assert_eq!(edited, Edited::new(small.tree(), summary, no_detail()), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_removed_node_rebuilds_only_its_spine_and_keeps_every_other_entry() {
+        // Catches a removal that drops or restages an entry off the spine, and a rebuilt directory the returned
+        // root does not reach.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&RemoveArgs::new(path("src/lib.rs")));
+        let (edited, store) = run_async::<TreeRemove>(&input, closure).expect("removes");
+
+        let root: Tree = store.value(edited.tree());
+        for kept in ["README", "run", "link", "blob.bin"] {
+            assert_eq!(root.entries().get(&name(kept)), small.root().entries().get(&name(kept)), "{kept} kept");
+        }
+        let Some(Node::Directory(src)) = root.entries().get(&name("src")) else {
+            panic!("src stays a directory");
+        };
+        let src: Tree = store.value(*src);
+        assert_eq!(src, Tree::new(BTreeMap::new()), "an emptied directory stays");
+    }
+
+    #[test]
+    fn a_blocked_removal_names_its_first_bad_prefix_and_changes_nothing() {
+        // Catches a removal that treats a missing entry or a path through a file as a fault, or stages a partial
+        // rebuild.
+        let small = SmallTree::new();
+        for (at, summary) in [
+            ("missing", "Nothing is at missing, so nothing changed."),
+            ("src/missing", "Nothing is at src/missing, so nothing changed."),
+            ("README/x", "README is not a directory, so nothing changed."),
+            ("nope/x/y", "Nothing is at nope, so nothing changed."),
+        ] {
+            let (input, closure) = small.call(&RemoveArgs::new(path(at)));
+            let (edited, _) = run_async::<TreeRemove>(&input, closure).expect("a result");
             assert_eq!(edited, Edited::new(small.tree(), summary, no_detail()), "{at}");
         }
     }
