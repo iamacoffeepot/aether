@@ -66,29 +66,26 @@ pub struct Spawner {
     /// Cloned into [`WakeHandle`]s when the Pooled spawn branch lands a
     /// slot.
     wake_sink: WakeSink,
-    /// Issue 635 Phase 3: strong-Arc store for instanced
-    /// [`Drainable`] slots spawned via the Pooled
-    /// branch. Without this the slot dropped at end of `spawn_actor`
-    /// and the [`WakeHandle`]'s `Weak` failed to
-    /// upgrade — every wake after spawn would silently no-op.
-    /// Slots live until the Spawner itself drops (chassis teardown);
-    /// self-closing actors leave their slot Arc here as a small
-    /// metadata leak (~80 B) that's reclaimed at teardown. Nothing an
-    /// actor holds on behalf of a *peer* may ride that retention: a
-    /// resource whose lifetime is the actor's own life is released on the
-    /// close path (cost rows, the parent-local child key — issue 4152),
-    /// never left for the teardown drain.
+    /// The pooled instanced actors that are born and have not closed, one
+    /// entry each. An entry holds the strong `Arc<dyn Drainable>` that
+    /// keeps the actor's slot alive between dispatches (a [`WakeHandle`]
+    /// and a seize handle hold only a `Weak`, so without it every wake
+    /// after the birth would find nothing to upgrade), a [`WakeHandle`]
+    /// clone so [`Self::shutdown_instanced`] can schedule a quiet slot
+    /// after signalling it (issue 685), and in a test build the
+    /// subscription to the birth's wire root.
     ///
-    /// Issue 685: each entry now also carries a [`WakeHandle`] clone
-    /// so [`Self::shutdown_instanced`] can fire one wake per slot at
-    /// chassis teardown — without it, a freshly-`signal_shutdown`-ed
-    /// slot whose inbox is empty would never enter `run_cycle` to
-    /// observe the flag.
+    /// [`Self::retain_activated_slot`] inserts the entry at birth. The
+    /// actor's own close cycle removes it through
+    /// [`Self::release_closed_slot`], after the registry close and before
+    /// the close-done signal, so a closed actor leaves nothing here and its
+    /// slot, with its rings and its binding, is freed once the worker
+    /// running that cycle returns (issue #7402). Chassis teardown drains
+    /// what is left, which is only the actors still open.
     ///
-    /// Issue #7074: the test-support `Spawner::await_closed` finds a
-    /// self-closing actor's slot here to install its close-done sender,
-    /// so a test waits on the actor's real close instead of polling its
-    /// route.
+    /// The test-support `Spawner::await_closed` finds a still-open actor's
+    /// slot here to install its close-done sender (issue #7074); for an
+    /// actor that has already closed it reads the actor registry instead.
     pub(in crate::actor::native::spawn) instanced_slots: Mutex<HashMap<MailboxId, InstancedSlotEntry>>,
     /// Issue 1990: the per-actor ring capacities resolved at chassis
     /// boot. Every actor spawned through [`Self::build`] seeds its
@@ -125,9 +122,10 @@ pub struct Spawner {
 /// One entry in [`Spawner::instanced_slots`]. Holds both the strong
 /// `Arc<dyn Drainable>` (so the wake handle's `Weak` upgrades) and a
 /// [`WakeHandle`] clone (so the chassis-teardown
-/// path can wake the slot after signaling shutdown). Issue 685.
+/// path can wake the slot after signaling shutdown). Issue 685. The entry
+/// lasts from the actor's birth to the end of its close cycle.
 pub(in crate::actor::native::spawn) struct InstancedSlotEntry {
-    slot: Arc<dyn Drainable>,
+    pub(in crate::actor::native::spawn) slot: Arc<dyn Drainable>,
     wake: WakeHandle,
     /// Issue #7120: the subscription to the birth's wire root (ADR-0244 §7)
     /// that the test-support `Spawner::await_wire_settled` consumes, kept on
@@ -254,6 +252,21 @@ impl Spawner {
             wire_settled: wire_wait::WireSettled::subscribe(wire_root, &self.mailer),
         };
         self.instanced_slots.lock().expect("instanced_slots mutex poisoned; fail-fast per ADR-0063").insert(id, entry);
+    }
+
+    /// Give up a pooled instanced actor's entry once its close cycle has
+    /// run: the inverse of [`Self::retain_activated_slot`]. The caller is
+    /// the closing slot itself, reached by a worker that holds its own
+    /// strong reference for the length of the cycle, so the slot is freed
+    /// when that worker returns and never under the caller.
+    ///
+    /// An id with no entry is not an error: chassis teardown may have
+    /// drained it first, and a composed singleton was never retained.
+    pub(crate) fn release_closed_slot(&self, id: MailboxId) {
+        let released =
+            self.instanced_slots.lock().expect("instanced_slots mutex poisoned; fail-fast per ADR-0063").remove(&id);
+
+        drop(released);
     }
 
     /// Allocate the next monotonic discriminator from the same per-chassis

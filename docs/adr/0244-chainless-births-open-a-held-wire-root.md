@@ -158,7 +158,10 @@ NativeCtx::for_wire(&binding, EffectChain::Held(causing_chain), Some(wire_root.r
    the receiver on the slot's `InstancedSlotEntry`, the one row each born
    actor already has. `Spawner::await_wire_settled` takes the receiver out and
    awaits it, in the shape of `Spawner::await_closed`, so a later wait on the
-   same actor returns at once. The chassis door resolves the `ErasedActorPath`
+   same actor returns at once. The entry lasts as long as the actor: the
+   actor's close cycle releases it, and the receiver with it, so the wait
+   covers an actor that is still open and panics, saying so, for one that
+   closed first. The chassis door resolves the `ErasedActorPath`
    through the boundary parser, as `resolve_address` does, and exposes no
    `MailboxId`. It panics naming `chassis.wire_settled` when the path names no
    pooled instanced actor, and names `await_boot_settled` for a pre-seal

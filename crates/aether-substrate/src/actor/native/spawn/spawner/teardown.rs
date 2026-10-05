@@ -1,4 +1,6 @@
-//! Chassis-teardown walk over every instanced slot the spawner retained.
+//! Chassis-teardown walk over every instanced slot the spawner still holds:
+//! the actors that are open at teardown. An actor that closed earlier
+//! released its own entry and is not walked.
 //!
 //! Spawned actors close *first* (before the singleton shutdowns) so their
 //! `MonitorNotice` mail reaches singleton watchers while those are still
@@ -16,7 +18,9 @@ use crate::runtime::lifecycle::FatalAbortRecord;
 use super::{InstancedSlotEntry, Spawner};
 
 impl Spawner {
-    /// Issue 685: walk every spawned instanced slot, signal shutdown
+    /// Issue 685: walk every spawned instanced slot that is still open
+    /// (an actor that already closed released its entry, so there is
+    /// nothing of it to signal or wait for), signal shutdown
     /// on its binding, fire one wake so a pool worker picks it up and
     /// runs the close path (drain residual → `unwire` → registry
     /// close + monitor fan-out), then wait per-slot on a one-shot
@@ -91,7 +95,9 @@ impl Spawner {
         // close path before `signal_engine_teardown` returns control. The
         // slot's `set_close_done_tx` fast-paths an already-closed slot
         // by firing immediately, so there's no race window where the
-        // close cycle ran without seeing the tx.
+        // close cycle ran without seeing the tx. A slot drained here
+        // while its own close cycle is running stays alive through this
+        // entry, and its release then finds nothing to remove.
         let mut waiters: Vec<crossbeam_channel::Receiver<()>> = Vec::with_capacity(entries.len());
         for (_id, entry) in &entries {
             let (tx, rx) = crossbeam_channel::bounded::<()>(1);
