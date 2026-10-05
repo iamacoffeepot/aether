@@ -6,18 +6,24 @@
 //!
 //! - The ADR-0163 §3 asset-window pull: `wire` pulls the bundle's
 //!   `asset_fixture.txt` and stashes a fingerprint, which an `AssetProbe`
-//!   reads back after the window has closed.
+//!   reads back after the window has closed. It also takes the same asset
+//!   as a blob and keeps it, which an `AssetBlobProbe` is answered with.
 //! - On every `LogMarker` delivery, a `tracing::info!("typed_send_alive")`
 //!   that flows through the actor-aware subscriber (issue #581) into the
 //!   per-actor log ring the log-ring tests read.
 
 use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult, LogMarker};
+use aether_data::Blob;
+use aether_test_fixtures_kinds::{AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, LogMarker};
 
 pub struct QuietProbe {
     /// ADR-0163 §3 (#3984): what `wire` pulled from the asset load window,
     /// surfaced later through [`QuietProbe::on_asset_probe`].
     asset: AssetProbeResult,
+    /// The same asset as `wire` took it through `AssetWindow::asset_blob`,
+    /// held by handle past the window and forwarded by
+    /// [`QuietProbe::on_asset_blob_probe`].
+    asset_blob: Option<Blob>,
 }
 
 #[actor(root)]
@@ -25,11 +31,15 @@ impl WasmActor for QuietProbe {
     const NAMESPACE: &'static str = "test.quiet_probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(QuietProbe { asset: AssetProbeResult::default() })
+        Ok(QuietProbe { asset: AssetProbeResult::default(), asset_blob: None })
     }
 
     /// Pull the bundle's asset through the load window (open during `wire`).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+        // The blob verb goes first, so it is the call that traps for an
+        // instance spawned from its publication, whose window has no code.
+        self.asset_blob = ctx.asset_blob("asset_fixture.txt");
+
         // ADR-0163 §3 (#3984): stash a content fingerprint — length + a
         // wrapping-sum checksum — so a later `AssetProbe` proves the
         // guest-side pull round-tripped the exact bytes across the FFI and
@@ -63,5 +73,18 @@ impl WasmActor for QuietProbe {
     #[handler::request]
     fn on_asset_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: AssetProbe) -> AssetProbeResult {
         self.asset.clone()
+    }
+
+    /// Reply with the asset blob this fixture took from its load window
+    /// during `wire` and kept. Runs post-`wire`, so the reply forwards a
+    /// handle that outlived the window, and its bytes never entered this
+    /// guest's memory.
+    ///
+    /// # Agent
+    /// Send `aether.test_fixtures.asset_blob_probe`; the reply
+    /// `aether.test_fixtures.asset_blob_probe_result` carries `{ blob }`.
+    #[handler::request]
+    fn on_asset_blob_probe(&mut self, _ctx: &mut WasmCtx<'_>, _query: AssetBlobProbe) -> AssetBlobProbeResult {
+        AssetBlobProbeResult { blob: self.asset_blob.clone() }
     }
 }

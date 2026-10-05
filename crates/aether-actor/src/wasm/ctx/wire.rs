@@ -6,8 +6,10 @@ use core::ops::{Deref, DerefMut};
 
 use super::WasmCtx;
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::blob::guest;
 use crate::model::ctx::Erased;
 use crate::wasm::bridge::asset;
+use aether_data::Blob;
 use alloc::vec::Vec;
 
 /// The window-bearing context `wire` receives (ADR-0163 §3). A thin
@@ -77,5 +79,9 @@ impl<A> AssetCatalog for WireCtx<'_, '_, A> {
 impl<A> AssetWindow for WireCtx<'_, '_, A> {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
         asset::fetch_asset(name)
+    }
+
+    fn asset_blob(&mut self, name: &str) -> Option<Blob> {
+        guest::asset_blob(name)
     }
 }

@@ -19,10 +19,13 @@
 //! ([`aether_kinds::ComponentCapabilities::assets`]). Payload access is
 //! the [`LoadWindow`]: it holds the code blob its opener brought (the
 //! load's, or the republish's) and serves [`LoadWindow::fetch`] by
-//! streaming the named asset's range out of it, and [`LoadWindow::close`]
-//! lets go of that blob when the load window ends (`init` + `wire`), so
-//! the guest's payload access ends with the window and nothing
-//! payload-sized outlives it (ADR-0163 §3/§4). An instance spawned from a
+//! streaming the named asset's range out of it, or
+//! [`LoadWindow::fetch_blob`] by viewing that range in place as a blob of
+//! its own. [`LoadWindow::close`] lets go of the code blob when the load
+//! window ends (`init` + `wire`), so the guest's payload access ends with
+//! the window and nothing payload-sized outlives it but an asset blob the
+//! guest chose to keep, which holds the code resident until it drops
+//! (ADR-0163 §3/§4). An instance spawned from a
 //! publication has no code in hand: its window answers the catalog and
 //! refuses a catalogued asset, naming `load_component`.
 //!
@@ -42,6 +45,7 @@ use sha2::{Digest, Sha256};
 use wasmparser::{Parser, Payload};
 
 use super::module::{AssetSection, Module};
+use crate::actor::native::BlobCheckIn;
 
 /// The prefix every asset custom section's name carries (ADR-0163 §2). An
 /// asset's catalog name is its section name with this prefix stripped.
@@ -107,10 +111,11 @@ pub fn read_assets_from_bytes(wasm: &[u8]) -> Result<Vec<AssetRecord>, String> {
 /// The ADR-0163 §3 load window: payload access to a component's assets,
 /// live only for the load window (`init` + `wire`). It holds the code blob
 /// its opener brought and serves [`fetch`](Self::fetch) by streaming the
-/// named asset's recorded range out of it; [`close`](Self::close) lets go
-/// of that blob so the payload path ends with the window, while the catalog
-/// metadata is retained for the instance's life (the ADR's "catalog for
-/// life, payload for the window" split).
+/// named asset's recorded range out of it, or
+/// [`fetch_blob`](Self::fetch_blob) by viewing that range in place;
+/// [`close`](Self::close) lets go of that blob so the payload path ends with
+/// the window, while the catalog metadata is retained for the instance's
+/// life (the ADR's "catalog for life, payload for the window" split).
 pub struct LoadWindow {
     /// Each asset's name and payload range in `source`.
     sections: Vec<AssetSection>,
@@ -157,6 +162,48 @@ impl LoadWindow {
     /// from, because the instance was spawned from its publication rather
     /// than loaded; or the code ends before the asset's recorded range.
     pub fn fetch(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let Some((range, source)) = self.locate(name)? else {
+            return Ok(None);
+        };
+        read_range(source, range.clone()).map(Some).ok_or_else(|| ends_early(name, &range))
+    }
+
+    /// The asset named `name` as a blob that views its range of the module's
+    /// code in place, copying nothing: `Ok(None)` when the module carries no
+    /// such asset or the window has closed. The blob holds the code's store
+    /// entry, so the code stays resident while the blob lives, past
+    /// [`close`](Self::close).
+    ///
+    /// Code the opener brought as `Owned` bytes is checked in on the first
+    /// call, and the window reads the resident entry from then on.
+    ///
+    /// # Errors
+    ///
+    /// As [`fetch`](Self::fetch); or the code cannot be read into the store.
+    pub fn fetch_blob(&mut self, blobs: &BlobCheckIn, name: &str) -> Result<Option<Blob>, String> {
+        let Some((range, source)) = self.locate(name)? else {
+            return Ok(None);
+        };
+        let resident = blobs
+            .entry(source)
+            .map_err(|error| format!("`{name}`: the module's code cannot be read: {error}"))?
+            .into_blob();
+        let asset = blobs.view(&resident, range.clone()).ok_or_else(|| ends_early(name, &range));
+        self.source = Some(resident);
+
+        asset.map(Some)
+    }
+
+    /// Where the asset named `name` sits and the code to read it from:
+    /// `Ok(None)` when the module carries no such asset or the window has
+    /// closed.
+    ///
+    /// # Errors
+    ///
+    /// The asset is in the catalog but the window has no code to read it
+    /// from, because the instance was spawned from its publication rather
+    /// than loaded.
+    fn locate(&self, name: &str) -> Result<Option<(Range<usize>, &Blob)>, String> {
         if !self.open {
             return Ok(None);
         }
@@ -170,14 +217,13 @@ impl LoadWindow {
                  (ADR-0163 §4)"
             ));
         };
-        read_range(source, section.range.clone()).map(Some).ok_or_else(|| {
-            format!("`{name}`: the module's code ends before the asset's recorded range {:?}", section.range)
-        })
+        Ok(Some((section.range.clone(), source)))
     }
 
     /// Close the window (ADR-0163 §3): let go of the module's code so
-    /// [`fetch`](Self::fetch) no longer serves — the substrate calls this
-    /// when `wire` returns. The catalog metadata is retained. Idempotent.
+    /// neither [`fetch`](Self::fetch) nor [`fetch_blob`](Self::fetch_blob)
+    /// serves — the substrate calls this when `wire` returns. The catalog
+    /// metadata is retained. Idempotent.
     pub fn close(&mut self) {
         self.open = false;
         self.source = None;
@@ -207,6 +253,11 @@ fn read_range(source: &Blob, range: Range<usize>) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The error for an asset whose recorded range runs past the module's code.
+fn ends_early(name: &str, range: &Range<usize>) -> String {
+    format!("`{name}`: the module's code ends before the asset's recorded range {range:?}")
+}
+
 impl AssetCatalog for LoadWindow {
     fn assets(&self) -> &[AssetInfo] {
         &self.catalog
@@ -224,7 +275,6 @@ mod tests {
     use wasmtime::Engine;
 
     use super::*;
-    use crate::actor::native::BlobCheckIn;
     use crate::actor::wasm::module::ModuleCache;
     use crate::store::BlobStore;
 
@@ -370,6 +420,89 @@ mod tests {
         assert!(error.contains("slime") && error.contains("load_component"), "error was: {error}");
         assert_eq!(window.fetch("missing").unwrap(), None);
         assert_eq!(window.assets().len(), 1, "the catalog answers without the bytes");
+    }
+
+    /// An open window's blob is the asset's exact bytes, viewed inside the
+    /// code's own buffer, and it keeps the code resident after the window
+    /// closed and the opener's value dropped, until the blob itself drops.
+    /// It catches a blob that copies its range into a second resident
+    /// buffer, one read from the wrong range, a view that lets the code go
+    /// with the window, and code that stays resident after the last blob.
+    #[test]
+    fn a_window_blob_views_the_code_and_keeps_it_resident_until_it_drops() {
+        let payload: &[u8] = b"slime-sprite-bytes";
+        let wasm = wasm_with_sections(&[("aether.asset.other", b"other"), ("aether.asset.slime", payload)]);
+        let wasm_len = wasm.len();
+        let (cache, blobs, store) = engine();
+        let code = blobs.check_in(wasm.into_boxed_slice());
+        let module = cache.check_in(&blobs, &code).unwrap();
+        let mut window = LoadWindow::open(&module, Some(code.clone()));
+
+        let asset = window.fetch_blob(&blobs, "slime").unwrap().expect("the asset is in the catalog");
+        let code_bytes = code.contiguous().expect("a store entry is contiguous").as_ptr_range();
+        let asset_bytes = asset.contiguous().expect("a view is contiguous");
+
+        assert_eq!(asset_bytes, payload);
+        assert!(code_bytes.contains(&asset_bytes.as_ptr()), "the blob reads the code's buffer in place");
+        assert_eq!(store.resident_bytes(), wasm_len, "a view adds no resident bytes");
+
+        window.close();
+        drop(code);
+
+        assert_eq!(asset.contiguous(), Some(payload));
+        assert_eq!(store.resident_bytes(), wasm_len, "the blob alone holds the module's code");
+
+        drop(asset);
+
+        assert_eq!(store.resident_bytes(), 0, "the code leaves with the last blob over it");
+    }
+
+    /// The window's refusals are the byte verb's: a closed window and a name
+    /// outside the catalog are plain not-found, and a sourceless window
+    /// refuses a catalogued asset naming `load_component`. It catches a blob
+    /// served after `close`, and a sourceless window answering a catalogued
+    /// asset as missing.
+    #[test]
+    fn a_window_blob_is_refused_as_the_bytes_are() {
+        let wasm = wasm_with_sections(&[("aether.asset.slime", b"slime")]);
+        let (cache, blobs, _store) = engine();
+        let code = blobs.check_in(wasm.into_boxed_slice());
+        let module = cache.check_in(&blobs, &code).unwrap();
+        let mut sourceless = LoadWindow::open(&module, None);
+        let mut window = LoadWindow::open(&module, Some(code));
+
+        let error = sourceless.fetch_blob(&blobs, "slime").unwrap_err();
+        assert!(error.contains("slime") && error.contains("load_component"), "error was: {error}");
+        assert!(sourceless.fetch_blob(&blobs, "missing").unwrap().is_none());
+        assert!(window.fetch_blob(&blobs, "missing").unwrap().is_none());
+
+        window.close();
+
+        assert!(window.fetch_blob(&blobs, "slime").unwrap().is_none());
+    }
+
+    /// Code that reached the window as `Owned` bytes, as a publish over the
+    /// wire brings it, is checked in once: every blob views that one entry,
+    /// and the byte verb reads it too. It catches a blob refused because its
+    /// source is not yet a store entry, and a second copy of the code checked
+    /// in per asset.
+    #[test]
+    fn a_window_over_owned_code_checks_it_in_once_for_its_blobs() {
+        let wasm = wasm_with_sections(&[("aether.asset.a", b"one"), ("aether.asset.b", b"two-longer")]);
+        let wasm_len = wasm.len();
+        let (cache, blobs, store) = engine();
+        let code = Blob::from(wasm);
+        let module = cache.check_in(&blobs, &code).unwrap();
+        let mut window = LoadWindow::open(&module, Some(code));
+        assert_eq!(store.resident_bytes(), 0, "the cache kept no bytes, and the window's are not checked in");
+
+        let one = window.fetch_blob(&blobs, "a").unwrap().expect("the asset is in the catalog");
+        let two = window.fetch_blob(&blobs, "b").unwrap().expect("the asset is in the catalog");
+
+        assert_eq!(one.contiguous(), Some(b"one".as_slice()));
+        assert_eq!(two.contiguous(), Some(b"two-longer".as_slice()));
+        assert_eq!(window.fetch("a").unwrap().as_deref(), Some(b"one".as_slice()));
+        assert_eq!(store.resident_bytes(), wasm_len, "both blobs view one resident copy of the code");
     }
 
     #[test]

@@ -28,6 +28,12 @@
 //! value first. Every other value, an `Owned` one included, is written as
 //! tag 0 and its bytes.
 //!
+//! One value is held without a delivery: an asset the guest takes from its
+//! load window as a blob ([`asset_blob`], ADR-0163 §3). The host places it in
+//! the blob table already held once and hands back its hash, and the SDK
+//! wraps that hold in the same `GuestHold` a decode builds, so it reads,
+//! forwards and drops as any held value does.
+//!
 //! The backing and the grant exist only on wasm32. The host build of the SDK
 //! never holds a guest blob, so there [`encode_guest`] is the plain encode
 //! with nothing kept.
@@ -37,6 +43,7 @@ use alloc::vec::Vec;
 use aether_data::{Blob, Kind};
 #[cfg(target_arch = "wasm32")]
 use {
+    crate::wasm::bridge::asset as asset_bridge,
     crate::wasm::bridge::blob as bridge,
     aether_data::{BlobBacking, BlobHash, wire},
     alloc::sync::Arc,
@@ -155,6 +162,29 @@ impl Drop for GuestHold {
 pub fn __mint_guest_blob(hash: BlobHash) -> Option<Blob> {
     let len = u64::try_from(bridge::hold(&hash)).ok()?;
     Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
+}
+
+/// The asset named `name` in this instance's load window as a `Shared` value
+/// (ADR-0163 §3), or `None` when the component carries no such asset. The
+/// host already took the hold the value owns, so this takes none: it only
+/// wraps the hash and length the host answered. No payload byte enters guest
+/// memory until the value is read.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn asset_blob(name: &str) -> Option<Blob> {
+    let (hash, len) = asset_bridge::fetch_asset_blob(name)?;
+    Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
+}
+
+/// The host build of the SDK has no load window to ask.
+///
+/// # Panics
+///
+/// Always, as every FFI import's host stub does (ADR-0063 fail-fast).
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn asset_blob(_name: &str) -> Option<Blob> {
+    panic!("aether-actor: asset_blob called outside the FFI guest");
 }
 
 /// Resolves a decode's tag-1 hashes by taking a hold on each. A decode that

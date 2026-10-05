@@ -182,11 +182,13 @@ pub struct ComponentCtx {
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
-    /// `asset_fetch_p32` / `asset_catalog_p32` host fns serve the guest's
-    /// `AssetWindow` / `AssetCatalog` surfaces from it. Closed after the
-    /// guest's `wire` returns — the window lets go of the module's code, so
-    /// `asset_fetch` traps thereafter, while the catalog metadata is
-    /// retained for the instance's life so `asset_catalog` still answers.
+    /// `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host fns
+    /// serve the guest's `AssetWindow` / `AssetCatalog` surfaces from it.
+    /// Closed after the guest's `wire` returns — the window lets go of the
+    /// module's code, so `asset_fetch` and `asset_blob` trap thereafter,
+    /// while the catalog metadata is retained for the instance's life so
+    /// `asset_catalog` still answers. An asset blob the guest took sits in
+    /// `blob_table`, not here, and outlives the close.
     /// `None` on the test paths that build a bare ctx.
     pub load_window: Option<LoadWindow>,
     /// A candidate guest's held outbox (#7067): `Some` from

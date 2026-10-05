@@ -6,11 +6,15 @@
 //! carries the exact bytes' length and content checksum — proving the guest-side `asset_fetch_p32`
 //! transport round-tripped the payload, and that it survived the window
 //! closing (the probe reply runs in an ordinary post-`wire` handler).
+//!
+//! The same `wire` takes the asset as a blob through
+//! `AssetWindow::asset_blob` and keeps it; `AssetBlobProbe` is answered with
+//! that blob, which reaches the session as the asset's exact bytes.
 
 mod tests {
     use aether_data::{EngineId, Kind};
     use aether_kinds::{LoadComponent, LogTailResult, Spawn, SpawnResult};
-    use aether_test_fixtures_kinds::{AssetProbe, AssetProbeResult};
+    use aether_test_fixtures_kinds::{AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
 
@@ -79,6 +83,40 @@ mod tests {
         assert_pulled_exact(&load_quiet_probe(&mut harness, engine));
     }
 
+    /// The blob a guest took from its load window and kept reaches a session
+    /// as the asset's exact bytes over the real hub path, from a handler
+    /// that runs after the window closed. It catches an `asset_blob` whose
+    /// hold the guest's value does not own (the reply's hash resolving to
+    /// nothing once `wire` returned), a view over the wrong range of the
+    /// module file, and a reply that leaves the process as a hash.
+    #[test]
+    fn fleetharness_guest_forwards_an_asset_blob_it_took_through_the_window() {
+        if !dist_component_available(BUNDLE) {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let load = LoadComponent {
+            wasm: read_component_wasm(BUNDLE),
+            name: None,
+            config: Vec::new(),
+            export: Some(QUIET_PROBE.to_owned()),
+        };
+        let addr = harness.load(engine, &load).addr;
+
+        let replies = harness.send(engine, &addr, &AssetBlobProbe);
+
+        let [reply] = replies.as_slice() else {
+            panic!("asset_blob_probe expected exactly one reply event, got {}", replies.len());
+        };
+        assert_eq!(reply.kind, AssetBlobProbeResult::ID, "the reply should be an AssetBlobProbeResult");
+        let blob = AssetBlobProbeResult::decode_from_bytes(&reply.payload)
+            .expect("the reply payload decodes as AssetBlobProbeResult")
+            .blob
+            .expect("the guest's `wire` took the asset as a blob");
+        assert_eq!(blob.contiguous(), Some(ASSET_FIXTURE), "the exact asset bytes reached the session");
+    }
+
     /// A module published first keeps no asset payload (ADR-0163 §3), so a
     /// later load of the same bytes, a module-cache hit, must read its
     /// assets from the code that load brought. It catches the load door not
@@ -98,8 +136,10 @@ mod tests {
 
     /// A spawn from a publication brings no bytes, so the guest's fetch of a
     /// catalogued asset in `wire` traps naming `load_component` (ADR-0163
-    /// §4) instead of reading as a missing asset. It catches a sourceless
-    /// window answering a catalogued asset with a silent `None`.
+    /// §4) instead of reading as a missing asset. The fixture's first fetch
+    /// is `asset_blob`, so that is the verb that traps here, under the
+    /// window check it shares with `asset`. It catches a sourceless window
+    /// answering a catalogued asset with a silent `None`, by either verb.
     #[test]
     fn fleetharness_a_spawned_instance_cannot_read_assets_without_its_bytes() {
         if !dist_component_available(BUNDLE) {
@@ -121,6 +161,7 @@ mod tests {
         else {
             panic!("the spawned instance answers LogTail");
         };
-        assert!(!entries.is_empty(), "the guest's `wire` fetch trapped naming load_component");
+        let trapped_on_blob = entries.iter().any(|entry| entry.message.contains("asset_blob"));
+        assert!(trapped_on_blob, "the guest's `wire` asset_blob trapped naming load_component, got {entries:?}");
     }
 }

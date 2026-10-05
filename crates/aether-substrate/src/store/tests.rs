@@ -204,3 +204,94 @@ fn an_unfinished_slab_is_freed_and_uncounted() {
     assert_eq!((store.resident_bytes(), store.slab_bytes(), store.slab_member_bytes()), (0, 0, 0));
     assert!(store.shared.lock_index().is_empty());
 }
+
+/// Catches a view that fails to hold its root (the buffer freed under a live
+/// view), a view's bytes counted a second time, and a root that stays
+/// resident after its value and its last view are gone, in either drop order.
+#[test]
+fn a_view_holds_its_root_resident_and_counts_no_bytes_of_its_own() {
+    let store = store();
+    let file: &[u8] = b"module file bytes";
+
+    let root = store.check_in(boxed(file));
+    let view = store.view(&root, 7..11).expect("the range is in bounds");
+    drop(root);
+
+    assert_eq!(view.bytes(), b"file");
+    assert_eq!(store.resident_bytes(), file.len());
+
+    drop(view);
+
+    assert_eq!(store.resident_bytes(), 0);
+    assert!(store.shared.lock_index().is_empty());
+
+    let root = store.check_in(boxed(file));
+    let view = store.view(&root, 7..11).expect("the range is in bounds");
+    drop(view);
+
+    assert_eq!(store.resident_bytes(), file.len());
+
+    drop(root);
+
+    assert_eq!(store.resident_bytes(), 0);
+    assert!(store.shared.lock_index().is_empty());
+}
+
+/// Catches an off-by-range rebase, a view of a view that holds the
+/// intermediate view rather than the root, and one whose range is checked
+/// against the root, so it could read past the view it was taken from.
+#[test]
+fn a_view_of_a_view_reads_the_rebased_range_of_the_root() {
+    let store = store();
+    let root = store.check_in(boxed(b"0123456789abcdef"));
+    let outer = store.view(&root, 4..12).expect("the range is in bounds");
+
+    let inner = store.view(&outer, 2..5).expect("the range is in bounds");
+
+    assert_eq!(outer.bytes(), b"456789ab");
+    assert_eq!(inner.bytes(), b"678");
+    assert!(store.view(&outer, 6..9).is_none(), "a range past the view's end is refused though the root has it");
+
+    drop(outer);
+    drop(root);
+
+    assert_eq!(inner.bytes(), b"678");
+    assert_eq!(store.resident_bytes(), 16);
+}
+
+/// Catches a second entry for bytes that are already resident, and a range
+/// outside the root accepted.
+#[test]
+fn a_view_reuses_a_resident_entry_and_refuses_a_range_outside_its_root() {
+    let store = store();
+    let resident = store.check_in(boxed(b"file"));
+    let root = store.check_in(boxed(b"module file bytes"));
+
+    let view = store.view(&root, 7..11).expect("the range is in bounds");
+
+    assert!(Arc::ptr_eq(&view, &resident));
+    assert!(Arc::ptr_eq(&store.view(&root, 0..17).expect("the whole root"), &root));
+    assert!(store.view(&root, 11..18).is_none());
+}
+
+/// Catches an owned check-in that adopts a view, which would keep the view's
+/// whole root resident for a holder that never chose it, and a displaced
+/// view whose drop removes the owned entry's slot.
+#[test]
+fn an_owned_check_in_takes_the_dedup_slot_from_a_view() {
+    let store = store();
+    let root = store.check_in(boxed(b"module file bytes"));
+    let view = store.view(&root, 7..11).expect("the range is in bounds");
+    let hash = view.hash();
+
+    let owned = store.check_in(boxed(b"file"));
+
+    assert!(!Arc::ptr_eq(&owned, &view));
+    assert_eq!(owned.hash(), hash);
+
+    drop(view);
+    drop(root);
+
+    assert_eq!(store.resident_bytes(), b"file".len());
+    assert!(store.shared.lock_index().get(&hash).is_some_and(|slot| ptr::eq(slot.as_ptr(), Arc::as_ptr(&owned))));
+}

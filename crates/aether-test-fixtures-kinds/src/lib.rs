@@ -18,7 +18,7 @@ extern crate alloc;
 pub mod wire_corpus;
 
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -169,6 +169,22 @@ pub struct AssetProbeResult {
     pub pulled: bool,
     pub len: u64,
     pub checksum: u64,
+}
+
+/// Driver kind: ask the `QuietProbe` fixture for the asset it took from its
+/// load window as a blob during `wire` and kept in its state (ADR-0163 §3).
+/// No-payload query; the reply is an [`AssetBlobProbeResult`].
+#[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe", default)]
+pub struct AssetBlobProbe;
+
+/// Reply kind for [`AssetBlobProbe`]: the blob the fixture took through
+/// `AssetWindow::asset_blob` in `wire`, forwarded by handle from a
+/// post-`wire` handler, or `None` when its `wire` took none. Lets a test
+/// read the exact bytes of an asset that never entered the guest's memory,
+/// after the window that served it closed.
+#[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe_result")]
+pub struct AssetBlobProbeResult {
+    pub blob: Option<Blob>,
 }
 
 /// Trigger for the `mat4_source` fixture (issue 1472). A DAG `Source`

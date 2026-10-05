@@ -22,7 +22,7 @@ pub(super) fn hash_of(bytes: &[u8]) -> BlobHash {
 /// The store entry behind a `Shared` value, recovered by downcast (ADR-0238
 /// decision 4). `None` for `Owned` bytes, or a backing that is not a store
 /// entry.
-pub(super) fn store_entry(value: &Blob) -> Option<Arc<BlobEntry>> {
+pub fn store_entry(value: &Blob) -> Option<Arc<BlobEntry>> {
     let backing: Arc<dyn BlobBacking> = Arc::clone(aether_data::__shared_backing(value)?);
     let backing: Arc<dyn Any + Send + Sync> = backing;
     backing.downcast::<BlobEntry>().ok()
@@ -62,6 +62,9 @@ enum Storage {
     /// A region of a slab the entry shares with the rest of one producer's
     /// check-in. The slab outlives every entry over it.
     Slab { slab: Arc<Slab>, range: Range<usize> },
+    /// A range of another entry's bytes. Holds that entry, and so its buffer,
+    /// resident. `of` is never itself a view.
+    View { of: Arc<BlobEntry>, range: Range<usize> },
 }
 
 impl BlobEntry {
@@ -78,10 +81,24 @@ impl BlobEntry {
         Self { hash, storage: Storage::Slab { slab, range }, home }
     }
 
-    /// Whether the entry's bytes are a region of a slab rather than its own
-    /// buffer.
-    pub(super) const fn is_slab(&self) -> bool {
-        matches!(self.storage, Storage::Slab { .. })
+    /// An entry over `range` of `of`'s bytes, which the caller found in
+    /// bounds. It owns no buffer and counts no bytes: `of` already counts
+    /// them. A view of a view points at the root entry with the range
+    /// rebased, so a chain never forms.
+    pub(super) fn view(hash: BlobHash, of: &Arc<Self>, range: Range<usize>, home: Arc<Shared>) -> Self {
+        let storage = match &of.storage {
+            Storage::View { of: root, range: outer } => {
+                Storage::View { of: Arc::clone(root), range: outer.start + range.start..outer.start + range.end }
+            }
+            Storage::Own(_) | Storage::Slab { .. } => Storage::View { of: Arc::clone(of), range },
+        };
+        Self { hash, storage, home }
+    }
+
+    /// Whether the entry's bytes are a buffer of its own, rather than a
+    /// region of a slab or a view of another entry.
+    pub(super) const fn is_own(&self) -> bool {
+        matches!(self.storage, Storage::Own(_))
     }
 
     #[must_use]
@@ -89,6 +106,7 @@ impl BlobEntry {
         match &self.storage {
             Storage::Own(bytes) => bytes,
             Storage::Slab { slab, range } => &slab.bytes()[range.clone()],
+            Storage::View { of, range } => &of.bytes()[range.clone()],
         }
     }
 
@@ -96,7 +114,7 @@ impl BlobEntry {
     pub fn len(&self) -> usize {
         match &self.storage {
             Storage::Own(bytes) => bytes.len(),
-            Storage::Slab { range, .. } => range.len(),
+            Storage::Slab { range, .. } | Storage::View { range, .. } => range.len(),
         }
     }
 
@@ -145,7 +163,10 @@ impl Drop for BlobEntry {
     /// An owned entry gives back and frees its bytes. A slab entry gives back
     /// only its live-member count; its `Arc<Slab>` field drops after this
     /// returns, once the index guard is gone, and frees the slab when it is
-    /// the last one.
+    /// the last one. A view gives back nothing, since it counted nothing; its
+    /// `Arc` to the entry it views drops after this returns as the slab's
+    /// does, and that entry's own drop frees the buffer when the view was its
+    /// last holder.
     fn drop(&mut self) {
         let owned = match &mut self.storage {
             Storage::Own(bytes) => {
@@ -157,6 +178,7 @@ impl Drop for BlobEntry {
                 self.home.slab_member_bytes.fetch_sub(range.len(), Ordering::Relaxed);
                 None
             }
+            Storage::View { .. } => None,
         };
 
         let this: *const Self = self;

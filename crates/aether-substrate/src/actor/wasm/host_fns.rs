@@ -11,7 +11,8 @@ use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
-use crate::actor::native::ResolvePathError;
+use crate::actor::native::{BlobCheckIn, ResolvePathError};
+use crate::actor::wasm::asset_manifest::LoadWindow;
 use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::actor::wasm::reply_table::{ReplyEntry, ReplyMail};
@@ -20,6 +21,7 @@ use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
+use crate::store::store_entry;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -616,20 +618,61 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "asset_fetch_p32",
         |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let bytes = {
-                let ctx = caller.data_mut();
-                let Some(window) = ctx.load_window.as_mut() else {
-                    return Err(wasmtime::Error::msg("asset_fetch: this component has no asset load window"));
-                };
-                if !window.is_open() {
-                    return Err(wasmtime::Error::msg(
-                        "asset_fetch: called outside the load window — asset payload access ends when `wire` \
-                         returns (ADR-0163 §3)",
-                    ));
-                }
-                window.fetch(&name).map_err(|error| wasmtime::Error::msg(format!("asset_fetch: {error}")))?
-            };
+            let bytes = open_load_window(caller.data_mut(), "asset_fetch")?
+                .fetch(&name)
+                .map_err(|error| wasmtime::Error::msg(format!("asset_fetch: {error}")))?;
             bytes.map_or_else(|| Ok(ASSET_NOT_FOUND), |bytes| deliver_bytes_to_guest(&mut caller, &bytes))
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0163 §3 asset load window — the blob sibling of
+    // `asset_fetch_p32` above, backing the guest's `AssetWindow::asset_blob`.
+    // It cannot be a native capability addressed by mail for the same
+    // reason: the read is synchronous inside the guest's own `init` / `wire`,
+    // and a mail round trip cannot answer inside `wire`. Unlike the fetch it
+    // moves no payload byte into guest memory: the guest gets a handle, and
+    // the bytes stay where the module's code already sits in the store.
+    //
+    // Take the asset named by `(name_ptr, name_len)` as a view of its range
+    // of the module's code (ADR-0238 decision 8), place the view in this
+    // instance's blob table with one hold, write its 32-byte hash at
+    // `hash_out_ptr`, and return its length. The SDK builds a `Blob` over
+    // that hash whose `GuestHold` owns the hold, exactly the value a tag-1
+    // decode produces, so `blob_read_p32` reads it, a send resolves it and
+    // `blob_drop_p32` gives it back. `ASSET_BLOB_NOT_FOUND` (`-1`), with
+    // nothing held or written, means the window is open but carries no asset
+    // by that name.
+    //
+    // The window rules are the fetch's: a call with no window, after the
+    // window closed, or for a catalogued asset on a window spawned from its
+    // publication traps, as does a `hash_out_ptr` outside guest memory.
+    linker.func_wrap(
+        "aether",
+        "asset_blob_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         name_ptr: u32,
+         name_len: u32,
+         hash_out_ptr: u32|
+         -> wasmtime::Result<i64> {
+            let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
+            let ctx = caller.data_mut();
+            let blobs = BlobCheckIn::new(ctx.binding.mailer().blob_store().clone());
+            let asset = open_load_window(ctx, "asset_blob")?
+                .fetch_blob(&blobs, &name)
+                .map_err(|error| wasmtime::Error::msg(format!("asset_blob: {error}")))?;
+            let Some(asset) = asset else {
+                return Ok(ASSET_BLOB_NOT_FOUND);
+            };
+            let entry = store_entry(&asset)
+                .ok_or_else(|| wasmtime::Error::msg("asset_blob: the load window served a blob outside the store"))?;
+
+            let memory = caller
+                .get_export("memory")
+                .and_then(wasmtime::Extern::into_memory)
+                .ok_or_else(|| wasmtime::Error::msg("guest exports no memory"))?;
+            memory.write(&mut caller, hash_out_ptr as usize, entry.hash().as_bytes())?;
+            // No resident entry nears `i64::MAX` bytes, so the length always fits.
+            Ok(i64::try_from(caller.data_mut().blob_table.hold_entry(entry)).unwrap_or(i64::MAX))
         },
     )?;
 
@@ -860,6 +903,28 @@ fn read_guest_hash(caller: &mut Caller<'_, ComponentCtx>, hash_ptr: u32) -> Resu
     memory.read(&*caller, hash_ptr as usize, &mut bytes).map_err(|_| BLOB_OUT_OF_BOUNDS)?;
     Ok(BlobHash::from_bytes(bytes))
 }
+
+/// The open load window `host_fn` reads an asset's payload through, or the
+/// trap it answers with when this component has no window or the window has
+/// closed. `asset_fetch_p32` and `asset_blob_p32` share it, so the two verbs
+/// cannot disagree about when the window serves.
+fn open_load_window<'a>(ctx: &'a mut ComponentCtx, host_fn: &str) -> wasmtime::Result<&'a mut LoadWindow> {
+    let Some(window) = ctx.load_window.as_mut() else {
+        return Err(wasmtime::Error::msg(format!("{host_fn}: this component has no asset load window")));
+    };
+    if !window.is_open() {
+        return Err(wasmtime::Error::msg(format!(
+            "{host_fn}: called outside the load window — asset payload access ends when `wire` returns \
+             (ADR-0163 §3)"
+        )));
+    }
+    Ok(window)
+}
+
+/// `asset_blob_p32`'s return for "the load window is open but carries no
+/// asset by the requested name": negative, so it is no length. The guest
+/// maps it to `None`.
+pub const ASSET_BLOB_NOT_FOUND: i64 = -1;
 
 /// ADR-0163 packed-return marker for "the load window is open but carries
 /// no asset by the requested name" — distinct from a real `(ptr << 32) |

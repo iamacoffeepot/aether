@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-22
+- **Amended:** 2026-10-04 — Section 3: `AssetWindow` gains `asset_blob`, which hands an asset over as a `Blob` the guest holds by handle, a range of the module's code where it already sits in the engine blob store; a blob the actor keeps or sends on holds that code resident until it drops, while the window itself still lets go when `wire` returns (issue 7393).
 
 ## Context
 
@@ -90,6 +91,19 @@ pub trait AssetWindow: AssetCatalog {         // implemented only by the init/wi
 `wire` takes a window-bearing context (`WireCtx`, dereferencing to `WasmCtx` and implementing `AssetWindow`) so "fetch later" is a compile error rather than a runtime surprise. When `wire` returns, the host drops the asset index and the payload path is gone: no hostcall remains, no cache exists, and the store pin taken for the load is released — store eviction can never strand a live actor, by construction. The catalog (names, sizes, hashes — a few hundred bytes) stays queryable for the instance's life and surfaces through `describe_component`, so tooling answers "what does this bundle carry" without executing anything.
 
 The actor pulls bytes through the window, transforms them into engine residents (`create_texture`, `load_instrument`, replayed geometry) or into its own state, and drops the rest. What survives the window is whatever the actor chose to keep — in practice handles and layout tables, not payload bytes.
+
+**Amended 2026-10-04 (issue 7393):** the window has a second verb, for an actor that routes an asset rather than reading it:
+
+```rust
+pub trait AssetWindow: AssetCatalog {
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>>;
+    fn asset_blob(&mut self, name: &str) -> Option<Blob>;   // held by handle; no byte enters guest memory until read
+}
+```
+
+`asset` copies the range into guest memory and is unchanged. `asset_blob` returns a `Blob` (ADR-0238) whose bytes are the asset's recorded range of the module's code, viewed in place in the engine blob store: nothing is copied, the guest holds the value by hash, and sending it on as a `Blob` field hands an in-process recipient the same bytes. A bundle that only routes its payload to the actor that makes it resident takes this verb; the reference bundle does.
+
+The window's guarantee is unchanged in what the window itself holds: when `wire` returns it lets go of the module's code, the hostcall traps from then on as `asset`'s does, and no payload path to the module file remains. What changes is what a kept value costs. An asset blob holds the code's store entry, so the whole module file stays resident for as long as the blob does: until the recipient it was sent to drops it, or, when the actor keeps it in its own state, until the actor drops it or its instance ends. That is "what the actor chose to keep", in the same sense as bytes copied into its state, and it is visible in the store's resident count. It is a resident range of an immutable in-memory buffer under a reference count, not a pin on the package store or a path back to the file, so store eviction still cannot strand a live actor. An instance spawned from its publication, which brought no code (§4), traps on `asset_blob` of a catalogued asset as it does on `asset`.
 
 ### 4. Residency is lifecycle
 

@@ -10,13 +10,14 @@
 //!   the dedup index. When a live entry with that hash is resident, check-in
 //!   returns it and frees the new buffer, so equal bytes are resident once.
 //!   The one exception is below: an owned check-in does not adopt a slab
-//!   entry.
+//!   entry or a view.
 //! - **The hash grants nothing.** An entry's identity is an
 //!   [`aether_data::BlobHash`], and nothing here looks an entry up by hash.
 //!
-//! # Two storage forms
+//! # Three storage forms
 //!
-//! An entry's bytes are either its own buffer or a region of a slab.
+//! An entry's bytes are its own buffer, a region of a slab, or a range of
+//! another entry's bytes.
 //!
 //! - **Own.** `BlobStore::check_in` makes an entry that owns the buffer it
 //!   was handed. Every single check-in is this form.
@@ -24,14 +25,21 @@
 //!   the lengths a producer declares, lets it fill each region in place, and
 //!   interns each region as its own entry with its own hash and dedup slot. A
 //!   producer chooses it when its members live and die together.
+//! - **View.** `BlobStore::view` interns a range of a resident entry as an
+//!   entry of its own, with its own hash and dedup slot, and copies nothing.
+//!   The view holds the entry it reads from, so that entry's whole buffer
+//!   stays resident while the view lives. A view of a view holds the root
+//!   entry with the range rebased, so views never chain. A producer chooses
+//!   it to hand out part of a buffer that is resident anyway, as a load
+//!   window does with an asset inside a module file (ADR-0163 §3).
 //!
 //! The dedup slot prefers owned storage. An owned check-in that finds a live
-//! slab entry with its hash makes a new owned entry and moves the slot to it:
-//! existing holders keep the slab entry, and later check-ins get the owned
-//! one, so a slab stays pinned only by the producer that chose it. Two live
-//! entries with one hash are sound, because the hash is the identity. A slab
-//! region whose hash is already resident, in either form, reuses the
-//! resident entry.
+//! slab entry or view with its hash makes a new owned entry and moves the
+//! slot to it: existing holders keep the entry they have, and later check-ins
+//! get the owned one, so a slab or a viewed buffer stays pinned only by the
+//! producer that chose it. Two live entries with one hash are sound, because
+//! the hash is the identity. A slab region or a view whose hash is already
+//! resident, in any form, reuses the resident entry.
 //!
 //! The cost a slab's producer accepts is retention: one live member keeps
 //! the whole slab resident, including regions dedup made redundant. The store
@@ -39,6 +47,8 @@
 //! plus every live slab. `slab_bytes` is every live slab, and
 //! `slab_member_bytes` is every live slab entry, so their difference is what
 //! slabs retain for regions no live entry uses. The gauge reports all three.
+//! A view accepts the same retention over the buffer it reads from and adds
+//! to no count: the entry it holds already counts those bytes, once.
 //!
 //! # How actors reach it
 //!
@@ -54,7 +64,8 @@
 //! A handler whose ADR-0093 worker reads bytes off the dispatcher hands that
 //! worker a `BlobCheckIn` from `NativeCtx::blob_check_in`, so the worker checks
 //! the bytes in where it read them. The handle holds a clone of this store and
-//! does nothing but check in, one buffer at a time or as one slab.
+//! does nothing but check in, one buffer at a time or as one slab, and view
+//! a range of a value it is handed.
 //!
 //! # How entries are freed
 //!
@@ -64,9 +75,11 @@
 //! slot, but only while the slot still points at this entry: a concurrent
 //! check-in of the same hash may already have found the slot dead and
 //! replaced it with a newer entry, or an owned check-in may have taken it
-//! from a slab entry. An owned entry's buffer is then freed. A slab entry
-//! lets go of its slab, which is freed, and leaves the resident count, when
-//! its last entry drops or when an unfinished builder does. A buffer of at
+//! from a slab entry or a view. An owned entry's buffer is then freed. A slab
+//! entry lets go of its slab, which is freed, and leaves the resident count,
+//! when its last entry drops or when an unfinished builder does. A view lets
+//! go of the entry it reads from, whose own drop runs when the view was its
+//! last holder. A buffer of at
 //! least [`RECLAIM_THRESHOLD_BYTES`], owned or slab, is sent to the
 //! `aether-blob-reclaim` thread and freed there, so a dispatch thread never
 //! pays to unmap a large block; a smaller buffer is freed inline.
@@ -81,9 +94,12 @@
 //! `BlobEntry::drop` takes that lock and [`Mutex`] is not reentrant. Dropping a
 //! dead `Weak` under the lock is fine. A slab's drop never takes the lock, and
 //! a slab entry's `Arc<Slab>` drops only after the entry's own drop has
-//! released it.
+//! released it. A view's `Arc` to the entry it reads from drops at the same
+//! point, so that entry's drop takes the lock only after the view's has let
+//! it go.
 
 use std::io;
+use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -100,6 +116,7 @@ mod tests;
 
 pub use entry::BlobEntry;
 pub use entry::read_all;
+pub use entry::store_entry;
 pub use slab::SlabBuilder;
 
 /// Buffers at or above this length are freed on the reclaim thread rather
@@ -163,14 +180,14 @@ impl BlobStore {
     /// Check `bytes` in as an owned entry, returning the resident entry for
     /// their hash: the already-resident one when a live owned entry has it
     /// (the new buffer is then freed), otherwise a new entry. A live slab
-    /// entry with the hash keeps its holders but loses the dedup slot to the
-    /// new entry.
+    /// entry or view with the hash keeps its holders but loses the dedup slot
+    /// to the new entry.
     pub(crate) fn check_in(&self, bytes: Box<[u8]>) -> Arc<BlobEntry> {
         let hash = entry::hash_of(&bytes);
 
         let mut index = self.shared.lock_index();
         let displaced = match resident(&index, hash) {
-            Some(found) if !found.is_slab() => {
+            Some(found) if found.is_own() => {
                 drop(index);
                 reclaim::route(&self.shared.reclaim, bytes);
                 return found;
@@ -181,8 +198,8 @@ impl BlobStore {
         let entry = Arc::new(BlobEntry::own(hash, bytes, Arc::clone(&self.shared)));
         index.insert(hash, Arc::downgrade(&entry));
         drop(index);
-        // The displaced slab entry may be its last strong reference, so it
-        // drops only now that the guard is gone.
+        // The displaced slab entry or view may be its last strong reference,
+        // so it drops only now that the guard is gone.
         drop(displaced);
 
         let resident = self.shared.resident_bytes.fetch_add(len, Ordering::Relaxed) + len;
@@ -196,10 +213,29 @@ impl BlobStore {
     /// decision 4). The envelope encoder and the module cache both reach a
     /// value's bytes through this one path.
     pub(crate) fn entry_of(&self, value: &Blob) -> Result<Arc<BlobEntry>, wire::Error> {
-        match entry::store_entry(value) {
+        match store_entry(value) {
             Some(found) => Ok(found),
             None => Ok(self.check_in(read_all(value)?)),
         }
+    }
+
+    /// The entry for `range` of `of`'s bytes, copying nothing: the
+    /// already-resident entry for those bytes' hash when one is live, in any
+    /// storage form, otherwise a new view that holds `of`, or the root entry
+    /// when `of` is itself a view. `None` when `range` runs outside `of`. See
+    /// the module docs for what a view retains.
+    pub(crate) fn view(&self, of: &Arc<BlobEntry>, range: Range<usize>) -> Option<Arc<BlobEntry>> {
+        let hash = entry::hash_of(of.bytes().get(range.clone())?);
+
+        let mut index = self.shared.lock_index();
+        let entry = resident(&index, hash).unwrap_or_else(|| {
+            let entry = Arc::new(BlobEntry::view(hash, of, range, Arc::clone(&self.shared)));
+            index.insert(hash, Arc::downgrade(&entry));
+            entry
+        });
+        drop(index);
+
+        Some(entry)
     }
 
     /// A builder for one slab of exactly the sum of `lens`, with one region

@@ -10,7 +10,9 @@
 //!   which a pin or an existing hold admits, and the value's `GuestHold` drop
 //!   gives it back (`blob_drop_p32`). Holds count live values, however many
 //!   times the guest decodes one mail. An entry leaves the table, and its
-//!   `Arc` drops, once it is neither pinned nor held.
+//!   `Arc` drops, once it is neither pinned nor held. An asset the guest
+//!   takes from its load window as a blob (`asset_blob_p32`, ADR-0163 §3)
+//!   enters already held once, for the value the SDK builds over it.
 //! - **Resolving a hash.** The `blob_*_p32` host fns, and resolve on send for
 //!   the tag-1 fields of a guest's `send_mail_p32` / `reply_mail_p32` payload,
 //!   resolve a guest-supplied hash only here, so a guessed or logged hash
@@ -95,6 +97,15 @@ impl BlobTable {
         let held = self.held.get_mut(&hash).ok_or(NotHeld)?;
         held.holds = held.holds.saturating_add(1);
         Ok(held.entry.len())
+    }
+
+    /// Admit `entry` with one hold taken, for an entry the host hands the
+    /// guest outside any delivery, and return its length. A hash the table
+    /// already has keeps its entry and gains the hold.
+    pub fn hold_entry(&mut self, entry: Arc<BlobEntry>) -> usize {
+        let held = self.held.entry(entry.hash()).or_insert(Held { entry, holds: 0, pinned: false });
+        held.holds = held.holds.saturating_add(1);
+        held.entry.len()
     }
 
     /// Give back one hold on `hash`. Once the entry is neither held nor

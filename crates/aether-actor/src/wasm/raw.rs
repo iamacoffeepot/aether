@@ -142,6 +142,17 @@ unsafe extern "C" {
     /// (the catalog metadata is retained past the window close).
     #[link_name = "asset_catalog_p32"]
     pub fn asset_catalog() -> u64;
+    /// ADR-0163 §3: take one asset through the load window as a blob this
+    /// instance holds by hash, with no payload byte entering guest memory.
+    /// `(name_ptr, name_len)` is the asset name, copied out before the call
+    /// returns. On success the host places the asset in this instance's blob
+    /// table with one hold, writes its 32-byte hash at `hash_out_ptr`, and
+    /// returns its length; `blob_drop` gives the hold back. A negative return,
+    /// with nothing held or written, means "no such asset in the open
+    /// window" (the SDK maps it to `None`). The host traps where
+    /// [`asset_fetch`] does, and on a `hash_out_ptr` outside guest memory.
+    #[link_name = "asset_blob_p32"]
+    pub fn asset_blob(name_ptr: u32, name_len: u32, hash_out_ptr: u32) -> i64;
     /// ADR-0230 §3 (#6786): prove the actor path at `(path_ptr, path_len)`, a
     /// UTF-8 slice in guest memory copied out before the call returns. The
     /// return is the packed `(ptr << 32) | len` of a live guest buffer
