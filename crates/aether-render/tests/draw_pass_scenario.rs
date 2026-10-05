@@ -1,9 +1,10 @@
 //! Draw-pass harness scenarios (ADR-0171, issue #4385): the
 //! `PassStage::Draw` arm driven end-to-end through an in-process
 //! `SubstrateHarness` — a rasterized triangle observed in pixels, two
-//! consecutive draw passes sharing a depth transient, the register-time
-//! vertex/layout classes, and a dispatch naming a geometry id that does
-//! not exist.
+//! consecutive draw passes sharing a depth transient, a depth slot one
+//! pass draws and a later pass reads (ADR-0246 decision 9), the
+//! register-time vertex/layout classes, and a dispatch naming a
+//! geometry id that does not exist.
 //!
 //! Every pixel scenario observes the program's writable output texture
 //! by drawing it through the overlay path in the same captured frame,
@@ -24,17 +25,20 @@ use std::env;
 use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, pixel_is_lit, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{
+    envelope, has_wgpu_adapter, pixel_is_lit, rgba_at, srgb_byte_to_linear,
+};
 use aether_harness_substrate_capture::visual::{Image, background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthExtent, DepthSpec, DrawPass,
-    DrawShapes, DrawTexturedQuads, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage, ProgramDispatch,
-    ProgramPass, ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent, SlotShape, SlotSpec,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat, Wrap,
+    Blend, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DepthExtent, DepthRead, DepthSpec,
+    DrawPass, DrawShapes, DrawTexturedQuads, GeometrySlotSpec, InputSlot, Mips, OutputSlot, PassLoad, PassStage,
+    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Samples, Sampling, Shape, SlotExtent,
+    SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, VertexAttribute, VertexFormat,
+    Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -54,12 +58,23 @@ fn require_wgpu_only() -> bool {
 /// window reaching the *vertex* stage is what places the geometry in
 /// depth; `fs_flat` paints the window's flat color, and `fs_nothing`
 /// returns none, as the fragment entry point of a depth-only pass does.
+///
+/// The two depth-read entry points take input 0 as a depth slot.
+/// `fs_shadowed` compares its own fragment's depth against the slot and
+/// multiplies the window's color by the result, sampling half a texel
+/// to the left of its fragment so that a fragment's coordinate lies on
+/// the boundary between two texels of the slot. `fs_stored_depth` loads
+/// the slot's texel under its fragment and writes it as green; it never
+/// names the comparison sampler, so a pass whose layout has none builds
+/// against it.
 const MODULE: &str = r"
 struct DrawParams {
     color: vec4<f32>,
     depth: f32,
 }
 @group(0) @binding(0) var<uniform> draw_params: DrawParams;
+@group(1) @binding(0) var depth_map: texture_depth_2d;
+@group(1) @binding(1) var depth_compare: sampler_comparison;
 
 @vertex
 fn vs_flat(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
@@ -78,6 +93,20 @@ fn fs_flat() -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_nothing() {}
+
+@fragment
+fn fs_shadowed(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let side = vec2<f32>(textureDimensions(depth_map));
+    let coordinate = (position.xy - vec2<f32>(0.5, 0.0)) / side;
+    let lit = textureSampleCompare(depth_map, depth_compare, coordinate, position.z);
+    return vec4<f32>(draw_params.color.rgb * lit, 1.0);
+}
+
+@fragment
+fn fs_stored_depth(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let stored = textureLoad(depth_map, vec2<i32>(position.xy), 0);
+    return vec4<f32>(0.0, stored, 0.0, 1.0);
+}
 ";
 
 /// Bytes of the module's `DrawParams` block: a `vec4<f32>` then an
@@ -524,6 +553,190 @@ fn a_depth_only_draw_pass_hides_the_far_quad_where_it_drew() {
     assert!(far_only[1] > far_only[0] + 60, "the far quad's own region must be green; got {far_only:?}");
     assert!(!pixel_is_lit(&img, 32, 24, bg, tolerance), "the depth-only pass's depth must hide the far quad");
     assert!(!pixel_is_lit(&img, 22, 24, bg, tolerance), "a depth-only pass must draw no colour");
+}
+
+/// The depth the occluder of the depth-read scenarios is drawn at, and
+/// the greater depth of the ground a later pass draws behind it.
+const OCCLUDER_DEPTH: f32 = 0.25;
+const GROUND_DEPTH: f32 = 0.5;
+
+/// How far a captured channel's linear value may sit from the value it
+/// shows. The depth-read scenarios tell apart values a quarter or more
+/// from each other.
+const LINEAR_TOLERANCE: f32 = 0.08;
+
+/// Output texel columns of the depth-read scenarios: one inside the
+/// occluder, the first one past its right edge, and one well clear of
+/// it.
+const OCCLUDED_COLUMN: u32 = 4;
+const EDGE_COLUMN: u32 = 8;
+const OPEN_COLUMN: u32 = 12;
+
+/// A depth-only pass draws geometry slot 0, an occluder over the left
+/// half of clip space, into depth slot 0 at `OCCLUDER_DEPTH`. Every
+/// depth-read scenario opens with it.
+fn occluder_pass() -> ProgramPass {
+    ProgramPass {
+        blend: Blend::Replace,
+        entry_point: "fs_nothing".to_owned(),
+        output: OutputSlot::None,
+        ..draw_pass(0, Some(0), PassLoad::Load, 0)
+    }
+}
+
+/// Run `passes` over `depth_transients` and capture the output: the
+/// occluder as geometry slot 0 under the first uniform window, and a
+/// quad over all of clip space as slot 1 under the second, green at
+/// `GROUND_DEPTH`. The output is sampled nearest and shown at 2x, so a
+/// frame pixel shows exactly one output texel.
+fn capture_depth_read(
+    harness: &mut SubstrateHarness,
+    depth_transients: Vec<DepthSpec>,
+    passes: Vec<ProgramPass>,
+) -> Image {
+    let (occluder_positions, indices) = quad_geometry(-1.0, 0.0);
+    let occluder_id = create_geometry(harness, "create_occluder", &occluder_positions, &indices);
+    let (ground_positions, _) = quad_geometry(-1.0, 1.0);
+    let ground_id = create_geometry(harness, "create_ground", &ground_positions, &indices);
+    let output_id = create_texture(
+        harness,
+        "create_nearest_output",
+        &CreateTexture {
+            width: OUTPUT_SIDE,
+            height: OUTPUT_SIDE,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Writable,
+            pixels: Blob::from(Vec::new()),
+        },
+    );
+    let program_id = registered_id(
+        harness,
+        "register",
+        &ProgramRegister {
+            wgsl: MODULE.to_owned(),
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
+            transients: Vec::new(),
+            geometries: vec![position_slot(), position_slot()],
+            depth_transients,
+            passes,
+        },
+    );
+
+    let mut uniforms = draw_params([0.0, 0.0, 0.0, 0.0], OCCLUDER_DEPTH);
+    uniforms.extend(draw_params([0.0, 1.0, 0.0, 1.0], GROUND_DEPTH));
+    let pre = vec![
+        envelope(
+            "aether.render",
+            &ProgramDispatch {
+                program_id,
+                bindings: vec![output_id],
+                geometries: vec![occluder_id, ground_id],
+                draw_sets: Vec::new(),
+                uniforms,
+            },
+        ),
+        envelope("aether.render", &output_overlay(output_id)),
+    ];
+    let captured =
+        harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture depth read");
+    decode_png(captured.captured("snap").expect("snap step ran")).expect("decode depth read capture png")
+}
+
+/// The linear green the capture shows for the output texel at `column`
+/// of row 8, the output's middle. The overlay shows texel `(c, r)` at
+/// frame pixel `(16 + 2c, 8 + 2r)`.
+fn linear_green(img: &Image, column: u32) -> f32 {
+    srgb_byte_to_linear(rgba_at(img, 16 + 2 * column, 24)[1])
+}
+
+fn near(value: f32, expected: f32) -> bool {
+    (value - expected).abs() <= LINEAR_TOLERANCE
+}
+
+/// ADR-0246 decision 9, a shadow comparison: a depth-only pass draws an
+/// occluder into a `Fixed` depth slot, and a color pass draws the
+/// ground behind it, attaching a second depth slot of its own and
+/// reading the first through `DepthRead::Compare`. The ground is dark
+/// under the occluder and lit beside it, and the column at the
+/// occluder's edge, whose sample lies between an occluded texel and an
+/// open one, is a fraction between the two.
+///
+/// The two slots resolve to one pool class, so they are told apart only
+/// by the pool's assignment. The named bugs: the depth texture created
+/// without `TEXTURE_BINDING`, a layout entry that is not a depth
+/// texture or not a comparison sampler, or the two slots landing on one
+/// texture, each of which the device refuses, leaving every column
+/// unlit; the comparison inverted, which swaps the dark and lit
+/// columns; a nearest sampler, under which the edge column reads dark
+/// or lit; and a backend that refuses a linear comparison sampler on
+/// `Depth32Float`, which the ADR takes from the specification.
+#[test]
+fn a_color_pass_compares_against_a_depth_slot_an_earlier_pass_drew() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let shadow_map = DepthSpec { extent: DepthExtent::Fixed { side: OUTPUT_SIDE }, samples: Samples::One };
+    let scene_depth = DepthSpec { extent: DepthExtent::Output(SlotExtent::Full), samples: Samples::One };
+    let ground_pass = ProgramPass {
+        entry_point: "fs_shadowed".to_owned(),
+        inputs: vec![InputSlot::Depth { index: 0, read: DepthRead::Compare }],
+        ..draw_pass(1, Some(1), PassLoad::Clear, second_window())
+    };
+    let img = capture_depth_read(&mut harness, vec![shadow_map, scene_depth], vec![occluder_pass(), ground_pass]);
+
+    let occluded = linear_green(&img, OCCLUDED_COLUMN);
+    let edge = linear_green(&img, EDGE_COLUMN);
+    let open = linear_green(&img, OPEN_COLUMN);
+    assert!(near(open, 1.0), "the ground beside the occluder passes the comparison and is lit: {open}");
+    assert!(near(occluded, 0.0), "the ground under the occluder fails the comparison and is dark: {occluded}");
+    assert!(
+        near(edge, 0.5),
+        "a sample between an occluded texel and an open one filters the two comparisons to a half: {edge}",
+    );
+}
+
+/// ADR-0246 decision 9, a texel read: the depth-only pass draws the
+/// occluder into a depth slot, and a fragment pass reads the slot
+/// through `DepthRead::Texel` and writes the depth it loads as green.
+/// The left half reads the depth the occluder was drawn at and the
+/// right half the far plane the slot was cleared to. The named bugs: a
+/// sampler entry left in a `Texel` input's layout, which the bind group
+/// built without one does not satisfy, leaving the output unwritten;
+/// the reader bound to a texture other than the one the first pass drew
+/// (both halves read one value); and a slot not cleared before its
+/// first write, which leaves the right half whatever the pool last
+/// held.
+#[test]
+fn a_fragment_pass_loads_the_depth_an_earlier_pass_stored() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let depth_slot = DepthSpec { extent: DepthExtent::Fixed { side: OUTPUT_SIDE }, samples: Samples::One };
+    let reader_pass = ProgramPass {
+        stage: PassStage::Fragment,
+        blend: Blend::Replace,
+        entry_point: "fs_stored_depth".to_owned(),
+        inputs: vec![InputSlot::Depth { index: 0, read: DepthRead::Texel }],
+        output: OutputSlot::Binding { index: 0 },
+        uniform_offset: 0,
+        uniform_length: 0,
+        repeat: None,
+    };
+    let img = capture_depth_read(&mut harness, vec![depth_slot], vec![occluder_pass(), reader_pass]);
+
+    let drawn = linear_green(&img, OCCLUDED_COLUMN);
+    let cleared = linear_green(&img, OPEN_COLUMN);
+    assert!(near(drawn, OCCLUDER_DEPTH), "a texel the occluder covers holds the depth it was drawn at: {drawn}");
+    assert!(near(cleared, 1.0), "a texel nothing was drawn to holds the far plane: {cleared}");
 }
 
 /// ADR-0171 register validation: the draw classes reply their own

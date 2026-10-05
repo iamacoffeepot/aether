@@ -492,11 +492,10 @@ Each pass reads through `InputSlot` values and writes one `OutputSlot`:
   index wrote, resolved at register time. A ping-pong chain reads "the
   previous pass's result" without naming the transient twice.
 - `InputSlot::Depth { index, read }` — a depth transient by list position,
-  read as `read` declares (`DepthRead::Texel` or `DepthRead::Compare`). Register
-  refuses every depth input until
-  [#7451](https://github.com/iamacoffeepot/aether/issues/7451) binds one at
-  dispatch; the refusals are listed under [Register-time
-  validation](#register-time-validation).
+  read as `read` declares: `DepthRead::Texel` loads the stored depth and
+  `DepthRead::Compare` compares a reference depth against it. The slot is a
+  `Samples::One` slot that an earlier pass attaches and this pass does not; see
+  [Reading a depth slot](#reading-a-depth-slot).
 - `OutputSlot::Binding { index }` / `OutputSlot::Transient { index }` — a
   dispatch binding (which must be declared a `Target` and resolve to a
   `Writable` registry texture at dispatch) or a transient.
@@ -669,8 +668,74 @@ of the pass, and a plane another program wrote stands at whatever format that
 program declared.
 
 A module whose entry point disagrees with its slots — it reads an array where
-the slot is a `Texture`, or samples through a sampler on a `Texel` input —
-fails pipeline creation, and the register replies `Err`.
+the slot is a `Texture`, samples through a sampler on a `Texel` input, declares
+a `texture_2d<f32>` where the input is a depth slot, or reads a `Compare` input
+through a plain `sampler` — fails pipeline creation, and the register replies
+`Err`.
+
+### Reading a depth slot
+
+An `InputSlot::Depth { index, read }` input binds the depth transient at
+`index` under the numbering every input has. Input `n` is a `texture_depth_2d`
+at `@binding(2 * n)`, and `read` decides the rest:
+
+- `DepthRead::Texel` — no sampler. `@binding(2 * n + 1)` is left out of the
+  layout, as it is for a `Texel` binding, and `textureLoad` returns the stored
+  depth.
+- `DepthRead::Compare` — a `sampler_comparison` at `@binding(2 * n + 1)`, read
+  with `textureSampleCompare` in a fragment stage and
+  `textureSampleCompareLevel` in any stage. A `Compare` input can still be read
+  with `textureLoad`.
+
+The read is declared on the input, not on the slot, so one pass may compare a
+slot that another loads. Every stage that sees group 1 may read one: the
+fragment stage of any pass, the authored vertex stage of a draw pass, and a
+compute pass.
+
+The comparison sampler is fixed. It compares `LessEqual`, the test a pass
+attaches a depth slot under, so a reference depth passes exactly where a
+fragment at that depth would have been drawn into the slot, and a texel nothing
+was drawn to holds the far plane and passes every reference. It clamps, reads
+the slot's one level, and is linear: at the edge of what was drawn the result
+is a fraction between 0 and 1, filtered from the comparisons around the
+coordinate. The engine applies no depth bias, so a pass that compares against a
+shadow map offsets its reference depth in its own shader.
+
+```wgsl
+// inputs: [ a Compare depth slot, a Texel depth slot ]
+@group(1) @binding(0) var shadow_map: texture_depth_2d;      // input 0
+@group(1) @binding(1) var shadow_compare: sampler_comparison;
+@group(1) @binding(2) var scene_depth: texture_depth_2d;     // input 1; nothing at binding 3
+
+@fragment
+fn fs_lit(@builtin(position) position: vec4<f32>, @location(0) light: vec3<f32>) -> @location(0) vec4<f32> {
+    // `light` is the fragment in the light's clip space: xy mapped to 0..1, z its depth there.
+    let lit = textureSampleCompare(shadow_map, shadow_compare, light.xy, light.z - 0.002);
+    let behind = textureLoad(scene_depth, vec2<i32>(position.xy), 0);
+    return vec4<f32>(vec3<f32>(lit * behind), 1.0);
+}
+```
+
+```jsonc
+"inputs": [ { "Depth": { "index": 0, "read": "Compare" } },
+            { "Depth": { "index": 1, "read": "Texel" } } ]
+```
+
+What a slot can be read as follows from what it is:
+
+- Only a `Samples::One` slot is read. A multisampled depth texture can be
+  neither compared nor sampled and a depth attachment is never resolved, so a
+  consumer that wants the depth of a scene drawn at `Four` draws the same
+  geometry again in a [depth-only pass](#depth-only-passes) onto a `One`
+  `Output` slot and reads that.
+- An earlier pass of the program attaches the slot, and the reading pass does
+  not: a depth slot gets its contents only from the passes that attach it, and
+  the device refuses a texture that is a written attachment and a bound texture
+  in one pass. A pass may attach one slot and read another.
+- A slot holds nothing between dispatches. The first pass of a dispatch to
+  attach it clears it, so the passes that draw a shadow map and the passes that
+  read it are passes of one program, and the map is drawn in every dispatch
+  that reads it.
 
 ## Draw passes
 
@@ -778,9 +843,10 @@ writes it without declaring one rejects at register.
 
 A `Draw`, `DrawIndexedIndirect` or `DrawSets` pass that declares
 `output: OutputSlot::None` is **depth-only**: it attaches its depth slot and no
-color target. A shadow map is a `Fixed` slot written by depth-only passes, and a
-depth pre-pass is the scene drawn depth-only into an `Output` slot that a later
-color pass names. The rules, each refused at register when broken:
+color target. A shadow map is a `Fixed` slot written by depth-only passes and
+[read](#reading-a-depth-slot) by the passes that light the scene, and a depth
+pre-pass is the scene drawn depth-only into an `Output` slot that a later color
+pass names. The rules, each refused at register when broken:
 
 - The pass names a depth slot and writes it. `depth: None` would attach
   nothing, and a `DrawSets` pass with `DepthWrite::TestOnly` would write
@@ -1027,9 +1093,7 @@ A `Fragment` pass that declares `OutputSlot::None` keeps its own class: `pass N:
 a fragment pass must declare a texture output`.
 
 The depth-input classes, checked in this order for every `InputSlot::Depth` a
-pass declares. The last stands until
-[#7451](https://github.com/iamacoffeepot/aether/issues/7451) binds a depth
-input at dispatch, so today no program holding a depth input registers:
+pass declares:
 
 | Class | Reason shape |
 |---|---|
@@ -1037,7 +1101,6 @@ input at dispatch, so today no program holding a depth input registers:
 | Multisampled depth input | `pass N input I reads depth transient D, which is declared Four — a multisampled depth slot can be neither compared nor sampled, so a pass reads a One slot` |
 | Self-attached depth input | `pass N input I reads depth transient D, which the same pass attaches — a pass cannot read the depth slot it draws into` |
 | Undrawn depth input | `pass N input I reads depth transient D before any earlier pass attaches it` |
-| Unbound depth input | `pass N input I reads depth transient D, and reading a depth slot from a pass is not bound yet (iamacoffeepot/aether#7451)` |
 
 The compute class, checked for every pass that declares `stage: Compute`
 beside the compute-output class (`pass N: a compute pass must declare
@@ -1185,6 +1248,12 @@ allocates nothing. A `DepthExtent::Fixed` slot's class is its own side, so a
 resize of the output leaves it in the class, and on the texture, it had; an
 `Output` slot moves to the class of its new size as a transient does.
 
+A `One` depth texture is created as an attachment a pass can also bind, as a
+`One` transient is, so a slot some pass reads and one that is only attached are
+the same class and reading a slot allocates nothing more. A `Four` depth
+texture is an attachment only. The sample count is part of the class, so the
+two never stand in for each other.
+
 ## Determinism
 
 Nothing on the GPU rolls dice. Accidents — jitters, noise windows, spatter
@@ -1200,8 +1269,10 @@ confidence comes from small single-pass scenarios;
 is the canonical set, and
 [`draw_pass_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/draw_pass_scenario.rs)
 alongside it covers the draw stage in rasterized pixels — a triangle observed
-through the overlay path, two passes sharing a depth transient, the register
-classes, and a dispatch naming a geometry id that does not exist. The registry
+through the overlay path, two passes sharing a depth transient, a color pass
+comparing against a depth slot a depth-only pass drew and a fragment pass
+loading one, the register classes, and a dispatch naming a geometry id that
+does not exist. The registry
 lifecycle over mail has its own scenario in
 [`geometry_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/geometry_scenario.rs),
 and the draw-set lifecycle in

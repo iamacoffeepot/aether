@@ -53,8 +53,8 @@ pub fn program_uniform_layout(
     })
 }
 
-/// How the texture at one program input is viewed, which is also the
-/// type the shader declares for it.
+/// How the color texture at one program input is viewed, which is also
+/// the type the shader declares for it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProgramInputView {
     /// `texture_2d<f32>`.
@@ -63,7 +63,7 @@ pub enum ProgramInputView {
     Array,
 }
 
-/// The sampler that accompanies one program input's texture.
+/// The sampler that accompanies one program input's color texture.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProgramInputSampler {
     /// A filtering sampler over a filterable texture.
@@ -75,11 +75,65 @@ pub enum ProgramInputSampler {
     None,
 }
 
-/// One input of a program pass, as its group-1 layout needs it.
+/// What accompanies a depth texture at one program input: a depth
+/// texture is compared or loaded, and never read through a plain
+/// sampler.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ProgramInput {
-    pub view: ProgramInputView,
-    pub sampler: ProgramInputSampler,
+pub enum ProgramDepthSampler {
+    /// A `sampler_comparison`, read with `textureSampleCompare` or
+    /// `textureSampleCompareLevel`.
+    Comparison,
+    /// No sampler: the shader reads the stored depth with `textureLoad`.
+    None,
+}
+
+/// One input of a program pass, as its group-1 layout needs it: a color
+/// texture with the sampler that reads it, or a depth texture with the
+/// one a depth texture takes. The two are separate forms so that a
+/// depth texture under a filtering sampler, which wgpu refuses only
+/// once a pipeline is built against the layout, cannot be described.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProgramInput {
+    /// `texture_2d<f32>` or `texture_2d_array<f32>`.
+    Color { view: ProgramInputView, sampler: ProgramInputSampler },
+    /// `texture_depth_2d`.
+    Depth { sampler: ProgramDepthSampler },
+}
+
+impl ProgramInput {
+    /// The texture entry's sample type and view dimension. A color
+    /// entry is filterable exactly when its sampler is
+    /// [`ProgramInputSampler::Filtering`]. Declaring the other two
+    /// unfilterable is what lets a texture of any format bind there: a
+    /// filterable texture satisfies an unfilterable entry, and the
+    /// reverse does not hold.
+    fn texture(self) -> (wgpu::TextureSampleType, wgpu::TextureViewDimension) {
+        match self {
+            Self::Color { view, sampler } => {
+                let filterable = sampler == ProgramInputSampler::Filtering;
+                let view_dimension = match view {
+                    ProgramInputView::Plain => wgpu::TextureViewDimension::D2,
+                    ProgramInputView::Array => wgpu::TextureViewDimension::D2Array,
+                };
+                (wgpu::TextureSampleType::Float { filterable }, view_dimension)
+            }
+            Self::Depth { .. } => (wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
+        }
+    }
+
+    /// The sampler entry's binding type, or `None` for an input the
+    /// shader reads with `textureLoad`.
+    fn sampler(self) -> Option<wgpu::SamplerBindingType> {
+        match self {
+            Self::Color { sampler: ProgramInputSampler::Filtering, .. } => Some(wgpu::SamplerBindingType::Filtering),
+            Self::Color { sampler: ProgramInputSampler::NonFiltering, .. } => {
+                Some(wgpu::SamplerBindingType::NonFiltering)
+            }
+            Self::Depth { sampler: ProgramDepthSampler::Comparison } => Some(wgpu::SamplerBindingType::Comparison),
+            Self::Color { sampler: ProgramInputSampler::None, .. }
+            | Self::Depth { sampler: ProgramDepthSampler::None } => None,
+        }
+    }
 }
 
 /// Group-1 layout for a pass's inputs, in slot order. Input `n` is the
@@ -87,12 +141,6 @@ pub struct ProgramInput {
 /// `@binding(2n + 1)`. An input without a sampler leaves `2n + 1` out
 /// of the layout, so the inputs after it keep their binding numbers
 /// whatever the inputs before them declare.
-///
-/// The texture entry is filterable exactly when its sampler is
-/// [`ProgramInputSampler::Filtering`]. Declaring the other two
-/// unfilterable is what lets a texture of any format bind there: a
-/// filterable texture satisfies an unfilterable entry, and the reverse
-/// does not hold.
 ///
 /// Visible to every stage the caller names, for the same reason the
 /// uniform window is (ADR-0172): a draw pass whose vertex stage
@@ -116,26 +164,16 @@ pub fn program_inputs_layout(
     let mut entries = Vec::with_capacity(inputs.len() * 2);
     for (input, description) in inputs.iter().enumerate() {
         let base = u32::try_from(input * 2).expect("program input binding index fits u32");
-        let view_dimension = match description.view {
-            ProgramInputView::Plain => wgpu::TextureViewDimension::D2,
-            ProgramInputView::Array => wgpu::TextureViewDimension::D2Array,
-        };
-        let filterable = description.sampler == ProgramInputSampler::Filtering;
+        let (sample_type, view_dimension) = description.texture();
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base,
             visibility,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable },
-                view_dimension,
-                multisampled: false,
-            },
+            ty: wgpu::BindingType::Texture { sample_type, view_dimension, multisampled: false },
             count: None,
         });
 
-        let sampler = match description.sampler {
-            ProgramInputSampler::Filtering => wgpu::SamplerBindingType::Filtering,
-            ProgramInputSampler::NonFiltering => wgpu::SamplerBindingType::NonFiltering,
-            ProgramInputSampler::None => continue,
+        let Some(sampler) = description.sampler() else {
+            continue;
         };
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base + 1,
@@ -409,11 +447,15 @@ pub fn build_program_compute_pipeline(
 }
 
 /// Create one depth transient for the program transient pool
-/// (ADR-0171): a `Depth32Float` attachment of `sample_count` samples
-/// per texel that draw passes clear and test against, beside a color
-/// attachment of the same size or, under a depth-only pass, alone.
-/// Render-attachment only — nothing samples it or resolves it, and the
-/// pass that shares it does so by attaching it again.
+/// (ADR-0171, ADR-0246 decision 9): a `Depth32Float` attachment of
+/// `sample_count` samples per texel that draw passes clear and test
+/// against, beside a color attachment of the same size or, under a
+/// depth-only pass, alone. A single-sample one is also a texture a
+/// later pass binds — `RENDER_ATTACHMENT | TEXTURE_BINDING`, the rule
+/// [`create_program_transient`] has — so a slot that is read and one
+/// that is only attached are one pool class. A multisampled one is an
+/// attachment only: it can be neither compared nor sampled, and a
+/// depth attachment is never resolved.
 #[must_use]
 pub fn create_program_depth_transient(
     device: &wgpu::Device,
@@ -428,9 +470,20 @@ pub fn create_program_depth_transient(
         sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: PROGRAM_DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: transient_usage(sample_count),
         view_formats: &[],
     })
+}
+
+/// What a pooled color or depth transient of `sample_count` samples per
+/// texel is created for: a single-sample one is attached and bound, and
+/// a multisampled one is attached only.
+fn transient_usage(sample_count: u32) -> wgpu::TextureUsages {
+    if sample_count > 1 {
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+    } else {
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+    }
 }
 
 /// What one pooled transient texture is created as: its size, its
@@ -455,11 +508,7 @@ pub struct ProgramTransientSpec {
 /// recorded here.
 #[must_use]
 pub fn create_program_transient(device: &wgpu::Device, spec: ProgramTransientSpec) -> wgpu::Texture {
-    let usage = if spec.sample_count > 1 {
-        wgpu::TextureUsages::RENDER_ATTACHMENT
-    } else {
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
-    };
+    let usage = transient_usage(spec.sample_count);
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("aether program transient"),
         size: wgpu::Extent3d { width: spec.width.max(1), height: spec.height.max(1), depth_or_array_layers: 1 },

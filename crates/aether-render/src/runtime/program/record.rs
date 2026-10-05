@@ -26,15 +26,15 @@ use super::super::instances::InstancesRegistry;
 use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
 use super::super::texture::{BoundTexture, TextureRegistry};
-use super::cache::{BoundInput, BoundStorage, CacheParts, TransientAssignment};
+use super::cache::{BoundInput, BoundStorage, CacheParts, ExtentLayout, TransientAssignment};
 use super::draw_sets::encode::{DrawSetSources, RowBuffers};
 use super::draw_sets::{dispatch as draw_sets_dispatch, encode as draw_sets_encode};
 use super::sampler::{Filter, ProgramSamplers};
 use super::submit::FramePasses;
 use super::timing::FrameQueries;
-use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolve_extent};
+use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedInput, ResolvedSlot, resolve_extent};
 use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
-use crate::{GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureUsage};
+use crate::{DepthRead, GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureUsage};
 
 /// What [`record_dispatch`] realizes, pools, and encodes against: the
 /// program, the sampler table, the transient pool, the resource
@@ -480,7 +480,7 @@ fn check_dispatch(
         if let Some(ResolvedSlot::Binding(output)) = pass_plan.output {
             let output_id = dispatch.bindings[output as usize];
             for input in &pass_plan.inputs {
-                if let ResolvedSlot::Binding(input_binding) = input
+                if let ResolvedInput::Slot(ResolvedSlot::Binding(input_binding)) = input
                     && dispatch.bindings[*input_binding as usize] == output_id
                 {
                     tracing::warn!(
@@ -498,6 +498,92 @@ fn check_dispatch(
         }
     }
     Some(reference)
+}
+
+/// What the inputs of a dispatch's passes resolve against: the plan,
+/// the pool assignments and the pool they index, the texture registry
+/// and the dispatch's bindings into it, and the sampler table.
+struct InputSources<'a> {
+    plan: &'a ProgramPlan,
+    extent: &'a ExtentLayout,
+    pool: &'a HashMap<TransientKey, Vec<wgpu::TextureView>>,
+    textures: &'a TextureRegistry,
+    samplers: &'a ProgramSamplers,
+    dispatch: &'a ProgramDispatch,
+}
+
+impl<'a> InputSources<'a> {
+    fn pooled_view(&self, assignment: TransientAssignment) -> &'a wgpu::TextureView {
+        &self.pool[&assignment.key][assignment.physical]
+    }
+
+    /// The pooled texture depth slot `slot` was assigned. A pass
+    /// attaches or reads only a slot some pass attaches (a depth input
+    /// of a slot no earlier pass attaches is refused at register), and
+    /// every attached slot is assigned.
+    fn depth_assignment(&self, slot: u32) -> TransientAssignment {
+        self.extent.depth_assignments[slot as usize].expect("depth slots a pass names were assigned physical slots")
+    }
+
+    fn depth_view(&self, slot: u32) -> &'a wgpu::TextureView {
+        self.pooled_view(self.depth_assignment(slot))
+    }
+
+    /// What `input` contributes to the key of its pass's cached bind
+    /// group: the identity of the texture it binds. The sampler is
+    /// fixed by the plan and the texture, so it adds nothing.
+    fn bound(&self, input: ResolvedInput) -> BoundInput {
+        let pooled = match input {
+            ResolvedInput::Slot(ResolvedSlot::Binding(binding)) => {
+                return BoundInput::Binding(self.dispatch.bindings[binding as usize]);
+            }
+            ResolvedInput::Slot(ResolvedSlot::Transient(transient)) => self.extent.read(transient),
+            ResolvedInput::Depth { slot, .. } => self.depth_assignment(slot),
+        };
+        BoundInput::Pooled(pooled.key, pooled.physical)
+    }
+
+    /// The view `input` binds at `@binding(2n)` and the sampler it
+    /// binds at `@binding(2n + 1)`. `None` is an input whose layout has
+    /// no sampler entry: a `Sampling::Texel` binding, or a
+    /// `DepthRead::Texel` depth slot. A `DepthRead::Compare` depth slot
+    /// takes the comparison sampler, and a color slot the sampler its
+    /// declaration and the bound texture's filter pick.
+    fn resources(
+        &self,
+        cache: &CacheParts<'a>,
+        input: ResolvedInput,
+    ) -> (&'a wgpu::TextureView, Option<&'a wgpu::Sampler>) {
+        let slot = match input {
+            ResolvedInput::Slot(slot) => slot,
+            ResolvedInput::Depth { slot, read: DepthRead::Compare } => {
+                return (self.depth_view(slot), Some(self.samplers.comparison()));
+            }
+            ResolvedInput::Depth { slot, read: DepthRead::Texel } => return (self.depth_view(slot), None),
+        };
+        let (view, nearest) = match slot {
+            ResolvedSlot::Binding(binding) => {
+                let bound = self
+                    .textures
+                    .resolve(self.dispatch.bindings[binding as usize])
+                    .expect("the dispatch check resolved every binding id");
+                (cache.binding_view(binding), bound.nearest())
+            }
+            ResolvedSlot::Transient(transient) => {
+                (self.pooled_view(self.extent.read(transient)), !self.plan.slot_format(slot).filterable())
+            }
+        };
+        let Sampling::Filtered { wrap, mips } = self.plan.slot_spec(slot).sampling else {
+            return (view, None);
+        };
+
+        let filter = if nearest {
+            Filter::Nearest
+        } else {
+            Filter::Linear
+        };
+        (view, Some(self.samplers.get(filter, wrap, mips)))
+    }
 }
 
 /// The checked dispatch and its derived state [`encode_passes`] records
@@ -533,19 +619,9 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
     let geometries = sources.geometries;
     let layout = cache.layout;
     let extent = cache.extent;
-    let pooled_view = |assignment: TransientAssignment| &pool[&assignment.key][assignment.physical];
-    let depth_view = |slot: u32| {
-        let assignment =
-            extent.depth_assignments[slot as usize].expect("depth slots a pass names were assigned physical slots");
-        pooled_view(assignment)
-    };
-    let bound_input = |slot: &ResolvedSlot| match slot {
-        ResolvedSlot::Binding(binding) => BoundInput::Binding(dispatch.bindings[*binding as usize]),
-        ResolvedSlot::Transient(transient) => {
-            let assignment = extent.read(*transient);
-            BoundInput::Transient(assignment.key, assignment.physical)
-        }
-    };
+    let input_sources = InputSources { plan, extent, pool, textures, samplers, dispatch };
+    let pooled_view = |assignment: TransientAssignment| input_sources.pooled_view(assignment);
+    let depth_view = |slot: u32| input_sources.depth_view(slot);
     let transient_view = |transient: u32| pooled_view(extent.attached(transient));
     // The single-sample view a pass's multisampled output resolves into
     // when an iteration ends: only the last iteration of the last pass
@@ -577,39 +653,24 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
     {
         let pass_scopes = GpuErrorScopes::push(&gpu.device);
         input_key.clear();
-        input_key.extend(pass_plan.inputs.iter().map(bound_input));
+        input_key.extend(pass_plan.inputs.iter().map(|input| input_sources.bound(*input)));
         if cache.inputs_stale(pass, &input_key) {
             input_entries.clear();
-            for (input, slot) in pass_plan.inputs.iter().enumerate() {
-                let (view, nearest) = match slot {
-                    ResolvedSlot::Binding(binding) => {
-                        let bound = textures
-                            .resolve(dispatch.bindings[*binding as usize])
-                            .expect("the dispatch check resolved every binding id");
-                        (cache.binding_view(*binding), bound.nearest())
-                    }
-                    ResolvedSlot::Transient(transient) => {
-                        (pooled_view(extent.read(*transient)), !plan.slot_format(*slot).filterable())
-                    }
-                };
+            for (input, resolved) in pass_plan.inputs.iter().enumerate() {
+                let (view, sampler) = input_sources.resources(cache, *resolved);
                 let base = u32::try_from(input * 2).expect("program input binding index fits u32");
                 input_entries
                     .push(wgpu::BindGroupEntry { binding: base, resource: wgpu::BindingResource::TextureView(view) });
 
-                // A `Texel` input has no sampler entry in the layout,
-                // and `base + 1` stays unused so later inputs keep
-                // their numbers.
-                let Sampling::Filtered { wrap, mips } = plan.slot_spec(*slot).sampling else {
+                // An input read texel by texel has no sampler entry in
+                // the layout, and `base + 1` stays unused so later
+                // inputs keep their numbers.
+                let Some(sampler) = sampler else {
                     continue;
-                };
-                let filter = if nearest {
-                    Filter::Nearest
-                } else {
-                    Filter::Linear
                 };
                 input_entries.push(wgpu::BindGroupEntry {
                     binding: base + 1,
-                    resource: wgpu::BindingResource::Sampler(samplers.get(filter, wrap, mips)),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 });
             }
             let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {

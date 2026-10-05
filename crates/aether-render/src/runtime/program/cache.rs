@@ -25,9 +25,9 @@
 //!   `write_texture_layer` uploads into the texture it was realized as.
 //! - A pass's input bind group is keyed on the resolved identity of every
 //!   slot it samples — the texture id for a binding, the pool class and
-//!   physical index of the texture a transient is read from — so
-//!   rebinding, a resize, or a pool class change rebuilds it and nothing
-//!   else does.
+//!   physical index of the texture a transient or a depth slot is read
+//!   from — so rebinding, a resize, or a pool class change rebuilds it
+//!   and nothing else does.
 //! - The uniform bind groups name a staging buffer, and a queued write
 //!   lands before any pass of the frame runs, so each dispatch of a
 //!   program within a frame stages into its own buffer. The slots are
@@ -199,15 +199,17 @@ impl ExtentLayout {
     }
 }
 
-/// What one input slot resolved to, at the granularity that decides
-/// which GPU view a bind group entry names. A binding resolves to a
-/// texture id — never recycled, and realized once — and a transient to
-/// the pool class and physical index of the texture it is read from,
-/// which name a view the pool only ever appends to.
+/// What one input resolved to, at the granularity that decides which
+/// GPU view a bind group entry names. A binding resolves to a texture
+/// id — never recycled, and realized once — and a transient or a depth
+/// slot to the pool class and physical index of the texture it is read
+/// from, which name a view the pool only ever appends to. A depth
+/// slot's class carries the depth format, so it never equals a
+/// transient's.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BoundInput {
     Binding(u32),
-    Transient(TransientKey, usize),
+    Pooled(TransientKey, usize),
 }
 
 /// Identity of one resident geometry buffer at the granularity that
