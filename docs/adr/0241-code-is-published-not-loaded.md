@@ -68,11 +68,22 @@ needs from it once, and then lets the bytes go:
 ```rust
 pub struct Module {
     hash: BlobHash,                   // identity: the hash of the wasm bytes it was made from
-    compiled: Arc<wasmtime::Module>,  // compiled once per hash per engine
+    compiled: Arc<wasmtime::Module>,  // compiled once per code per engine, shared by every
+                                      // module whose bytes differ only in asset sections
     manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds,
                                       // and each asset's catalog entry and byte range
 }
 ```
+
+The compile is keyed by the module's **code**: its bytes with every
+`aether.asset.*` custom section removed whole, hashed the same way. The
+compiler never reads an asset section, so asset bundles packed from one build
+(ADR-0163) are separate modules, each with its own hash, manifest, asset
+catalog and publication, over one compiled `wasmtime::Module`. The bytes
+compiled are exactly the bytes that key hashes, and a module with no asset
+section is its own code. Every other custom section stays in the code: the
+name section feeds trap symbolication, and the manifest sections differ only
+between modules that are different modules.
 
 The wasm bytes are used once, to compile and to parse, and are not retained,
 and neither is any asset's payload. Nothing re-parses a section per load or
@@ -83,7 +94,7 @@ which reads the asset's recorded range from the code its opener brought (a
 load's or a republish's bytes) and lets go of that code when the window
 closes. A spawn from a publication brings no bytes, so its window answers the
 catalog and refuses a catalogued asset, naming `load_component`. An entry lives while anything holds it: a publication, a running
-instance, or a held `Module`.
+instance, or a held `Module`. Compiled code lives while any entry over it does.
 
 A `Module` never leaves its engine. Compiled code is tied to the engine's
 wasmtime version, configuration, and target, so the portable form of code is
