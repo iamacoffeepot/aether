@@ -78,7 +78,12 @@ fn fs_invert(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 ```
 
 Register it with the declared graph: two bindings (source, output), one
-transient for the ping-pong hop, and two passes. Pass 0 reads binding 0 and
+transient for the ping-pong hop, and two passes. Each slot declares a `shape`
+and a `sampling`: all three here are `Target(Full)`, sized from the output,
+and `Filtered`, read through a clamped sampler. A source of a size of its own
+would declare `"shape": "Texture"`, and a table read with `textureLoad` would
+declare `"sampling": "Texel"`
+([slots and extents](../systems/render-programs.md#slots-and-extents)). Pass 0 reads binding 0 and
 writes the transient, windowing bytes 0..4 of the dispatch blob; pass 1 reads
 pass 0's output through the `PassOutput` alias and writes binding 1, windowing
 bytes 4..8.
@@ -88,11 +93,14 @@ bytes 4..8.
 {
   "wgsl": "<the module above, as one string>",
   "bindings": [
-    { "format": "Rgba8", "extent": "Full" },   // 0: the source
-    { "format": "Rgba8", "extent": "Full" }    // 1: the output (written by the final pass; must be Full)
+    // 0: the source
+    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } },
+    // 1: the output (written by the final pass; must be Target(Full))
+    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } }
   ],
   "transients": [
-    { "format": "Rgba8", "extent": "Full" }    // 0: the ping-pong hop
+    // 0: the ping-pong hop
+    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } }
   ],
   "geometries": [],                            // no draw pass in this graph
   "depth_transients": [],                      // and so no depth targets
@@ -125,7 +133,7 @@ The reply is `aether.render.program.register_result`:
 
 Validation happens here, once — naga over the WGSL, the graph checks
 (entry points exist, slots written before read, windows cover the shader's
-uniform block, the final pass writes a `Full`-extent binding), then wgpu
+uniform block, the final pass writes a `Target(Full)` binding), then wgpu
 pipeline creation under an error scope. A failure replies
 `{ "Err": { "reason": … } }` with the failing class named — see the
 [validation table](../systems/render-programs.md#register-time-validation) —
@@ -296,7 +304,8 @@ cover.
 {
   "wgsl": "<the module above, as one string>",
   "bindings": [
-    { "format": "Rgba8", "extent": "Full" }      // 0: the output (Full, as the final pass writes it)
+    // 0: the output (Target(Full), as the final pass writes it)
+    { "format": "Rgba8", "shape": { "Target": "Full" }, "sampling": { "Filtered": { "wrap": "Clamp", "mips": "Base" } } }
   ],
   "transients": [],
   "geometries": [

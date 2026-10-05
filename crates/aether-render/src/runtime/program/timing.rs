@@ -145,7 +145,7 @@ impl PassCosts {
             .enumerate()
             .map(|(index, (pass, cell))| {
                 let (width, height, divisor) = pass.output.map_or((0, 0, 1), |output| {
-                    let extent = plan.slot_spec(output).extent;
+                    let extent = plan.target_extent(output);
                     let (width, height) = self.reference.map_or((0, 0), |reference| resolve_extent(extent, reference));
                     let divisor = match extent {
                         SlotExtent::Full => 1,
@@ -479,12 +479,16 @@ fn nanos_of(ticks: u64, period_nanos: f32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SlotSpec, TextureFormat};
+    use crate::{Mips, Sampling, SlotShape, SlotSpec, TextureFormat, Wrap};
 
     #[test]
     fn compute_timing_row_has_stage_and_no_texture_extent() {
         let plan = ProgramPlan {
-            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            bindings: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Full),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             transients: Vec::new(),
             geometries: Vec::new(),
             depth_transients: Vec::new(),

@@ -14,8 +14,8 @@ use naga::{
 use super::super::surface::render_limits;
 use crate::{
     ComputeBufferBinding, ComputePass, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad,
-    PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, StorageAccess, TextureFormat, VertexAttribute,
-    VertexFormat,
+    PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat,
+    VertexAttribute, VertexFormat,
 };
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -155,6 +155,27 @@ impl ProgramPlan {
             ResolvedSlot::Transient(index) => self.transients[index as usize].spec,
         }
     }
+
+    /// The declared extent of a slot a pass writes or the pool
+    /// allocates: a pass output or a transient. Validation admits only
+    /// a `Target` in either place, so those are the only slots that
+    /// may be asked.
+    ///
+    /// # Panics
+    /// Panics for a slot that is not a `Target`, which no output or
+    /// transient of a validated plan is.
+    pub fn target_extent(&self, slot: ResolvedSlot) -> SlotExtent {
+        target_extent(self.slot_spec(slot)).expect("a validated output or transient slot is a Target")
+    }
+}
+
+/// The extent a slot is sized by, or `None` for a shape that takes a
+/// texture of its own size.
+fn target_extent(spec: SlotSpec) -> Option<SlotExtent> {
+    match spec.shape {
+        SlotShape::Target(extent) => Some(extent),
+        SlotShape::Texture | SlotShape::TextureArray => None,
+    }
 }
 
 /// Resolve a declared extent against the reference size. Floor
@@ -181,10 +202,19 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
         return Err("program declares no passes".to_owned());
     }
     for (index, spec) in mail.bindings.iter().enumerate() {
-        check_extent(spec.extent, || format!("binding {index}"))?;
+        if let Some(extent) = target_extent(*spec) {
+            check_extent(extent, || format!("binding {index}"))?;
+        }
     }
     for (index, spec) in mail.transients.iter().enumerate() {
-        check_extent(spec.extent, || format!("transient {index}"))?;
+        let Some(extent) = target_extent(*spec) else {
+            return Err(format!(
+                "transient {index}: a transient must declare a Target shape, not {:?} — the executor allocates it \
+                 at a size taken from the program's output",
+                spec.shape,
+            ));
+        };
+        check_extent(extent, || format!("transient {index}"))?;
     }
     for (index, extent) in mail.depth_transients.iter().enumerate() {
         check_extent(*extent, || format!("depth transient {index}"))?;
@@ -225,9 +255,9 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     let Some(ResolvedSlot::Binding(output_binding)) = final_output else {
         return Err("the final pass must write a dispatch binding (the program's result texture)".to_owned());
     };
-    if mail.bindings[output_binding as usize].extent != SlotExtent::Full {
+    if mail.bindings[output_binding as usize].shape != SlotShape::Target(SlotExtent::Full) {
         return Err(format!(
-            "binding {output_binding}: the program's output binding must declare Full extent — its texture's size \
+            "binding {output_binding}: the program's output binding must declare Target(Full) — its texture's size \
              is the reference every other extent scales from",
         ));
     }
@@ -339,6 +369,13 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
     let output = match pass.output {
         OutputSlot::Binding { index: binding } => {
             check_binding_index(mail, index, binding)?;
+            let shape = mail.bindings[binding as usize].shape;
+            if !matches!(shape, SlotShape::Target(_)) {
+                return Err(format!(
+                    "pass {index}: binding {binding} is declared {shape:?}, which is read only — a pass writes only \
+                     a Target binding",
+                ));
+            }
             Some(ResolvedSlot::Binding(binding))
         }
         OutputSlot::Transient { index: transient } => {
@@ -362,10 +399,11 @@ fn validate_pass(context: &PassValidation<'_>, index: usize, pass: &ProgramPass)
             let Some(output) = output else {
                 return Err(format!("pass {index}: a draw pass must declare a texture output"));
             };
-            let output_extent = match output {
-                ResolvedSlot::Binding(binding) => mail.bindings[binding as usize].extent,
-                ResolvedSlot::Transient(transient) => mail.transients[transient as usize].extent,
+            let output_spec = match output {
+                ResolvedSlot::Binding(binding) => mail.bindings[binding as usize],
+                ResolvedSlot::Transient(transient) => mail.transients[transient as usize],
             };
+            let output_extent = target_extent(output_spec).expect("outputs and transients were checked to be Targets");
             let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), output_extent)?;
             if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
                 check_indirect_writer(earlier, index, draw.geometry)?;
@@ -824,7 +862,7 @@ fn uniform_block_bytes(module: &Module, info: &ModuleInfo, entry_index: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PassRepeat;
+    use crate::{Mips, PassRepeat, Sampling, Wrap};
 
     const MODULE: &str = r"
 struct WindowParams { value: f32 }
@@ -851,7 +889,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     }
 
     fn full(format: TextureFormat) -> SlotSpec {
-        SlotSpec { format, extent: SlotExtent::Full }
+        SlotSpec {
+            format,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }
     }
 
     /// A ping-pong chain writes each hop to a fresh transient; the plan's
@@ -948,7 +990,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         assert!(zero_repeat.contains("repeat count"), "repeat class: {zero_repeat}");
 
         let zero_divisor = rejection(&ProgramRegister {
-            transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Divided { divisor: 0 } }],
+            transients: vec![SlotSpec {
+                format: TextureFormat::Rgba8,
+                shape: SlotShape::Target(SlotExtent::Divided { divisor: 0 }),
+                sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+            }],
             ..base()
         });
         assert!(zero_divisor.contains("divisor must be at least 1"), "divisor class: {zero_divisor}");
@@ -996,6 +1042,87 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         // The named consumer's shape — one maximally-repeated pass over a
         // small window — stays comfortably inside both ceilings.
         assert!(validate(&base(vec![repeated(64)])).is_ok(), "a wash-shaped chain must still register");
+    }
+
+    /// A read-only slot of the given shape, read texel by texel.
+    fn read_only(shape: SlotShape) -> SlotSpec {
+        SlotSpec { format: TextureFormat::Rgba8, shape, sampling: Sampling::Texel }
+    }
+
+    /// The two-binding copy program the shape rules are checked on:
+    /// binding 0 read, binding 1 written by the only pass.
+    fn copy_program(bindings: Vec<SlotSpec>, transients: Vec<SlotSpec>) -> ProgramRegister {
+        ProgramRegister {
+            wgsl: MODULE.to_owned(),
+            bindings,
+            transients,
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes: vec![pass(
+                "fs_copy",
+                vec![InputSlot::Binding { index: 0 }],
+                OutputSlot::Binding { index: 1 },
+                0,
+                4,
+            )],
+        }
+    }
+
+    /// A read-only texture attached as a render target: the dispatch
+    /// check asks only that a written binding's texture is writable, so
+    /// a writable texture of any size bound at a `Texture` binding would
+    /// be rendered into at a size the graph never agreed to. The pass
+    /// before the final one is the writer here, so the refusal is the
+    /// pass rule and not the final-output rule.
+    #[test]
+    fn a_pass_writing_a_texture_binding_is_refused() {
+        let mut mail = copy_program(
+            vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8), read_only(SlotShape::Texture)],
+            Vec::new(),
+        );
+        mail.passes
+            .insert(0, pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Binding { index: 2 }, 0, 4));
+
+        let reason = rejection(&mail);
+        assert!(reason.contains("pass 0: binding 2"), "the refusal names pass and binding: {reason}");
+        assert!(reason.contains("read only"), "read-only class: {reason}");
+    }
+
+    /// The final output's size is the reference every extent scales
+    /// from. A final output with no extent leaves the program without
+    /// one, and the transient pool would size from nothing.
+    #[test]
+    fn a_final_output_that_is_not_a_full_target_is_refused() {
+        let halved =
+            SlotSpec { shape: SlotShape::Target(SlotExtent::Divided { divisor: 2 }), ..full(TextureFormat::Rgba8) };
+        let reason = rejection(&copy_program(vec![full(TextureFormat::Rgba8), halved], Vec::new()));
+        assert!(reason.contains("must declare Target(Full)"), "final-output class: {reason}");
+
+        let any_size = copy_program(vec![full(TextureFormat::Rgba8), read_only(SlotShape::Texture)], Vec::new());
+        let reason = rejection(&any_size);
+        assert!(reason.contains("binding 1"), "the refusal names the binding: {reason}");
+    }
+
+    /// The pool allocates a transient at a size resolved from its
+    /// extent; one declared `Texture` has none to resolve.
+    #[test]
+    fn a_transient_that_is_not_a_target_is_refused() {
+        let bindings = vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8)];
+        let reason = rejection(&copy_program(bindings, vec![read_only(SlotShape::Texture)]));
+        assert!(reason.contains("transient 0: a transient must declare a Target shape"), "transient class: {reason}");
+    }
+
+    /// A `Texture` binding has no extent, so a register that still
+    /// demanded one of every binding would refuse the shape outright.
+    /// The plan keeps the declaration, which is what the layout and the
+    /// dispatch check read.
+    #[test]
+    fn a_texel_texture_binding_validates() {
+        let table = read_only(SlotShape::Texture);
+        let plan = validate(&copy_program(vec![table, full(TextureFormat::Rgba8)], Vec::new()))
+            .expect("a read-only binding of its own size validates");
+        assert_eq!(plan.slot_spec(ResolvedSlot::Binding(0)), table);
+        assert_eq!(plan.output_binding, 1);
     }
 
     /// A draw-pass module: one entry per shape the draw validation has

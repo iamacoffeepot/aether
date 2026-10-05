@@ -25,17 +25,20 @@ use super::super::pipeline::RenderGpu;
 use super::super::surface::render_limits;
 use super::super::texture::TextureRegistry;
 use super::cache::{BoundInput, BoundStorage, CacheParts};
+use super::sampler::{Filter, ProgramSamplers};
 use super::submit::FramePasses;
 use super::timing::FrameQueries;
 use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
-use crate::{GeometryBuffer, PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
+use crate::{GeometryBuffer, PassLoad, ProgramDispatch, Sampling, SlotShape, TextureSampling, TextureUsage};
 
 /// What [`record_dispatch`] realizes, pools, and encodes against: the
-/// program, the transient pool, the two registries, the dispatch, and
-/// the frame's timing queries when this frame measures.
+/// program, the sampler table, the transient pool, the two registries,
+/// the dispatch, and the frame's timing queries when this frame
+/// measures.
 pub(super) struct DispatchRecord<'a> {
     pub(super) program: &'a mut RegisteredProgram,
+    pub(super) samplers: &'a ProgramSamplers,
     pub(super) pool: &'a mut HashMap<TransientKey, Vec<wgpu::TextureView>>,
     pub(super) textures: &'a mut TextureRegistry,
     pub(super) geometries: &'a mut GeometryRegistry,
@@ -48,7 +51,7 @@ pub(super) struct DispatchRecord<'a> {
 /// checks run first, so a rejected dispatch records nothing and the
 /// frame survives untouched.
 pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, record: DispatchRecord<'_>) {
-    let DispatchRecord { program, pool, textures, geometries, dispatch, queries, passes } = record;
+    let DispatchRecord { program, samplers, pool, textures, geometries, dispatch, queries, passes } = record;
     let RegisteredProgram { plan, state, timings, .. } = program;
     let ProgramDeviceState::Ready { passes_gpu, cache } = state else {
         let ProgramDeviceState::Quarantined { reason } = state else {
@@ -125,7 +128,18 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
     encode_passes(
         gpu,
         encoder,
-        PassEncoding { plan, passes_gpu, cache: &mut parts, pool, textures, geometries, dispatch, queries, passes },
+        PassEncoding {
+            plan,
+            passes_gpu,
+            cache: &mut parts,
+            samplers,
+            pool,
+            textures,
+            geometries,
+            dispatch,
+            queries,
+            passes,
+        },
     );
 }
 
@@ -275,20 +289,40 @@ fn check_dispatch(
             );
             return None;
         }
-        let expected = resolve_extent(spec.extent, reference);
-        if (entry.width, entry.height) != expected {
-            tracing::warn!(
-                target: "aether_render",
-                program_id,
-                binding,
-                texture_id,
-                expected_width = expected.0,
-                expected_height = expected.1,
-                bound_width = entry.width,
-                bound_height = entry.height,
-                "program dispatch binding size disagrees with the registered graph; dropping the dispatch",
-            );
-            return None;
+        match spec.shape {
+            SlotShape::Target(extent) => {
+                let expected = resolve_extent(extent, reference);
+                if (entry.width, entry.height) != expected {
+                    tracing::warn!(
+                        target: "aether_render",
+                        program_id,
+                        binding,
+                        texture_id,
+                        expected_width = expected.0,
+                        expected_height = expected.1,
+                        bound_width = entry.width,
+                        bound_height = entry.height,
+                        "program dispatch binding size disagrees with the registered graph; dropping the dispatch",
+                    );
+                    return None;
+                }
+            }
+            // Any size: the binding is read, never attached.
+            SlotShape::Texture => {}
+            // The registry holds no array texture, so whatever is bound
+            // here is a plain one, and its view cannot stand at an
+            // array-typed binding.
+            SlotShape::TextureArray => {
+                tracing::warn!(
+                    target: "aether_render",
+                    program_id,
+                    binding,
+                    texture_id,
+                    "program dispatch binds a texture that is not an array at a TextureArray binding; \
+                     dropping the dispatch",
+                );
+                return None;
+            }
         }
     }
     for &binding in &plan.written_bindings {
@@ -429,6 +463,7 @@ struct PassEncoding<'a, 'c> {
     plan: &'a ProgramPlan,
     passes_gpu: &'a [PassGpu],
     cache: &'a mut CacheParts<'c>,
+    samplers: &'a ProgramSamplers,
     pool: &'a HashMap<TransientKey, Vec<wgpu::TextureView>>,
     textures: &'a TextureRegistry,
     geometries: &'a GeometryRegistry,
@@ -447,7 +482,8 @@ struct PassEncoding<'a, 'c> {
 // arguments — the same shape `record_overlay_batches` keeps.
 #[allow(clippy::too_many_lines)] // aether-suppression-request: pre-existing; the attribute only lost its argument-count lint
 fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: PassEncoding<'_, '_>) {
-    let PassEncoding { plan, passes_gpu, cache, pool, textures, geometries, dispatch, mut queries, passes } = encoding;
+    let PassEncoding { plan, passes_gpu, cache, samplers, pool, textures, geometries, dispatch, mut queries, passes } =
+        encoding;
     let layout = cache.layout;
     let extent = cache.extent;
     let transient_view = |transient: u32| {
@@ -497,17 +533,24 @@ fn encode_passes(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncoder, encoding: 
                         (transient_view(*transient), !plan.slot_format(*slot).filterable())
                     }
                 };
-                let sampler = if nearest {
-                    &gpu.texture_bindings.nearest_sampler
-                } else {
-                    &gpu.texture_bindings.sampler
-                };
                 let base = u32::try_from(input * 2).expect("program input binding index fits u32");
                 input_entries
                     .push(wgpu::BindGroupEntry { binding: base, resource: wgpu::BindingResource::TextureView(view) });
+
+                // A `Texel` input has no sampler entry in the layout,
+                // and `base + 1` stays unused so later inputs keep
+                // their numbers.
+                let Sampling::Filtered { wrap, mips } = plan.slot_spec(*slot).sampling else {
+                    continue;
+                };
+                let filter = if nearest {
+                    Filter::Nearest
+                } else {
+                    Filter::Linear
+                };
                 input_entries.push(wgpu::BindGroupEntry {
                     binding: base + 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(samplers.get(filter, wrap, mips)),
                 });
             }
             let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {

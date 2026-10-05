@@ -30,9 +30,9 @@ use aether_math::Rgba;
 use aether_render::QuadBlend;
 use aether_render::RenderCapability;
 use aether_render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot,
-    PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, Mips, OutputSlot,
+    PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Sampling, Shape, SlotExtent, SlotShape,
+    SlotSpec, TextureFormat, TextureSampling, TextureUsage, TexturedQuad, Wrap,
 };
 
 /// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
@@ -60,7 +60,11 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 ";
 
 fn full(format: TextureFormat) -> SlotSpec {
-    SlotSpec { format, extent: SlotExtent::Full }
+    SlotSpec {
+        format,
+        shape: SlotShape::Target(SlotExtent::Full),
+        sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+    }
 }
 
 fn create_reply(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> CreateTextureResult {

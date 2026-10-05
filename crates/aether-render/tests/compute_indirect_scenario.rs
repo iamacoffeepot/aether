@@ -18,10 +18,10 @@ use aether_math::Rgba;
 use aether_render::RenderCapability;
 use aether_render::{
     ComputeBufferBinding, ComputePass, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult,
-    DrawPass, DrawTexturedQuads, GeometryBuffer, GeometrySlotSpec, OutputSlot, PassLoad, PassStage, PassStageKind,
-    ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
-    QuadBlend, SlotExtent, SlotSpec, StorageAccess, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
-    UpdateGeometry, VertexAttribute, VertexFormat,
+    DrawPass, DrawTexturedQuads, GeometryBuffer, GeometrySlotSpec, Mips, OutputSlot, PassLoad, PassStage,
+    PassStageKind, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, QuadBlend, Sampling, SlotExtent, SlotShape, SlotSpec, StorageAccess, TextureFormat,
+    TextureSampling, TextureUsage, TexturedQuad, UpdateGeometry, VertexAttribute, VertexFormat, Wrap,
 };
 
 const MODULE: &str = r"
@@ -122,7 +122,11 @@ fn program() -> ProgramRegister {
     let slot = GeometrySlotSpec { layout: position_layout() };
     ProgramRegister {
         wgsl: MODULE.to_owned(),
-        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        bindings: vec![SlotSpec {
+            format: TextureFormat::Rgba8,
+            shape: SlotShape::Target(SlotExtent::Full),
+            sampling: Sampling::Filtered { wrap: Wrap::Clamp, mips: Mips::Base },
+        }],
         transients: Vec::new(),
         geometries: vec![slot.clone(), slot],
         depth_transients: Vec::new(),

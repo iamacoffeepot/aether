@@ -354,7 +354,7 @@ graph with no draw pass in it:
   format is fixed.
 
 A `SlotSpec` is a `format` (`Rgba8`, `R8`, `R32Float`, `R16Float`, or
-`Rgba16Float`) plus an `extent`. The float formats are data planes — texels carrying
+`Rgba16Float`), a `shape`, and a `sampling`. The float formats are data planes — texels carrying
 quantities rather than colours — and choosing between them is a question about
 what the texel holds and who reads it. `R32Float` keeps a full 24-bit mantissa
 and cannot be linear-filtered in core WebGPU, so it is what a label, an index,
@@ -366,6 +366,21 @@ into filtered reads halves its texture fetches. `Rgba16Float` gives the same
 filterability and per-lane precision to four quantities in one target, so
 same-kernel scalar operations can travel independently through its channels.
 
+The `shape` says what the slot takes and whether a pass may write it:
+
+- `SlotShape::Target(SlotExtent)` — a texture sized from the program's output.
+  A pass may write it or read it, and the texture bound there must be exactly
+  the resolved size. Every transient is a `Target`, and so is every binding a
+  pass writes.
+- `SlotShape::Texture` — a texture of any size, read only: a lookup table, a
+  tile sheet, a table of per-instance data. A pass naming it as its output
+  rejects at register.
+- `SlotShape::TextureArray` — an array texture of any size and layer count,
+  read only. The shader declares it `texture_2d_array<f32>`. A dispatch that
+  binds a texture that is not an array there is dropped.
+
+A `Target` carries one of two extents:
+
 - `SlotExtent::Full` — the reference size.
 - `SlotExtent::Divided { divisor }` — the reference size floor-divided by
   `divisor` on both axes, clamped to at least one texel, for pyramid and
@@ -373,9 +388,20 @@ same-kernel scalar operations can travel independently through its channels.
 
 The **reference extent** is the size of the texture bound at the program's
 output binding — the dispatch binding the final pass writes, which must be
-declared `Full`. Every other extent scales from it, which is what lets one
-registered program dispatch at any canvas size: the graph carries no pixel
-dimensions, only ratios.
+declared `Target(Full)`. Every other `Target` scales from it, which is what
+lets one registered program dispatch at any canvas size: the graph carries no
+pixel dimensions, only ratios. A `Texture` or `TextureArray` binding stands
+outside that rule and keeps the size it was created with.
+
+The `sampling` says how a pass that reads the slot does so:
+
+- `Sampling::Filtered { wrap, mips }` — the slot binds with a sampler. `wrap`
+  is `Wrap::Clamp` (the edge texel extends outward) or `Wrap::Repeat` (the
+  texture tiles). `mips` is `Mips::Base` (the base level only) or `Mips::Chain`
+  (the whole mip chain, where the texture has one).
+- `Sampling::Texel` — the slot binds with no sampler, and the shader reads it
+  texel by texel with `textureLoad`. This is what a table of exact values
+  declares.
 
 Each pass reads through `InputSlot` values and writes one `OutputSlot`:
 
@@ -385,8 +411,8 @@ Each pass reads through `InputSlot` values and writes one `OutputSlot`:
   index wrote, resolved at register time. A ping-pong chain reads "the
   previous pass's result" without naming the transient twice.
 - `OutputSlot::Binding { index }` / `OutputSlot::Transient { index }` — a
-  dispatch binding (which must resolve to a `Writable` registry texture at
-  dispatch) or a transient.
+  dispatch binding (which must be declared a `Target` and resolve to a
+  `Writable` registry texture at dispatch) or a transient.
 
 ### Sequence order
 
@@ -450,17 +476,40 @@ and its fragment stage receives that stage's outputs instead; see
 Bindings inside the shader, identical for both pass classes:
 
 - `@group(0) @binding(0) var<uniform>` — the pass's uniform window.
-- Group 1 — the pass's input slots, in declaration order, as texture /
-  sampler pairs: input `n` is `@binding(2 * n)` (`texture_2d<f32>`) plus
-  `@binding(2 * n + 1)` (`sampler`).
+- Group 1 — the pass's input slots, in declaration order. Input `n` is the
+  texture at `@binding(2 * n)` and, for a `Filtered` slot, the `sampler` at
+  `@binding(2 * n + 1)`. The texture is `texture_2d<f32>` for a `Target` or
+  `Texture` slot and `texture_2d_array<f32>` for a `TextureArray`.
 
-The sampler an input receives follows the bound texture: nearest when the
-registry texture was created with `Nearest` sampling or its format cannot be
-linear-filtered (`R32Float`), linear otherwise. Transients sample by their
-declared format the same way. So a pass that wants a filtered read has to be
-handed a plane standing at a filterable format — filtering is a property of
-the texture, not of the pass, and a plane another program wrote stands at
-whatever format that program declared.
+A `Texel` slot has no sampler. Its input still takes the texture at
+`@binding(2 * n)` and leaves `@binding(2 * n + 1)` unused, so the inputs after
+it keep their numbers whatever the inputs before them declare:
+
+```wgsl
+// inputs: [ a Texel table, a Filtered texture ]
+@group(1) @binding(0) var table: texture_2d<f32>;        // input 0; nothing at binding 1
+@group(1) @binding(2) var tint_texture: texture_2d<f32>; // input 1
+@group(1) @binding(3) var tint_sampler: sampler;
+```
+
+Group 1 is visible to the fragment stage of every pass, to the authored vertex
+stage of a draw pass, and to a compute pass. A vertex stage has no implicit
+derivatives, so it reads an input with `textureLoad` or `textureSampleLevel`.
+
+The slot and the bound texture each decide part of how an input is read. The
+slot's `sampling` decides whether there is a sampler, how it addresses a
+coordinate outside the texture, and which mip levels it reads. The bound
+texture decides linear or nearest: nearest when the registry texture was
+created with `Nearest` sampling or its format cannot be linear-filtered
+(`R32Float`), linear otherwise. Transients filter by their declared format the
+same way. So a pass that wants a filtered read has to be handed a plane
+standing at a filterable format — filtering is a property of the texture, not
+of the pass, and a plane another program wrote stands at whatever format that
+program declared.
+
+A module whose entry point disagrees with its slots — it reads an array where
+the slot is a `Texture`, or samples through a sampler on a `Texel` input —
+fails pipeline creation, and the register replies `Err`.
 
 ## Draw passes
 
@@ -505,9 +554,10 @@ matrix, a pose, a per-pass depth all ride there.
 
 The fragment entry point receives whatever the vertex stage returns as
 varyings, and returns `@location(0) vec4<f32>` into the pass's color output. It
-may also sample the pass's `inputs` through the group-1 texture and sampler
-pairs, exactly as a fragment pass does — a draw pass that reads a mask texture
-while rasterizing is an ordinary declaration.
+may also sample the pass's `inputs` through group 1, exactly as a fragment
+pass does — a draw pass that reads a mask texture while rasterizing is an
+ordinary declaration. The vertex entry point reads the same inputs, which is
+how a table of per-instance data declared `Texel` reaches the geometry.
 
 A minimal pair, over a position-only layout:
 
@@ -606,6 +656,8 @@ The classes, in check order:
 | WGSL | `invalid wgsl: …` — naga parse or validation failure |
 | Empty graph | `program declares no passes` |
 | Extent | `binding N: extent divisor must be at least 1` (also for transients and depth transients) |
+| Transient shape | `transient N: a transient must declare a Target shape, not Texture …` |
+| Read-only output | `pass N: binding B is declared Texture, which is read only — a pass writes only a Target binding` |
 | Geometry slot | `geometry slot N: layout declares no attributes`; `geometry slot N: layout declares location L twice` |
 | Entry point | ``pass N: no fragment entry point named `X` in the module`` |
 | Slot range | `pass N: binding slot B is out of range (M declared)` (also for transients) |
@@ -613,8 +665,8 @@ The classes, in check order:
 | Self-read | `pass N reads its own output slot` |
 | Uniform window | `pass N: uniform window (L bytes) is shorter than the shader's uniform block (B bytes)` |
 | Repeat | `pass N: repeat count must be at least 1`; `pass N: repeat count C exceeds the supported maximum 4096` |
-| Final output | `the final pass must write a dispatch binding (the program's result texture)`; `binding N: the program's output binding must declare Full extent …` |
-| Pipeline | `pipeline creation failed: …` — a wgpu validation error caught by the register's error scope (for example a sampler-versus-layout mismatch naga alone cannot see) |
+| Final output | `the final pass must write a dispatch binding (the program's result texture)`; `binding N: the program's output binding must declare Target(Full) …` |
+| Pipeline | `pipeline creation failed: …` — a wgpu validation error caught by the register's error scope (for example an array-typed input against a `Texture` slot, or a sampler used on a `Texel` input, neither of which naga alone can see) |
 
 The draw-pass classes, checked for every pass that declares `stage: Draw`:
 
@@ -681,8 +733,9 @@ drop classes:
 - a geometry count that disagrees with the registered graph;
 - a binding naming an unknown texture id;
 - a binding whose format disagrees with the declared `SlotSpec`;
-- a binding whose size disagrees with its extent resolved against the
-  reference;
+- a `Target` binding whose size disagrees with its extent resolved against the
+  reference (a `Texture` binding takes any size);
+- a `TextureArray` binding whose texture is not an array;
 - a non-`Writable` texture bound where the graph writes;
 - a geometry slot naming an unknown geometry id;
 - a geometry whose created layout disagrees with the slot's declared layout;
