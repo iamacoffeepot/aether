@@ -86,7 +86,8 @@ pub struct DispatchId(pub u64);
 /// the [`DispatchId`] (reachable via [`Pending::dispatch_id`] for *optional*
 /// cancellation) plus the reply-kind marker. Framework-constructed:
 /// `Pending::new` is crate-internal, and the only mint sites are
-/// [`NativeCtx::hold`] and the offload dispatch calls
+/// [`NativeCtx::hold`], its hold-free twin [`NativeCtx::defer`], and the
+/// offload dispatch calls
 /// [`NativeCtx::dispatch_blocking`] and
 /// [`NativeCtx::dispatch_blocking_with_pending`], so every receipt names an
 /// armed ledger entry (ADR-0109 §3, ADR-0243 §3). A bounded queue returns
@@ -113,7 +114,7 @@ pub struct Pending<R: ActorMail> {
 
 impl<R: ActorMail> Pending<R> {
     /// Wrap the armed obligation's [`DispatchId`]. Crate-internal — called
-    /// only from [`NativeCtx::hold`] and
+    /// only from [`NativeCtx::hold`], [`NativeCtx::defer`], and
     /// [`NativeCtx::dispatch_blocking_with_pending`] (ADR-0109 §3,
     /// ADR-0243 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {

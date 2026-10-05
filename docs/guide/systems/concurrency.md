@@ -202,6 +202,17 @@ parked while the engine keeps running answers each with its reply kind's
 `unanswered()` (the `HeldReply` trait) before releasing its hold, and an
 engine teardown releases them silently.
 
+**A reply owed later that the caller must not wait for → `ctx.defer`.**
+`ctx.defer::<R>()` is `hold` for a request whose caller's chain should settle
+now, such as a load sent from a `Tick` handler that must not hold the frame. It
+returns the same `Pending<R>` and `Held<R>` and parks the same ledger entry,
+but with no settlement hold: the caller's chain settles when the handler
+returns. `answer` later replies to the captured caller with its correlation, so
+the caller's response handler still gets the context it bound, and the reply
+joins no chain. A worker or bounded queue answers it through
+`dispatch_blocking_held_with`. The one-debt-per-dispatch rule, the drop panic,
+and the close-time `unanswered()` apply as for `hold`.
+
 ## The offload shapes, and the hold
 
 Settlement — how `send_mail_traced` knows a chain of mail is *fully* done rather
@@ -217,6 +228,7 @@ the causal chain open*:
 | `spawn_detached` | no — the worker holds no chain and sends no mail | true fire-and-forget background work |
 | `dispatch_blocking` (hold-until-resolve) | yes — until you `resolve`, *outliving* the worker | the "reply in a later turn" shape above |
 | `stage_blocking` (staged task) | yes — the staging turn's chain, until the completion handler ends | work that owes no reply, and a bounded queue's waiting work |
+| `ctx.defer` (a held reply with no hold) | no — the caller's chain settles when the handler returns, and the later answer joins no chain | a request answered later whose caller must not wait |
 
 A panic in any of them is fatal
 ([ADR-0063](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0063-fail-fast-on-abnormal-component-lifecycle.md)):

@@ -340,14 +340,44 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Panics on a second `hold` in one dispatch (ADR-0243 §7): two debts
     /// on one request would send two replies.
     pub fn hold<R: HeldReply>(&mut self) -> (Pending<R>, Held<R>) {
-        assert!(
-            !self.held_this_dispatch,
-            "a second NativeCtx::hold in one dispatch: one request owes one reply (ADR-0243 §7)"
-        );
-        self.held_this_dispatch = true;
+        self.claim_dispatch_debt();
         let (id, ledger) =
             self.binding.dispatch_hold(self.acquire_settlement_hold(), self.reply_target(), answer_unanswered::<R>);
         (Pending::new(id), Held::new(id, ledger))
+    }
+
+    /// Owe one reply of kind `R` to this request's caller without holding
+    /// its chain (ADR-0243 §1): [`Self::hold`] for a request whose caller
+    /// must not wait. The entry carries the caller's reply target and no
+    /// settlement hold, so the caller's chain settles as soon as this
+    /// handler returns.
+    ///
+    /// [`Held::answer`] later replies to the captured caller with its
+    /// correlation, so the caller's response handler gets the context it
+    /// bound, and the reply joins no chain: it records no `Sent` and the
+    /// receiving turn's own sends start fresh chains. Everything else is as
+    /// for `hold`: the handler returns the [`Pending<R>`] receipt, a worker
+    /// can answer through [`Self::dispatch_blocking_held_with`], an
+    /// unanswered ticket fails fast on drop, and an actor close sends
+    /// [`HeldReply::unanswered`].
+    ///
+    /// # Panics
+    /// Panics on a second `hold` or `defer` in one dispatch (ADR-0243 §7):
+    /// two debts on one request would send two replies.
+    pub fn defer<R: HeldReply>(&mut self) -> (Pending<R>, Held<R>) {
+        self.claim_dispatch_debt();
+        let (id, ledger) = self.binding.dispatch_hold(None, self.reply_target(), answer_unanswered::<R>);
+        (Pending::new(id), Held::new(id, ledger))
+    }
+
+    /// Record that this dispatch owes its one reply through a `Held`
+    /// ([`Self::hold`] or [`Self::defer`]), failing fast on a second.
+    fn claim_dispatch_debt(&mut self) {
+        assert!(
+            !self.held_this_dispatch,
+            "a second NativeCtx::hold or defer in one dispatch: one request owes one reply (ADR-0243 §7)"
+        );
+        self.held_this_dispatch = true;
     }
 
     /// The ledger half of [`Held::answer`]: claim the held entry `id` from

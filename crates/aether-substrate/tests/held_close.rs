@@ -52,6 +52,10 @@ struct Stash;
 #[aether_data::kind(name = "test.held_close.stage", copy)]
 struct Stage;
 
+/// Owe the reply with no settlement hold and keep the `Held` in actor state.
+#[aether_data::kind(name = "test.held_close.defer", copy)]
+struct Defer;
+
 /// Close the actor.
 #[aether_data::kind(name = "test.held_close.close", copy)]
 struct Close;
@@ -100,6 +104,14 @@ impl NativeActor for CloseProbe {
     }
 
     #[aether_actor::handler::request]
+    fn on_defer(&mut self, ctx: &mut NativeCtx<'_>, _defer: Defer) -> Pending<Owed> {
+        assert!(!self.closing, "the scenario defers every request before it closes the actor");
+        let (pending, held) = ctx.defer::<Owed>();
+        self.kept.push(held);
+        pending
+    }
+
+    #[aether_actor::handler::request]
     fn on_stash(&mut self, ctx: &mut NativeCtx<'_>, _stash: Stash) -> Pending<Owed> {
         let (pending, held) = ctx.hold::<Owed>();
         self.unstarted.push(ctx.stage_blocking_with::<Step, Stashed>(Stashed { held }));
@@ -128,9 +140,11 @@ struct Arrival {
     held_open: u32,
 }
 
-/// A booted [`CloseProbe`] with its three requests sent: `Keep` under
-/// correlation 1, `Stash` under 2, and `Stage` under 3, each replying to the
-/// recording sink.
+/// A booted [`CloseProbe`] with its four requests sent: `Keep` under
+/// correlation 1, `Stash` under 2, `Stage` under 3, and `Defer` under 4, each
+/// replying to the recording sink. `settled` and `roots` cover the three
+/// that hold their chains; the deferred request's chain settled before the
+/// scenario returns.
 struct Scenario {
     chassis: PassiveChassis<TestChassis>,
     mailer: Arc<Mailer>,
@@ -178,6 +192,8 @@ fn scenario() -> Scenario {
     ]
     .into_iter()
     .unzip();
+    let (_, deferred) = chassis.send_tracked(probe, &Defer, reply(4));
+    deferred.recv_timeout(PATIENCE).expect("a deferred request's chain settles once it is handled");
 
     let scenario = Scenario { chassis, mailer, arrivals, settled, roots, record };
     scenario.await_holds();
@@ -200,23 +216,24 @@ impl Scenario {
     }
 }
 
-/// The two answers a close sends, in correlation order, after checking that
+/// The three answers a close sends, in correlation order, after checking that
 /// nothing arrives for the staged task.
 fn answers(arrivals: &Receiver<Arrival>) -> Vec<Arrival> {
     let mut answers: Vec<Arrival> =
-        (0..2).map(|_| arrivals.recv_timeout(PATIENCE).expect("the close answers a held reply")).collect();
+        (0..3).map(|_| arrivals.recv_timeout(PATIENCE).expect("the close answers a held reply")).collect();
     answers.sort_by_key(|arrival| arrival.correlation);
     assert!(arrivals.recv_timeout(QUIET).is_err(), "the staged task owes nothing, so nothing answers it");
     answers
 }
 
-/// Assert the close answered correlations 1 (kept in state) and 2 (parked in
-/// a task context) with `Owed::unanswered()` before releasing each hold. The
-/// stashed request's chain also carries its unstarted task's hold, which the
-/// close releases only after the answers, so it arrives with two holds open.
+/// Assert the close answered correlations 1 (kept in state), 2 (parked in a
+/// task context), and 4 (deferred, kept in state) with `Owed::unanswered()`
+/// before releasing each hold. The stashed request's chain also carries its
+/// unstarted task's hold, which the close releases only after the answers, so
+/// it arrives with two holds open; the deferred answer joins no chain.
 fn assert_answered(answers: &[Arrival]) {
     let seen: Vec<(u64, u32)> = answers.iter().map(|arrival| (arrival.correlation, arrival.held_open)).collect();
-    assert_eq!(seen, [(1, 1), (2, 2)], "each answer is sent before the holds on its chain release");
+    assert_eq!(seen, [(1, 1), (2, 2), (4, 0)], "each answer is sent before the holds on its chain release");
     for arrival in answers {
         assert_eq!(arrival.kind, Owed::ID, "the answer is the held reply kind");
         assert_eq!(
@@ -227,8 +244,8 @@ fn assert_answered(answers: &[Arrival]) {
     }
 }
 
-/// Catches a silent close, an answer pointer lost when a `Held` parks in a
-/// stored context, a hold released before its answer's `Sent`, and a staged
+/// Catches a silent close, a deferred entry (no settlement hold) the close
+/// skips, an answer pointer lost when a `Held` parks in a stored context, a hold released before its answer's `Sent`, and a staged
 /// `Task` entry that is answered, treated as owed, or left holding its chain.
 #[test]
 fn closing_an_actor_answers_its_live_and_parked_held_replies() {
