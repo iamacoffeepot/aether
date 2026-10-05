@@ -18,8 +18,7 @@ use aether_render::{
 
 use crate::visual::Image;
 
-/// Probe for any usable wgpu adapter. Used by [`require_runtime`] and
-/// by visual tests that need wgpu but no wasm component.
+/// Probe for any usable wgpu adapter. Used by [`require_wgpu_adapter`].
 #[must_use]
 pub fn has_wgpu_adapter() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -31,9 +30,33 @@ pub fn has_wgpu_adapter() -> bool {
     .is_ok()
 }
 
-/// Gate for visual scenarios: probes wgpu, then locates the wasm via
-/// `require_wasm`. Returns the wasm path on success; `None` when the
-/// test skips.
+/// Gate for visual tests that need wgpu but no wasm component: `true` when
+/// an adapter is available. Without one the test skips (`false`), or, under
+/// `AETHER_REQUIRE_RUNTIME=1`, panics so a runner that lost its driver is
+/// loud rather than vacuous.
+///
+/// # Panics
+/// Panics under `AETHER_REQUIRE_RUNTIME=1` if no wgpu adapter is available.
+#[must_use]
+// Test-only skip diagnostic — emitted from `cargo test` runners so a
+// skipped test is visible alongside `test ... ok` lines (issue 891).
+#[allow(clippy::print_stderr)]
+// Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle, a test
+// harness knob, not cap config.
+#[allow(clippy::disallowed_methods)]
+pub fn require_wgpu_adapter() -> bool {
+    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    let available = has_wgpu_adapter();
+    if !available {
+        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
+        eprintln!("skipping: no wgpu adapter available");
+    }
+    available
+}
+
+/// Gate for visual scenarios: probes wgpu with [`require_wgpu_adapter`],
+/// then locates the wasm via `require_wasm`. Returns the wasm path on
+/// success; `None` when the test skips.
 ///
 /// The two gates answer differently on purpose (issue #5724). A missing
 /// wasm artifact fails: it is one `cargo xtask build-wasm` away, and a
@@ -50,17 +73,8 @@ pub fn has_wgpu_adapter() -> bool {
 /// `AETHER_ALLOW_WASM_SKIP=1`), or, under `AETHER_REQUIRE_RUNTIME=1`, if
 /// no wgpu adapter is available — fail-fast per ADR-0063.
 #[must_use]
-// Test-only skip diagnostic — emitted from `cargo test` runners so a
-// skipped test is visible alongside `test ... ok` lines (issue 891).
-#[allow(clippy::print_stderr)]
-// Test-only: AETHER_REQUIRE_RUNTIME is the CI strict-mode toggle, a test
-// harness knob, not cap config.
-#[allow(clippy::disallowed_methods)]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
-    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
-        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
-        eprintln!("skipping: no wgpu adapter available");
+    if !require_wgpu_adapter() {
         return None;
     }
     require_wasm(crate_name)

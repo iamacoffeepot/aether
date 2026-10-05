@@ -360,8 +360,7 @@ mod tests {
         // 3181 failed 163 scenarios at once on a compile-time target path
         // into a checkout whose target was gone. Resolution walks up from
         // the caller's directory instead: the nearest checkout root wins,
-        // and a directory outside any checkout resolves to nothing rather
-        // than to a guess.
+        // and the scratch root resolves as its own ancestors do.
         let scratch = env::temp_dir().join(format!("aether-target-resolve-{}", process::id()));
         let checkout = scratch.join("outer").join("checkout");
         let nested = checkout.join("crates").join("some-crate");
@@ -369,7 +368,11 @@ mod tests {
         fs::write(checkout.join("Cargo.lock"), "").expect("checkout marker");
 
         assert_eq!(checkout_root(&nested), Some(checkout));
-        assert_eq!(checkout_root(&scratch), None, "no ancestor checkout, no resolution");
+        assert_eq!(
+            checkout_root(&scratch),
+            checkout_root(&env::temp_dir()),
+            "a directory above the checkout resolves as the temp directory does, never down into the checkout",
+        );
 
         fs::remove_dir_all(&scratch).expect("scratch removed");
     }
