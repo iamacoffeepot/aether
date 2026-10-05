@@ -5,17 +5,8 @@
 //! reader — so the scenario's surface is the registry over the mail
 //! path.
 //!
-//! Skipped when no wgpu adapter is available (driverless runners);
-//! `AETHER_REQUIRE_RUNTIME=1` (CI) flips the skip into a hard panic.
-
-// Integration-test skip diagnostic: emit via stderr so `cargo test`
-// surfaces "skipping: ..." alongside `test ... ok` (issue 891).
-#![allow(clippy::print_stderr)]
-// Reads the AETHER_REQUIRE_RUNTIME CI skip toggle — a test-harness knob,
-// not cap config.
-#![allow(clippy::disallowed_methods)]
-
-use std::env;
+//! Skipped when no wgpu adapter is available (driverless runners), as
+//! the registry's adapter-gated unit tests are.
 
 use aether_data::Blob;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -25,18 +16,6 @@ use aether_render::RenderCapability;
 use aether_render::{
     CreateInstances, CreateInstancesResult, DestroyInstances, UpdateInstances, VertexAttribute, VertexFormat,
 };
-
-/// Skip (or panic under `AETHER_REQUIRE_RUNTIME`) when no wgpu adapter
-/// is available — the composed render cap is the pumped GPU runtime.
-fn require_wgpu_only() -> bool {
-    if has_wgpu_adapter() {
-        return true;
-    }
-    let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
-    eprintln!("skipping: no wgpu adapter available");
-    false
-}
 
 /// One offset per instance: stride 12.
 fn offset_layout() -> Vec<VertexAttribute> {
@@ -68,7 +47,8 @@ fn created_id(harness: &mut SubstrateHarness, label: &'static str, mail: &Create
 /// out again.
 #[test]
 fn instances_lifecycle_round_trips_over_mail() {
-    if !require_wgpu_only() {
+    // The composed render cap is the pumped GPU runtime.
+    if !has_wgpu_adapter() {
         return;
     }
     let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
