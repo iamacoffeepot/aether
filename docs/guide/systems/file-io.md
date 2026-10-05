@@ -55,7 +55,7 @@ Each request kind pairs with a reply kind that names the same operation:
 | `aether.fs.list` | `addr` | `aether.fs.list_result` | `entries` |
 | `aether.fs.copy` | `from`, `to` | `aether.fs.copy_result` | — (ack) |
 | `aether.fs.fetch` | `addr`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` (a blob) |
-| `aether.fs.load` | `addr`, `tag` | `aether.fs.load_result` | — (`Accepted` / `Refused`); the bytes follow as `aether.fs.loaded` |
+| `aether.fs.load` | `addr` | `aether.fs.loaded` (sent late, outside the caller's chain) | `bytes` (a blob) |
 
 **One addressing type.** `addr` is a `NamespaceAddr { namespace, path }` — the
 same shape everywhere, including `copy`'s destination `to`. `list` addresses a
@@ -149,15 +149,14 @@ its `ReadResult` goes out, so a read sent from a `Tick` handler holds that
 frame: lifecycle advance waits on settlement. Reads run on a bounded queue of
 worker threads, so several are in progress at once and a frame that sent
 several waits for the slowest, not their sum; past the bound a read waits its
-turn in arrival order. A `load` answers at once with `LoadResult::Accepted`, so
-the caller's chain settles without waiting, and delivers the bytes later as a
-separate `aether.fs.loaded` mail to the requester, on a fresh chain. Loads run
-on their own bounded queue, so background loads never hold up a frame's reads,
-and a load past the bound waits rather than being dropped. The requester must
-handle `Loaded` silently (`#[handler::event]`); mail with no actor sender, or a
-sender that does not handle it, is answered `Refused` and nothing follows.
-`write`, `copy`, `delete`, `list`, and `fetch` still run on the `aether.fs`
-turn itself.
+turn in arrival order. A `load` is an ordinary request too, sent with an
+ordinary send, but `aether.fs` answers it late without holding the caller's
+chain: the chain settles as soon as the request is handled, and the
+`aether.fs.loaded` reply arrives afterwards, outside it, with any context the
+caller bound. Loads run on their own bounded queue, so background loads never
+hold up a frame's reads, and a load past the bound waits rather than being
+dropped. `write`, `copy`, `delete`, `list`, and `fetch` still run on the
+`aether.fs` turn itself.
 
 The cap is wired on the desktop and headless chassis. On a chassis that doesn't
 run it, `aether.fs` isn't a registered mailbox, so mail to it warn-drops like any
@@ -219,32 +218,29 @@ let Some(context) = ctx.take_context::<FontLoadContext>() else {
 needs the id keeps it; one that does not can drop it. (The request and reply
 kinds live in `aether-fs/src/kinds.rs`.)
 
-To read without holding the frame, send `load` with your own `tag` and handle
-both the acceptance and the later delivery. `Loaded` is not a reply, so request
-ids and stored contexts do not reach it; the `tag` is how you tell your loads
-apart:
+To read without holding the frame, send `load` instead and handle its reply as
+you would any other. Bind a context to tell concurrent loads apart; it comes
+back with the late reply:
 
 ```rust
-ctx.send::<FsCapability>(&Load { addr: NamespaceAddr::new("assets", "level1.bin"), tag: 1 });
+ctx.send_with_context::<FsCapability>(&Load { addr: NamespaceAddr::new("assets", "level1.bin") }, &AssetSlot { index });
 
 #[handler::response]
-fn on_load_result(&mut self, ctx: &mut WasmCtx<'_>, result: LoadResult) {
-    // `Accepted` means one `Loaded` with the same `addr` and `tag` follows;
-    // `Refused { reason }` means none will.
-}
-
-#[handler::event]
-fn on_loaded(&mut self, ctx: &mut WasmCtx<'_>, loaded: Loaded) {
+fn on_loaded(&mut self, ctx: &mut WasmCtx<'_>, loaded: Loaded, slot: AssetSlot) {
     match loaded {
-        Loaded::Ok { addr, tag, bytes } => { /* runs on a fresh chain */ }
-        Loaded::Err { addr, tag, error } => { /* the same FsError a read gives */ }
+        Loaded::Ok { addr, bytes } => { /* arrives after the sending chain settled */ }
+        Loaded::Err { addr, error } => { /* the same FsError a read gives */ }
     }
 }
 ```
 
+The reply joins no chain, so mail its handler sends starts fresh chains of its
+own.
+
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a read is a single call: mail `aether.fs.read` to `aether.fs`
-and the `ReadResult` bytes come back with it — no polling. `describe_kinds`
+and the `ReadResult` bytes come back with it — no polling. Use `read` here, not
+`load`: a load's chain settles before its reply exists. `describe_kinds`
 carries the exact param schema for each request if you need it.
 
 The address is a nested object, not two top-level fields:

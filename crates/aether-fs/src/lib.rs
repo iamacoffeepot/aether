@@ -11,9 +11,9 @@
 //!
 //! `read` and `load` run their adapter calls on bounded worker queues, so
 //! several files are read at once: a `read` holds its caller's chain until
-//! it is answered, while a `load` is accepted at once and delivers its bytes
-//! later as `Loaded` on a fresh chain. The other verbs run their adapter
-//! calls on the actor's own turn.
+//! it is answered, while a `load` is answered late without holding it, so
+//! the caller's chain settles at once and `Loaded` arrives afterwards. The
+//! other verbs run their adapter calls on the actor's own turn.
 
 #![forbid(unsafe_code)]
 

@@ -14,16 +14,16 @@ use super::{AdapterRegistry, FsFoldError, FsTransformError};
 // `HandlesKind<K>` markers through `pub use kinds::*`.
 use super::{
     Copy, CopyResult, Delete, DeleteResult, FileAdapter, FsCapability, FsError, FsFetch, FsFetchError, FsFetchResult,
-    List, ListResult, Load, LoadResult, Loaded, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+    List, ListResult, Load, Loaded, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     build_registry,
 };
-use aether_actor::{Subscriber, runtime};
+use aether_actor::{Unchecked, runtime};
 use aether_data::Blob;
 use aether_substrate::actor::native::{BlobCheckIn, Pending, TaskDone, TaskQueue};
 
 mod load_queue;
 
-use load_queue::{LoadQueue, LoadSubscriber};
+use load_queue::LoadQueue;
 
 pub use std::any::Any;
 pub use std::fs;
@@ -53,8 +53,8 @@ pub struct FsCapabilityState {
     /// Frame-bound reads on worker threads, each holding its request's
     /// chain until it is answered.
     reads: TaskQueue<ReadResult>,
-    /// Background loads on worker threads, holding no chain and
-    /// delivering `Loaded` to the requester on a fresh one.
+    /// Loads on worker threads, holding no chain: each is answered late,
+    /// after the caller's chain has settled.
     loads: LoadQueue,
 }
 
@@ -76,14 +76,6 @@ fn read_blob(registry: &AdapterRegistry, addr: &NamespaceAddr, check_in: &BlobCh
         .ok_or(FsError::UnknownNamespace)?
         .read(&addr.path)
         .map(|bytes| check_in.check_in(bytes.into_boxed_slice()))
-}
-
-/// Type a load's sender as a subscriber to `Loaded` (ADR-0231 §4's guard
-/// cast), or name why it cannot be one: the mail has no actor sender, or the
-/// sender does not handle `Loaded` silently.
-fn loaded_subscriber<A>(ctx: &NativeCtx<'_, A>) -> Result<LoadSubscriber, &'static str> {
-    let sender = ctx.sender().ok_or("a load needs an actor sender to deliver `aether.fs.loaded` to")?;
-    ctx.cast::<Subscriber<Loaded>>(sender).ok_or("the load's sender does not handle `aether.fs.loaded` silently")
 }
 
 pub fn map_fold_error(e: &FoldError) -> FsFoldError {
@@ -179,39 +171,34 @@ impl NativeActor for FsCapability {
         state.reads.complete(ctx, done);
     }
 
-    /// Read bytes in the background: accept or refuse at once, so the
-    /// caller's chain settles without waiting for the disk, then deliver
-    /// `Loaded` to the requester on a fresh chain once the file is read.
-    /// The requester must handle `aether.fs.loaded` silently.
+    /// Read bytes without holding the caller's chain. The handler returns
+    /// without replying, so the caller's chain (and a `Tick` frame it rides)
+    /// settles at once; the load reads on a worker that holds no chain, and
+    /// its completion answers `Loaded` late, through the caller's reply
+    /// target, with no root. The caller's bound context still comes back
+    /// with it, by correlation. Unchecked because a checked request must
+    /// return `Loaded` or a `Pending<Loaded>`, and every public `Pending`
+    /// takes the settlement hold a load exists to avoid.
     ///
     /// # Agent
-    /// Reply: `LoadResult`. `Accepted` is followed by one `Loaded` to the
-    /// sender, echoing `addr` and `tag`; `Refused` (no actor sender, or one
-    /// that does not handle `aether.fs.loaded`) by nothing.
-    #[handler::request]
-    fn on_load(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Load) -> LoadResult {
-        let Load { addr, tag } = mail;
-        let subscriber = match loaded_subscriber(ctx) {
-            Ok(subscriber) => subscriber,
-            Err(reason) => return LoadResult::refused(addr, tag, reason),
-        };
-
+    /// Reply: `Loaded`, sent after the file is read and after the request's
+    /// own chain has settled. Echoes the address on both arms. Over MCP the
+    /// call settles before the reply exists; use `aether.fs.read` there.
+    #[handler::unchecked(reason = "answers from the load queue's completion, holding no chain")]
+    fn on_load(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Load) {
         let registry = Arc::clone(&state.registry);
         let check_in = ctx.blob_check_in();
-        let read_addr = addr.clone();
-        state.loads.submit(ctx, subscriber, move || {
-            let read = read_blob(&registry, &read_addr, &check_in);
-            Loaded::from_op(read_addr, tag, read)
-        });
 
-        LoadResult::accepted(addr, tag)
+        state.loads.submit(ctx, move || {
+            let read = read_blob(&registry, &mail.addr, &check_in);
+            Loaded::from_op(mail.addr, read)
+        });
     }
 
-    /// Completion of a load: deliver `Loaded` to its requester on a fresh
-    /// chain, then start the next waiting load in the freed slot. A load
-    /// owes its requester no reply, so the completion only borrows it.
+    /// Completion of a load: answer its caller late, then start the next
+    /// waiting load in the freed slot.
     #[handler(task)]
-    fn on_load_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: &TaskDone<Loaded, LoadSubscriber>) {
+    fn on_load_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<Loaded>) {
         state.loads.complete(ctx, done);
     }
 
@@ -354,8 +341,8 @@ impl FsCapabilityState {
 mod tests {
     use super::super::FsCapability;
     use super::super::{
-        Access, Copy, CopyResult, FileAdapter, FsError, FsFetch, FsFetchError, FsFetchResult, FsFoldError, Load,
-        LoadResult, LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
+        Access, Copy, CopyResult, FileAdapter, FsError, FsFetch, FsFetchError, FsFetchResult, FsFoldError,
+        LocalFileAdapter, NamespaceAddr, NamespaceRoots, Read, ReadResult, Write, WriteResult,
     };
     use aether_actor::{Addressable, HandlesKind};
     use aether_data::{Kind, SessionToken, Uuid, transform};
@@ -629,25 +616,6 @@ mod tests {
                 assert_eq!(addr.path, "x.bin");
             }
             other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
-        }
-    }
-
-    /// Bug caught: `on_load` accepting work it can never deliver: a session
-    /// request has no actor sender to receive `Loaded`, so accepting it would
-    /// leave the requester waiting for bytes that never come.
-    #[test]
-    fn load_from_a_sender_that_cannot_receive_loaded_is_refused() {
-        let mut fsys = PumpedFs::boot("cap-load-refused");
-
-        let result: LoadResult = fsys.request(&Load { addr: NamespaceAddr::new("save", "x.bin"), tag: 7 });
-
-        match result {
-            LoadResult::Refused { addr, tag, .. } => {
-                assert_eq!(addr.namespace, "save");
-                assert_eq!(addr.path, "x.bin");
-                assert_eq!(tag, 7);
-            }
-            LoadResult::Accepted { .. } => panic!("a load with no actor sender must be refused"),
         }
     }
 

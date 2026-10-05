@@ -1,12 +1,14 @@
 //! `aether.fs` reads and loads on worker queues (issue 7377), driven over a
-//! real chassis with `aether.fs` composed on the pool.
+//! real chassis with `aether.fs` composed on the pool and a pumped requester
+//! sending to it.
 //!
 //! A worker is held mid-read by pointing it at a FIFO: `fs::read` blocks in
 //! `open` until a writer opens the other end, so a test decides exactly when
-//! each read can finish. A test opens a FIFO's write end only once the read
-//! behind it has been started, so the open returns as soon as that worker
-//! reaches its own `open`. Every wait is a settlement wait, a pump on mail
-//! wakes, or that FIFO rendezvous, never a sleep.
+//! each read can finish. A FIFO is fed only through a non-blocking write-open,
+//! retried on each pump of the requester, which fails with `ENXIO` until the
+//! worker has opened its end; so a queue that never starts a read fails the
+//! test at the pump cap instead of hanging it. Every wait is a settlement wait
+//! or a pump, never a sleep.
 #![cfg(unix)]
 
 use std::ffi::CString;
@@ -15,70 +17,73 @@ use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
 
 use aether_actor::actor;
-use aether_data::{MailId, SessionToken, Uuid};
-use aether_fs::{
-    FsCapability, Load, LoadResult, Loaded, MAX_LOADS_IN_FLIGHT, NamespaceAddr, NamespaceRoots, Read, ReadResult,
-};
+use aether_data::MailId;
+use aether_fs::{FsCapability, Load, Loaded, MAX_LOADS_IN_FLIGHT, NamespaceAddr, NamespaceRoots, Read, ReadResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::chassis::builder::{PassiveChassis, ReplyTarget};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::outbound::EgressEvent;
-use aether_substrate::testing::{
-    PumpedDriver, TestChassis, await_settled, boot_test_chassis_with, cleanup, decode_session_reply,
-    fresh_substrate_and_rx, scratch_dir,
-};
+use aether_substrate::testing::{PumpedDriver, boot_test_chassis_with, cleanup, fresh_substrate, scratch_dir};
 
-/// Ask the requester to load `addr` under `tag`.
+/// Ask the requester to read `addr`, holding the chain until it is answered.
+#[aether_data::kind(name = "test.fs_offload.start_read")]
+struct StartRead {
+    addr: NamespaceAddr,
+}
+
+/// Ask the requester to load `addr`, binding `slot` as the request's context.
 #[aether_data::kind(name = "test.fs_offload.start_load")]
 struct StartLoad {
     addr: NamespaceAddr,
-    tag: u64,
+    slot: Slot,
 }
 
-/// A requester that loads through `aether.fs` and records what comes back:
-/// each `LoadResult`, each `Loaded`, and the chain root of the turn that
-/// sent each load and of the turn that received each delivery.
-struct LoadRequester;
+/// The context a load binds and takes back from its late reply.
+#[aether_data::kind(name = "test.fs_offload.slot", copy, eq)]
+struct Slot {
+    index: u64,
+}
 
-struct LoadRequesterState {
+/// A requester that reads and loads through `aether.fs` and records what
+/// comes back, with the chain root of each load's sending turn and of each
+/// turn that received a load's reply.
+struct Requester;
+
+struct RequesterState {
     sent_roots: Vec<Option<MailId>>,
-    accepted: Vec<LoadResult>,
-    loaded: Vec<(Loaded, Option<MailId>)>,
-}
-
-impl LoadRequesterState {
-    fn loaded_count(&self) -> usize {
-        self.loaded.len()
-    }
+    reads: Vec<ReadResult>,
+    loaded: Vec<(Loaded, Slot, Option<MailId>)>,
 }
 
 #[actor(singleton, root, depends(FsCapability))]
-impl NativeActor for LoadRequester {
-    type State = LoadRequesterState;
+impl NativeActor for Requester {
+    type State = RequesterState;
     type Config = ();
     const NAMESPACE: &'static str = "test.fs_offload.requester";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<LoadRequesterState, BootError> {
-        Ok(LoadRequesterState { sent_roots: Vec::new(), accepted: Vec::new(), loaded: Vec::new() })
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<RequesterState, BootError> {
+        Ok(RequesterState { sent_roots: Vec::new(), reads: Vec::new(), loaded: Vec::new() })
+    }
+
+    #[handler::tell]
+    fn on_start_read(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, start: StartRead) {
+        ctx.send::<FsCapability>(&Read { addr: start.addr });
     }
 
     #[handler::tell]
     fn on_start_load(state: &mut Self::State, ctx: &mut NativeCtx<'_>, start: StartLoad) {
         state.sent_roots.push(ctx.in_flight_root());
-        ctx.send::<FsCapability>(&Load { addr: start.addr, tag: start.tag });
+        let _request = ctx.send_with_context::<FsCapability>(&Load { addr: start.addr }, start.slot);
     }
 
     #[handler::response]
-    fn on_load_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, result: LoadResult) {
-        state.accepted.push(result);
+    fn on_read_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, result: ReadResult) {
+        state.reads.push(result);
     }
 
-    #[handler::event]
-    fn on_loaded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, loaded: Loaded) {
-        state.loaded.push((loaded, ctx.in_flight_root()));
+    #[handler::response]
+    fn on_loaded(state: &mut Self::State, ctx: &mut NativeCtx<'_>, loaded: Loaded, slot: Slot) {
+        state.loaded.push((loaded, slot, ctx.in_flight_root()));
     }
 }
 
@@ -118,38 +123,38 @@ impl Drop for Sandbox {
     }
 }
 
-/// Write `bytes` into `fifo` and close it, letting the read blocked on it
-/// finish. Call only once that read's worker has been started: the open
-/// blocks until the worker opens its end.
-fn feed(fifo: &Path, bytes: &[u8]) {
-    let mut writer = OpenOptions::new().write(true).open(fifo).expect("open the FIFO's write end");
+/// Write `bytes` into `fifo` and close it, if a reader has its other end
+/// open: a non-blocking write-open fails with `ENXIO` until one has. Called
+/// from a pump predicate, so it is retried on each pump until it succeeds.
+fn try_feed(fifo: &Path, bytes: &[u8]) -> bool {
+    let Ok(mut writer) = OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo) else {
+        return false;
+    };
     writer.write_all(bytes).expect("write the FIFO");
+    true
 }
 
-/// Whether a reader has the FIFO open right now: a non-blocking write-open
-/// fails with `ENXIO` when none has.
+/// Whether a reader has the FIFO open right now.
 fn has_reader(fifo: &Path) -> bool {
     OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo).is_ok()
 }
 
-fn chassis_with_fs(roots: &NamespaceRoots) -> (PassiveChassis<TestChassis>, Receiver<EgressEvent>) {
-    let (registry, mailer, rx) = fresh_substrate_and_rx();
-    let chassis = boot_test_chassis_with::<FsCapability>(&registry, &mailer, roots.clone(), ());
-
-    (chassis, rx)
-}
-
-fn session(correlation: u64) -> ReplyTarget {
-    ReplyTarget::Session { session: SessionToken(Uuid::nil()), correlation }
-}
-
-fn requester(sandbox: &Sandbox) -> PumpedDriver<LoadRequester> {
-    let (chassis, _rx) = chassis_with_fs(&sandbox.roots);
+/// A pumped [`Requester`] on a chassis composing `aether.fs` on the pool.
+fn requester(sandbox: &Sandbox) -> PumpedDriver<Requester> {
+    let (registry, mailer) = fresh_substrate();
+    let chassis = boot_test_chassis_with::<FsCapability>(&registry, &mailer, sandbox.roots.clone(), ());
     PumpedDriver::boot(chassis, (), ())
 }
 
 fn save(path: &str) -> NamespaceAddr {
     NamespaceAddr::new("save", path)
+}
+
+fn read_bytes(result: &ReadResult) -> (&str, Option<&[u8]>) {
+    match result {
+        ReadResult::Ok { addr, bytes } => (addr.path.as_str(), bytes.contiguous()),
+        ReadResult::Err { addr, error } => panic!("read of {} failed: {error:?}", addr.path),
+    }
 }
 
 /// Bug caught: reads still running on the `aether.fs` turn, so a read
@@ -161,68 +166,58 @@ fn two_reads_run_at_once_and_each_holds_its_own_chain() {
     let sandbox = Sandbox::new("reads-overlap");
     let slow = sandbox.fifo("slow.bin");
     fs::write(sandbox.roots.save.join("quick.bin"), b"quick").expect("test setup: seed quick.bin");
-    let (chassis, rx) = chassis_with_fs(&sandbox.roots);
-    let fs_ref = chassis.actor_ref::<FsCapability>();
+    let mut driver = requester(&sandbox);
+    let requester_ref = driver.chassis().actor_ref::<Requester>();
 
-    let (_, slow_settled) = chassis.send_tracked(fs_ref, &Read { addr: save("slow.bin") }, Some(session(1)));
-    let (_, quick_settled) = chassis.send_tracked(fs_ref, &Read { addr: save("quick.bin") }, Some(session(2)));
+    let (slow_root, slow_settled) =
+        driver.chassis().send_tracked(requester_ref, &StartRead { addr: save("slow.bin") }, None);
+    let quick_root = driver.send_tracked(requester_ref, &StartRead { addr: save("quick.bin") }, None);
+    driver.settle(&[quick_root]);
 
-    await_settled(&quick_settled, "the quick read beside a blocked one");
-    match decode_session_reply::<ReadResult>(&rx) {
-        ReadResult::Ok { addr, bytes } => {
-            assert_eq!(addr.path, "quick.bin");
-            assert_eq!(bytes.contiguous(), Some(&b"quick"[..]));
-        }
-        ReadResult::Err { error, .. } => panic!("quick read failed: {error:?}"),
-    }
+    let reads = driver.read_state(|state| state.reads.clone()).expect("the requester is live");
+    let [quick] = reads.as_slice() else {
+        panic!("expected only the quick read answered, got {reads:?}");
+    };
+    assert_eq!(read_bytes(quick), ("quick.bin", Some(&b"quick"[..])));
     assert!(slow_settled.try_recv().is_err(), "the blocked read's chain settled before its reply");
 
-    feed(&slow, b"slow");
-    await_settled(&slow_settled, "the blocked read once fed");
-    match decode_session_reply::<ReadResult>(&rx) {
-        ReadResult::Ok { addr, bytes } => {
-            assert_eq!(addr.path, "slow.bin");
-            assert_eq!(bytes.contiguous(), Some(&b"slow"[..]));
-        }
-        ReadResult::Err { error, .. } => panic!("slow read failed: {error:?}"),
-    }
+    driver.pump_until("the slow read's worker opens its FIFO", |_| try_feed(&slow, b"slow"));
+    driver.settle(&[slow_root]);
+
+    let reads = driver.read_state(|state| state.reads.clone()).expect("the requester is live");
+    assert_eq!(reads.len(), 2, "both reads answered: {reads:?}");
+    assert_eq!(read_bytes(&reads[1]), ("slow.bin", Some(&b"slow"[..])));
 }
 
-/// Bug caught: a load's read holding the caller's chain (the caller's frame
-/// would wait for the disk), or `Loaded` sent on the caller's chain rather
-/// than a fresh one.
+/// Bug caught: a load holding the caller's chain (the caller's frame would
+/// wait for the disk), a late reply that rides a chain, or one that loses
+/// the context the caller bound.
 #[test]
-fn load_is_accepted_and_its_chain_settles_before_the_bytes_arrive() {
+fn load_settles_its_chain_before_the_bytes_and_replies_with_the_bound_context() {
     let sandbox = Sandbox::new("load-settles");
     let fifo = sandbox.fifo("asset.bin");
     let mut driver = requester(&sandbox);
-    let requester_ref = driver.chassis().actor_ref::<LoadRequester>();
+    let requester_ref = driver.chassis().actor_ref::<Requester>();
 
-    driver.send_and_settle(requester_ref, &StartLoad { addr: save("asset.bin"), tag: 42 }, None);
+    let start = StartLoad { addr: save("asset.bin"), slot: Slot { index: 42 } };
+    driver.send_and_settle(requester_ref, &start, None);
 
-    let (accepted, loaded) =
-        driver.read_state(|state| (state.accepted.clone(), state.loaded_count())).expect("the requester is live");
-    assert!(
-        matches!(accepted.as_slice(), [LoadResult::Accepted { tag: 42, .. }]),
-        "expected one acceptance, got {accepted:?}",
-    );
-    assert_eq!(loaded, 0, "the bytes arrived before the FIFO was fed");
+    let loaded = driver.read_state(|state| state.loaded.len()).expect("the requester is live");
+    assert_eq!(loaded, 0, "the reply arrived before the FIFO was fed");
 
-    feed(&fifo, b"asset bytes");
-    driver.pump_until("the load's delivery", |state| state.loaded_count() == 1);
+    driver.pump_until("the load's worker opens its FIFO", |_| try_feed(&fifo, b"asset bytes"));
+    driver.pump_until("the load's late reply", |state| state.loaded.len() == 1);
 
     driver
         .read_state(|state| {
-            let [(Loaded::Ok { addr, tag, bytes }, delivered_root)] = state.loaded.as_slice() else {
+            let [(Loaded::Ok { addr, bytes }, slot, reply_root)] = state.loaded.as_slice() else {
                 panic!("expected one Loaded::Ok, got {:?}", state.loaded);
             };
             assert_eq!(addr.path, "asset.bin");
-            assert_eq!(*tag, 42);
             assert_eq!(bytes.contiguous(), Some(&b"asset bytes"[..]));
-
-            let sent_root = state.sent_roots[0];
-            assert!(delivered_root.is_some(), "Loaded arrived on no chain");
-            assert_ne!(*delivered_root, sent_root, "Loaded rode the chain that sent the load");
+            assert_eq!(*slot, Slot { index: 42 }, "the late reply lost the bound context");
+            assert!(state.sent_roots[0].is_some(), "the load was sent on a chain");
+            assert!(reply_root.is_none(), "the late reply rode a chain: {reply_root:?}");
         })
         .expect("the requester is live");
 }
@@ -234,41 +229,38 @@ fn load_is_accepted_and_its_chain_settles_before_the_bytes_arrive() {
 fn loads_past_the_bound_wait_in_order_and_none_is_dropped() {
     let sandbox = Sandbox::new("load-bound");
     let total = MAX_LOADS_IN_FLIGHT + 1;
-    let fifos: Vec<PathBuf> = (0..total).map(|tag| sandbox.fifo(&format!("asset-{tag}.bin"))).collect();
+    let fifos: Vec<PathBuf> = (0..total).map(|index| sandbox.fifo(&format!("asset-{index}.bin"))).collect();
     let mut driver = requester(&sandbox);
-    let requester_ref = driver.chassis().actor_ref::<LoadRequester>();
+    let requester_ref = driver.chassis().actor_ref::<Requester>();
 
     let roots: Vec<MailId> = (0..total)
-        .map(|tag| {
-            let start = StartLoad { addr: save(&format!("asset-{tag}.bin")), tag: tag as u64 };
+        .map(|index| {
+            let start = StartLoad { addr: save(&format!("asset-{index}.bin")), slot: Slot { index: index as u64 } };
             driver.send_tracked(requester_ref, &start, None)
         })
         .collect();
     driver.settle(&roots);
 
-    let last = &fifos[MAX_LOADS_IN_FLIGHT];
-    assert!(!has_reader(last), "the load past the bound started before a slot freed");
+    assert!(!has_reader(&fifos[MAX_LOADS_IN_FLIGHT]), "the load past the bound started before a slot freed");
 
-    feed(&fifos[0], b"first");
-    driver.pump_until("the first load", |state| state.loaded_count() == 1);
-    for fifo in &fifos[1..] {
-        feed(fifo, b"rest");
+    for fifo in &fifos {
+        driver.pump_until("a load's worker opens its FIFO", |_| try_feed(fifo, b"bytes"));
     }
-    driver.pump_until("every load", |state| state.loaded_count() == total);
+    driver.pump_until("every load's reply", |state| state.loaded.len() == total);
 
     driver
         .read_state(|state| {
-            let mut tags: Vec<u64> = state
+            let mut indices: Vec<u64> = state
                 .loaded
                 .iter()
-                .map(|(loaded, _)| match loaded {
-                    Loaded::Ok { tag, .. } => *tag,
-                    Loaded::Err { tag, error, .. } => panic!("load {tag} failed: {error:?}"),
+                .map(|(loaded, slot, _)| match loaded {
+                    Loaded::Ok { .. } => slot.index,
+                    Loaded::Err { error, .. } => panic!("load {} failed: {error:?}", slot.index),
                 })
                 .collect();
-            tags.sort_unstable();
+            indices.sort_unstable();
             let expected: Vec<u64> = (0..total as u64).collect();
-            assert_eq!(tags, expected, "every load is delivered exactly once");
+            assert_eq!(indices, expected, "every load is answered exactly once");
         })
         .expect("the requester is live");
 }
