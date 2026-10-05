@@ -34,6 +34,7 @@ mod probe;
 mod quiet_probe;
 mod source_forwarder;
 mod source_observer;
+mod spike_asset_probe;
 mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
@@ -62,6 +63,7 @@ pub use probe::{KeyProbe, Probe, ProbeWithConfig};
 pub use quiet_probe::QuietProbe;
 pub use source_forwarder::SourceForwarder;
 pub use source_observer::SourceObserver;
+pub use spike_asset_probe::SpikeAssetProbe;
 pub use stateful_replace::{Counter, RehydrateTrap, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
 pub use ui_widget::UiWidget;
@@ -75,6 +77,7 @@ aether_actor::export!(
         KeyProbe,
         PaintProbe,
         QuietProbe,
+        SpikeAssetProbe,
         RootManager,
         Panel,
         ParentPeerCaller,

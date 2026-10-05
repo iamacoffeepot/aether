@@ -1,0 +1,20 @@
+[package]
+name = "spike-load-drop-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# SPIKE (branch `spike/load-drop-heap`, issue 7414): the smallest asset
+# bundle component: one instanced export whose `wire` fetches every asset in
+# its catalog through the load window. The shape of the bundle actor the
+# issue's figures were measured with, in this repository.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../../crates/aether-actor" }
+aether-data = { path = "../../../crates/aether-data", features = ["derive"] }
+
+[lints]
+workspace = true

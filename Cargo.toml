@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "spikes/load-drop-heap/bundle",
     "crates/aether-substrate",
     "crates/aether-chassis",
     "crates/aether-chassis-desktop",

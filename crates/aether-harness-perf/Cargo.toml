@@ -31,6 +31,22 @@ bloomery = [
     "dep:tracing-subscriber",
 ]
 
+# SPIKE (spike/load-drop-heap, issue 7414): the load and drop heap profiler.
+heap-profile = [
+    "dep:dhat",
+    "dep:libc",
+    "dep:aether-actor",
+    "dep:aether-component",
+    "dep:aether-data",
+    "dep:aether-kinds",
+    "dep:aether-substrate",
+]
+
+[[bin]]
+name = "aether-perf-load-drop"
+path = "src/bin/perf-load-drop/main.rs"
+required-features = ["heap-profile"]
+
 [[bin]]
 name = "aether-perf-trial"
 path = "src/bin/perf-trial.rs"
@@ -81,6 +97,12 @@ aether-bloomery-journal = { path = "../aether-bloomery-journal", optional = true
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds", optional = true }
 aether-bloomery-muse = { path = "../aether-bloomery-muse", optional = true }
 aether-data = { path = "../aether-data", optional = true }
+dhat = { version = "0.3", optional = true }
+libc = { version = "0.2", optional = true }
+aether-actor = { path = "../aether-actor", optional = true }
+aether-component = { path = "../aether-component", optional = true }
+aether-kinds = { path = "../aether-kinds", optional = true }
+aether-substrate = { path = "../aether-substrate", optional = true }
 tracing = { workspace = true, optional = true, features = ["std"] }
 tracing-subscriber = { version = "0.3", optional = true }
 
