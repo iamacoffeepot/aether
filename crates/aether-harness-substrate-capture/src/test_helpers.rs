@@ -32,12 +32,18 @@ pub fn has_wgpu_adapter() -> bool {
 }
 
 /// Gate for visual tests that need wgpu but no wasm component: `true` when
-/// an adapter is available. Without one the test skips (`false`), or, under
-/// `AETHER_REQUIRE_RUNTIME=1`, panics so a runner that lost its driver is
-/// loud rather than vacuous.
+/// an adapter is available, `false` when the test skips.
+///
+/// A missing wgpu adapter skips: no command the reader can
+/// run puts a GPU on a driverless box, and the workspace's standing
+/// promise is that such a box builds and tests cleanly.
+/// `AETHER_REQUIRE_RUNTIME=1` — which CI exports — turns the adapter
+/// skip into a panic, so a runner that lost its driver is loud
+/// rather than vacuous.
 ///
 /// # Panics
-/// Panics under `AETHER_REQUIRE_RUNTIME=1` if no wgpu adapter is available.
+/// Panics under `AETHER_REQUIRE_RUNTIME=1` if no wgpu adapter is
+/// available — fail-fast per ADR-0063.
 #[must_use]
 // Test-only skip diagnostic — emitted from `cargo test` runners so a
 // skipped test is visible alongside `test ... ok` lines (issue 891).
@@ -55,24 +61,18 @@ pub fn require_wgpu_adapter() -> bool {
     available
 }
 
-/// Gate for visual scenarios: probes wgpu with [`require_wgpu_adapter`],
-/// then locates the wasm via `require_wasm`. Returns the wasm path on
-/// success; `None` when the test skips.
+/// Gate for visual scenarios that load a component: [`require_wgpu_adapter`],
+/// then the wasm through `require_wasm`. Returns the wasm path, or `None`
+/// when the test skips.
 ///
-/// The two gates answer differently on purpose (issue #5724). A missing
-/// wasm artifact fails: it is one `cargo xtask build-wasm` away, and a
-/// scenario that reports `test … ok` without running is worse than a red
-/// one. A missing wgpu adapter still skips: no command the reader can
-/// run puts a GPU on a driverless box, and the workspace's standing
-/// promise is that such a box builds and tests cleanly.
-/// `AETHER_REQUIRE_RUNTIME=1` — which CI exports — turns the adapter
-/// skip into a panic too, so a runner that lost its driver is loud
-/// rather than vacuous.
+/// The two gates answer differently on purpose (issue #5724). The adapter
+/// gate skips; a missing wasm artifact fails, because it is one
+/// `cargo xtask build-wasm` away and a scenario that reports `test … ok`
+/// without running is worse than a red one.
 ///
 /// # Panics
-/// Panics if the named crate's wasm artifact is not pre-built (unless
-/// `AETHER_ALLOW_WASM_SKIP=1`), or, under `AETHER_REQUIRE_RUNTIME=1`, if
-/// no wgpu adapter is available — fail-fast per ADR-0063.
+/// Panics where [`require_wgpu_adapter`] does, and when the named crate's
+/// wasm artifact is not pre-built (unless `AETHER_ALLOW_WASM_SKIP=1`).
 #[must_use]
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     if !require_wgpu_adapter() {
