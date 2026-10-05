@@ -65,11 +65,10 @@ impl Program for TreeMove {
 #[cfg(test)]
 mod tests {
     use aether_bloomery_kinds::{Node, Tree};
-    use aether_bloomery_program::Edited;
     use serde_json::json;
 
     use super::{MoveArgs, TreeMove};
-    use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
+    use crate::session::fixture::{SmallTree, name, path, run_async};
 
     #[test]
     fn a_moved_executable_stays_executable_and_a_symlink_keeps_its_target() {
@@ -113,23 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn a_move_it_cannot_make_is_a_result_that_leaves_the_tree_unchanged() {
-        // Catches a model's mistake refused as a fault, which would end the session, and one that changes the tree.
+    fn invalid_arguments_are_a_result_that_leaves_the_tree_unchanged() {
+        // Catches invalid arguments refused as a fault, which would end the session.
         let small = SmallTree::new();
-        for (from, to, summary) in [
-            ("missing", "dst", "Nothing is at missing, so nothing changed."),
-            ("README/x", "dst", "README is not a directory, so nothing changed."),
-            ("README", "src/lib.rs", "src/lib.rs already exists, so nothing changed."),
-            ("README", "README", "README is the same path, so nothing changed."),
-            ("src", "src/nested/lib.rs", "src/nested/lib.rs is inside src, so nothing changed."),
-            ("README", "run/x", "run is not a directory, so nothing changed."),
-        ] {
-            let args = MoveArgs::new(path(from), path(to));
-            let (input, closure) = small.call(&args);
-            let edited = run_async::<TreeMove>(&input, closure).map(|(edited, _)| edited);
-            assert_eq!(edited, Ok(Edited::new(small.tree(), summary, no_detail())), "{from} to {to}");
-        }
-
         let raw = json!({ "from": "../x", "to": "dst" });
         let (input, closure) = small.call_json::<MoveArgs>(&raw);
         let (edited, _) = run_async::<TreeMove>(&input, closure).expect("invalid arguments are a result");

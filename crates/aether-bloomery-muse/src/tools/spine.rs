@@ -218,10 +218,11 @@ pub async fn remove(
 /// source or lies inside it.
 ///
 /// Both spines descend from the one original `root`, so only original
-/// directories are read. The rebuild removes the entry from `from`'s spine
-/// bottom-up up to the deepest directory both spines share, keeping that
-/// directory in memory, then places the node down `to`'s spine bottom-up to
-/// the root, so every directory staged is on the returned root's spine.
+/// directories are read. The source spine is cut at the deepest directory both
+/// spines share, that lower spine is rebuilt without its leaf to give the
+/// shared directory unstaged, that directory is stored into the destination
+/// spine, and the destination spine is rebuilt with the moved node.
+/// Every directory staged is then on the returned root's spine.
 ///
 /// Both walks are iterative, one frame per segment.
 ///
@@ -238,112 +239,66 @@ pub async fn relocate(
     if from.as_str() == to.as_str() {
         return Ok(Err(Moved::Same { at: from.as_str().into() }));
     }
-    let from_split: Vec<&str> = from.as_str().split('/').collect();
-    let to_split: Vec<&str> = to.as_str().split('/').collect();
-    let mut shared_depth = 0;
-    for (from_segment, to_segment) in from_split.iter().zip(to_split.iter()) {
-        let same = from_segment == to_segment;
-        if !same {
-            break;
-        }
-        shared_depth += 1;
-    }
-    if shared_depth == from_split.len() {
-        return Ok(Err(Moved::Inside { from: from.as_str().into(), to: to.as_str().into() }));
-    }
 
-    let from_spine = match descend(env, root, from, false).await? {
+    let mut from_spine = match descend(env, root, from, false).await? {
         Ok(spine) => spine,
         Err(blocked) => return Ok(Err(Moved::Source(blocked))),
     };
-    let to_spine = match descend(env, root, to, true).await? {
+    let mut to_spine = match descend(env, root, to, true).await? {
         Ok(spine) => spine,
         Err(blocked) => return Ok(Err(Moved::Destination(blocked))),
     };
+    let shared = from_spine.names.iter().zip(&to_spine.names).take_while(|(from, to)| from == to).count();
+    if shared == from_spine.names.len() {
+        return Ok(Err(Moved::Inside { from: from.as_str().into(), to: to.as_str().into() }));
+    }
 
-    let node = {
-        let (dir, name) = from_spine.parent();
-        match dir.entries().get(name).cloned() {
-            Some(node) => node,
-            None => return Ok(Err(Moved::Source(Blocked::Missing { at: from.as_str().into() }))),
-        }
+    let (dir, name) = from_spine.parent();
+    let Some(node) = dir.entries().get(name).cloned() else {
+        return Ok(Err(Moved::Source(Blocked::Missing { at: from.as_str().into() })));
     };
-    {
-        let (dir, name) = to_spine.parent();
-        if dir.entries().contains_key(name) {
-            return Ok(Err(Moved::Exists { at: to.as_str().into() }));
-        }
+    let (dir, name) = to_spine.parent();
+    let present = dir.entries().contains_key(name);
+    if present {
+        return Ok(Err(Moved::Exists { at: to.as_str().into() }));
     }
 
-    let Spine { names: from_names, dirs: from_dirs } = from_spine;
-    let Spine { names: to_names, dirs: to_dirs } = to_spine;
+    let lower = Spine { names: from_spine.names.split_off(shared), dirs: from_spine.dirs.split_off(shared) };
+    let shared_tree = rebuild_tree(env, lower, None)?;
+    to_spine.dirs[shared] = shared_tree;
+    Ok(Ok(rebuild(env, to_spine, Some(node))?))
+}
 
-    let mut child: Option<Node> = None;
-    let mut shared: Option<Tree> = None;
-    let mut index = from_names.len();
-    while index > shared_depth {
-        index -= 1;
-        let mut entries = from_dirs[index].entries().clone();
-        match child.take() {
-            None => {
-                entries.remove(&from_names[index]);
-            }
-            Some(node) => {
-                entries.insert(from_names[index].clone(), node);
-            }
-        }
-        let tree = Tree::new(entries);
-        if index == shared_depth {
-            shared = Some(tree);
-        } else {
-            let staged = env.stage_encoded(&tree)?;
-            child = Some(Node::Directory(staged));
-        }
+/// The top directory of the spine with its last entry set to `last`, or removed
+/// when `last` is `None`, unstaged, staging every directory below it.
+fn rebuild_tree(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Tree, Refusal> {
+    let mut levels = spine.names.into_iter().zip(spine.dirs);
+    let Some((top_name, top_dir)) = levels.next() else {
+        unreachable!("a spine has at least one directory");
+    };
+
+    let mut child = last;
+    for (name, dir) in levels.rev() {
+        child = Some(Node::Directory(env.stage_encoded(&with_entry(&dir, name, child))?));
     }
-    let shared = shared.expect("the shared directory is on the source spine");
+    Ok(with_entry(&top_dir, top_name, child))
+}
 
-    let mut child = Some(node);
-    let mut root = None;
-    let mut index = to_names.len();
-    while index > 0 {
-        index -= 1;
-        let dir = if index == shared_depth {
-            &shared
-        } else {
-            &to_dirs[index]
-        };
-        let mut entries = dir.entries().clone();
-        entries.insert(to_names[index].clone(), child.take().expect("a placed child is always staged"));
-        let staged = env.stage_encoded(&Tree::new(entries))?;
-        if index == 0 {
-            root = Some(staged);
-        } else {
-            child = Some(Node::Directory(staged));
-        }
-    }
-    let root = root.expect("a tree path has at least one segment");
-
-    Ok(Ok(root))
+/// `dir` with `name` set to `node`, or without it when `node` is `None`.
+fn with_entry(dir: &Tree, name: Name, node: Option<Node>) -> Tree {
+    let mut entries = dir.entries().clone();
+    match node {
+        Some(node) => entries.insert(name, node),
+        None => entries.remove(&name),
+    };
+    Tree::new(entries)
 }
 
 /// The root of the spine with its last entry set to `last`, or removed when
 /// `last` is `None`, staging every directory rebuilt on the way up.
 fn rebuild(env: &mut Env<Async>, spine: Spine, last: Option<Node>) -> Result<Ref<Tree>, Refusal> {
-    let Spine { names, dirs } = spine;
-    let mut child = last;
-    for (name, dir) in names.into_iter().zip(dirs).rev() {
-        let mut entries = dir.entries().clone();
-        match child {
-            Some(node) => entries.insert(name, node),
-            None => entries.remove(&name),
-        };
-        child = Some(Node::Directory(env.stage_encoded(&Tree::new(entries))?));
-    }
-
-    let Some(Node::Directory(root)) = child else {
-        unreachable!("the last rebuilt node is the root directory");
-    };
-    Ok(root)
+    let tree = rebuild_tree(env, spine, last)?;
+    env.stage_encoded(&tree)
 }
 
 #[cfg(test)]
@@ -356,7 +311,7 @@ mod tests {
 
     use crate::session::fixture::{SmallTree, name, no_detail, path, run_async};
     use crate::tools::edit::{EditArgs, TreeEdit};
-    use crate::tools::move_::{MoveArgs, TreeMove};
+    use crate::tools::relocate::{MoveArgs, TreeMove};
     use crate::tools::remove::{RemoveArgs, TreeRemove};
     use crate::tools::write::{TreeWrite, WriteArgs};
 
@@ -453,8 +408,7 @@ mod tests {
 
     #[test]
     fn a_move_between_sibling_directories_rebuilds_both_spines() {
-        // Catches a move that drops the destination sibling or leaves the source entry behind, and a rebuilt
-        // directory the returned root does not reach.
+        // Catches a move that drops the destination sibling or leaves the source entry behind.
         let small = SmallTree::new();
         let (input, closure) = small.call(&MoveArgs::new(path("src/lib.rs"), path("dst/lib.rs")));
         let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
@@ -516,6 +470,31 @@ mod tests {
     }
 
     #[test]
+    fn a_move_below_the_shared_directory_substitutes_it_in_memory() {
+        // Catches a move that loses the removal when the shared directory is deeper than the root.
+        let small = SmallTree::new();
+        let (input, closure) = small.call(&MoveArgs::new(path("src/lib.rs"), path("src/deep/lib.rs")));
+        let (edited, store) = run_async::<TreeMove>(&input, closure).expect("moves");
+        assert_eq!(edited.summary(), "Moved src/lib.rs to src/deep/lib.rs.");
+
+        let root: Tree = store.value(edited.tree());
+        let Some(Node::Directory(src)) = root.entries().get(&name("src")) else {
+            panic!("src stays a directory");
+        };
+        let src: Tree = store.value(*src);
+        assert_eq!(src.entries().len(), 1, "src holds only deep");
+        let Some(Node::Directory(deep)) = src.entries().get(&name("deep")) else {
+            panic!("src/deep is created");
+        };
+        let deep: Tree = store.value(*deep);
+        let lib = Node::File(Ref::of_bytes(SmallTree::LIB));
+        assert_eq!(deep.entries().get(&name("lib.rs")), Some(&lib));
+        for kept in ["README", "run", "link", "blob.bin"] {
+            assert_eq!(root.entries().get(&name(kept)), small.root().entries().get(&name(kept)), "{kept} kept");
+        }
+    }
+
+    #[test]
     fn a_blocked_move_leaves_the_tree_unchanged() {
         // Catches a move that treats a model's mistake as a fault, changes the tree, or stages a partial rebuild.
         let small = SmallTree::new();
@@ -524,6 +503,7 @@ mod tests {
             ("src/missing", "dst", "Nothing is at src/missing, so nothing changed."),
             ("README/x", "dst", "README is not a directory, so nothing changed."),
             ("README", "src/lib.rs", "src/lib.rs already exists, so nothing changed."),
+            ("src", "src/lib.rs", "src/lib.rs is inside src, so nothing changed."),
             ("README", "README", "README is the same path, so nothing changed."),
             ("src/lib.rs", "README/x", "README is not a directory, so nothing changed."),
             ("src", "src/new/lib.rs", "src/new/lib.rs is inside src, so nothing changed."),
