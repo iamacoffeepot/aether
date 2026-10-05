@@ -534,8 +534,9 @@ Run the steps on the host whose daemon the actor dials.
 On an engine the hub did not spawn there is no `load_component`, so
 `cargo xtask muse bootstrap --rpc-port <port> --unit <key> --base <ref>
 --toolchain <ref>` sends the same six steps from outside the engine. It prints
-`platform=<p>` and `environment=<digest>`, with `unchanged ` ahead of the digest
-when the head already named it, in which case it appends no head move.
+`platform=<p>` and `environment=<digest>`. When the head already named the
+result, the second line reads `unchanged environment=<digest>` and no head move
+is appended.
 
 The merge call's key is the input digest's first eight bytes, so a rerun over
 the same images replays the recorded merge (ADR-0226 decision 11) and moves the

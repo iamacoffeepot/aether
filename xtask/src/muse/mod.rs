@@ -73,8 +73,8 @@ enum Verb {
     BindPrograms(bind_programs::BindProgramsArgs),
     /// Import the base and toolchain images, merge them into an environment,
     /// and move the environment head to it. Prints `platform=` and
-    /// `environment=`, the latter prefixed `unchanged ` when the head already
-    /// named it.
+    /// `environment=`, the latter line prefixed `unchanged ` when the head
+    /// already named it.
     Bootstrap(bootstrap::BootstrapArgs),
     /// Run `cargo vendor` over a commit's or stored tree's `Cargo.lock` in an
     /// environment. Prints `vendor=`, or fails with cargo's stderr.

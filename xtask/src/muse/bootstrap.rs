@@ -35,7 +35,8 @@ pub(super) struct BootstrapArgs {
 }
 
 /// Build the environment and print `platform=<p>` and `environment=<digest>`,
-/// the latter prefixed `unchanged ` when the platform's head already named it.
+/// the latter line prefixed `unchanged ` when the platform's head already named
+/// it.
 pub(super) fn run(args: &BootstrapArgs) -> Result<()> {
     let base = ImageRef::new(args.base.as_str()).map_err(|error| anyhow!("--base: {error}"))?;
     let toolchain = ImageRef::new(args.toolchain.as_str()).map_err(|error| anyhow!("--toolchain: {error}"))?;
@@ -60,14 +61,12 @@ pub(super) fn run(args: &BootstrapArgs) -> Result<()> {
         commit(&mut engine, publish).context("moving the environment head")?;
     }
 
+    let status = if moved {
+        ""
+    } else {
+        "unchanged "
+    };
     println!("platform={}", environment.platform.as_str());
-    println!(
-        "environment={}{result}",
-        if moved {
-            ""
-        } else {
-            "unchanged "
-        }
-    );
+    println!("{status}environment={result}");
     Ok(())
 }
