@@ -29,8 +29,9 @@
 //! decode), so the model sees its mistake on the next turn. The
 //! program never runs a call. A later turn replays the call as
 //! [`TurnItem::Call`] and its [`ToolOutput`] as [`TurnItem::CallOutput`]:
-//! a stored result, which the program renders to JSON with the result schema
-//! the output cites, or the refusal text, sent as stored. The request asks
+//! a stored result, which the program sends as its text when it is a
+//! [`Viewed`] or an `Edited` and otherwise renders to JSON with the result
+//! schema the output cites, or the refusal text, sent as stored. The request asks
 //! for each reply's reasoning as encrypted content, and a called or completed
 //! reply keeps every reasoning item that carries it as a [`Reasoning`], which
 //! the next turn resends as [`TurnItem::Reasoning`] ahead of the reply's text
