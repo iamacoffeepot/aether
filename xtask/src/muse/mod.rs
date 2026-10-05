@@ -5,6 +5,8 @@
 //! Every verb dials the engine's RPC port and addresses one unit's journal
 //! owner and the bundle driver over the shared [`crate::bloomery`] client.
 //!
+//! - [`activation`] reads from the journal whether the muse reactor is live,
+//!   so `bind` and `open` report a reactor that failed to activate.
 //! - [`bind`] binds the muse bundle and the reactor set that runs its session
 //!   loop, once per engine.
 //! - [`open`] stages a tree, instructions, a brief, and seeded reads, and
@@ -19,6 +21,7 @@
 //! instead of opening or continuing twice. Two opens with the same tree,
 //! instructions, brief, seeds, and settings therefore name the same session.
 
+mod activation;
 mod bind;
 mod continue_;
 mod export;
@@ -53,10 +56,12 @@ pub struct MuseArgs {
 #[derive(Subcommand, Debug)]
 enum Verb {
     /// Bind the muse bundle and a reactor set holding it, unless both heads
-    /// already name them. Prints `bound` or `unchanged` with both digests.
+    /// already name them. Prints `bound` or `unchanged` with both digests, and
+    /// fails with the driver's recorded reason when the reactor is not live.
     Bind(bind::BindArgs),
     /// Open a session on a commit's tree, or a stored tree, with instructions,
     /// a brief, and seeded reads. Prints `tree=`, `session=`, and `after=`.
+    /// Refuses when the muse reactor is not live.
     Open(Box<open::OpenArgs>),
     /// Continue a rested session with a message, or resend its conversation
     /// as it stands. Prints `after=`.

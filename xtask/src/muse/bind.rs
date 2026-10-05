@@ -6,6 +6,11 @@
 //! member the bound set already holds and adds [`MUSE`], so binding never
 //! drops another bundle's reactors. A rebind of the same bundle publishes
 //! nothing, so it appends no head move.
+//!
+//! A publish that moves the head is answered by the driver recording the
+//! reactor's activation or its rejection. `bind` waits for that answer and
+//! fails with the recorded reason when the reactor did not come live; a
+//! rebind that publishes nothing fails the same way when the head is owed.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +21,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 
 use super::EngineArgs;
+use super::activation::{muse_activation, verdict_after};
 use crate::bloomery::{latest_moves, publish_at_fence, read_value};
 
 /// Arguments for `cargo xtask muse bind`.
@@ -29,7 +35,8 @@ pub(super) struct BindArgs {
 }
 
 /// Bind the bundle and print `bound` or `unchanged` with the bundle and set
-/// digests.
+/// digests, or fail with the reason the driver recorded when the reactor is
+/// not live.
 pub(super) fn run(args: &BindArgs) -> Result<()> {
     let wasm = fs::read(&args.bundle).with_context(|| format!("reading the bundle {}", args.bundle.display()))?;
     let mut engine = args.engine.connect()?;
@@ -56,6 +63,7 @@ pub(super) fn run(args: &BindArgs) -> Result<()> {
         .map(|(head, _, to)| RecordedHeadMove::new(head, to))
         .collect();
     if moves.is_empty() {
+        muse_activation(&mut engine)?.refuse_unless_live(&args.engine.unit)?;
         println!("unchanged bundle={bundle_digest} set={set_digest}");
         return Ok(());
     }
@@ -63,7 +71,10 @@ pub(super) fn run(args: &BindArgs) -> Result<()> {
     engine.stage_artifacts(vec![bundle, set])?;
     let fence = engine.read_head()?;
     match publish_at_fence(&mut engine, Publish::new(Vec::new(), moves, fence))? {
-        PublishResult::Committed { .. } => println!("bound bundle={bundle_digest} set={set_digest}"),
+        PublishResult::Committed { .. } => {
+            verdict_after(&mut engine, fence)?.refuse_unless_live(&args.engine.unit)?;
+            println!("bound bundle={bundle_digest} set={set_digest}");
+        }
         PublishResult::Conflict { actual } => {
             bail!("the journal reported a conflict at the fence {actual} it was sent")
         }

@@ -62,7 +62,8 @@
 //! rest writes the conversation and
 //! the latest tree down as a [`Session`] (`muse.session`) through
 //! `muse.session.record`, moving the session's head to it. The bound tools are
-//! [`TreeEdit`] (`tree.edit`) and [`TreeWrite`] (`tree.write`), which return an `Edited`
+//! [`TreeEdit`] (`tree.edit`), [`TreeWrite`] (`tree.write`), and
+//! [`TreeRemove`] (`tree.remove`), which return an `Edited`
 //! tree the loop carries to the next call; [`TreeList`] (`tree.list`),
 //! [`TreeRead`] (`tree.read`), and [`TreeGrep`] (`tree.grep`), which return
 //! the text they read as [`Viewed`] and leave the tree as it was; [`End`]
@@ -135,8 +136,8 @@ pub use session::{
 };
 pub use tools::{
     Echo, EchoArgs, EchoResult, EditArgs, End, EndArgs, Ending, GrepArgs, ListArgs, MAX_TEXT_BYTES, NUDGE_TEXT,
-    ReadArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeWrite, VIEW_MAX_BYTES, Viewed, WriteArgs, offered,
-    offered_with_proofs, proof_passed, required_proofs,
+    ReadArgs, RemoveArgs, TreeEdit, TreeGrep, TreeList, TreeRead, TreeRemove, TreeWrite, VIEW_MAX_BYTES, Viewed,
+    WriteArgs, offered, offered_with_proofs, proof_passed, required_proofs,
 };
 
 aether_actor::export!(
@@ -151,6 +152,7 @@ aether_actor::export!(
         End,
         TreeEdit,
         TreeWrite,
+        TreeRemove,
         TreeList,
         TreeRead,
         TreeGrep,

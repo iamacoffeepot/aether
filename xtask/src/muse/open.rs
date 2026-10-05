@@ -13,6 +13,7 @@ use aether_data::Ref;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
+use super::activation::muse_activation;
 use super::{EngineArgs, SettingsArgs, call, turn_limit};
 use crate::bloomery::parse_digest;
 use crate::import_commit::Imported;
@@ -77,7 +78,8 @@ pub(super) struct OpenArgs {
 }
 
 /// Open the session and print `tree=<digest>`, `session=<key>`, and
-/// `after=<seq>`, the boundary `wait` reads from.
+/// `after=<seq>`, the boundary `wait` reads from; refuse when the muse reactor
+/// is not live.
 pub(super) fn run(args: &OpenArgs) -> Result<()> {
     let ((tools, mut artifacts), preface) =
         proofs(args.environment.as_deref(), args.vendor.as_deref(), &args.test_env)?.map_or_else(
@@ -94,6 +96,7 @@ pub(super) fn run(args: &OpenArgs) -> Result<()> {
         .with_context(|| format!("reading the instructions {}", args.instructions.display()))?;
     let seeds = args.seeds.as_deref().map(seeds).transpose()?.unwrap_or_default();
     let mut engine = args.engine.connect()?;
+    muse_activation(&mut engine)?.refuse_unless_live(&args.engine.unit)?;
 
     let tree = match (&args.commit, &args.tree) {
         (Some(commit), _) => Imported::read(Path::new("."), commit)?.stage(&mut engine)?.root,
