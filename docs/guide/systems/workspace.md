@@ -505,7 +505,10 @@ Run the steps on the host whose daemon the actor dials.
    head, with no artifacts, carries one `RecordedHeadMove` of the head
    `(OpaqueBytes, workspace-programs)` to that digest.
    `describe_kinds(names: ["aether.bloomery.journal.publish"], detail:
-   "schema")` prints the shape.
+   "schema")` prints the shape. On an engine the hub did not spawn,
+   `cargo xtask muse bind-programs --rpc-port <port> --unit <key> --bundle <wasm>`
+   does both publishes and prints `bound bundle=<digest>`, or `unchanged
+   bundle=<digest>` when the head already names it.
 4. **Load the bootstrap.** `upload_component` the built
    `aether_bloomery_bootstrap.wasm` (`crates/aether-bloomery-bootstrap`), then
    `load_component` it with the two references `publish.sh` printed and the
@@ -527,6 +530,12 @@ Run the steps on the host whose daemon the actor dials.
    `aether.bloomery.bootstrap`. It logs one
    `info` line per step and ends with `the environment head moved; bootstrap
    done`. On the first refusal it logs one `error` and sends nothing more.
+
+On an engine the hub did not spawn there is no `load_component`, so
+`cargo xtask muse bootstrap --rpc-port <port> --unit <key> --base <ref>
+--toolchain <ref>` sends the same six steps from outside the engine. It prints
+`platform=<p>` and `environment=<digest>`, with `unchanged ` ahead of the digest
+when the head already named it, in which case it appends no head move.
 
 The merge call's key is the input digest's first eight bytes, so a rerun over
 the same images replays the recorded merge (ADR-0226 decision 11) and moves the

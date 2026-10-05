@@ -116,6 +116,11 @@ after=<seq>
   head `workspace-programs`, and hold both digests: the environment the head
   `(aether.workspace.environment, <platform>)` names, and the `Vendored.tree`
   of a `vendor.cargo` run over a source with the session tree's `Cargo.lock`.
+  On an engine the hub did not spawn, `muse bind-programs --bundle <wasm>`
+  binds the bundle head, `muse bootstrap --base <ref> --toolchain <ref>`
+  prints the environment digest, and `muse vendor (--commit <rev> | --tree
+  <digest>) --environment <digest>` prints `vendor=<digest>`, or fails with
+  cargo's stderr.
   A proof that runs out of time or memory is retried twice, then answered
   with what happened; any other proof fault fails the session.
 - `--test-env KEY=VALUE`, repeatable, needs `--environment` / `--vendor`: a

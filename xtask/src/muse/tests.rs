@@ -11,8 +11,9 @@ use std::{env, process};
 use aether_bloomery_journal::{Batch, Journal};
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, ClosureArtifact, Detail, EncodedArtifact, Fault, FaultReason, JournalEntry, Name,
-    NativeOrigin, Node, Path, ProgramName, ProgramRef, ReactorName, ReadArtifacts, ReadArtifactsResult, ReadEvents,
-    ReadEventsResult, RequestSource, Requested, RuleName, Seq, Transition, Tree, WatchHead, WatchHeadResult,
+    NativeOrigin, Node, Path, ProgramName, ProgramRef, ReactorName, ReactorSet, ReadArtifacts, ReadArtifactsResult,
+    ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, RequestSource, Requested, RuleName, Seq, Transition,
+    Tree, WatchHead, WatchHeadResult,
 };
 use aether_bloomery_muse::{
     ContinueInput, Echo, Endpoint, InputLimit, MUSE, ModelName, MuseTurn, OfferedTools, OpenInput, OutputBudget,
@@ -21,12 +22,14 @@ use aether_bloomery_muse::{
 };
 use aether_bloomery_program::Program;
 use aether_bloomery_workspace::EnvVar;
+use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_codec::encode_storage_schema;
 use aether_data::{Cites, Digest, Ref, Schema, Storage};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::activation::{MuseActivation, muse_activation, verdict_after};
+use super::bind_programs::programs_publish;
 use super::export::{Action, Change, export};
 use super::open::parse_test_env;
 use super::wait::{Usage, follow};
@@ -430,5 +433,35 @@ fn a_journal_never_bound_refuses_naming_bind() -> Result<()> {
 
     assert_eq!(state, MuseActivation::Never);
     assert!(error.contains("muse bind"), "{error}");
+    Ok(())
+}
+
+/// Store `artifact` and move `head` to it in one batch, and return its digest.
+fn bound(reads: &mut JournalReads, head: RecordedHead, artifact: EncodedArtifact) -> Result<Digest> {
+    let mut batch = Batch::new();
+    let digest = batch.stage_artifact(artifact);
+    batch.push_event(&RecordedHeadMove::new(head, digest), None)?;
+    reads.commit(&batch)?;
+    Ok(digest)
+}
+
+#[test]
+fn binding_programs_moves_only_their_head_and_is_unchanged_on_a_rebind() -> Result<()> {
+    // Catches a bind that rewrites the muse head or the reactor set, or one that appends a head move on every rerun.
+    let (_root, mut reads) = scratch_journal()?;
+    bound(&mut reads, RecordedHead::from(&MUSE), EncodedArtifact::opaque_bytes(b"muse"))?;
+    let set = EncodedArtifact::new(&ReactorSet::new(vec![MUSE])?)?;
+    bound(&mut reads, RecordedHead::from(&ReactorSet::ROOT), set)?;
+    let fence = reads.0.head()?.0;
+
+    let programs = EncodedArtifact::opaque_bytes(b"programs").digest();
+    let publish = programs_publish(&mut reads, programs, fence)?.expect("an unbound head is owed a move");
+    let moved: Vec<_> = publish.moves().iter().map(|moved| (moved.head().clone(), moved.to())).collect();
+    assert_eq!(moved, [(RecordedHead::from(&WORKSPACE_PROGRAMS), programs)]);
+    assert_eq!(publish.expected_seq(), fence);
+
+    bound(&mut reads, RecordedHead::from(&WORKSPACE_PROGRAMS), EncodedArtifact::opaque_bytes(b"programs"))?;
+    let rebind = programs_publish(&mut reads, programs, fence + 1)?;
+    assert!(rebind.is_none(), "a head that names the bundle owes no move");
     Ok(())
 }

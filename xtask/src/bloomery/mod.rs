@@ -7,7 +7,8 @@
 //! matching mail, and a test implements them over a scratch journal, so the
 //! lane's own logic runs against real citation checks and real entries.
 //!
-//! - [`client`] dials the engine and addresses the journal owner and the driver.
+//! - [`client`] dials the engine and addresses the journal owner, the driver, and
+//!   the workspace actor (`import`).
 //! - [`reads`] pages events, waits on the head, reads artifacts in batches, and
 //!   finds a head's latest move.
 
