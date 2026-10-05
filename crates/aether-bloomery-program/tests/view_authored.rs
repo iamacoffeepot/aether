@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, Entry, Head, HeadMoved, OpaqueBytes, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{ClosureArtifact, Entry, Head, HeadMoved, Program, Seq, Tree};
 use aether_bloomery_program::{Cited, CitedError, SequenceError, View, ViewCursor, ViewFoldError, view};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Storage, StorageData};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.view.note")]

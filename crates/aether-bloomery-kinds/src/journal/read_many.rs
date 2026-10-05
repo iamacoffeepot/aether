@@ -7,7 +7,9 @@ use core::fmt;
 
 use aether_actor::HeldReply;
 
-use crate::{ClosureArtifact, ClosureLimit, Digest};
+use aether_data::Digest;
+
+use crate::{ClosureArtifact, ClosureLimit};
 
 /// The digests one [`ReadArtifacts`] names, in request order: at least one,
 /// at most [`ReadArtifacts::MAX_ARTIFACTS`]. Construction and every decode
@@ -131,11 +133,11 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use aether_data::Kind;
     use aether_data::wire::encode_to_vec;
+    use aether_data::{Digest, Kind};
 
     use super::{ArtifactDigests, ArtifactDigestsError, ReadArtifacts};
-    use crate::{ClosureLimit, Digest};
+    use crate::ClosureLimit;
 
     fn digests(count: usize) -> Vec<Digest> {
         (0..count).map(|index| Digest::from_bytes([u8::try_from(index % 256).expect("byte"); 32])).collect()

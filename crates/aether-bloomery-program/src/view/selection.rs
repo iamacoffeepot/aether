@@ -4,7 +4,8 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Head, OpaqueBytes, ReactorSet, Ref, Seq};
+use aether_bloomery_kinds::{Head, ReactorSet, Seq};
+use aether_data::{OpaqueBytes, Ref};
 
 use crate::view::Heads;
 

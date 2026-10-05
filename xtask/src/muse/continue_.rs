@@ -8,8 +8,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use aether_bloomery_kinds::{EncodedArtifact, RecordedHead, Ref};
+use aether_bloomery_kinds::{EncodedArtifact, RecordedHead};
 use aether_bloomery_muse::{ContinueInput, SessionContinue, SessionKey};
+use aether_data::Ref;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 

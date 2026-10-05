@@ -3,11 +3,12 @@
 
 use std::time::{Duration, Instant};
 
-use aether_bloomery_journal::{DecodeError, Digest, JournalReader};
+use aether_bloomery_journal::{DecodeError, JournalReader};
 use aether_bloomery_kinds::{
-    Call, CallOutcome, Entry, Fault, MoveHead, MoveHeadResult, ReactorSet, Ref, Seq, Transition, WatchHeadResult,
+    Call, CallOutcome, Entry, Fault, MoveHead, MoveHeadResult, ReactorSet, Seq, Transition, WatchHeadResult,
 };
 use aether_bloomery_muse::{RestReason, Session};
+use aether_data::{Digest, Ref};
 use aether_harness_bloomery::BloomeryHarness;
 
 use crate::Failure;

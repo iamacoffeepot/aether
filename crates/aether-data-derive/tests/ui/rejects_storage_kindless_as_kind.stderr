@@ -9,8 +9,16 @@ help: the trait `aether_data::Kind` is not implemented for `Nested`
   |
 4 | struct Nested {
   | ^^^^^^^^^^^^^
-help: the trait `aether_data::Kind` is implemented for `()`
+help: the following other types implement trait `aether_data::Kind`
  --> $WORKSPACE/crates/aether-data/src/lib.rs
   |
   | impl Kind for () {
-  | ^^^^^^^^^^^^^^^^
+  | ^^^^^^^^^^^^^^^^ `()`
+  |
+ ::: $WORKSPACE/crates/aether-data/src/storage/artifact/leaf_kinds.rs
+  |
+  | impl Kind for OpaqueBytes {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^ `OpaqueBytes`
+...
+  | impl Kind for Utf8Text {
+  | ^^^^^^^^^^^^^^^^^^^^^^ `Utf8Text`

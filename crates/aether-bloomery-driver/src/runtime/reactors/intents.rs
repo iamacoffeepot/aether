@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, Detail, Digest, DriverRecord, EncodedArtifact, LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID,
+    CallInput, CallProgram, Detail, DriverRecord, EncodedArtifact, LEGACY_CALL_PROGRAM_ID, LEGACY_SET_HEAD_ID,
     ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifact, ReadArtifactResult, RequestSource, Requested,
     RuleName, SetHeads, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_program::Heads;
-use aether_data::{Kind, KindId};
+use aether_data::{Digest, Kind, KindId};
 
 use crate::runtime::clock::program_bundle;
 use crate::runtime::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};

@@ -11,9 +11,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_data::{Cites, Kind, Storage, StorageError};
+use aether_data::{Cites, Digest, Kind, Ref, Storage, StorageError};
 
-use crate::{Digest, EncodedArtifact, Head, HeadMoved, RecordedHead, RecordedHeadMove, Ref};
+use crate::{EncodedArtifact, Head, HeadMoved, RecordedHead, RecordedHeadMove};
 
 /// Move one typed head to an artifact the journal already stores.
 ///
@@ -32,7 +32,8 @@ impl MoveHead {
     /// The head and destination must have the same kind:
     ///
     /// ```compile_fail
-    /// use aether_bloomery_kinds::{Digest, Head, MoveHead, Program, Ref, Tree};
+    /// use aether_bloomery_kinds::{Head, MoveHead, Program, Tree};
+    /// use aether_data::{Digest, Ref};
     /// let head = Head::<Program>::new("main");
     /// let _ = MoveHead::new(&head, Ref::<Tree>::from_digest(Digest::from_bytes([0; 32])), 0);
     /// ```

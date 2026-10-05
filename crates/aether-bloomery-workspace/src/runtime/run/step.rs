@@ -34,8 +34,8 @@ use std::iter;
 use std::thread;
 use std::time::Instant;
 
-use aether_bloomery_kinds::{OpaqueBytes, Ref};
 use aether_bloomery_tar::{BlobWriter, TreeSink};
+use aether_data::{OpaqueBytes, Ref};
 use serde_json::{Value, json};
 
 use super::cleanup::Cleanup;

@@ -1,8 +1,9 @@
 //! `muse.session.record`: the turn a session ended on, written down as the
 //! [`Session`] it leaves.
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Tree, Utf8Text};
+use aether_bloomery_kinds::{Detail, Mode, Refusal, Tree};
 use aether_bloomery_program::{Env, Program, Sync, program};
+use aether_data::{Ref, Utf8Text};
 
 use crate::input::{CallId, Role, ToolCall, ToolOutput, TurnInput, TurnItem, TurnItems};
 use crate::result::{TurnOutcome, TurnResult, TurnUsage};
@@ -290,9 +291,9 @@ fn refused(reason: &str) -> Refusal {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Detail, ErasedRef, ProgramName, Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Detail, ProgramName, Refusal, Tree};
     use aether_bloomery_program::{Program, ToolSchema};
-    use aether_data::Kind;
+    use aether_data::{ErasedRef, Kind, Ref};
 
     use super::{Answered, CallAnswer, RecordInput, SessionRecord};
     use crate::input::tests::call;

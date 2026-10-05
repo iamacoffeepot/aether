@@ -58,7 +58,7 @@ pub use tool::{
 
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::{Kind, KindId, MailboxId, RequestId, Schema, StaticSchema, require_documented};
+    pub use aether_data::{Digest, Kind, KindId, MailboxId, RequestId, Schema, StaticSchema, require_documented};
     pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;

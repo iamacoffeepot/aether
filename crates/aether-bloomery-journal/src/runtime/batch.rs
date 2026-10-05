@@ -4,12 +4,10 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{
-    ArtifactCitation, Digest, EncodedArtifact, OpaqueBytes, Ref, Transition, Utf8Text, artifact_blob, artifact_prefix,
-    hash_bytes,
-};
+use aether_bloomery_kinds::{ArtifactCitation, EncodedArtifact, Transition};
 use aether_data::{
-    Blob, BlobReader, Citation, Citations, Cites, Kind, KindId, MAX_READ_BYTES, Storage, StorageData, StorageError,
+    Blob, BlobReader, Citation, Citations, Cites, Digest, Kind, KindId, MAX_READ_BYTES, OpaqueBytes, Ref, Storage,
+    StorageData, StorageError, Utf8Text, artifact_blob, artifact_prefix, hash_bytes,
 };
 
 use crate::Seq;

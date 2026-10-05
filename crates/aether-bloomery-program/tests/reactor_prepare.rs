@@ -6,9 +6,9 @@ use std::fmt;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, Tree};
 use aether_bloomery_program::{And, Arg, At, Guard, GuardArg, Heads, Owner, PrepareError, View, ViewArg, prepare};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, Ref, Storage, StorageData};
 
 const CURRENT: Head<Program> = Head::new("current");
 const SOURCE: Head<Tree> = Head::new("source");

@@ -20,10 +20,11 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
-    AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, DeclarationsResult, Detail, Digest,
-    DriverRecord, Fault, FaultReason, Invoked, ProgramRef, ReadArtifact, ReadArtifactResult, ReadClosureResult,
-    ReadEvents, ReadEventsResult, Seq,
+    AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, DeclarationsResult, Detail, DriverRecord, Fault,
+    FaultReason, Invoked, ProgramRef, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEvents,
+    ReadEventsResult, Seq,
 };
+use aether_data::Digest;
 
 use self::artifacts::{ARTIFACT_CACHE_BYTES, ArtifactCache};
 use crate::runtime::bundles::BundleTable;

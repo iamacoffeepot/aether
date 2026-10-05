@@ -14,8 +14,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path as HostPath, PathBuf};
 
-use aether_bloomery_kinds::{Digest, Name, Node, OpaqueBytes, Tree};
-use aether_data::Kind;
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::{Digest, Kind, OpaqueBytes};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 

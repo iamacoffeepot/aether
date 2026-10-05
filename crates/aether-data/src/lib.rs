@@ -21,7 +21,9 @@
 //! encoders); the `Kind`, `Schema`, and `CastEligible` traits that bind a Rust
 //! type to its wire form; the `encode` / `decode` helpers for POD and
 //! structured kinds; `Blob`, immutable bytes as a value, with `BlobReader`
-//! streaming them and `BlobHash` naming them (ADR-0238); and `__inventory`, the
+//! streaming them and `BlobHash` naming them (ADR-0238); the content-addressed
+//! artifact vocabulary, `Digest` with its kind-prefixed framing and the typed
+//! citations `Ref` and `ErasedRef` beside `Cites`; and `__inventory`, the
 //! native-only auto-collection of `#[derive(Kind)]` types into the
 //! substrate's descriptor list.
 
@@ -81,7 +83,8 @@ pub use reference::{
 pub use schema::*;
 pub use schema_docs::{Doc, DocCell, DocNode, FieldDoc, MAX_DOC_DEPTH, StaticSchema, VariantDoc, require_documented};
 pub use storage::{
-    Citation, Citations, Cites, Invariant, Storage, StorageData, StorageError, StorageLeaves, UnknownField,
+    ArtifactHasher, Citation, Citations, Cites, Digest, ErasedRef, Invariant, OpaqueBytes, Ref, Storage, StorageData,
+    StorageError, StorageLeaves, UnknownField, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes,
 };
 pub use tagged_id::{Tag, with_tag};
 pub use transform::{InvokeFn, TransformError};

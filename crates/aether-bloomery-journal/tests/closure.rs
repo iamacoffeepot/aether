@@ -6,9 +6,9 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery_journal::{Batch, Closure, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, artifact_blob};
+use aether_bloomery_journal::{Batch, Closure, Journal, JournalError, Seq};
 use aether_bloomery_kinds::ClosureLimit;
-use aether_data::{Blob, Kind};
+use aether_data::{Blob, Digest, Kind, OpaqueBytes, Ref, artifact_blob};
 use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]

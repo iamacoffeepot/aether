@@ -20,7 +20,8 @@ pub mod environment;
 pub mod proof;
 pub mod vendor;
 
-use aether_bloomery_kinds::{Head, OpaqueBytes};
+use aether_bloomery_kinds::Head;
+use aether_data::OpaqueBytes;
 
 /// The head the operator binds to this bundle, which a caller of its
 /// programs, such as a Muse session offering `proof.clippy` and `proof.test`, names.

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery_journal::{Batch, Seq};
 use aether_bloomery_kinds::{
-    Call, CallOutcome, EncodedArtifact, Head, MoveHead, MoveHeadResult, Name, NativeOrigin, Node, OpaqueBytes, Path,
-    ProgramName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, Tree, Utf8Text,
+    Call, CallOutcome, EncodedArtifact, Head, MoveHead, MoveHeadResult, Name, NativeOrigin, Node, Path, ProgramName,
+    ReactorSet, RecordedHead, RecordedHeadMove, Tree,
 };
 use aether_bloomery_muse::{
     Endpoint, InputLimit, MUSE, ModelName, OpenInput, OutputBudget, ReasoningEffort, TurnLimit, TurnSettings, offered,
@@ -22,7 +22,7 @@ use aether_chassis_bloomery::inspect::{
     InspectArtifact, InspectArtifactResult, InspectEvents, InspectEventsResult, InspectedEvent, MAX_ARTIFACTS,
 };
 use aether_data::storage::storage_kind;
-use aether_data::{KindId, storage_kind_id_from_name};
+use aether_data::{KindId, OpaqueBytes, Ref, Utf8Text, storage_kind_id_from_name};
 use aether_harness_bloomery::BloomeryHarness;
 use aether_harness_substrate::test_helpers::require_wasm;
 use serde_json::{Value, json};
@@ -121,14 +121,14 @@ fn session_record(harness: &mut BloomeryHarness) -> Option<Value> {
         .find(|value| value.to_string().contains("\"muse.session.record\""))
 }
 
-/// Every string a resolved `bloomery.artifact.text` carries in `json`, walked without recursion.
+/// Every string a resolved `aether.artifact.text` carries in `json`, walked without recursion.
 fn resolved_texts(json: &Value) -> Vec<String> {
     let mut texts = Vec::new();
     let mut pending = vec![json];
     while let Some(value) = pending.pop() {
         match value {
             Value::Object(object) => {
-                if object.get("kind") == Some(&json!("bloomery.artifact.text"))
+                if object.get("kind") == Some(&json!("aether.artifact.text"))
                     && let Some(Value::String(text)) = object.get("value")
                 {
                     texts.push(text.clone());
@@ -271,7 +271,7 @@ fn a_result_kind_only_a_bundle_declares_resolves_through_the_driver() -> Result<
     };
     assert_eq!(kind.as_deref(), Some("test.program.summarize.result"));
     let result: Value = serde_json::from_str(&json)?;
-    assert_eq!(result["text"]["kind"], json!("bloomery.artifact.text"), "{result:#}");
+    assert_eq!(result["text"]["kind"], json!("aether.artifact.text"), "{result:#}");
     assert_eq!(result["text"]["value"], json!("summary:hello"), "{result:#}");
     Ok(())
 }
@@ -319,8 +319,8 @@ fn a_stored_tree_reads_its_entries_by_name_and_variant() -> Result<(), Box<dyn E
     let tree: Value = serde_json::from_str(&json)?;
     let entries = &tree["entries"];
     assert!(entries.is_object(), "the entries read as a map, not a fallback: {tree:#}");
-    assert_eq!(entries["a.txt"]["File"]["kind"], json!("bloomery.artifact.bytes"), "{tree:#}");
-    assert_eq!(entries["run"]["Executable"]["kind"], json!("bloomery.artifact.bytes"), "{tree:#}");
+    assert_eq!(entries["a.txt"]["File"]["kind"], json!("aether.artifact.bytes"), "{tree:#}");
+    assert_eq!(entries["run"]["Executable"]["kind"], json!("aether.artifact.bytes"), "{tree:#}");
     assert_eq!(entries["link"], json!({"Symlink": "../bin/run"}), "{tree:#}");
     let subtree = &entries["sub"]["Directory"];
     assert_eq!(subtree["kind"], json!("bloomery.tree"), "{tree:#}");

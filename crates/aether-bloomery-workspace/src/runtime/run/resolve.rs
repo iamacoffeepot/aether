@@ -19,8 +19,8 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::str;
 
-use aether_bloomery_kinds::{Digest, Name, Node, OpaqueBytes, Ref, Tree};
-use aether_data::Storage;
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::{Digest, OpaqueBytes, Ref, Storage};
 
 use super::{RunError, Stop, engine_failed, storage_stop};
 use crate::runtime::engine::Engine;

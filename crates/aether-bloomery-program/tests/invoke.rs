@@ -4,15 +4,15 @@ use std::cell::Cell;
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Detail, Digest, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, OpaqueBytes, ProgramApi,
-    ProgramName, ReadArtifactResult, Ref, Refusal, Tree, Utf8Text,
+    ClosureArtifact, Detail, EncodedArtifact, ExecutorFault, Invoke, Invoked, Mode, ProgramApi, ProgramName,
+    ReadArtifactResult, Refusal, Tree,
 };
 use aether_bloomery_program::{
     Async, AsyncProgram, AsyncSession, Env, Http, InjectedApi, Pending, PendingCall, PollResult, Process, Program,
     Started, Sync, SyncProgram, Workspace, invoke, start_async,
 };
 use aether_data::wire::{decode_from_slice, encode_to_vec};
-use aether_data::{Cites, Kind, MAX_READ_BYTES, Storage};
+use aether_data::{Cites, Digest, Kind, MAX_READ_BYTES, OpaqueBytes, Ref, Storage, Utf8Text};
 use aether_http::{Fetch, FetchResult, HttpMethod};
 use aether_process::{Run, RunResult};
 

@@ -54,9 +54,9 @@ pub fn declared_roles(wasm: &[u8]) -> Result<DeclaredRoles, Detail> {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{OpaqueBytes, ProgramName, Utf8Text};
+    use aether_bloomery_kinds::ProgramName;
     use aether_data::canonical::canonical_kind_bytes;
-    use aether_data::{Kind, LabelNode, SchemaType, wire};
+    use aether_data::{Kind, LabelNode, OpaqueBytes, SchemaType, Utf8Text, wire};
 
     use super::declared_roles;
 

@@ -2,9 +2,9 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, OpaqueBytes, ReactorSet, Ref, Seq};
+use aether_bloomery_kinds::{Entry, Head, ReactorSet, Seq};
 use aether_bloomery_program::{Heads, SelectionError, View, select_reactors};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Storage, StorageData};
 
 const SET_ROOT: Head<ReactorSet> = Head::new("core.reactors");
 const ALPHA: Head<OpaqueBytes> = Head::new("cluster.alpha");

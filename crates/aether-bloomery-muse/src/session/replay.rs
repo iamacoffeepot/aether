@@ -1,7 +1,7 @@
 //! The items a called turn adds to its conversation once every call has its
 //! output.
 
-use aether_bloomery_kinds::{Ref, Utf8Text};
+use aether_data::{Ref, Utf8Text};
 
 use crate::input::{Reasoning, Role, ToolCall, TurnItem};
 use crate::session::record::CallAnswer;

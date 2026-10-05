@@ -7,10 +7,11 @@ mod common;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, ErrorKind, Read, Write};
 
-use aether_bloomery_kinds::{Node, OpaqueBytes, Path, Ref, Tree, hash_bytes};
+use aether_bloomery_kinds::{Node, Path, Tree};
 use aether_bloomery_tar::{
     CANONICAL_MTIME_SECS, EncodeError, MAX_DEPTH, SourceBlob, Stamp, TreeSource, encode, encode_stamped,
 };
+use aether_data::{OpaqueBytes, Ref, hash_bytes};
 use common::MemoryStore;
 
 /// The canonical tar stream of `root`.

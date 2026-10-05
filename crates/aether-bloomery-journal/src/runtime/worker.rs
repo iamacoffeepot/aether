@@ -7,11 +7,11 @@ use aether_bloomery_kinds::{ClosureArtifact, ClosureLimit};
 use aether_substrate::actor::native::BlobCheckIn;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use crate::Digest;
 use crate::runtime::blobs::BlobDir;
 use crate::runtime::cache::ReadCache;
 use crate::runtime::closure::{Closure, PlannedMember, Stored, plan_closure, read_slab};
 use crate::runtime::journal::{BUSY_TIMEOUT, JournalError, RootLock};
+use aether_data::Digest;
 
 /// The recorded stored length of one artifact row.
 const SIZE_QUERY: &str = "SELECT size_bytes FROM artifacts WHERE digest = ?1";

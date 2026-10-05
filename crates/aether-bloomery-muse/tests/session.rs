@@ -6,11 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    CLOCK, CLOCK_BUNDLE, CallInput, CallProgram, ClosureArtifact, Detail, Digest, EncodedArtifact, ErasedRef,
-    Evaluated, Event, Fault, FaultReason, Fired, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node,
-    ProgramName, ProgramRef, ReactionFailed, ReactorIntent, ReactorName, ReadArtifactResult, RecordedHead, Ref,
-    RequestSource, Requested, SetHeads, Transition, Tree, Until, Utf8Text, Warm, WarmEntries, Warmed,
-    decode_call_program, decode_set_heads,
+    CLOCK, CLOCK_BUNDLE, CallInput, CallProgram, ClosureArtifact, Detail, EncodedArtifact, Evaluated, Event, Fault,
+    FaultReason, Fired, HeadChange, Invoke, Invoked, JournalEntry, Name, NativeOrigin, Node, ProgramName, ProgramRef,
+    ReactionFailed, ReactorIntent, ReactorName, ReadArtifactResult, RecordedHead, RequestSource, Requested, SetHeads,
+    Transition, Tree, Until, Warm, WarmEntries, Warmed, decode_call_program, decode_set_heads,
 };
 use aether_bloomery_muse::{
     Answered, ContinueInput, Echo, EchoResult, End, Ending, Endpoint, Failure, InputLimit, ModelName, MuseSession,
@@ -27,7 +26,7 @@ use aether_bloomery_program::{
 use aether_bloomery_workspace::{Outcome, RunResult, StepOutcome, ToolName, ToolRecord, TreePath};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, ProofVerdict, TestEnv};
-use aether_data::{Cites, Kind, Storage, StorageData};
+use aether_data::{Cites, Digest, ErasedRef, Kind, Ref, Storage, StorageData, Utf8Text};
 use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
 const CALLED_ECHO: &str = include_str!("../fixtures/called_echo.json");

@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Ref, Tree};
+use aether_bloomery_kinds::Tree;
 use aether_bloomery_workspace::{EnvVar, Environment};
-use aether_data::Invariant;
+use aether_data::{Invariant, Ref};
 
 use super::config;
 

@@ -19,12 +19,13 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{
-    CallInput, CallProgram, Detail, EncodedArtifact, ErasedRef, Fault, Head, HeadChange, HeadMoved, OpaqueBytes,
-    ProgramName, ReactionFailed, Ref, RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until, Utf8Text,
+    CallInput, CallProgram, Detail, EncodedArtifact, Fault, Head, HeadChange, HeadMoved, ProgramName, ReactionFailed,
+    RequestSource, Requested, Seq, SetHeads, Transition, Tree, Until,
 };
 use aether_bloomery_program::{
     At, Cited, CitedError, ClockUntil, ErasedEdited, Ran, Reactor, ViewCursor, tooled, view,
 };
+use aether_data::{ErasedRef, OpaqueBytes, Ref, Utf8Text};
 
 use crate::input::{Reasoning, Role, ToolCalls, ToolInput, ToolOutput, TurnInput, TurnItem};
 use crate::program::MuseTurn;
@@ -587,8 +588,9 @@ impl View for Conversations {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Head, ProgramName, Ref, Seq, Tree};
+    use aether_bloomery_kinds::{Head, ProgramName, Seq, Tree};
     use aether_bloomery_program::At;
+    use aether_data::Ref;
 
     use super::{Conversation, Conversations, Waiting};
     use crate::input::{CallId, OfferedTool, OfferedTools, ToolCall, ToolCalls};

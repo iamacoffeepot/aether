@@ -355,8 +355,9 @@ published name says which bundle it runs, and the key which unit it folds for.
 pub struct UnitKey(LoadName);
 ```
 
-It lives beside `Digest` in `aether-bloomery-kinds`, so the driver, the
-chassis, and external tooling key roots from the same value.
+It lives in `aether-bloomery-kinds`, which every unit's crates already
+depend on, so the driver, the chassis, and external tooling key roots from the
+same value.
 
 - A bundle root's key is its unit key, never a name built or hashed from the
   key and the digest (a `sha256(key || digest)` name would hide both parts
@@ -598,7 +599,7 @@ units importing one environment converge on one image.
 | Unit paths | written from the actor types and the unit key with ADR-0230 §2's `ActorPath<R>`: the journal is `ActorPath::<JournalActor>::instance(&key)` (`aether.bloomery.journal:<key>`), and a member is written beneath it, `ActorPath::<C>::child(&journal, &C::key())`; each constructor compiles only for the placement its bounds name (`Root + Instanced`, `ChildOf<JournalActor> + Instanced`). No registry lookup and no position: the text is each type's `NAMESPACE` and its key. `.narrow::<P>()` makes a `ProtocolPath<P>` where a holder needs only a protocol (D7). |
 | `WasmCtx::resolve` | ADR-0230 §3's verb over an `ActorPath<R>`, the guest arm: the path compiles to its position by the lineage fold, and one route-table lookup checks the canonical name and `Live`; it proves liveness only, compares no rows, and mints `ActorRef<R>`. The path's leaf namespace is `R::NAMESPACE` by construction: the bootstrap writes it with a type constructor, and an `ActorPath<R>`'s decode refuses any other leaf (ADR-0230 §2, #6857). The guest crosses one host import. It takes the name ADR-0230 reserved. |
 | `UnitMember` | a trait in the journal identity half: `ChildOf<JournalActor> + Instanced` with a fixed key, `C::key()` (`driver`). A member's path is its unit's path plus `ActorPath::<C>::child(&journal, &C::key())`. The fixed key stands in for a one-per-parent child placement that the actor model does not have yet (ADR-0166 defers a keyless native-child resolver); #6822 designs that placement, and `UnitMember` is deleted when it lands. |
-| `UnitKey` | in `aether-bloomery-kinds` beside `Digest` (D4). The key the driver gives every bundle root it loads. |
+| `UnitKey` | in `aether-bloomery-kinds` (D4). The key the driver gives every bundle root it loads. |
 | `aether-bloomery-journal`, `aether-bloomery-driver` | split per ADR-0122: an always-on, `no_std` identity (the marker, its handled kinds and contract rows, `UnitMember`) and a `runtime` feature carrying the actor, `aether-substrate`, and `rusqlite`. |
 | Bootstrap config | `journal` and `driver` paths are replaced by `units: Vec<UnitKey>`. At `wire` it writes each unit's `ActorPath<JournalActor>` and `ActorPath<BundleDriver>` from the types and the key and resolves each with `WasmCtx::resolve` to an `ActorRef`; every send is `send_to(ActorRef<R>, &K)`, kind-checked. That includes `aether.bloomery.driver.call`, which the driver answers from a manual handler (`on_call`, `crates/aether-bloomery-driver/src/actor/mod.rs`); a protocol-typed path could not carry it, which is why the bootstrap names the driver by actor type (ADR-0231 §3). Its journal sends, `ReadHead`, `Publish`, and `ReadArtifact`, land on single handlers (`crates/aether-bloomery-journal/src/actor.rs`). Its `Import`s name the unit's journal as `source`, `ActorPath::<JournalActor>::instance(&key).narrow::<ArtifactStorage>()` (D7). |
 | External callers (MCP, `xtask import-commit`) | name a unit's member by its canonical ADR-0166 path, `aether.bloomery.journal:<key>/aether.bloomery.driver:driver`; `import-commit` takes the unit key. An operator's `Import` names the unit's journal as its `source` (D7). A unit's bundle root is `aether.bloomery.bundle.<module hash>:<key>`. |

@@ -1,4 +1,5 @@
-use aether_bloomery_kinds::{Digest, Head, Ref, SetHeads, Tree};
+use aether_bloomery_kinds::{Head, SetHeads, Tree};
+use aether_data::{Digest, Ref};
 use aether_bloomery_program::reactor;
 
 const PUBLISHED: Head<Tree> = Head::new("published");

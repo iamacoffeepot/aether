@@ -20,13 +20,14 @@ use aether_bloomery_driver::{
 };
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
-    Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
-    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, ReadClosure,
-    ReadClosureResult, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult,
-    artifact_digest,
+    DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, Processed, ReactionFailed,
+    ReadArtifact, ReadArtifactResult, ReadArtifacts, ReadArtifactsResult, ReadClosure, ReadClosureResult, ReadEvents,
+    ReadEventsResult, RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult,
 };
 use aether_data::canonical::canonical_kind_bytes;
-use aether_data::{Kind, KindId, LabelNode, SchemaType, Storage, StorageData, wire};
+use aether_data::{
+    Digest, Kind, KindId, LabelNode, OpaqueBytes, SchemaType, Storage, StorageData, artifact_digest, wire,
+};
 use reactor::Reactor;
 
 /// Byte budget every test core starts under: 1 MiB.

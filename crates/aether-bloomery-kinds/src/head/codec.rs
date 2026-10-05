@@ -15,11 +15,9 @@ use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 #[cfg(not(target_family = "wasm"))]
 use aether_data::{__inventory::inventory, storage::StorageKindEntry};
 use aether_data::{
-    Citations, Cites, DocNode, Kind, KindId, LabelNode, Schema, SchemaType, Storage, StorageData, StorageError,
-    StorageLeaves,
+    Citations, Cites, Digest, DocNode, Kind, KindId, LabelNode, Ref, Schema, SchemaType, Storage, StorageData,
+    StorageError, StorageLeaves,
 };
-
-use crate::{Digest, Ref};
 
 use super::identity::head_storage_err;
 use super::{Head, HeadMoved, RecordedHead, RecordedHeadMove};

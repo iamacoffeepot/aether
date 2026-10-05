@@ -6,7 +6,7 @@ mod identity;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 
-use crate::{Digest, Ref};
+use aether_data::{Digest, Ref};
 
 pub use identity::{Head, HeadNameError, RecordedHead};
 
@@ -103,9 +103,9 @@ impl<K> fmt::Debug for HeadMoved<K> {
 
 #[cfg(test)]
 mod tests {
-    use aether_data::{Citations, Cites, Kind};
+    use aether_data::{Citations, Cites, Digest, Kind, Ref};
 
-    use crate::{Digest, Program, Ref, Tree};
+    use crate::{Program, Tree};
 
     use super::{Head, RecordedHead, RecordedHeadMove};
 

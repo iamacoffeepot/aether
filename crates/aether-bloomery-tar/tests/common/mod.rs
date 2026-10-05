@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::{Name, Node, Tree};
 use aether_bloomery_tar::{BlobWriter, Limits, Rules, SourceBlob, TreeSink, TreeSource, decode};
+use aether_data::{OpaqueBytes, Ref};
 
 /// Blobs and trees keyed by digest, the way a journal keys them.
 #[derive(Default)]

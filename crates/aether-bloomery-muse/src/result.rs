@@ -7,7 +7,8 @@
 
 use core::borrow::Borrow;
 
-use aether_bloomery_kinds::{Detail, OpaqueBytes, Ref, Utf8Text};
+use aether_bloomery_kinds::Detail;
+use aether_data::{OpaqueBytes, Ref, Utf8Text};
 
 use crate::input::{Reasoning, ToolCalls};
 

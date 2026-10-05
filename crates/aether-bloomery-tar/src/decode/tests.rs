@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 
-use aether_bloomery_kinds::{Name, NameError, Node, OpaqueBytes, Path, PathError, Ref, Tree};
+use aether_bloomery_kinds::{Name, NameError, Node, Path, PathError, Tree};
+use aether_data::{OpaqueBytes, Ref};
 
 use super::{DecodeError, Limits, LimitsError, Refusal, Rules, decode};
 use crate::block::{BLOCK_BYTES, Header, padding_len, seal, typeflag};

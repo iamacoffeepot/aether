@@ -1,8 +1,9 @@
 //! `tree.edit`: replace one exact occurrence of a text in a file.
 
-use aether_bloomery_kinds::{Mode, Node, Ref, Refusal};
+use aether_bloomery_kinds::{Mode, Node, Refusal};
 use aether_bloomery_program::{Async, Edited, Env, NoDetail, Program, Tooled, program};
 use aether_bloomery_workspace::TreePath;
+use aether_data::Ref;
 
 use crate::tools::spine::{leaf, place};
 use crate::tools::{MAX_TEXT_BYTES, read_args};
@@ -115,8 +116,9 @@ fn replace_once(text: &str, old: &str, new: &str) -> Result<String, Matches> {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Node, Ref, Tree};
+    use aether_bloomery_kinds::{Node, Tree};
     use aether_bloomery_program::Edited;
+    use aether_data::Ref;
     use serde_json::json;
 
     use super::{EditArgs, Matches, TreeEdit, replace_once};

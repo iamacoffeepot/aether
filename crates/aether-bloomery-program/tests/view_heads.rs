@@ -3,11 +3,10 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    Digest, Entry, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove,
-    Ref, Seq, Tree,
+    Entry, Head, Mode, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove, Seq, Tree,
 };
 use aether_bloomery_program::{HeadFoldError, Heads, SequenceError, View};
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Storage, StorageData};
 
 const PAGE: usize = 256;
 

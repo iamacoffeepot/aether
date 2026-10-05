@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use aether_data::{KindId, Storage};
+use aether_data::{Digest, KindId, Storage};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::runtime::blobs::BlobDir;
 use crate::runtime::journal::{
     DATABASE_FILE, GetError, JournalError, decode_artifact, head_of, load_artifact, read_entries,
 };
-use crate::{Digest, Entry, Seq};
+use crate::{Entry, Seq};
 
 /// Reads a journal root without taking its lock.
 ///

@@ -7,10 +7,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
-use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ReadArtifactResult, Ref, Refusal,
-};
-use aether_data::KindId;
+use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Invoke, Invoked, ReadArtifactResult, Refusal};
+use aether_data::{Digest, KindId, Ref};
 
 use crate::kinds::Detail;
 use crate::program::declare::{AsyncProgram, SyncProgram};

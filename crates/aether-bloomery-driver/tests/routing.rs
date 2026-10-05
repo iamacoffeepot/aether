@@ -11,12 +11,12 @@ use std::{collections::BTreeMap, slice};
 
 use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
-    AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord,
-    EncodedArtifact, Evaluated, FaultReason, Head, HeadChange, Invoked, NativeOrigin, OpaqueBytes, Processed,
-    ProgramName, ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref,
-    RequestSource, RuleName, Seq, SetHeads, Status, Utf8Text, WatchHeadResult, artifact_digest,
+    AppendRecords, AwaitProcessed, Call, CallInput, CallProgram, ClosureArtifact, Detail, DriverRecord,
+    EncodedArtifact, Evaluated, FaultReason, Head, HeadChange, Invoked, NativeOrigin, Processed, ProgramName,
+    ProgramRef, ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, RequestSource, RuleName, Seq,
+    SetHeads, Status, WatchHeadResult,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Utf8Text, artifact_digest};
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, bundle_wasm, digest, program_head, program_records, wasm_module};
 

@@ -5,9 +5,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, Seq, Utf8Text};
-use aether_bloomery_kinds::{Name, Node, OpaqueBytes, Ref, Tree};
-use aether_data::Kind;
+use aether_bloomery_journal::{AppendError, Batch, Seq};
+use aether_bloomery_kinds::{Name, Node, Tree};
+use aether_data::{Digest, Kind, OpaqueBytes, Ref, Utf8Text};
 
 fn name(value: &str) -> Name {
     Name::new(value).expect("valid name")

@@ -8,10 +8,10 @@
 //! only on the cited payload and schema, and the same input always sends the
 //! same request.
 
-use aether_bloomery_kinds::{Detail, Digest, ErasedRef, Refusal};
+use aether_bloomery_kinds::{Detail, Refusal};
 use aether_bloomery_program::{Async, Env, ToolSchema};
 use aether_codec::decode_storage_schema;
-use aether_data::{EnumVariant, Primitive, SchemaType};
+use aether_data::{Digest, EnumVariant, ErasedRef, Primitive, SchemaType};
 use serde_json::Value;
 
 use crate::input::{ToolOutput, TurnItem};
@@ -168,9 +168,8 @@ fn refused(reason: String) -> Refusal {
 mod tests {
     use core::array;
 
-    use aether_bloomery_kinds::{Digest, Ref};
     use aether_bloomery_program::{Edited, NoDetail, ToolSchema};
-    use aether_data::{Storage, StorageData};
+    use aether_data::{Digest, Ref, Storage, StorageData};
 
     use super::json;
 

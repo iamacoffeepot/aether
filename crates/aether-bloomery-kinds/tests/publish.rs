@@ -1,7 +1,7 @@
 use std::error::Error;
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Head, Publish, Ref, Tree, artifact_digest};
-use aether_data::{Kind, Storage};
+use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Head, Publish, Tree};
+use aether_data::{Digest, Kind, Ref, Storage, artifact_digest};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.publish.document")]

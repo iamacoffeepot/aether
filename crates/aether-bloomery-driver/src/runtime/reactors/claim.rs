@@ -4,7 +4,8 @@
 //! attempt and every wake-up run the same code, so a load failure, an
 //! undeclared role, and a past-start root all refuse through one path.
 
-use aether_bloomery_kinds::{Detail, Digest};
+use aether_bloomery_kinds::Detail;
+use aether_data::Digest;
 
 use super::instance::{Health, Instance};
 use crate::runtime::bundles::{DeclaredRoles, LoadState};

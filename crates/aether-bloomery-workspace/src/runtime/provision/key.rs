@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use aether_bloomery_kinds::{Digest, hash_bytes};
+use aether_data::{Digest, hash_bytes};
 
 use crate::RunRequest;
 

@@ -7,10 +7,9 @@ use core::fmt;
 use crate::view::contract::View;
 use crate::view::sequence::{SequenceError, check_next};
 use aether_bloomery_kinds::{
-    DecodeError, Digest, Entry, Fault, ProgramRef, ReactionFailed, RecordedHeadMove, RequestSource, Requested, Seq,
-    Transition,
+    DecodeError, Entry, Fault, ProgramRef, ReactionFailed, RecordedHeadMove, RequestSource, Requested, Seq, Transition,
 };
-use aether_data::Kind;
+use aether_data::{Digest, Kind};
 
 /// Outstanding and completed program requests over a contiguous log prefix.
 ///

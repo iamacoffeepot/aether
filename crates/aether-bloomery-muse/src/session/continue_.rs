@@ -1,7 +1,8 @@
 //! `muse.session.continue`: the one way a rested session takes its next turn.
 
-use aether_bloomery_kinds::{Detail, Mode, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{Detail, Mode, Refusal};
 use aether_bloomery_program::{Env, Program, Sync, program};
+use aether_data::{Ref, Utf8Text};
 
 use crate::input::{OutputBudget, TurnInput};
 use crate::session::state::{Session, SessionKey, TurnLimit};
@@ -94,7 +95,8 @@ impl Program for SessionContinue {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{Ref, Refusal, Tree};
+    use aether_bloomery_kinds::{Refusal, Tree};
+    use aether_data::Ref;
 
     use super::{ContinueInput, SessionContinue};
     use crate::input::{OfferedTools, OutputBudget, Role, TurnItem};

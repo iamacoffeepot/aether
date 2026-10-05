@@ -7,16 +7,16 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, Entry, Evaluated, Event, Head, HeadChange, HeadMoved, JournalEntry, Mode, ProgramName,
-    ProgramRef, ReactorName, Ref, RequestSource, Requested, RuleName, RuleRecord, Seq, SetHeads, Transition, Tree,
-    Warm, WarmEntries, Warmed, reactor_record_len, write_reactor_record,
+    ClosureArtifact, Entry, Evaluated, Event, Head, HeadChange, HeadMoved, JournalEntry, Mode, ProgramName, ProgramRef,
+    ReactorName, RequestSource, Requested, RuleName, RuleRecord, Seq, SetHeads, Transition, Tree, Warm, WarmEntries,
+    Warmed, reactor_record_len, write_reactor_record,
 };
 use aether_bloomery_program::reactor::Root;
 use aether_bloomery_program::{
     At, Cited, CitedError, Guard, Nil, Owner, PrepareError, Program, Publish, PublishError, Ran, Reactor, View,
     ViewCursor, reactor, view,
 };
-use aether_data::{Kind, KindId, Storage, StorageData};
+use aether_data::{Digest, Kind, KindId, Ref, Storage, StorageData};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
 

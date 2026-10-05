@@ -4,10 +4,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_bloomery_kinds::{EncodedArtifact, Ref};
+use aether_bloomery_kinds::EncodedArtifact;
 use aether_bloomery_muse::{OpenInput, SessionOpen, offered, offered_with_proofs};
 use aether_bloomery_workspace::{EnvVar, TreePath};
 use aether_bloomery_workspace_programs::proof::{ProofBound, TestEnv};
+use aether_data::Ref;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 

@@ -10,12 +10,13 @@ use std::thread;
 
 use aether_bloomery_journal::{Batch, JournalReader, Seq};
 use aether_bloomery_kinds::{
-    Call, CallOutcome, Digest, Fault, FaultReason, Head, Name, NativeOrigin, Node, OpaqueBytes, ProgramName,
-    ProgramRef, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested, Tree,
+    Call, CallOutcome, Fault, FaultReason, Head, Name, NativeOrigin, Node, ProgramName, ProgramRef, RecordedHead,
+    RecordedHeadMove, RequestSource, Requested, Tree,
 };
 use aether_bloomery_workspace::testing::{RunScript, StubDaemon, StubReply, TarWriter};
 use aether_bloomery_workspace::{Environment, Platform, Provides, Tool, ToolName, Tools, TreePath};
 use aether_chassis_bloomery::BloomeryCli;
+use aether_data::{Digest, OpaqueBytes, Ref};
 use aether_harness_bloomery::{BloomeryHarness, Record, SeededJournal};
 use aether_harness_substrate::test_helpers::require_wasm;
 use clap::Parser;

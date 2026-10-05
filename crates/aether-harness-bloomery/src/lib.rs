@@ -51,11 +51,11 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use aether_actor::{ActorPath, ActorRef, ProtocolPath};
-use aether_bloomery_journal::{Digest, JournalActor, Seq};
+use aether_bloomery_journal::{JournalActor, Seq};
 use aether_bloomery_kinds::{ArtifactStorage, UnitKey};
 use aether_bloomery_program::View;
 use aether_chassis_bloomery::{BloomeryChassis, Mounted};
-use aether_data::Storage;
+use aether_data::{Digest, Storage};
 use aether_substrate::chassis::builder::BuiltChassis;
 
 mod boot;

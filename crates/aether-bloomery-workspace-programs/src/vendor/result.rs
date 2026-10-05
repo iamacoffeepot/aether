@@ -1,6 +1,7 @@
 //! `vendor.cargo.result`: the vendor tree cargo wrote, or the stderr of a vendor run that failed.
 
-use aether_bloomery_kinds::{OpaqueBytes, Ref, Tree};
+use aether_bloomery_kinds::Tree;
+use aether_data::{OpaqueBytes, Ref};
 
 /// The answer of one cargo vendor step.
 ///

@@ -17,7 +17,8 @@ extern crate alloc;
 
 pub mod wire_corpus;
 
-use aether_bloomery_kinds::{Head, OpaqueBytes, ProgramName, Ref, Utf8Text};
+use aether_bloomery_kinds::{Head, ProgramName};
+use aether_data::{OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 

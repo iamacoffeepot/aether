@@ -14,8 +14,9 @@
 
 use std::borrow::Cow;
 
-use aether_bloomery_kinds::{Detail, ProgramName, Refusal, hash_bytes};
+use aether_bloomery_kinds::{Detail, ProgramName, Refusal};
 use aether_bloomery_program::function_name;
+use aether_data::hash_bytes;
 use aether_http::{Fetch, HttpHeader, HttpMethod};
 use serde::Serialize;
 use serde_json::Value;
@@ -202,8 +203,8 @@ pub fn fetch(input: &TurnInput, texts: &[String], definitions: &[String]) -> Res
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery_kinds::{ErasedRef, ProgramName, Ref, Refusal};
-    use aether_data::KindId;
+    use aether_bloomery_kinds::{ProgramName, Refusal};
+    use aether_data::{ErasedRef, KindId, Ref};
     use aether_http::{HttpHeader, HttpMethod};
     use serde_json::json;
 

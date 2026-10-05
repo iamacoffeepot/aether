@@ -64,8 +64,9 @@ use std::fmt;
 use std::io;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aether_bloomery_kinds::{Detail, Ref, Tree};
+use aether_bloomery_kinds::{Detail, Tree};
 use aether_bloomery_tar::{DecodeError, EncodeError, Limits, Stamp, encode, encode_stamped};
+use aether_data::Ref;
 
 use super::engine::{ContainerId, Engine, EngineError, UploadError};
 use super::provision::{CpuSet, RunKey};

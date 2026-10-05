@@ -67,7 +67,8 @@
 //! ```
 //!
 //! ```
-//! use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq};
+//! use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq};
+//! use aether_data::{Digest, Ref};
 //! use aether_bloomery_program::Heads;
 //! use aether_bloomery_program::reactor::{Owner, ViewArg};
 //! use aether_data::{Kind, Storage, StorageData};

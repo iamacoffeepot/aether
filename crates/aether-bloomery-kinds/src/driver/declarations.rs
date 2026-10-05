@@ -3,9 +3,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::KindId;
+use aether_data::{Digest, KindId};
 
-use crate::{Digest, Mode, ProgramName};
+use crate::{Mode, ProgramName};
 
 /// Ask the driver for the programs of every bundle it holds decoded, read from
 /// each bundle's `aether.bloomery.programs` records.

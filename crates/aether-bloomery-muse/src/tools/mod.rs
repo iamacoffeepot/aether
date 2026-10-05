@@ -36,11 +36,11 @@ mod write;
 
 use std::iter;
 
-use aether_bloomery_kinds::{EncodedArtifact, Head, OpaqueBytes, Ref, Refusal};
+use aether_bloomery_kinds::{EncodedArtifact, Head, Refusal};
 use aether_bloomery_program::{Async, Env, NoBound, Program, ToolArguments, ToolSchema, tool_definition};
 use aether_bloomery_workspace_programs::WORKSPACE_PROGRAMS;
 use aether_bloomery_workspace_programs::proof::{ClippyProof, ProofBound, TestProof, cargo_config_artifacts};
-use aether_data::{Schema, Storage};
+use aether_data::{OpaqueBytes, Ref, Schema, Storage};
 
 pub use echo::{Echo, EchoArgs, EchoResult};
 pub use edit::{EditArgs, TreeEdit};

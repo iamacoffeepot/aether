@@ -1,10 +1,10 @@
 //! Native `Root` state machine: admission, attribution, dispatch.
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Mode, ProgramName, Refusal};
+use aether_bloomery_kinds::{ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, ProgramName, Refusal};
 use aether_bloomery_program::{
     __macro_internals, Env, Program, ProgramEntry, ProgramTable, Root, Sync, SyncProgram, dispatch,
 };
-use aether_data::MailboxId;
+use aether_data::{Digest, MailboxId};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.root.count")]

@@ -1,6 +1,6 @@
 //! `proof.verdict`: whether a proof passed, citing what failed it.
 
-use aether_bloomery_kinds::{Ref, Utf8Text};
+use aether_data::{Ref, Utf8Text};
 
 /// The verdict of a proof run, the detail of the `Edited` it returns.
 ///
