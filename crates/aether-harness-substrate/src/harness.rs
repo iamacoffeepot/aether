@@ -2065,7 +2065,7 @@ mod tests {
             type Resolver = aether_actor::Many;
         }
         impl Root for Child {}
-        impl HandlesKind<Bump> for Child {}
+        impl HandlesKind<Bump> for Child { type Sender = aether_actor::Anyone; }
         impl aether_actor::Lifecycle<Self> for Child {
             type Config = Arc<AtomicU32>;
             type Params = ();

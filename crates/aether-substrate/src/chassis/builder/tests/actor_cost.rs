@@ -42,7 +42,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for PreSeedProbe {}
-    impl HandlesKind<DeclaredPing> for PreSeedProbe {}
+    impl HandlesKind<DeclaredPing> for PreSeedProbe { type Sender = aether_actor::Anyone; }
 
     impl aether_actor::Lifecycle<Self> for PreSeedProbe {
         type Config = ();
@@ -158,8 +158,8 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     }
     impl aether_actor::Root for SpawnCostProbe {}
 
-    impl HandlesKind<CostPing> for SpawnCostProbe {}
-    impl HandlesKind<CostQuit> for SpawnCostProbe {}
+    impl HandlesKind<CostPing> for SpawnCostProbe { type Sender = aether_actor::Anyone; }
+    impl HandlesKind<CostQuit> for SpawnCostProbe { type Sender = aether_actor::Anyone; }
 
     impl aether_actor::Lifecycle<Self> for SpawnCostProbe {
         type Config = ();

@@ -54,3 +54,25 @@ mod sealed {
 pub trait SendableTo<R>: ActorMail + sealed::Sealed<R> {}
 
 impl<K: ActorMail, R: HandlesKind<K>> SendableTo<R> for K {}
+
+mod sent_sealed {
+    use aether_data::Kind;
+
+    use crate::model::{CoveredBy, HandlesKind};
+
+    /// The seal: only the blanket impl below admits a sender.
+    pub trait Sealed<A, R> {}
+
+    impl<K: Kind, A, R: HandlesKind<K>> Sealed<A, R> for K where R::Sender: CoveredBy<A> {}
+}
+
+/// A kind the actor `A` may send to `R`: `K: SentBy<A, R>` holds when `A`
+/// covers what `R`'s handler for `K` requires of its sender.
+#[diagnostic::on_unimplemented(
+    message = "`{A}` may not send `{Self}` to `{R}`",
+    label = "`{R}`'s handler for `{Self}` requires its sender to handle kinds `{A}` does not",
+    note = "the handler names the protocol in its `sender: ProtocolRef<P>` parameter; add a handler for each of `P`'s kinds"
+)]
+pub trait SentBy<A, R>: sent_sealed::Sealed<A, R> {}
+
+impl<K: aether_data::Kind, A, R: HandlesKind<K>> SentBy<A, R> for K where R::Sender: super::CoveredBy<A> {}

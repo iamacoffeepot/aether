@@ -63,6 +63,7 @@ members = [
     # lib, and the republish fixtures, whose same-namespace successor
     # modules are example cdylibs of one crate.
     "crates/aether-test-fixtures-kinds",
+    "spikes/sender-requirement",
     "crates/aether-test-fixtures-bundle",
     "crates/aether-test-fixtures-stateful-typed",
     "crates/aether-test-fixtures-stateful-reshaped",

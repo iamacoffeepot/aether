@@ -41,12 +41,12 @@ impl Declared for WasmTrampoline {
     type Parents = ();
 }
 
-impl HandlesKind<DropComponent> for WasmTrampoline {}
-impl HandlesKind<LoadDelivered> for WasmTrampoline {}
-impl HandlesKind<SpawnDelivered> for WasmTrampoline {}
-impl HandlesKind<Prepare> for WasmTrampoline {}
-impl HandlesKind<Commit> for WasmTrampoline {}
-impl HandlesKind<Abort> for WasmTrampoline {}
+impl HandlesKind<DropComponent> for WasmTrampoline { type Sender = aether_actor::Anyone; }
+impl HandlesKind<LoadDelivered> for WasmTrampoline { type Sender = aether_actor::Anyone; }
+impl HandlesKind<SpawnDelivered> for WasmTrampoline { type Sender = aether_actor::Anyone; }
+impl HandlesKind<Prepare> for WasmTrampoline { type Sender = aether_actor::Anyone; }
+impl HandlesKind<Commit> for WasmTrampoline { type Sender = aether_actor::Anyone; }
+impl HandlesKind<Abort> for WasmTrampoline { type Sender = aether_actor::Anyone; }
 
 impl Replies<DropComponent> for WasmTrampoline {
     type Reply = DropResult;

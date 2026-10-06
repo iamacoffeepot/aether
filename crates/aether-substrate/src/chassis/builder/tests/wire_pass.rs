@@ -29,7 +29,7 @@ impl Addressable for Ponger {
     type Resolver = aether_actor::One;
 }
 impl aether_actor::Root for Ponger {}
-impl HandlesKind<WireBarrierPing> for Ponger {}
+impl HandlesKind<WireBarrierPing> for Ponger { type Sender = aether_actor::Anyone; }
 impl aether_actor::Lifecycle<Self> for Ponger {
     type Config = ();
     type Params = Arc<AtomicU32>;

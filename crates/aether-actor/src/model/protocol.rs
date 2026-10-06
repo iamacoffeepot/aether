@@ -174,16 +174,34 @@ macro_rules! row_tuples {
 
         impl<T, $($kind: Kind, $reply: RowReply),+> covers_sealed::Sealed<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply> + super::HandlesKind<$kind, Sender = Anyone>),+
         {
         }
 
         impl<T, $($kind: Kind, $reply: RowReply),+> CoversRows<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply> + super::HandlesKind<$kind, Sender = Anyone>),+
         {
         }
     };
+}
+
+impl rows_sealed::Sealed for () {}
+
+impl RowSet for () {
+    const CONTRACTS: &'static [(KindId, ReplyContract)] = &[];
+}
+
+impl<T> covers_sealed::Sealed<()> for T {}
+
+impl<T> CoversRows<()> for T {}
+
+/// What a handler that asks nothing of its sender requires: no rows, so every
+/// sender covers it, the erased ctx included.
+pub struct Anyone;
+
+impl Protocol for Anyone {
+    type Rows = ();
 }
 
 row_tuples!(

@@ -9,6 +9,7 @@ use aether_data::{ActorMail, Kind};
 use crate::blob::guest::encode_guest;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
+use crate::model::Anyone;
 use crate::reference::Target;
 use crate::wasm::bridge::{mail, persist};
 use crate::wasm::inline::Registry;
@@ -118,7 +119,7 @@ impl MailSender for WasmDropCtx<'_> {
     // By-id detached send, stamping the caller's id as the sender.
     // The encoded values it names by hash stay alive across the host call,
     // whose resolve on send attaches their entries (ADR-0238 decision 3).
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K) {
         let encoded = encode_guest(payload);
         mail::send_mail(target.erased().id().0, K::ID.0, &encoded.bytes, 1, true, self.mailbox);
     }

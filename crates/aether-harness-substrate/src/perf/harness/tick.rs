@@ -39,8 +39,8 @@ impl aether_actor::Addressable for TickSource {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for TickSource {}
-impl aether_actor::HandlesKind<Tick> for TickSource {}
-impl aether_actor::HandlesKind<CountQuery> for TickSource {}
+impl aether_actor::HandlesKind<Tick> for TickSource { type Sender = aether_actor::Anyone; }
+impl aether_actor::HandlesKind<CountQuery> for TickSource { type Sender = aether_actor::Anyone; }
 /// The type-level mirror of [`Dispatch::capabilities`], row for row and in the
 /// same order, so a [`TickSource`] reference narrows to the protocols its
 /// dispatch answers, such as [`PerfParticipant`](super::PerfParticipant).

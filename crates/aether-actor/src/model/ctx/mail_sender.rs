@@ -18,6 +18,7 @@
 
 use aether_data::ActorMail;
 
+use crate::model::Anyone;
 use crate::reference::Target;
 
 /// Outbound-mail surface every actor ctx exposes: the correlation accessor
@@ -65,5 +66,5 @@ pub trait MailSender {
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx
     /// inherent `send_to`), so each concrete ctx supplies its own body.
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K);
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K);
 }

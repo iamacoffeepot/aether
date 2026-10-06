@@ -46,7 +46,7 @@ fn ctx_spawn_child_routes_through_handler() {
         const NAMESPACE: &'static str = "test.spawn_child.child";
         type Resolver = aether_actor::Many;
     }
-    impl HandlesKind<Ping> for ChildCap {}
+    impl HandlesKind<Ping> for ChildCap { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for ChildCap {
         type Config = ();
         type Params = Arc<Mutex<Vec<u32>>>;
@@ -92,7 +92,7 @@ fn ctx_spawn_child_routes_through_handler() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for ParentCap {}
-    impl HandlesKind<Hatch> for ParentCap {}
+    impl HandlesKind<Hatch> for ParentCap { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for ParentCap {
         type Config = ();
         type Params = (Arc<AtomicU32>, Arc<AtomicU32>, Arc<Mutex<Vec<u32>>>, Arc<registry::Registry>);
@@ -296,7 +296,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for ParentCap {}
-    impl HandlesKind<Hatch> for ParentCap {}
+    impl HandlesKind<Hatch> for ParentCap { type Sender = aether_actor::Anyone; }
     impl ChildOf<ParentCap> for FailingChild {
         type Index = aether_actor::Here;
     }
@@ -419,7 +419,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for ActualParent {}
-    impl HandlesKind<Hatch> for ActualParent {}
+    impl HandlesKind<Hatch> for ActualParent { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for ActualParent {
         type Config = ();
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>);

@@ -65,7 +65,7 @@ impl Addressable for EchoCap {
 
 impl aether_actor::Root for EchoCap {}
 
-impl HandlesKind<RootPing> for EchoCap {}
+impl HandlesKind<RootPing> for EchoCap { type Sender = aether_actor::Anyone; }
 
 impl aether_actor::Lifecycle<Self> for EchoCap {
     type Config = ();

@@ -1294,7 +1294,7 @@ fn emit_native_identity_markers(
         let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
         vec![quote! {
             impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
-                for #self_ty #blanket_where {}
+                for #self_ty #blanket_where { type Sender = ::aether_actor::Anyone; }
         }]
     } else {
         handler_kinds
@@ -1305,7 +1305,7 @@ fn emit_native_identity_markers(
                 quote! {
                     #(#cfgs)*
                     impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                        for #self_ty #where_clause {}
+                        for #self_ty #where_clause { type Sender = ::aether_actor::Anyone; }
                 }
             })
             .collect()

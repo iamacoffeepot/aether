@@ -577,7 +577,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! {
             #(#cfgs)*
             impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
+                for #self_ty #where_clause { type Sender = ::aether_actor::Anyone; }
         }
     });
     let reply_marker_impls = handlers.iter().map(|h| {

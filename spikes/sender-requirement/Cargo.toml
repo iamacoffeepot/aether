@@ -1,0 +1,15 @@
+[package]
+name = "spike-sender-requirement"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Issue 7532 compile spike: a receiver's contract row names the protocol its
+# sender must cover, and the ordinary typed send verbs check it against the
+# sending ctx's own actor. `src/lib.rs` holds the cases that must compile;
+# each file under `examples/` named `refused_*` must fail to compile.
+[dependencies]
+aether-actor = { path = "../../crates/aether-actor" }
+aether-data = { path = "../../crates/aether-data", features = ["derive"] }
+aether-substrate = { path = "../../crates/aether-substrate" }
+serde = { workspace = true, default-features = false, features = ["derive"] }

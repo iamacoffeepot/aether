@@ -29,7 +29,7 @@
 //! sends go out unwalked.
 
 use aether_actor::{
-    CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, OutboundReply, ReplyMode, SendableTo,
+    Anyone, CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, OutboundReply, ReplyMode, SendableTo,
     Singleton, Target, Unchecked,
 };
 use aether_data::{ActorMail, Encoded, Kind, KindId, MailId, RequestId};
@@ -109,7 +109,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: ActorMail, I, T: Target<K, I>>(&mut self, recipients: impl IntoIterator<Item = T>, payload: &K) {
+    pub fn fanout<K: ActorMail, I, T: Target<K, I>>(&mut self, recipients: impl IntoIterator<Item = T>, payload: &K)
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -182,11 +185,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// server's reader encodes each buffered request and its dispatch shard
     /// sends the bytes to the route holder (ADR-0135 §2).
     #[must_use]
-    pub fn send_encoded_detached_to<K: ActorMail, I>(
+    pub fn send_encoded_detached_to<K: ActorMail, I, T: Target<K, I>>(
         &self,
-        target: impl Target<K, I>,
+        target: T,
         payload: &Encoded<K>,
-    ) -> Option<MailId> {
+    ) -> Option<MailId>
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         self.push_encoded(target.erased(), K::ID, payload.as_bytes(), None, None)
     }
 
@@ -202,7 +208,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Its consumer is the fleet server's `TerminateEngine` forward to the
     /// proxy its spawn proved.
-    pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         let _ = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
     }
 
@@ -232,7 +241,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     let _mail_id = ctx.send_detached_to(target, mail);
     /// }
     /// ```
-    pub fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) -> MailId {
+    pub fn send_detached_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K) -> MailId
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         self.push_to(target.erased(), payload, None, None)
     }
 
@@ -252,12 +264,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, through the role
     /// protocol it cast the load reply's stamped sender to).
     #[must_use]
-    pub fn send_to_with_context<K: ActorMail, C: Kind, I>(
+    pub fn send_to_with_context<K: ActorMail, C: Kind, I, T: Target<K, I>>(
         &mut self,
-        target: impl Target<K, I>,
+        target: T,
         payload: &K,
         context: C,
-    ) -> MailId {
+    ) -> MailId
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         let mail_id = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
         self.park_context(mail_id, context);
         mail_id
@@ -279,12 +294,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
     #[must_use]
-    pub fn send_detached_to_with_context<K: ActorMail, C: Kind, I>(
+    pub fn send_detached_to_with_context<K: ActorMail, C: Kind, I, T: Target<K, I>>(
         &mut self,
-        target: impl Target<K, I>,
+        target: T,
         payload: &K,
         context: C,
-    ) -> MailId {
+    ) -> MailId
+    where
+        T::Sender: aether_actor::CoveredBy<A>,
+    {
         let mail_id = self.push_to(target.erased(), payload, None, None);
         self.park_context(mail_id, context);
         mail_id
@@ -303,7 +321,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumers are `aether.text`'s render sends: the atlas texture's
     /// creation, glyph uploads, atlas resyncs, and each draw's textured-quad
     /// batch.
-    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + aether_actor::SentBy<A, R>))
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
@@ -325,7 +343,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,
-        payload: &impl SendableTo<R>,
+        payload: &(impl SendableTo<R> + aether_actor::SentBy<A, R>),
         context: impl Kind,
     ) -> MailId
     where
@@ -351,7 +369,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// fleet server: the `Pong` or connection close behind each is an
     /// external event, causally unrelated to whatever inbound woke the
     /// handler.
-    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + aether_actor::SentBy<A, R>))
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
@@ -577,7 +595,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
         self.binding.prev_correlation()
     }
 
-    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+    fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K) {
         let _ = NativeCtx::send_detached_to(self, target, payload);
     }
 }

@@ -15,7 +15,7 @@ impl Addressable for SendsPeer {
     type Resolver = One;
 }
 
-impl HandlesKind<()> for SendsPeer {}
+impl HandlesKind<()> for SendsPeer { type Sender = crate::Anyone; }
 
 /// A one-row protocol listing the unit kind, so a [`ProtocolRef`] to it is a
 /// target the guest verbs take at an inferred row index.

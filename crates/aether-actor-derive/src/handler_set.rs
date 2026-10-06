@@ -671,7 +671,7 @@ fn handler_markers(h: &HandlerFn, position: usize, cfgs: &[syn::Attribute]) -> [
     [
         quote! {
             #(#cfgs)*
-            impl ::aether_actor::HandlesKind<#kind_ty> for $ty {}
+            impl ::aether_actor::HandlesKind<#kind_ty> for $ty { type Sender = ::aether_actor::Anyone; }
         },
         reply_marker_impl(h.class, &h.reply, kind_ty, &site),
         contract_row_impl(h.class, &h.reply, kind_ty, &position_past(quote! { $base }, position), &site),

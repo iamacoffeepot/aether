@@ -170,7 +170,7 @@ impl BundleDriverState {
         request: &K,
         ticket: C,
     ) where
-        ProtocolRef<P>: Target<K, I>,
+        ProtocolRef<P>: Target<K, I, Sender = aether_actor::Anyone>,
     {
         let Some(root) = self.roots.get(&bundle).and_then(as_role) else {
             ctx.fatal_abort(format!("the core addressed bundle {bundle} as a {role} root the driver never kept"));

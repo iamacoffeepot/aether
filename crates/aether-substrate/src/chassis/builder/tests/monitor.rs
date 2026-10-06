@@ -37,7 +37,7 @@ impl Addressable for DepartingRoot {
     type Resolver = aether_actor::One;
 }
 impl aether_actor::Root for DepartingRoot {}
-impl HandlesKind<Depart> for DepartingRoot {}
+impl HandlesKind<Depart> for DepartingRoot { type Sender = aether_actor::Anyone; }
 impl aether_actor::Lifecycle<Self> for DepartingRoot {
     type Config = ();
     type Params = ();
@@ -85,9 +85,9 @@ impl Addressable for LateWatcher {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for LateWatcher {}
-impl HandlesKind<Watch> for LateWatcher {}
-impl HandlesKind<Report> for LateWatcher {}
-impl HandlesKind<aether_kinds::MonitorNotice> for LateWatcher {}
+impl HandlesKind<Watch> for LateWatcher { type Sender = aether_actor::Anyone; }
+impl HandlesKind<Report> for LateWatcher { type Sender = aether_actor::Anyone; }
+impl HandlesKind<aether_kinds::MonitorNotice> for LateWatcher { type Sender = aether_actor::Anyone; }
 impl aether_actor::Lifecycle<Self> for LateWatcher {
     type Config = ();
     type Params = (ErasedActorRef, Sender<Did>, Sender<()>);
@@ -308,8 +308,8 @@ fn ctx_monitor_fires_notice_at_target_close() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Watcher {}
-    impl HandlesKind<WatchOrder> for Watcher {}
-    impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
+    impl HandlesKind<WatchOrder> for Watcher { type Sender = aether_actor::Anyone; }
+    impl HandlesKind<aether_kinds::MonitorNotice> for Watcher { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>, Sender<()>);
@@ -478,8 +478,8 @@ fn watcher_close_prunes_targets_forward_index() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Watcher {}
-    impl HandlesKind<WatchOrder> for Watcher {}
-    impl HandlesKind<Quit> for Watcher {}
+    impl HandlesKind<WatchOrder> for Watcher { type Sender = aether_actor::Anyone; }
+    impl HandlesKind<Quit> for Watcher { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
         type Params = Arc<AtomicU32>;

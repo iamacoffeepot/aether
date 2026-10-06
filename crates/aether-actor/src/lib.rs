@@ -58,10 +58,10 @@ pub use local::Local;
 pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, AllHandle, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract,
+    Actor, Addressable, AllHandle, Anyone, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract,
     Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap,
     HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol,
-    Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo,
+    Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo, SentBy,
     Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, WatchTarget, Watchable, Watches,
     declared_dependencies, root_mailbox, validate_namespace_segment,
 };

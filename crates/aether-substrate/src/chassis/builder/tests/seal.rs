@@ -179,7 +179,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for Pumped {}
-    impl HandlesKind<Poke> for Pumped {}
+    impl HandlesKind<Poke> for Pumped { type Sender = aether_actor::Anyone; }
     impl aether_actor::Lifecycle<Self> for Pumped {
         type Config = ();
         type Params = Arc<AtomicU32>;
@@ -250,7 +250,7 @@ impl Addressable for Witness {
     type Resolver = aether_actor::One;
 }
 
-impl HandlesKind<Announce> for Witness {}
+impl HandlesKind<Announce> for Witness { type Sender = aether_actor::Anyone; }
 
 /// A pumped actor that mails the [`Witness`] from `wire`, as an actor
 /// subscribing from `wire` mails its publisher.

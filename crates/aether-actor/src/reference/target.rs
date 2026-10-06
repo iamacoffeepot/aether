@@ -3,7 +3,7 @@
 use aether_data::ActorMail;
 
 use super::{ActorRef, ErasedActorRef, ProtocolRef};
-use crate::model::{HandlesKind, Protocol, RowAt};
+use crate::model::{Anyone, HandlesKind, Protocol, RowAt};
 
 mod sealed {
     use crate::reference::{ActorRef, ProtocolRef};
@@ -70,7 +70,7 @@ pub struct Direct;
 ///     type Resolver = One;
 /// }
 ///
-/// impl HandlesKind<()> for Peer {}
+/// impl HandlesKind<()> for Peer { type Sender = aether_actor::Anyone; }
 ///
 /// fn ping(ctx: &mut WasmCtx<'_>, peer: ActorRef<Peer>) {
 ///     ctx.send_to(peer, &());
@@ -137,11 +137,16 @@ pub struct Direct;
 /// }
 /// ```
 pub trait Target<K: ActorMail, I = Direct>: sealed::Sealed {
+    /// What the target's handler for `K` requires of the sending actor.
+    type Sender: Protocol;
+
     /// The proof this target sends through, with its actor type forgotten.
     fn erased(&self) -> ErasedActorRef;
 }
 
 impl<R: HandlesKind<K>, K: ActorMail> Target<K> for ActorRef<R> {
+    type Sender = R::Sender;
+
     fn erased(&self) -> ErasedActorRef {
         self.erase()
     }
@@ -151,12 +156,16 @@ impl<P: Protocol, K: ActorMail, I> Target<K, I> for ProtocolRef<P>
 where
     P::Rows: RowAt<K, I>,
 {
+    type Sender = Anyone;
+
     fn erased(&self) -> ErasedActorRef {
         self.target()
     }
 }
 
 impl<K: ActorMail, I, T: Target<K, I> + ?Sized> Target<K, I> for &T {
+    type Sender = T::Sender;
+
     fn erased(&self) -> ErasedActorRef {
         (**self).erased()
     }

@@ -26,6 +26,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         P::Resolver: DependencyResolver,
         A: DependsOn<P> + Contract<K>,
         <A as Contract<K>>::Reply: SilentRow,
+        P::Subscribe: crate::model::SentBy<A, P>,
     {
         self.send::<P>(&P::subscribe_request::<K>());
     }
@@ -40,6 +41,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         P: Publishes<K> + Singleton + CallerAddressable,
         P::Resolver: DependencyResolver,
         A: DependsOn<P>,
+        P::Unsubscribe: crate::model::SentBy<A, P>,
     {
         self.send::<P>(&P::unsubscribe_request::<K>());
     }

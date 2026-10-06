@@ -42,7 +42,7 @@ impl aether_actor::Addressable for SubstrateHarnessObserver {
     type Resolver = aether_actor::One;
 }
 
-impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {}
+impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver { type Sender = aether_actor::Anyone; }
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the harness's

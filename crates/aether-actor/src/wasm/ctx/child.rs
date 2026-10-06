@@ -82,6 +82,7 @@ impl<C: Addressable> InlineChild<C> {
     pub fn send<K: ActorMail, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
     where
         C: HandlesKind<K>,
+        K: crate::model::SentBy<A, C>,
     {
         ctx.push(self.erase(), payload, ChainMode::Inherit);
     }
