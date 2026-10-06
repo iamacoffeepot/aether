@@ -14,7 +14,7 @@
 use std::marker::PhantomData;
 use std::thread;
 
-use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, engine_name};
 
@@ -51,15 +51,15 @@ impl<C: Chassis> DriverCapability for SignalDriverCapability<C> {
 }
 
 impl<C: Chassis> DriverRunning for SignalDriverRunning<C> {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         let Self { boot, .. } = *self;
         let engine = engine_name::<C>();
         let sig = shutdown_signal(&engine);
         tracing::info!("{engine}: {sig} received, shutting down");
-        // `boot` drops here — actor registries shut down, dispatcher
-        // threads see their inbox senders drop and exit.
+        // `boot` drops here; the chassis then closes its actors. This
+        // driver pumps none.
         drop(boot);
-        Ok(())
+        (Ok(()), PumpedRoots::none())
     }
 }
 

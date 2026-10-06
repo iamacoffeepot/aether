@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use aether_kinds::LifecycleAdvance;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::SubstrateBoot;
-use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
+use aether_substrate::chassis::builder::{
+    DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RootPusher, RunError,
+};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigMember, ConfigMemberRecord};
 
@@ -135,7 +137,7 @@ fn install_shutdown_handler(shutdown: &Arc<AtomicBool>) {
 }
 
 impl DriverRunning for HeadlessTimerRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         let Self {
             lifecycle,
             tick_period,
@@ -171,9 +173,8 @@ impl DriverRunning for HeadlessTimerRunning {
         }
 
         // SIGINT/SIGTERM flipped `shutdown` (or a test pre-set it): the
-        // loop broke, so `run()` returns. The destructured locals drop —
-        // `boot` joins the scheduler workers — the teardown a bare
-        // SIGKILL would skip.
-        Ok(())
+        // loop broke, so `run()` returns and the chassis tears down, which
+        // a bare SIGKILL would skip. This driver pumps no actor.
+        (Ok(()), PumpedRoots::none())
     }
 }

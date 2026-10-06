@@ -13,6 +13,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnError, SpawnOutcome, Subname};
+use crate::chassis::builder::TeardownGate;
 use crate::chassis::frame_loop;
 use crate::chassis::settlement::{TerminalDisposition, await_internal_signal};
 use crate::config::{RegistryQueueCapacities, SettlementConfig};
@@ -22,7 +23,7 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
 use crate::mail::{Mail, MailId};
 use crate::runtime::effect_chain::EffectChain;
-use crate::runtime::lifecycle::FatalAbortRecord;
+use crate::runtime::lifecycle::{FatalAbortRecord, PanicAborter};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority;
 
@@ -223,7 +224,12 @@ fn successful_prepared_activation_enters_ordinary_dispatch_once() {
     assert_eq!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(home));
     assert!(events_rx.try_recv().is_err(), "one live mail performs one ordinary dispatcher drain");
 
-    spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
+    spawner.shutdown_instanced(&TeardownGate {
+        round_budget: Duration::from_millis(1),
+        cumulative_cap: Duration::from_secs(1),
+        abort_record: &FatalAbortRecord::new(),
+        aborter: &PanicAborter,
+    });
     drop(owner);
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
 }
@@ -299,7 +305,12 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     );
     drop(reborn_done);
 
-    spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
+    spawner.shutdown_instanced(&TeardownGate {
+        round_budget: Duration::from_millis(1),
+        cumulative_cap: Duration::from_secs(1),
+        abort_record: &FatalAbortRecord::new(),
+        aborter: &PanicAborter,
+    });
     drop(owner);
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
 }

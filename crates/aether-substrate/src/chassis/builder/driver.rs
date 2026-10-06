@@ -115,8 +115,49 @@ pub trait DriverCapability: 'static {
 /// which calls [`DriverRunning::run`] on the calling thread. Returns
 /// when the underlying loop drains
 /// cleanly (window closed, accept loop done, shutdown signal).
+///
+/// `run` answers its result together with the [`PumpedRoots`] it drove.
+/// The driver does not close them: a [`PumpedSlot`] closes by being dropped,
+/// and the chassis drops what `run` hands back only after it has torn its
+/// passives down (ADR-0160 §3), so the order is the chassis's and no driver
+/// can get it wrong by calling something.
 pub trait DriverRunning: 'static {
-    fn run(self: Box<Self>) -> Result<(), RunError>;
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots);
+}
+
+/// The pumped roots a driver drove, handed back from [`DriverRunning::run`]
+/// so the chassis closes them last (ADR-0160 §3).
+///
+/// A pumped root is a dependency of the actors around it: its mailbox is
+/// claimed in the first boot pass exactly so that others can declare it. It
+/// therefore outlives them at teardown, and mail a closing actor leaves on
+/// its inbox is dispatched by its own close.
+///
+/// The owner a driver hands over is opaque here, and it closes its slots in
+/// its own field order when this drops. A driver that pumps nothing hands
+/// back [`Self::none`].
+pub struct PumpedRoots(Option<Box<dyn Any>>);
+
+impl PumpedRoots {
+    /// The roots of a driver that pumps no actor.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(None)
+    }
+
+    /// Hand back `owner`, the value that owns every [`PumpedSlot`] the driver
+    /// drove. Its slots close, in its own field order, when the chassis
+    /// drops this.
+    #[must_use]
+    pub fn of(owner: impl Any) -> Self {
+        Self(Some(Box::new(owner)))
+    }
+}
+
+impl fmt::Debug for PumpedRoots {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PumpedRoots").field("held", &self.0.is_some()).finish()
+    }
 }
 
 /// Phantom [`DriverCapability`] for passive chassis (substrate-harness, future
@@ -145,7 +186,7 @@ impl DriverCapability for NeverDriver {
 pub struct NeverDriverRunning;
 
 impl DriverRunning for NeverDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         unreachable!("NeverDriverRunning::run is never called by design");
     }
 }
@@ -253,9 +294,10 @@ impl<'a> DriverCtx<'a> {
     /// when mail arrives while the loop is parked.
     ///
     /// The dispatch drain itself is chassis-owned: the driver calls
-    /// [`PumpedSlot::drain_available`] at its pump point and
-    /// [`PumpedSlot::shutdown`] on exit. Only the dispatch *semantics*
-    /// (the shared `dispatch_envelope` body) is framework-owned.
+    /// [`PumpedSlot::drain_available`] at its pump point and hands the slot
+    /// back from [`DriverRunning::run`] in its [`PumpedRoots`], whose drop
+    /// closes it. Only the dispatch *semantics* (the shared
+    /// `dispatch_envelope` body) and the close are framework-owned.
     ///
     /// Errors if the publication table refuses `A` its namespace (another
     /// type sharing it was born first), or if the driver reserved no
@@ -448,5 +490,5 @@ where
     });
 
     let actor_registry: Arc<ActorRegistry> = Arc::clone(spawner.actor_registry());
-    Ok(PumpedSlot::new(actor, transport, slots, actor_registry, mailbox_id))
+    Ok(PumpedSlot::new(actor, transport, slots, actor_registry))
 }

@@ -127,7 +127,8 @@ macro_rules! chassis_accessors {
 
 /// A chassis built with a driver. [`Self::run`] delegates to the
 /// driver's [`DriverRunning::run`] on the calling thread; when that
-/// returns, every passive is shut down in reverse boot order.
+/// returns, every passive is shut down in reverse boot order, and then the
+/// pumped roots the driver drove are closed.
 pub struct BuiltChassis<C: Chassis> {
     pub(super) booted: BootedPassives,
     pub(super) driver: Box<dyn DriverRunning>,
@@ -146,17 +147,23 @@ impl<C: Chassis> fmt::Debug for BuiltChassis<C> {
 impl<C: Chassis> BuiltChassis<C> {
     chassis_accessors!();
 
-    /// Block on the driver's run loop. On clean return, shut down
-    /// every passive in reverse boot order. Driver errors propagate
-    /// as [`RunError`]; passives still tear down before the error
-    /// returns to the caller.
+    /// Block on the driver's run loop, then tear the chassis down in the
+    /// one order it owns (ADR-0160 §3): the instanced actors, the composed
+    /// roots in reverse boot order, and last the pumped roots the driver
+    /// handed back. The pumped roots are dependencies of the others, so mail
+    /// a closing actor leaves on one is dispatched by that root's own close.
+    /// Driver errors propagate as [`RunError`]; the teardown runs before the
+    /// error returns to the caller.
     pub fn run(self) -> Result<(), RunError> {
         let Self { booted, driver, .. } = self;
-        let result = driver.run();
-        // Passives drop here, triggering reverse-order shutdown via
-        // BootedPassives::Drop. Holding `booted` until after `result`
-        // is bound keeps shutdown ordering deterministic.
+        let (result, pumped) = driver.run();
+
+        // `BootedPassives::Drop` closes the instanced actors and then the
+        // composed roots. Each pumped slot closes in its own drop, on this
+        // thread, which is the one that pumped it.
         drop(booted);
+        drop(pumped);
+
         result
     }
 
@@ -380,7 +387,8 @@ impl<C: Chassis> PassiveChassis<C> {
     /// type sharing it was born first), if the owner refuses either ack, if
     /// `A::init` returns `Err`, or if an earlier boot of the same reservation
     /// already failed; in each failure any accepted `Starting` reservation is
-    /// cancelled before returning. The namespace hold is never released: a
+    /// cancelled before returning, and an actor that had already wired is
+    /// closed. The namespace hold is never released: a
     /// failed boot fails the build (R-0046). A failed boot of a Claim-stage
     /// reservation leaves the slot unbooted, so the build fails too.
     pub fn boot_pumped_actor<A>(
@@ -404,7 +412,9 @@ impl<C: Chassis> PassiveChassis<C> {
                 if let Err(error) =
                     spawner.mailer().registry().publish_contract_through_owner(mailbox_id, RouteContract::of::<A>())
                 {
-                    slot.discard_outbound_after_activation();
+                    // The actor wired, so it closes: the slot's drop runs
+                    // the one close, which discards what `wire` sent.
+                    drop(slot);
                     return Err(owner_boot_error(&error));
                 }
                 slot.release_outbound_after_activation();
@@ -437,8 +447,11 @@ impl<C: Chassis> PassiveChassis<C> {
                                 self.booted.references.record(Registry::activated::<A>(mailbox_id));
                                 Ok((slot, wake_slot))
                             }
+                            // The actor wired, so it closes: the slot's
+                            // drop runs the one close, which discards what
+                            // `wire` sent.
                             Err(error) => {
-                                slot.discard_outbound_after_activation();
+                                drop(slot);
                                 Err(owner_boot_error(&error))
                             }
                         },

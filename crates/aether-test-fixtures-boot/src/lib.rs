@@ -18,8 +18,9 @@
 //!   this module observe it exactly once — the module-boot singleton is
 //!   instantiated once, not per load (cardinality).
 //! - `unwire` → [`BootTornDown`], once when the boot closes: on a drop
-//!   addressed at it. Stays at zero while every widget unloads (the boot
-//!   outlives them), and reaches one after the boot's own drop.
+//!   addressed at it, or when its engine tears down. Stays at zero while
+//!   every widget unloads (the boot outlives them), and reaches one after the
+//!   boot's own close.
 //!
 //! Kept standalone rather than folded into the shared bundle: an unconditional
 //! boot slot on the bundle would spawn a boot for its many unrelated scenario
@@ -51,9 +52,9 @@ impl WasmActor for Boot {
         ctx.send::<SubstrateHarnessObserver>(&BootObserved { marker: 0 });
     }
 
-    /// Broadcast [`BootTornDown`] once when the boot closes. `unwire` is the
-    /// trampoline's pre-shutdown hook, reached by a `DropComponent` addressed
-    /// at the boot.
+    /// Broadcast [`BootTornDown`] once when the boot closes. `unwire` runs in
+    /// every close of the boot's trampoline: a `DropComponent` addressed at
+    /// the boot, or its engine's teardown.
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
         ctx.send::<SubstrateHarnessObserver>(&BootTornDown { marker: 0 });
     }

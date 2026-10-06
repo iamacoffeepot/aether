@@ -58,8 +58,13 @@ pub enum DesktopWindowUserEvent {
 /// Construction and `run_app` remain chassis responsibilities; this value
 /// neither spawns nor transfers the application thread.
 pub struct DesktopWindowApplication<I> {
-    window_slot: DesktopWindowSlot,
+    /// Declared before `window_slot` so it drops first: the integration owns
+    /// the pumped render slot, which holds each window's surface, so render
+    /// closes before the window actor that owns the windows.
     integration: I,
+    /// The pumped window actor. It closes when this application drops, which
+    /// the chassis does after its passives (ADR-0160 §3).
+    window_slot: DesktopWindowSlot,
     pending_dirty: BTreeSet<ErasedActorPath>,
     shutdown_requested: bool,
 }
@@ -88,11 +93,6 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
 
     pub fn integration_mut(&mut self) -> &mut I {
         &mut self.integration
-    }
-
-    /// Run the pumped actor's closed path after `run_app` returns.
-    pub fn shutdown(&mut self) {
-        self.window_slot.shutdown();
     }
 
     fn apply_work(

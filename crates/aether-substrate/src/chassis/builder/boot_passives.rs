@@ -10,6 +10,7 @@ use crossbeam_channel::Receiver;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use super::references::ComposedReferences;
+use super::teardown::TeardownGate;
 use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, ChassisCtxParts, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
@@ -41,7 +42,7 @@ pub(super) struct BootedPassives {
     pub(super) aborter: Arc<dyn FatalAborter>,
     /// Issue #4193: the first fatal abort reason seen on this chassis.
     /// Written by the [`RecordingAborter`] on [`Self::aborter`] and read
-    /// by [`Self::shutdown_in_place`]'s close gate, which is otherwise
+    /// by [`Self::shutdown_in_place`]'s teardown gate, which is otherwise
     /// the place an attributed handler panic becomes an anonymous
     /// teardown timeout.
     abort_record: Arc<FatalAbortRecord>,
@@ -90,8 +91,8 @@ pub(super) struct BootedPassives {
     /// [`boot_passives`] before any cap, then drains every actor (all
     /// pool-dispatched since issue 635 Phase 3 / issue 1187). Drops
     /// *after* `shutdowns` (per `BootedPassives::Drop` + implicit
-    /// field-drop ordering), so every dispatcher slot has signalled
-    /// shutdown before pool workers join.
+    /// field-drop ordering), so every dispatcher slot has closed before
+    /// pool workers join.
     _pool: PoolHandle,
     /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
     /// chassis-router closure (which decodes `Settled { root }`
@@ -100,10 +101,10 @@ pub(super) struct BootedPassives {
     /// [`Self::settlement_registry`] for PR 4 gate-site
     /// `subscribe_settlement` calls.
     settlement_registry: Arc<SettlementRegistry>,
-    /// Issue #2509: cumulative patience the instanced-actor teardown
-    /// close-done gate waits before declaring a slot wedged. Threaded from
-    /// [`super::Builder::with_teardown_budget`] and handed to
-    /// `Spawner::shutdown_instanced` in `Self::shutdown_in_place`.
+    /// Issue #2509: cumulative patience the teardown gate waits on one
+    /// slot's close before declaring it wedged. Threaded from
+    /// [`super::Builder::with_teardown_budget`] onto the gate
+    /// `Self::shutdown_in_place` closes every pooled slot through.
     teardown_budget: Duration,
 }
 
@@ -138,38 +139,43 @@ impl BootedPassives {
         let _spent = self.spawner.seal();
     }
 
+    /// Close every pooled actor this chassis holds, in the one order it
+    /// owns (ADR-0160 §3): the instanced actors, then the composed roots in
+    /// reverse boot order. Whoever pumps a root closes it after this
+    /// returns, by dropping its slot.
     fn shutdown_in_place(&mut self) {
         // Stop new prepared births and synchronously cancel/join every
         // Starting activation while the relay and worker pool are live.
         // Only then may the instanced-slot snapshot be final.
         drop(self.registry_owner.take());
-        // Issue 685: spawned-instanced actors close BEFORE the
-        // singleton shutdowns walk. Two reasons: (1) their close
-        // path's `MonitorNotice` fan-out targets singleton watchers
-        // that we want still alive, (2) the pool is still up at this
-        // point (drops via `_pool` field order after this method
-        // returns), so workers can drain the close cycles the
-        // `shutdown_instanced` wakes queue.
-        // Issue #1305: escalating patience replaces the old 2s
-        // wall-clock deadline that false-fired under `--workspace`
-        // saturation (flake #1295). The per-round budget is the log
-        // cadence; the cumulative cap is generous (a healthy close
-        // cycle resolves well before it; a genuine wedge exhausts it
-        // and aborts/panics).
-        // Issue #2509: the cumulative cap is now the configured
+
+        // One gate for both walks. Issue #1305: escalating patience, not a
+        // wall-clock deadline, which false-fired under `--workspace`
+        // saturation (flake #1295). The 2s round budget is the warn cadence.
+        // Issue #2509: the cumulative cap is the configured
         // `teardown_budget` (default 300s, retunable via the shared
-        // `AETHER_SETTLEMENT_CAP_SECS` knob) rather than a hardcoded
-        // 30s, so a healthy-but-slow close cycle on a saturated box is
-        // never false-fired — the same starvation-vs-wedge fix #2062
-        // gave the settlement gates, on the gate it scoped out. The 2s
-        // round budget (the warn cadence) is unchanged.
-        // Issue #4193: the gate watches the abort record, so a chassis
-        // that already fatally aborted reports *that* here instead of
-        // waiting the budget out for close cycles whose worker unwound
-        // with the abort.
-        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_budget, &self.abort_record);
-        while let Some(s) = self.shutdowns.pop() {
-            s.shutdown_dyn();
+        // `AETHER_SETTLEMENT_CAP_SECS` knob), so a healthy-but-slow close
+        // cycle on a saturated box is never false-fired. Issue #4193: the
+        // gate watches the abort record, so a chassis that already fatally
+        // aborted reports *that* here instead of waiting the budget out for
+        // close cycles whose worker unwound with the abort.
+        let gate = TeardownGate {
+            round_budget: TEARDOWN_ROUND_BUDGET,
+            cumulative_cap: self.teardown_budget,
+            abort_record: &self.abort_record,
+            aborter: &*self.aborter,
+        };
+
+        // Issue 685: spawned-instanced actors close BEFORE the composed
+        // roots. Their close's `MonitorNotice` fan-out, and whatever their
+        // `unwire` sends, targets roots that are still open, and the pool
+        // is still up (it drops via `_pool` field order after this method
+        // returns), so workers run the close cycles the gate wakes.
+        self.spawner.shutdown_instanced(&gate);
+        // The roots close the same way, one at a time and newest first, so
+        // a root outlives every root composed after it.
+        while let Some(shutdown) = self.shutdowns.pop() {
+            shutdown.shutdown_dyn(&gate);
         }
     }
 }
@@ -179,6 +185,10 @@ impl Drop for BootedPassives {
         self.shutdown_in_place();
     }
 }
+
+/// The teardown gate's per-round patience: the cadence of its slow-gate
+/// log, not a deadline.
+const TEARDOWN_ROUND_BUDGET: Duration = Duration::from_secs(2);
 
 /// The resolved chassis config values [`boot_passives`] boots under,
 /// mirroring the `Builder` fields they come from.
@@ -361,6 +371,15 @@ pub(super) fn boot_passives(
         };
     }
 
+    // A boot that fails after its spawn pass began closes the roots it had
+    // already spawned through the same gate a teardown uses.
+    let rollback_gate = TeardownGate {
+        round_budget: TEARDOWN_ROUND_BUDGET,
+        cumulative_cap: teardown_budget,
+        abort_record: &abort_record,
+        aborter: &**aborter,
+    };
+
     // Helper: undo every advanced passive in `booted` in reverse,
     // then propagate `err`. Spawn-pass failures additionally pass
     // already-spawned shutdowns; this helper handles those too.
@@ -372,9 +391,10 @@ pub(super) fn boot_passives(
         ctx: &mut ChassisCtx<'_>,
         booted: Vec<Box<dyn PassiveBoot>>,
         already_spawned: Vec<Box<dyn DynShutdown>>,
+        gate: &TeardownGate<'_>,
     ) {
         for shutdown in already_spawned.into_iter().rev() {
-            shutdown.shutdown_dyn();
+            shutdown.shutdown_dyn(gate);
         }
         // ADR-0155 §4: `cleanup_after_failure` never touches driver reservations.
         for boot in booted.into_iter().rev() {
@@ -409,7 +429,7 @@ pub(super) fn boot_passives(
             Ok(()) => booted.push(boot),
             Err(e) => {
                 drop(boot);
-                rollback(&mut ctx, booted, Vec::new());
+                rollback(&mut ctx, booted, Vec::new(), &rollback_gate);
                 return Err(e);
             }
         }
@@ -424,7 +444,7 @@ pub(super) fn boot_passives(
     {
         let mut ctx = build_ctx!();
         if let Err(e) = driver_claim(&mut ctx) {
-            rollback(&mut ctx, booted, Vec::new());
+            rollback(&mut ctx, booted, Vec::new(), &rollback_gate);
             return Err(e);
         }
     }
@@ -433,7 +453,7 @@ pub(super) fn boot_passives(
     for boot in &mut *booted {
         let mut ctx = build_ctx!();
         if let Err(e) = boot.init(&mut ctx, &mut handles) {
-            rollback(&mut ctx, booted, Vec::new());
+            rollback(&mut ctx, booted, Vec::new(), &rollback_gate);
             return Err(e);
         }
     }
@@ -442,7 +462,7 @@ pub(super) fn boot_passives(
     for boot in &mut *booted {
         if let Err(e) = boot.wire(spawner.boot_wire_root()) {
             let mut ctx = build_ctx!();
-            rollback(&mut ctx, booted, Vec::new());
+            rollback(&mut ctx, booted, Vec::new(), &rollback_gate);
             return Err(e);
         }
     }
@@ -459,7 +479,7 @@ pub(super) fn boot_passives(
             Ok(s) => shutdowns.push(s),
             Err(e) => {
                 let remaining: Vec<Box<dyn PassiveBoot>> = booted_opt.into_iter().flatten().collect();
-                rollback(&mut ctx, remaining, shutdowns);
+                rollback(&mut ctx, remaining, shutdowns, &rollback_gate);
                 return Err(e);
             }
         }

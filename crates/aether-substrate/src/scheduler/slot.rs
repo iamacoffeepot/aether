@@ -308,14 +308,14 @@ pub trait Drainable: Send + Sync + 'static {
         "<unnamed>"
     }
 
-    /// Issue 685: chassis-teardown signal for `Pooled` instanced
-    /// actors. The chassis calls this on every spawned slot before the
-    /// pool drops; a real slot forwards to its binding's crate-private
-    /// `signal_engine_teardown`, so its close settles held replies silently
-    /// (ADR-0243 §1), and the next [`Self::run_cycle`] observes
-    /// `should_shutdown` and runs the close path (drain residual → `unwire` → registry close +
-    /// monitor fan-out). Default no-op so mock fixtures don't have to
-    /// care.
+    /// Issue 685: chassis-teardown signal for a `Pooled` actor. The
+    /// chassis calls this on every instanced slot and every composed root
+    /// before the pool drops; a real slot forwards to its binding's
+    /// crate-private `signal_engine_teardown`, so its close settles held
+    /// replies silently (ADR-0243 §1), and the next [`Self::run_cycle`]
+    /// observes `should_shutdown` and runs the close (drain residual →
+    /// `unwire` → registry close + monitor fan-out). Default no-op so mock
+    /// fixtures don't have to care.
     fn signal_engine_teardown(&self) {}
 
     /// Issue 685: chassis-teardown wait predicate. Returns `true` once
@@ -330,9 +330,8 @@ pub trait Drainable: Send + Sync + 'static {
     /// Issue 714: install a one-shot completion sender the slot fires
     /// when its [`CycleResult::Closed`] cycle finishes — i.e. after
     /// `unwire` + registry close ran and the actor box was taken out.
-    /// The crate-internal `Spawner::shutdown_instanced` (in
-    /// `crate::actor::native::spawn`) uses this to settle on each
-    /// spawned slot via `recv_timeout` instead of polling
+    /// The chassis's teardown gate uses this to settle on each pooled
+    /// slot it closes, instanced or composed root, instead of polling
     /// [`Self::is_closed`] in a 2 ms loop, which flaked under nextest
     /// contention.
     ///

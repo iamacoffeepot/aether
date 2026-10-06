@@ -2,140 +2,51 @@
 //! the actors that are open at teardown. An actor that closed earlier
 //! released its own entry and is not walked.
 //!
-//! Spawned actors close *first* (before the singleton shutdowns) so their
-//! `MonitorNotice` mail reaches singleton watchers while those are still
-//! alive. Each slot is signalled, woken once so a pool worker runs its close
-//! path, and then waited on through the escalating-patience gate — a close
-//! cycle that never runs left `unwire` unrun, so the wedge is unrecoverable
-//! rather than something to warn past.
+//! Spawned actors close *first* (before the composed roots) so their
+//! `MonitorNotice` mail, and anything their `unwire` sends, reaches a root
+//! that is still open. Each slot is signalled, woken once so a pool worker
+//! runs its close, and then waited on through the chassis's
+//! [`TeardownGate`], the same gate the walk over the roots uses.
 
-use std::time::Duration;
-
-use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
+use crate::chassis::builder::{ClosingSlot, TeardownGate};
 use crate::mail::MailboxId;
-use crate::runtime::lifecycle::FatalAbortRecord;
 
 use super::{InstancedSlotEntry, Spawner};
 
 impl Spawner {
-    /// Issue 685: walk every spawned instanced slot that is still open
+    /// Issue 685: close every spawned instanced slot that is still open
     /// (an actor that already closed released its entry, so there is
-    /// nothing of it to signal or wait for), signal shutdown
-    /// on its binding, fire one wake so a pool worker picks it up and
-    /// runs the close path (drain residual → `unwire` → registry
-    /// close + monitor fan-out), then wait per-slot on a one-shot
-    /// completion channel until every slot has finished or `timeout`
-    /// elapses.
+    /// nothing of it to signal or wait for) through `gate`.
     ///
     /// Called from the chassis builder's `BootedPassives::shutdown_in_place`
-    /// before the singleton shutdowns walk. The ordering matters:
-    /// spawned actors close *first* so their `MonitorNotice` mail
-    /// reaches singleton watchers while they're still alive. The
-    /// pool stays alive through this method (it drops via the
-    /// `_pool: PoolHandle` field on `BootedPassives` which has a later
-    /// drop order than the explicit `shutdown_in_place` call), so
-    /// workers can drain the close cycles we just queued.
+    /// before the walk over the composed roots. The pool stays alive through
+    /// this method (it drops via the `_pool: PoolHandle` field on
+    /// `BootedPassives`, after the explicit `shutdown_in_place` call), so
+    /// workers run the close cycles the gate wakes.
     ///
-    /// Issue 714: the original implementation polled
-    /// [`Drainable::is_closed`](crate::scheduler::Drainable::is_closed) every 2 ms with a
-    /// `timeout`-bounded loop. Under nextest contention the worker that
-    /// observed the wake could be scheduled out long enough that the
-    /// 2 s deadline elapsed before the close cycle ran, surfacing as
-    /// the `chassis_teardown_runs_unwire` flake. The waker now installs a
-    /// one-shot `crossbeam_channel::bounded(1)` per entry; the slot's
-    /// close cycle fires it after `unwire` + registry close land, so
-    /// teardown wakes the instant the cycle settles instead of polling.
-    ///
-    /// Issue #1305: each close-done receiver is waited on via
-    /// [`await_internal_signal`] with escalating patience rather than a
-    /// bare wall-clock `recv_timeout`. A genuinely wedged close cycle is
-    /// unrecoverable — `unwire` never ran, so teardown invariants are
-    /// already corrupt — so the disposition is `Abort` in release
-    /// (route the wedge through the Spawner's
-    /// [`FatalAborter`](crate::runtime::lifecycle::FatalAborter)) and `Panic` in test/debug (so #1295's
-    /// assertion fails attributably at the gate site instead of as a
-    /// downstream `0 != 1`). The old silent `warn!`-and-return-anyway
-    /// path that left an un-closed actor is gone.
-    ///
-    /// `round_budget` is the per-round patience interval (the log
-    /// cadence); `cumulative_cap` is the total patience per slot before
-    /// declaring a wedge.
-    ///
-    /// Issue #4193: `abort_record` is the chassis's [`FatalAbortRecord`],
-    /// and it is what stops this gate laundering a handler panic into a
-    /// bare timeout. A panicking handler escalates through the pool
-    /// worker's [`FatalAborter`](crate::runtime::lifecycle::FatalAborter); under [`crate::runtime::lifecycle::PanicAborter`]
-    /// that unwinds the worker, so the slot it was mid-turn on never
-    /// fires close-done and every remaining slot waits out `cumulative_cap`
-    /// — five minutes by default, longer than any test-runner ceiling, so
-    /// the run reports a truncated hang and the panic that caused it never
-    /// reaches the failure. Watching the record makes the gate report the
-    /// abort reason instead, at the moment it looks.
-    pub(crate) fn shutdown_instanced(
-        &self,
-        round_budget: Duration,
-        cumulative_cap: Duration,
-        abort_record: &FatalAbortRecord,
-    ) {
-        // Issue #2509: retain the slot's `MailboxId` alongside its entry
-        // (previously dropped as `_id`) so a genuine teardown wedge names
-        // the actor whose close cycle failed rather than a bare
-        // gate-name panic.
-        let entries: Vec<(MailboxId, InstancedSlotEntry)> = {
-            let mut guard =
-                self.instanced_slots.lock().expect("instanced_slots mutex poisoned; fail-fast per ADR-0063");
-            guard.drain().collect()
-        };
-        if entries.is_empty() {
-            return;
-        }
-        // Wire one (tx, rx) per entry up-front. Installing the tx on
-        // the slot before signalling shutdown ensures the close cycle
-        // sees the sender to fire — even if the worker enters the
-        // close path before `signal_engine_teardown` returns control. The
-        // slot's `set_close_done_tx` fast-paths an already-closed slot
-        // by firing immediately, so there's no race window where the
-        // close cycle ran without seeing the tx. A slot drained here
-        // while its own close cycle is running stays alive through this
-        // entry, and its release then finds nothing to remove.
-        let mut waiters: Vec<crossbeam_channel::Receiver<()>> = Vec::with_capacity(entries.len());
-        for (_id, entry) in &entries {
-            let (tx, rx) = crossbeam_channel::bounded::<()>(1);
-            entry.slot.set_close_done_tx(tx);
-            waiters.push(rx);
-            entry.slot.signal_engine_teardown();
-            // Shutdown wake: schedule the slot so the worker observes
-            // the shutdown signal. The CAS-win bool is meaningful only
-            // for callers wiring up first-time scheduling races; here
-            // we just need *some* worker to pick the slot up.
-            let _ = entry.wake.wake();
-        }
-        // `Panic` in test/debug (attributable failure at the gate),
-        // `Abort` in release (the wedge is unrecoverable — route it
-        // through the Spawner's aborter). The helper diverges itself on
-        // `Panic`; on `Abort` it hands back the wedge for us to abort.
-        let disposition = if cfg!(debug_assertions) {
-            TerminalDisposition::Panic
-        } else {
-            TerminalDisposition::Abort
-        };
-        for ((id, _entry), rx) in entries.iter().zip(&waiters) {
-            // Issue #2509: name the wedged slot in the gate label so a
-            // teardown wedge panic/abort points at the actor whose close
-            // cycle failed (e.g. `shutdown_instanced.close_done[mbx-…]`)
-            // rather than the bare `shutdown_instanced.close_done`.
-            let gate = format!("shutdown_instanced.close_done[{id}]");
-            match await_internal_signal(rx, &gate, round_budget, cumulative_cap, disposition, Some(abort_record)) {
-                WaitOutcome::Settled => {}
-                WaitOutcome::Wedged(wedge) => {
-                    // `Abort` disposition (release): the close cycle
-                    // never ran `unwire`; teardown invariants are
-                    // corrupt and unrecoverable. Route through the
-                    // Spawner's aborter — diverges.
-                    self.aborter.abort(wedge.reason());
-                }
-            }
-        }
+    /// Each wait is named `shutdown_instanced.close_done[<id>]` (issue
+    /// #2509), so a wedge points at the actor whose close never ran rather
+    /// than at a bare gate name.
+    pub(crate) fn shutdown_instanced(&self, gate: &TeardownGate<'_>) {
+        // A slot drained here while its own close cycle is running stays
+        // alive through this entry, and its release then finds nothing to
+        // remove.
+        let entries: Vec<(MailboxId, InstancedSlotEntry)> = self
+            .instanced_slots
+            .lock()
+            .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
+            .drain()
+            .collect();
+        let closing: Vec<ClosingSlot<'_>> = entries
+            .iter()
+            .map(|(id, entry)| ClosingSlot {
+                gate: format!("shutdown_instanced.close_done[{id}]"),
+                slot: &*entry.slot,
+                wake: &entry.wake,
+            })
+            .collect();
+
+        gate.close(&closing);
     }
 }
 
@@ -143,12 +54,13 @@ impl Spawner {
 mod tests {
     use std::any::Any;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::Registry;
-    use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+    use crate::runtime::lifecycle::{FatalAbortRecord, FatalAborter, PanicAborter};
     use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, SlotState, WakeHandle};
 
     use super::*;
@@ -184,9 +96,9 @@ mod tests {
     /// `shutdown_instanced.close_done`, the substring stops matching and
     /// this test fails.
     ///
-    /// Fast by construction: the cumulative cap is injected directly as
-    /// `shutdown_instanced`'s parameter (20 ms), so the wedge fires in
-    /// milliseconds rather than blocking on the 300 s default.
+    /// Fast by construction: the cumulative cap is injected directly on
+    /// the gate (20 ms), so the wedge fires in milliseconds rather than
+    /// blocking on the 300 s default.
     #[test]
     #[should_panic(expected = "shutdown_instanced.close_done[0x000000000000abcd]")]
     fn shutdown_instanced_wedge_names_the_slot() {
@@ -210,6 +122,11 @@ mod tests {
         let wake = WakeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot), pool.wake_sink());
         spawner.retain_activated_slot(MailboxId(0xABCD), slot, wake, None);
 
-        spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_millis(20), &FatalAbortRecord::new());
+        spawner.shutdown_instanced(&TeardownGate {
+            round_budget: Duration::from_millis(1),
+            cumulative_cap: Duration::from_millis(20),
+            abort_record: &FatalAbortRecord::new(),
+            aborter: &*aborter,
+        });
     }
 }

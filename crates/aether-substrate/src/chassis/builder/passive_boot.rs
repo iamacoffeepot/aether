@@ -4,8 +4,13 @@ use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigSources};
 use crate::mail::MailId;
 
+use super::teardown::TeardownGate;
+
+/// What a spawned passive leaves the chassis to shut down. `gate` is the
+/// chassis's one teardown gate, which a passive that owns a pooled slot
+/// closes it through.
 pub(super) trait DynShutdown {
-    fn shutdown_dyn(self: Box<Self>);
+    fn shutdown_dyn(self: Box<Self>, gate: &TeardownGate<'_>);
 }
 
 /// Concrete adapter for the fallback-router slot. The handler itself
@@ -16,7 +21,7 @@ pub(super) trait DynShutdown {
 struct FallbackShutdown;
 
 impl DynShutdown for FallbackShutdown {
-    fn shutdown_dyn(self: Box<Self>) {
+    fn shutdown_dyn(self: Box<Self>, _gate: &TeardownGate<'_>) {
         // The fallback router doesn't own any threads or channels —
         // it's a single function pointer. Nothing to do here; the
         // chassis's `fallback` slot drops the `Arc` when the
@@ -26,12 +31,12 @@ impl DynShutdown for FallbackShutdown {
 
 /// The reserved pumped slot's no-op shutdown. The slot's inbox rides the
 /// Claim-stage stash until the Start stage recovers it, and the pumped slot
-/// built from it is shut down by whoever pumps it, so this entry owns
-/// nothing.
+/// built from it closes when whoever pumps it drops it, after this chassis,
+/// so this entry owns nothing.
 struct ReservedPumpShutdown;
 
 impl DynShutdown for ReservedPumpShutdown {
-    fn shutdown_dyn(self: Box<Self>) {}
+    fn shutdown_dyn(self: Box<Self>, _gate: &TeardownGate<'_>) {}
 }
 
 /// Issue 697: chassis boot is multi-pass. Every registered passive
@@ -59,7 +64,8 @@ impl DynShutdown for ReservedPumpShutdown {
 /// previously-advanced passive, then the error propagates. Already-
 /// spawned dispatchers (only on a spawn-pass failure for a later
 /// passive) shut down via the [`DynShutdown`] handles the spawn pass
-/// produced.
+/// produced. Either way an actor whose `wire` ran is closed, so its
+/// `unwire` runs (ADR-0247 rule 5).
 pub(super) trait PassiveBoot: Send {
     /// Phase 0 (ADR-0156 §5) — resolve this passive's cap `Config` off the
     /// builder's source stack (programmatic > argv > env > file > default),
@@ -105,8 +111,8 @@ pub(super) trait PassiveBoot: Send {
 
     /// Roll back any acquired resources after a phase returned `Err`
     /// on this impl, or after a sibling passive's later phase failed
-    /// while this impl had already advanced. Idempotent across the
-    /// pre-spawn phases. Consumes the impl.
+    /// while this impl had already advanced. An actor that had wired is
+    /// closed here, on the boot thread that wired it. Consumes the impl.
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>);
 }
 

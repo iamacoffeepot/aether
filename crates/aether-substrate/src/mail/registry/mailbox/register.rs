@@ -67,12 +67,12 @@ impl Registry {
     /// so this now drops any live `Inbox` or `Inline` mailbox.
     ///
     /// The production caller is `ChassisCtx::retire_claim`, the boot
-    /// unwind for a claim some actor may already have observed: a
-    /// capability boot that fails after its `wire` ran, or a pumped boot
-    /// that fails while the passives are dispatching. A claim nothing could
-    /// have observed is withdrawn instead ([`Self::withdraw_claim`]). A
-    /// closed actor's route reaches `Dropped` through the same effect,
-    /// staged by the close tail through the ADR-0165 owner. Callers ignore
+    /// unwind for a claim some actor may already have observed: a pumped
+    /// boot whose `init` fails while the passives are dispatching. A claim
+    /// nothing could have observed is withdrawn instead
+    /// ([`Self::withdraw_claim`]). A closed actor's route reaches `Dropped`
+    /// through the same effect, staged by the close tail through the
+    /// ADR-0165 owner. Callers ignore
     /// the `Err`: an unknown, `Starting`, or already-dropped id leaves
     /// nothing to retire. The `WasmTrampoline` shutdown path this comment
     /// once named reaches

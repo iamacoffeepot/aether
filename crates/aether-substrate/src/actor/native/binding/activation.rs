@@ -93,10 +93,16 @@ impl NativeBinding {
     /// staged activation never reaches `Live`. Mail settlement bumps are
     /// balanced locally, prepared births reject at their execution homes, and
     /// deferred owner completions abandon their held actor work.
+    ///
+    /// Its one caller is the close sequence, which runs it for every actor:
+    /// one that went `Live` released the hold long ago, so there is nothing
+    /// held and nothing to discard.
     pub(crate) fn discard_outbound_after_activation(&self) {
         let (ring, mails, births, owner_batches) = {
             let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
-            assert!(buffer.activation_held, "only a staged activation can discard the outbound hold");
+            if !buffer.activation_held {
+                return;
+            }
             buffer.activation_held = false;
             self.activation_held.store(false, Ordering::Release);
             if buffer.burst_open {
