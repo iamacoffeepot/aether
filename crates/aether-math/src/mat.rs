@@ -182,6 +182,20 @@ impl Mat4 {
         Self::from_basis_rows_and_translation(row0, row1, row2, translation)
     }
 
+    /// `self * (point, 1)` divided by its `w`: the point through a projective
+    /// transform. `None` when `w` is zero or not finite, as for a point on the
+    /// plane through the eye of a perspective projection.
+    #[must_use]
+    pub fn project_point(self, point: Vec3) -> Option<Vec3> {
+        let clip = self * point.extend(1.0);
+        let usable = clip.w != 0.0 && clip.w.is_finite();
+        if usable {
+            Some(Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w))
+        } else {
+            None
+        }
+    }
+
     /// General inverse of the whole 4×4, with no assumption about the
     /// bottom row, so a projection, a view-projection product, and a
     /// transform with scale or shear are all in range. Under the crate's
@@ -371,6 +385,17 @@ mod tests {
         let left = (a * b) * v;
         let right = a * (b * v);
         assert!(approx_eq_vec4(left, right));
+    }
+
+    #[test]
+    fn project_point_divides_by_w_and_refuses_the_eye_plane() {
+        let proj = Mat4::perspective_rh(PI * 0.5, 1.0, 1.0, 10.0);
+
+        let far = proj.project_point(Vec3::new(0.0, 0.0, -10.0)).expect("a point in front projects");
+        let eye = proj.project_point(Vec3::new(1.0, 2.0, 0.0));
+
+        assert!((far.z - 1.0).abs() < EPS, "far z_ndc = {}", far.z);
+        assert_eq!(eye, None);
     }
 
     #[test]
