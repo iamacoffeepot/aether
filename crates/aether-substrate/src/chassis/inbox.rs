@@ -248,16 +248,38 @@ impl SettlingInbox {
 
     /// Queue `env` through the inbox's own sender: mail that must be in the
     /// queue before the actor is live (`after_init`, bootstrap, and parked
-    /// mail), so the spawn and activation paths hold no sender. A closed
-    /// inbox settles the envelope on the spot.
+    /// mail), so the spawn and activation paths hold no sender.
+    ///
+    /// The inbox is open at every call. Only the root shutdown, the close
+    /// tail, and this inbox's own drop close it; a birth preloads before
+    /// its slot is retained, wakeable, or seizable, so no close tail can
+    /// have run, and it is not a composed root. The send cannot fail
+    /// either: the receiver is this inbox's own field. An envelope that
+    /// could not be queued is therefore a broken invariant in the birth
+    /// path (ADR-0063): a debug build panics, and a release build logs the
+    /// error and settles the envelope so its chain still closes.
     pub(crate) fn preload(&self, env: Envelope) {
         let Some(sender) = &self.sender else {
-            drop(self.wrap(env));
+            self.settle_unqueued_preload(env, "the inbox was already closed");
             return;
         };
         if let Err(mpsc::SendError(env)) = sender.send(env) {
-            drop(self.wrap(env));
+            self.settle_unqueued_preload(env, "the inbox's own receiver was gone");
         }
+    }
+
+    /// The invariant-violation tail of [`Self::preload`]: report, settle
+    /// the envelope, then fail fast in a debug build. The settle comes
+    /// first so the panic never unwinds past an armed envelope.
+    fn settle_unqueued_preload(&self, env: Envelope, why: &'static str) {
+        tracing::error!(
+            target: "aether_substrate::capability",
+            mailbox = %self.id,
+            kind = %env.kind,
+            "preloaded mail could not be queued ({why}) — mail discarded",
+        );
+        drop(self.wrap(env));
+        debug_assert!(false, "SettlingInbox::preload could not queue its mail: {why}");
     }
 
     /// Re-home this inbox's reply-id minting onto `reply_lineage`,
