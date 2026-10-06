@@ -415,7 +415,7 @@ pub struct InboundMail {
 impl InboundMail {
     /// #1757: build a guard for a native dispatcher's *retained* inbound
     /// (via [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)).
-    /// Mirrors [`SettlingInbox::wrap`], but the mailer / claimed mailbox /
+    /// Mirrors a [`SettlingInbox`]'s own wrap, but the mailer / claimed mailbox /
     /// reply-lineage are passed explicitly because the native dispatcher
     /// owns those on its
     /// [`NativeBinding`](crate::actor::native::NativeBinding) rather than
