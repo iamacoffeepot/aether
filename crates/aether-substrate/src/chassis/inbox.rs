@@ -44,7 +44,11 @@
 //! There is no closed-but-alive inbox. Mail that reaches an actor between
 //! its close tail and the freeing of its slot is accepted, never
 //! dispatched (a finalized slot's cycle returns without draining), and
-//! settled and warn-logged by this drain.
+//! settled by this drain. The drain does not log what it settles: a pool
+//! worker's thread-local deque can hold the last reference to a slot, so
+//! the drain can run inside a thread-local destructor at thread exit,
+//! where a log event reaches thread-local state that is already gone and
+//! aborts the process.
 //!
 //! Settling on scope exit rather than on payload access is load-bearing:
 //! ADR-0080 §6 requires a reply's `Sent` to be recorded before the
@@ -243,13 +247,11 @@ impl Drop for InboxQueue {
         // here instead of being destroyed armed by the receiver's own drop
         // (#7460). Each wrapped envelope's guard records `Finished` +
         // disarms on drop, so teardown is a settled drain (#1704, #1716).
+        //
+        // Nothing is logged here: this can run inside a thread-local
+        // destructor at worker exit (see the module docs), where a log
+        // event aborts the process.
         while let Ok(env) = self.receiver.recv() {
-            tracing::warn!(
-                target: "aether_substrate::capability",
-                mailbox = %self.id,
-                kind = %env.kind,
-                "inbox dropped with mail queued — mail discarded",
-            );
             drop(self.wrap(env));
         }
     }
