@@ -971,7 +971,7 @@ impl WasmActor for WidgetPanel {
     ///
     /// A panel that owns no input subscribes none: it is the child of an
     /// [`EditorRegion`], which relays the editor shell's input to it.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         if self.config.owns_input {
             ctx.subscribe::<WindowCapability, MouseButton>();
             ctx.subscribe::<WindowCapability, MouseButtonRelease>();
@@ -990,6 +990,7 @@ impl WasmActor for WidgetPanel {
                 path: self.config.font_path.clone(),
             });
         }
+        Ok(())
     }
 
     /// Frame driver: spawn on the first tick, then open a composite frame, lay

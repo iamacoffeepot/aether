@@ -462,8 +462,9 @@ impl WasmActor for VirtualListWidget {
 
     /// Ask for the theme font's metrics; rows are elided against real
     /// advances as soon as there are any (inline children run `wire`).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Replace the items / viewport / theme in place, holding the selection and

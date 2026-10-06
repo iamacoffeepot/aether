@@ -57,6 +57,12 @@ pub enum SpawnError {
     /// `A::init` returned an error. The actor's partial state dropped
     /// before this returns; no dispatcher thread was spawned.
     InitFailed(BootError),
+    /// `A::wire` returned an error (ADR-0247 rule 3). The hook was entered,
+    /// so the actor ran its `unwire` and closed before this was reported;
+    /// it never went live, nothing it sent left, and its name is free for
+    /// another attempt unless the birth published the name before `wire`
+    /// (the pre-seal direct commit does, and that name is spent).
+    WireFailed(BootError),
     /// The registry owner closed before it could authoritatively apply the
     /// staged birth.
     OwnerClosed,

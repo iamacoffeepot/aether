@@ -27,8 +27,9 @@ impl WasmActor for PaintProbe {
 
     /// Subscribe `Tick` on `aether.lifecycle` (ADR-0082) so the tick
     /// fanout drives `on_tick`.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
+        Ok(())
     }
 
     /// When the stored render state is `visible`, emits a colored

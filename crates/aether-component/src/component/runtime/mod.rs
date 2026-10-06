@@ -222,8 +222,9 @@ impl NativeActor for ComponentHostCapability {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         state.registry_subscription = Some(ctx.subscribe_inventory());
+        Ok(())
     }
 
     /// Load a wasm component into the substrate: a publish of its module,

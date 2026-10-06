@@ -276,8 +276,9 @@ impl WasmActor for SegmentedWidget {
 
     /// Kick off the font-metrics request for the initial theme font; the
     /// per-bucket elision depends on it.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Replace the options / theme in place, re-clamping the selection into

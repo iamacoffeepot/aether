@@ -64,8 +64,9 @@ impl WasmActor for Typed {
         Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<Peer>(&Ping { seq: 1 });
+        Ok(())
     }
 
     fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {

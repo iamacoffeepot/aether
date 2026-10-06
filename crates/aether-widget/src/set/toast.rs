@@ -343,8 +343,9 @@ impl WasmActor for ToastWidget {
     }
 
     /// Ask for the theme font's metrics; the wrap wants real advances.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Raise a notice. Fire-and-forget from anywhere.

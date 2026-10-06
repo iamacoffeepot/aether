@@ -162,12 +162,28 @@ impl NativeActor for WasmTrampoline {
     /// The guest's `wire` sends inherit this ctx's in-flight root, the
     /// birth's wire root (ADR-0244), so they settle with the rest of the
     /// birth's `wire` mail under one root a test can await.
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    ///
+    /// A guest whose `wire` faults fails this birth (ADR-0247 rule 3), and
+    /// the load or spawn that asked for it answers `Err` with the fault. A
+    /// guest that returned an error is intact and stays in its slot, so the
+    /// close that follows runs its `unwire`. A guest that trapped is
+    /// released here, so the close finds no guest and runs no more of its
+    /// code, as a guest whose `init` trapped is dropped without a further
+    /// call.
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.sync_guest(state);
         let root = ctx.in_flight_root();
-        if let Slot::Live(component) = &mut state.slot {
-            WasmTrampolineState::wire_guest(ctx, component, root);
+        let Slot::Live(component) = &mut state.slot else {
+            return Ok(());
+        };
+        let Err(fault) = WasmTrampolineState::wire_guest(ctx, component, root) else {
+            return Ok(());
+        };
+
+        if fault.is_trap() {
+            state.slot = Slot::Released;
         }
+        Err(BootError::Other(io::Error::other(format!("wasm {fault}")).into()))
     }
 
     /// The close hook: release the guest (ADR-0241 §8, ADR-0247 rule 5). A

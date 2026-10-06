@@ -292,8 +292,9 @@ impl WasmActor for DialogWidget {
 
     /// Ask for the theme font's metrics; the title's own width is the plate's
     /// floor, so it wants real advances as soon as there are any.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Rename the dialog or change its floor in place.

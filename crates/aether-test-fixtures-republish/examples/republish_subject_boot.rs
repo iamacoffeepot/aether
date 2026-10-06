@@ -53,8 +53,9 @@ impl WasmActor for SubjectBoot {
         Ok(SubjectBoot { bumps: 0 })
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&BootObserved { marker: 0 });
+        Ok(())
     }
 
     #[handler::tell]

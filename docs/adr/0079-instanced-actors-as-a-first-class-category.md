@@ -8,6 +8,7 @@
 - **Amended:** 2026-09-24 — Section 8's `MonitorNotice` is engine-only mail ([ADR-0233](0233-engine-only-mail.md)): only the host's `notify_departure` sends it, a typed actor send of it does not compile, and every raw-`KindId` door refuses it.
 - **Amended:** 2026-09-24 — Section 5's `NativeInitCtx::self_id()` is removed (issue 6350): `init` sends nothing (issue 703), and no actor reads its own position ([ADR-0230](0230-proven-actor-references.md)).
 - **Amended:** 2026-10-05 — Section 6: every exit of an actor runs one close sequence ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 5, issue 7468). Substrate shutdown signals, wakes, and awaits every pooled actor, an idle one included, and a birth cancelled after `wire` or a boot rolled back after its wire pass closes the actor too, so `unwire` runs on every exit the engine takes. The sequence varies only by two facts the engine already records.
+- **Amended:** 2026-10-05 — Section 6: `wire` returns a result, and a failure fails the birth ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 3, issue 7463). The hook returns its transport's birth error, the same type `init` returns, and whoever asked for the actor is told. The actor that failed is closed by the one close, so its `unwire` runs; a guest that trapped is released first and runs no more code.
 - **Amended:** 2026-09-29 — Section 8's vacate amendment retires: `DropComponent`, its one production caller, becomes a close request under [ADR-0241](0241-code-is-published-not-loaded.md) §8, and a wasm component drop now closes and tombstones like any other actor (issue 7067).
 
 ## Context
@@ -164,12 +165,14 @@ Singleton init aligns to the same model as a separate cleanup pass — both card
 Actors get three lifecycle hooks beyond `init`. Two are mail-allowed; one signals the dispatcher to terminate. Termination itself remains self-initiated only — external triggering is a mail-level convention, not a primitive.
 
 ```rust
-fn wire(&mut self, ctx: NativeCtx<'_>);                        // post-init, mail-allowed (default no-op)
+fn wire(&mut self, ctx: NativeCtx<'_>) -> Result<(), BootError>; // post-init, mail-allowed (default Ok(()))
 fn unwire(&mut self, ctx: NativeCtx<'_>);                      // pre-shutdown, mail-allowed (default no-op)
 fn shutdown(&self);                                            // on NativeCtx — signals termination
 ```
 
 Lifecycle order: `init` (sync constructor, no mail) → `wire` (mail-allowed; subscribe, register, hello peers) → handler dispatches → `unwire` (mail-allowed; unsubscribe, goodbye peers) → dispatcher exits → registry close.
+
+**A `wire` that fails fails the birth.** `wire` returns `Result<(), InitError>`, the error type `init` returns on the same transport (`BootError` for a native actor, `ActorInitError` for a guest), and an `Err` ends the birth as an `Err` from `init` does: the actor never goes live and the requester of the birth receives the error. A load or spawn answers `Err`, a boot manifest entry fails the build, a handler's staged child completes with `SpawnError::WireFailed`, and a composed capability or pumped root fails the chassis build. The hook was entered, so the actor is handed to the one close below: `unwire` runs, mail still held for the activation is discarded, and a name that was only reserved stays free. A guest that trapped in `wire` is released before that close, so no more of its code runs. `unwire` keeps returning nothing: a close has no asker to tell.
 
 Three termination flows:
 

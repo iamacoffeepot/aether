@@ -394,8 +394,9 @@ impl<'a> DriverCtx<'a> {
 /// (which claims a fresh mailbox post-boot on a no-driver chassis).
 ///
 /// The namespace claim + its release-on-error are the caller's: this
-/// function only reports `init` failure back through its `Err` so the caller
-/// can unwind whatever registry / namespace state it reserved. Every other
+/// function only reports an `init` or `wire` failure back through its `Err`
+/// so the caller can unwind whatever registry / namespace state it reserved.
+/// An actor whose `wire` failed is closed here first. Every other
 /// chassis handle (mailer, aborter, actor registry, ring capacities) is
 /// sourced from the `spawner`, keeping the arg list to the per-actor inputs.
 ///
@@ -484,11 +485,19 @@ where
     // casts a `wire`-time subscribe request's sender reads those rows
     // (ADR-0231 §4).
     transport.hold_outbound_for_activation();
-    local::with_stamped(&slots, || {
+    let wired = local::with_stamped(&slots, || {
         let mut wire_ctx = NativeCtx::for_wire(&transport, EffectChain::Uncaused(born), spawner.boot_wire_root());
-        A::wire(actor.as_mut(), &mut wire_ctx);
+        A::wire(actor.as_mut(), &mut wire_ctx)
     });
 
     let actor_registry: Arc<ActorRegistry> = Arc::clone(spawner.actor_registry());
-    Ok(PumpedSlot::new(actor, transport, slots, actor_registry))
+    let slot = PumpedSlot::new(actor, transport, slots, actor_registry);
+    // ADR-0247 rule 3: a `wire` that failed fails the birth. The hook was
+    // entered, so the actor closes: dropping the slot runs the one close,
+    // which runs `unwire` and discards what both hooks sent behind the hold.
+    if let Err(error) = wired {
+        drop(slot);
+        return Err(error);
+    }
+    Ok(slot)
 }

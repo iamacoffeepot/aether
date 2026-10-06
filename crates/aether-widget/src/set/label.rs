@@ -201,8 +201,9 @@ impl WasmActor for LabelWidget {
 
     /// Kick off the font-metrics request for the initial theme font (inline
     /// children run `wire`).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.pump_font_metrics(ctx);
+        Ok(())
     }
 
     /// Change the text / role / alignment / theme in place from a re-sent

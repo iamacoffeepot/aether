@@ -178,8 +178,9 @@ impl WasmActor for ProbeGate {
     }
 
     /// Count each run of the hook, without sending anything.
-    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.wired += 1;
+        Ok(())
     }
 
     #[handler::request]

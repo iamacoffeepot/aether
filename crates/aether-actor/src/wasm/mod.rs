@@ -61,11 +61,12 @@ pub use ctx::{
     SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
-/// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
-/// (config parse failure, required handle missing, malformed env var).
-/// The message rides the `init_failed_p32` host fn into the substrate,
-/// which surfaces it in `LoadResult::Err { error }` instead of the
-/// panic-hook path's generic "guest trapped during init" text.
+/// Error returned by either birth hook, [`Lifecycle::init`](crate::Lifecycle::init) or
+/// [`Lifecycle::wire`](crate::Lifecycle::wire), when the actor cannot start
+/// (config parse failure, required handle missing, a peer that does not
+/// prove). The message rides the `init_failed_p32` host fn into the
+/// substrate, which surfaces it in `LoadResult::Err { error }` instead of the
+/// panic-hook path's generic trap text.
 ///
 /// Wraps a `Cow<'static, str>` so static-string callers don't allocate
 /// (`ActorInitError::from("config missing")`) while owned strings still flow
@@ -394,8 +395,11 @@ pub trait ErasedWasmActor {
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire). The synthesized
     /// impl upgrades the carried erased ctx to the actor, whose lifecycle ctx
     /// is typed by it, and downgrades the [`Unchecked`](crate::Unchecked) view to
-    /// `Single`.
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
+    /// `Single`. The hook's error is the birth's (ADR-0247 rule 3).
+    ///
+    /// # Errors
+    /// The error the actor's `wire` returned.
+    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) -> Result<(), ActorInitError>;
 
     /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire), upgrading
     /// the ctx the same way as [`Self::erased_wire`].
@@ -1225,8 +1229,18 @@ macro_rules! __export_internal {
             // lifecycle ctx is `WasmCtx<'_, $component>` (= Single), so upgrade
             // it to the actor once, here where it is born, and downgrade.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
-            0
+            let wired =
+                <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
+            // ADR-0247 rule 3: a failed `wire` fails the birth. The message
+            // crosses the way a failed `init`'s does, and the non-zero code
+            // tells the host to read it.
+            match wired {
+                Ok(()) => 0,
+                Err(err) => {
+                    $crate::wasm::stage_init_failure(err.message());
+                    1
+                }
+            }
         }
 
         /// # Safety
@@ -1955,8 +1969,15 @@ macro_rules! __export_multi_internal {
             // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Unchecked`
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            instance.erased_wire(&mut ctx);
-            0
+            // ADR-0247 rule 3: a failed `wire` fails the birth, reported the
+            // way the single-actor shim reports it.
+            match instance.erased_wire(&mut ctx) {
+                Ok(()) => 0,
+                Err(err) => {
+                    $crate::wasm::stage_init_failure(err.message());
+                    1
+                }
+            }
         }
 
         #[cfg(all(target_family = "wasm", not(feature = "library")))]

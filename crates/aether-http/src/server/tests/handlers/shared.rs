@@ -29,12 +29,13 @@ macro_rules! shared_routed_handler {
                 Ok($state)
             }
 
-            fn wire(_state: &mut $state, ctx: &mut NativeCtx<'_>) {
+            fn wire(_state: &mut $state, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
                 $(ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
                     prefix: $prefix.to_string(),
                     method: $method,
                     shared: true,
                 });)+
+                Ok(())
             }
 
             #[handler::request]
@@ -108,11 +109,12 @@ impl NativeActor for SharedMacroPoolHandler {
     // `on_route` still reads). An author-written `wire` sidesteps
     // both: its own unused first arg is independently `_`-prefixed
     // and never read, and `on_route`'s `state` is read and plain.
-    fn wire(_state: &mut SharedMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut SharedMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         // Body is otherwise empty — `#[http::router]` appends this
         // impl's `RegisterRouteSelf` send here, which is what actually
         // uses `ctx` (a plain, non-underscore name since it must be
         // usable by the injected statement).
+        Ok(())
     }
 
     #[http::route(any, "/macro-pool")]
@@ -143,9 +145,10 @@ impl NativeActor for ExclusiveMacroPoolHandler {
         Ok(ExclusiveMacroPoolHandlerState { tag })
     }
 
-    fn wire(_state: &mut ExclusiveMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut ExclusiveMacroPoolHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         // Body is otherwise empty; `#[http::router]` appends the
         // registration send that uses `ctx`.
+        Ok(())
     }
 
     #[http::route(any, "/macro-excl")]

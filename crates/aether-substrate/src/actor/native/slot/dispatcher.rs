@@ -94,6 +94,7 @@ use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
+use crate::chassis::error::BootError;
 use crate::mail::{MailId, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::{
@@ -219,14 +220,19 @@ where
     /// this same path from a thread holding no mail and declares so. Both
     /// pass the fresh wire root the birth opened for the hook's sends as
     /// `wire_root` (ADR-0244).
-    pub(crate) fn wire_activation(&self, chain: EffectChain, wire_root: Option<MailId>) {
+    ///
+    /// The hook's result is the birth's (ADR-0247 rule 3): on `Err` the
+    /// activation job cancels this slot through [`Self::cancel_activation`],
+    /// which closes the actor, and the birth answers with the error.
+    pub(crate) fn wire_activation(&self, chain: EffectChain, wire_root: Option<MailId>) -> Result<(), BootError> {
         let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
         let actor = actor_guard.as_mut().expect("prepared activation owns an initialized actor");
-        local::with_stamped(&self.slots, || {
+        let wired = local::with_stamped(&self.slots, || {
             let mut ctx = NativeCtx::for_wire(&self.binding, chain, wire_root);
-            A::wire(actor.as_mut(), &mut ctx);
+            A::wire(actor.as_mut(), &mut ctx)
         });
         drop(actor_guard);
+        wired
     }
 
     /// Cancel a wired-but-not-live activation at the same execution home:

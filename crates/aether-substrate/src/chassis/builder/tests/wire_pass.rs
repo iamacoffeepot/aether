@@ -76,8 +76,9 @@ impl NativeActor for SpawnedPinger {
         Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         ctx.send::<Ponger>(&WireBarrierPing { tag: 2 });
+        Ok(())
     }
 
     #[fallback]
@@ -135,8 +136,9 @@ fn spawn_actor_runs_wire_once_after_init() {
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: params })
         }
-        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
+        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
         }
     }
     impl aether_actor::Declared for WireSpawnProbe {
@@ -256,9 +258,10 @@ impl NativeActor for WiredChild {
         Ok(Self { hold: None })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         self.hold = ctx.acquire_settlement_hold();
         ctx.send::<Ponger>(&WireBarrierPing { tag: 3 });
+        Ok(())
     }
 
     #[handler::tell]
@@ -350,8 +353,9 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: params })
         }
-        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
+        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
         }
     }
     impl aether_actor::Declared for WireProbe {
@@ -393,9 +397,9 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
 /// fails after the wire pass, the earlier root, whose `wire` ran, is closed,
 /// so its `unwire` runs exactly once (ADR-0247 rule 5).
 ///
-/// No composed actor can fail after the wire pass today, so the failure is a
-/// stand-in passive whose own `wire` refuses, driven through the real
-/// `boot_passives` beside a real root boot.
+/// The failure is a stand-in passive whose own `wire` refuses, driven through
+/// the real `boot_passives` beside a real root boot, so the root under test is
+/// one whose own `wire` succeeded.
 #[test]
 fn a_boot_that_fails_after_the_wire_pass_closes_the_roots_that_wired() {
     use super::super::boot_passives::{BootTuning, boot_passives};
@@ -428,8 +432,9 @@ fn a_boot_that_fails_after_the_wire_pass_closes_the_roots_that_wired() {
             Ok(Self { wired, unwired })
         }
 
-        fn wire(&mut self, _ctx: &mut NativeCtx<'_, Self>) {
+        fn wire(&mut self, _ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
             self.wired.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
         }
 
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -490,6 +495,87 @@ fn a_boot_that_fails_after_the_wire_pass_closes_the_roots_that_wired() {
     assert_eq!(unwired.load(AtomicOrdering::SeqCst), 1, "the rollback closed the wired root, so its unwire ran");
 }
 
+/// A composed capability whose `wire` returns an error fails the chassis
+/// build with that error (ADR-0247 rule 3). Catches the wire pass swallowing
+/// the hook's result (the build would succeed with a half-wired root), and a
+/// failed root rolled back as if it had never wired (its `unwire` would not
+/// run, nor would the `unwire` of the sibling that wired before it).
+#[test]
+fn a_composed_capability_whose_wire_fails_fails_the_build() {
+    use std::io;
+
+    const REFUSAL: &str = "this capability's wire refused";
+
+    struct WiresFirst {
+        unwired: Arc<AtomicU32>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for WiresFirst {
+        const NAMESPACE: &'static str = "test.wire_failure.wires_first";
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+
+        fn init((): (), unwired: Arc<AtomicU32>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { unwired })
+        }
+
+        fn unwire(&mut self, _ctx: &mut NativeCtx<'_, Self>) {
+            self.unwired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        #[fallback]
+        fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+            let _ = self;
+        }
+    }
+
+    struct RefusesWire {
+        unwired: Arc<AtomicU32>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for RefusesWire {
+        const NAMESPACE: &'static str = "test.wire_failure.refuses";
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+
+        fn init((): (), unwired: Arc<AtomicU32>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { unwired })
+        }
+
+        fn wire(&mut self, _ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
+            let _ = self;
+            Err(BootError::Other(Box::new(io::Error::other(REFUSAL))))
+        }
+
+        fn unwire(&mut self, _ctx: &mut NativeCtx<'_, Self>) {
+            self.unwired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        #[fallback]
+        fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+            let _ = self;
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let sibling_unwired = Arc::new(AtomicU32::new(0));
+    let refuser_unwired = Arc::new(AtomicU32::new(0));
+
+    let built = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<WiresFirst>(Arc::clone(&sibling_unwired))
+        .with_actor::<RefusesWire>(Arc::clone(&refuser_unwired))
+        .build_passive();
+
+    let Err(error) = built else {
+        panic!("a capability whose wire returned an error must fail the build");
+    };
+    assert!(error.to_string().contains(REFUSAL), "the build error is the hook's own: {error}");
+    assert_eq!(refuser_unwired.load(AtomicOrdering::SeqCst), 1, "the root that entered wire ran its unwire");
+    assert_eq!(sibling_unwired.load(AtomicOrdering::SeqCst), 1, "the root that wired before it ran its unwire");
+}
+
 fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     struct Pinger {
         wire_ran: Arc<AtomicU32>,
@@ -505,9 +591,10 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
             Ok(Self { wire_ran: params })
         }
 
-        fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+        fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
             ctx.send::<Ponger>(&WireBarrierPing { tag: 1 });
             self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(())
         }
 
         #[fallback]

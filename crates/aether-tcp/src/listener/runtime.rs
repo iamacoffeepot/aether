@@ -173,10 +173,11 @@ impl NativeActor for TcpListenerActor {
         })
     }
 
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         if let Some(start) = state.accept_start.take() {
             let _ = start.send(());
         }
+        Ok(())
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {

@@ -43,8 +43,9 @@ impl WasmActor for Hello {
         Ok(Hello {})
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
+        Ok(())
     }
 
     /// Emits the configured triangle to the render capability every tick.

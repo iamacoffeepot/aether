@@ -38,6 +38,7 @@ mod source_observer;
 mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
+mod wire_fault;
 
 pub use asset_instance::AssetInstance;
 pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended, ContractFallback};
@@ -67,6 +68,7 @@ pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, RehydrateTrap, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
 pub use ui_widget::UiWidget;
+pub use wire_fault::{WireFault, WireRefuser};
 
 // Every actor is reachable by its `NAMESPACE` export selector; a `load` with
 // no selector is refused naming them (ADR-0241 §9).
@@ -123,6 +125,8 @@ aether_actor::export!(
         ContractChanged,
         ContractExtended,
         ContractFallback,
+        WireFault,
+        WireRefuser,
     ],
     private = [InlineChild, InlineDespawnChild, InlineContextAsker],
 );
