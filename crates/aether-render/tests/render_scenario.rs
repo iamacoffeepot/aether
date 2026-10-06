@@ -41,6 +41,7 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+use aether_actor::ActorPath;
 use aether_component::ComponentHostCapability;
 use aether_data::{Blob, ErasedActorPath};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -64,10 +65,11 @@ use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
     DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
     MaterialTexturedRect, ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage,
-    TexturedQuad, UpdateTexture, Vertex,
+    TexturedQuad, UpdateTexture, Vertex, ViewFrom, ViewSource,
 };
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
+use aether_test_fixtures_bundle::Cube;
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -323,39 +325,51 @@ fn capture_while_pending_replies_err_and_leaves_the_first_in_flight() {
     assert!(png.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "the first capture returns a PNG");
 }
 
-/// Render-pipeline proof: load the `cube` fixture, drive one tick, and
-/// capture. The fixture publishes a fixed `ViewProjection { view_proj }` and a
+/// Render-pipeline proof: load the `cube` fixture, tell the renderer to
+/// take its view from it, drive one tick, and capture. The fixture is a
+/// view source publishing a fixed `ViewProjection` and draws a
 /// twelve-triangle world-space unit cube, so the captured frame puts
-/// every stage on the line at once — camera, `view_proj`, world-space
-/// geometry, the depth test that orders the cube's faces, and GPU
-/// readback. The existing `capture_frame_round_trip` scenario only
-/// draws a flat NDC triangle at identity `view_proj`, so this is the
-/// first capture that actually projects geometry through a camera.
+/// every stage on the line at once — `aether.render.view_from`, the
+/// subscription it sends, the published view applied as
+/// `projection * view`, world-space geometry, the depth test that orders
+/// the cube's faces, and GPU readback. The existing
+/// `capture_frame_round_trip` scenario only draws a flat NDC triangle at
+/// the identity view, so this is the capture that projects geometry
+/// through a camera.
 ///
 /// The assertions use the #1513 silhouette reductions against the
-/// known framing matrix: the cube's lit bounding box must sit centered
+/// known framing view: the cube's lit bounding box must sit centered
 /// and inset from the frame edges (not a corner speck, not full-bleed),
-/// and coverage must land in the cube's band. The bounds below were
-/// tuned against the real captured frame at this size and `view_proj`.
+/// coverage must land in the cube's band, and the silhouette must be the
+/// hexagon of three visible faces. The bounds below were tuned against
+/// the real captured frame at this size and view.
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn cube_render_projects_centered_silhouette() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    // 128×96 matches the fixture's `view_proj` aspect (4:3), so the
-    // silhouette projects undistorted.
+    // 128×96 matches the extent the fixture's projection is built for
+    // (4:3), so the silhouette projects undistorted.
     let (width, height) = (128u32, 96u32);
     let mut harness =
         SubstrateHarness::builder().size(width, height).with_render().with_component_host().build().expect("boot");
     load_cube(&mut harness, &wasm_path);
 
-    // Priming advance subscribes the cube to ticks; the next tick (run
-    // inside `capture`) drives the cube's camera + geometry emission so
-    // the readback sees a fully-formed frame.
+    // The renderer holds its identity view until it is told whose view to
+    // take. The subscription it sends the cube and the view the cube
+    // sends back ride the request's chain, so the view is applied once
+    // that chain settles. The priming advance subscribes the cube to
+    // ticks; the next tick (run inside `capture`) drives the cube's
+    // geometry emission so the readback sees a fully-formed frame.
+    let follow = ViewFrom { source: ActorPath::<Cube>::root().narrow::<ViewSource>() };
     let captured = harness
-        .execute(vec![("prime", HarnessOp::advance(1)), ("snap", HarnessOp::capture())])
-        .expect("prime + capture");
+        .execute(vec![
+            ("follow", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &follow)),
+            ("prime", HarnessOp::advance(1)),
+            ("snap", HarnessOp::capture()),
+        ])
+        .expect("follow + prime + capture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -363,7 +377,7 @@ fn cube_render_projects_centered_silhouette() {
 
     // Coverage band: the cube fills a healthy fraction of the frame but
     // leaves the clear color showing in the corners. The fixed
-    // `view_proj` makes this deterministic; the observed fraction is
+    // view makes this deterministic; the observed fraction is
     // ~0.18, so the band brackets it with margin while still ruling out
     // an empty frame (drew nothing) and a full-bleed frame (clear-color
     // mismatch or runaway geometry).
@@ -402,6 +416,19 @@ fn cube_render_projects_centered_silhouette() {
          {}x{} frame (not a corner speck)",
         img.width,
         img.height,
+    );
+
+    // Three faces seen off-axis make a hexagon, which leaves the corners
+    // of its bounding box clear: it fills ~0.73 of the box. At the identity
+    // view the same cube is an axis-aligned square that fills its whole
+    // box while passing every bound above, so this is the assertion that
+    // fails when the fixture's view never reached the renderer.
+    let box_area = (max_x - min_x + 1.0) * (max_y - min_y + 1.0);
+    let fill = drawn * frame_width * frame_height / box_area;
+    assert!(
+        (0.60..0.85).contains(&fill),
+        "cube silhouette fills {fill} of its bounding box {silhouette:?}; a hexagon fills about 0.73, \
+         and a full box is the cube drawn through the identity view",
     );
 }
 

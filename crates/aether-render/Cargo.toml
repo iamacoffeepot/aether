@@ -36,14 +36,8 @@ publish = false
 # `*Overlay` / `*Layer` structs, so both crates are real deps (the crate fails
 # to compile without them) even though neither is named in this crate's source.
 # False positives, so ignored here rather than dropped.
-#
-# `aether-test-fixtures-bundle` is a cdylib-only wasm component crate: the
-# render scenario tests load its pre-built wasm at runtime, and the dev-dep
-# edge is what `cargo xtask affected` reads to derive `wasm_needed` (the
-# `cargo xtask dist` pre-build) when this crate's tests are selected — no
-# source-level `use` exists for machete to see.
 [package.metadata.cargo-machete]
-ignored = ["clap", "confique", "aether-test-fixtures-bundle"]
+ignored = ["clap", "confique"]
 
 [features]
 default = ["runtime"]
@@ -78,7 +72,7 @@ aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 # The render cast-shaped kinds (`DrawTriangle` / `Vertex` /
-# `ViewProjection` / `TexturedQuad`) derive `bytemuck::Pod` + `Zeroable`,
+# `TexturedQuad`) derive `bytemuck::Pod` + `Zeroable`,
 # and the runtime accumulator `cast_slice`s vertices — always-on.
 bytemuck = { workspace = true, features = ["derive"] }
 # Native-only runtime half — gated so wasm / marker builds skip the
@@ -132,7 +126,8 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # Cargo-invisible wasm coupling made visible (issue #3617): the scenario
 # tests execute this crate's pre-built component wasm, and this dev-dep is
 # the edge `cargo xtask affected` derives `wasm_needed` from so the
-# `cargo xtask dist` pre-build runs before these tests in CI.
+# `cargo xtask dist` pre-build runs before these tests in CI. The cube
+# scenario also names the `Cube` actor type, to write its typed path.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 # The artifact-guard scenario decodes the persisted `measurements.json`.
 serde_json = { workspace = true }

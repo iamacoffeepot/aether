@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use aether_actor::{ReplyMode, runtime};
 use aether_data::ErasedActorPath;
 
-use aether_kinds::{CaptureFrame, CaptureFrameResult};
+use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
 
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
@@ -107,6 +107,9 @@ mod texture_array;
 // Volume textures in the texture registry (ADR-0246 decision 6): width
 // by height by depth, given whole at creation and immutable after.
 mod texture_volume;
+// The view source the renderer follows: the hold `view_from` installs and
+// the two ways it is released.
+mod view_source;
 
 // The cap-root re-exports source these names through `runtime`. The
 // `RenderTuning*` trio is the derive-Config surface (ADR-0090) the chassis
@@ -134,6 +137,7 @@ pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
 use self::program::{DispatchResources, ProgramRegistry};
 pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
+use self::view_source::FollowedView;
 
 use super::{
     CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
@@ -142,7 +146,7 @@ use super::{
     DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
     Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
     ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
-    UpdateInstances, UpdateTexture, ViewProjection, WriteTextureLayer,
+    UpdateInstances, UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -161,6 +165,9 @@ pub struct RenderCapabilityState {
     last_submitted: Vec<u8>,
     triangles_rendered: u64,
     camera_state: [f32; 16],
+    /// The view source the renderer follows, absent until the first
+    /// `aether.render.view_from` and again once that source closes.
+    view_source: Option<FollowedView>,
     overlay_frame: Vec<OverlayBatch>,
     overlay_last_submitted: Vec<OverlayBatch>,
     material_frame: Vec<MaterialBatch>,
@@ -937,6 +944,7 @@ impl NativeActor for RenderCapability {
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
+            view_source: None,
             overlay_frame: Vec::new(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
@@ -997,13 +1005,47 @@ impl NativeActor for RenderCapability {
         }
     }
 
-    /// `ViewProjection` latest-value-wins, on the owned `camera_state`.
+    /// `ViewProjection` latest-value-wins, on the owned `camera_state`: the
+    /// renderer applies `projection * view`. The followed view source sends
+    /// it, and so may any actor that computes its own view.
     #[handler::tell]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         if state.warn_drop_if_unusable("view_projection") {
             return;
         }
-        state.camera_state = mail.view_proj;
+        state.camera_state = (mail.projection * mail.view).to_cols_array();
+    }
+
+    /// Follow a view source: unsubscribe from the one followed before,
+    /// subscribe to this one, and monitor it.
+    ///
+    /// The source arrives as a `ProtocolPath<ViewSource>`, so the contextual
+    /// decode already proved that the route at the path, live or closed,
+    /// takes `aether.render.view_subscribe` and `aether.render.view_unsubscribe`
+    /// silently (ADR-0231 §3), and a path that did not prove is answered
+    /// `Err` by the dispatch. The handler proves it live, answering the same
+    /// `Err` naming the path when its actor has closed.
+    ///
+    /// # Agent
+    /// `ViewFrom { source }`, where `source` is the canonical path of a live
+    /// actor that handles both subscription kinds, such as a camera. The
+    /// renderer then takes each `aether.view_projection` that source sends
+    /// it. Send it again naming another source to switch cameras.
+    #[handler::request]
+    fn on_view_from(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ViewFrom) -> ViewFromResult {
+        state.follow_view(ctx, &mail.source)
+    }
+
+    /// Release the followed view source when it closes. The host stamps the
+    /// departed actor as the notice's sender, so `ctx.sender()` is the
+    /// reference the hold is compared by; a notice with no sender names
+    /// nothing and changes nothing.
+    #[handler::event]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        state.release_view_of(departed);
     }
 
     /// `CreateTexture` (ADR-0105), on the owned texture registry.
@@ -1560,6 +1602,7 @@ mod tests {
             last_submitted: Vec::new(),
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
+            view_source: None,
             overlay_frame: Vec::new(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
