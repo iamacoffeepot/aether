@@ -101,7 +101,7 @@ impl SilentRow for Undeclared {}
 /// hand ([`Undeclared`]).
 ///
 /// A protocol (ADR-0231 §2) has no `Contract` rows: it declares its rows as
-/// [`Protocol::Rows`](crate::Protocol::Rows), and a target covers them through
+/// [`Protocol::Rows`], and a target covers them through
 /// these rows ([`CoveredBy`](crate::CoveredBy)).
 ///
 /// A row exists only at a position of the target's one
@@ -173,7 +173,7 @@ pub use watch_sealed::Sealed as WatchedRef;
 /// [`ProtocolRef`].
 ///
 /// `#[actor]` emits it for every actor and `#[protocol]` for every protocol;
-/// [`Subscriber<K>`] has it by hand. A departure handler names the watched
+/// [`Subscriber<K>`](crate::Subscriber) has it by hand. A departure handler names the watched
 /// type as `Departed<W>`, and its event carries a [`Ref`](Watchable::Ref) at
 /// the departed actor's position.
 pub trait Watchable: Sized {

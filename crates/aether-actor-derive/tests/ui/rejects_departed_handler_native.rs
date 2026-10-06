@@ -17,7 +17,6 @@ trait Provider {
     fn ping(_: Ping);
 }
 
-#[allow(dead_code)]
 struct NativeWatcher;
 
 #[actor]

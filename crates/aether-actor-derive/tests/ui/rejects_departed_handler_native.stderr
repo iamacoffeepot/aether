@@ -1,7 +1,7 @@
 error: `Departed<W>` is the event of a wasm component's `ctx.watch` (ADR-0079 §8): a native actor watches with `ctx.monitor(reference)`, keeps the `MonitorHandle`, and takes `MonitorNotice` in its `#[handler::event]`, reading the departed actor from `ctx.sender()`
-  --> tests/ui/rejects_departed_handler_native.rs:40:17
+  --> tests/ui/rejects_departed_handler_native.rs:39:17
    |
-40 |         _event: Departed<Provider>,
+39 |         _event: Departed<Provider>,
    |                 ^^^^^^^^^^^^^^^^^^
 
 warning: unused import: `Departed`
