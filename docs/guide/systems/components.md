@@ -197,7 +197,8 @@ manifest entry spawns this way: every instance it stands up, each replica of a
 `replicas: N` entry included, brings the entry's module and reads its assets in
 `wire`. A `Spawn` with no `code` brings no bytes: its guest sees the catalog,
 and a fetch of a catalogued asset by either verb traps naming the two doors
-that bring them, a spawn with its code and `load_component`.
+that bring them, a spawn with its code and `load_component`. A trap in the
+load window fails the birth, so that spawn answers `Err` with the reason.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
@@ -251,6 +252,16 @@ instance and the engine tears down
 ([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
 rule 5): a guest's `unwire` runs on every exit of its instance, so what its
 `wire` created can be released there.
+
+A guest whose `wire` fails fails its birth (rule 3). A `wire` that returns
+`Err` answers the load or spawn `Err` with the guest's message; the guest then
+runs its `unwire` and is dropped. A `wire` that traps answers `Err` too, and
+the guest is released without running any more of its code. Either way no
+instance is left at the name, nothing the guest sent from `wire` leaves, and
+the name is free for another load. A boot manifest holding such a component
+fails the chassis build. One case aborts the engine instead: a guest that an
+aborted republish reinstated runs `wire` a second time, and a fault there has
+no birth to fail and no other guest to fall back to.
 
 In practice you drive this through the MCP harness — `publish(engine_id,
 selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,
@@ -581,11 +592,12 @@ decode, and the guest proves it once with `ctx.resolve(&path)`
 §3, #7205):
 
 ```rust
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    match ctx.resolve(&self.config.journal) {
-        Ok(journal) => self.journal = Some(journal),
-        Err(error) => tracing::error!(path = self.config.journal.as_erased().as_str(), %error, "the journal does not prove"),
-    }
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+    let journal = ctx
+        .resolve(&self.config.journal)
+        .map_err(|error| ActorInitError::new(format!("the journal does not prove: {error}")))?;
+    self.journal = Some(journal);
+    Ok(())
 }
 ```
 
@@ -602,8 +614,9 @@ way. It refuses one way, naming no position:
 It costs one host call reading the published route view. Call it once, at
 `wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt, and keep the
 `ActorRef<R>` it returns; never re-resolve at a send. The verb is on the
-receive and `wire` ctx only, not on `WasmInitCtx`, so a refused path does not
-fail the load: the guest decides what a refusal means.
+receive and `wire` ctx only, not on `WasmInitCtx`. The guest decides what a
+refusal means: returned from `wire`, as above, it fails the load with that
+message; handled, the instance goes live without the peer.
 
 The answer is kind-checked: `ctx.send_to(journal, &kind)` compiles only for a
 kind `R` handles, caught where the send is written rather than at the

@@ -177,8 +177,9 @@ impl WasmActor for InlineFsDemuxParent {
 
     /// Co-locate the demux child under the `Named` subname `demux`; the test
     /// reaches it by that key.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let _ = ctx.spawn_inline_child::<InlineFsDemuxParent, InlineFsDemuxChild>(Subname::Named("demux"), &());
+        Ok(())
     }
 
     /// The parent carries no demux state; a `#[fallback]` keeps it a valid

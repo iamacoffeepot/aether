@@ -108,9 +108,10 @@ use aether_window::WindowCapability;
 
 #[actor(root, depends(WindowCapability))]
 impl WasmActor for Editor {
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, WindowSize>();
+        Ok(())
     }
 }
 ```

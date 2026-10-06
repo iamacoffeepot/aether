@@ -607,8 +607,9 @@ impl WasmActor for DropdownWidget {
     /// Ask for the theme font's metrics; the dropdown reports the width its
     /// widest option needs as soon as there are real advances to measure it
     /// with (inline children run `wire`).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Install a font-metrics reply; the next `Collect` reports an intrinsic

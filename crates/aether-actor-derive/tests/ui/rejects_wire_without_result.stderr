@@ -1,0 +1,11 @@
+error: `wire` returns the birth's result: write `fn wire(..) -> Result<(), ActorInitError>` and end it with `Ok(())`; an `Err` fails the birth and whoever asked for the actor is told
+  --> tests/ui/rejects_wire_without_result.rs:32:8
+   |
+32 |     fn wire(&mut self, _ctx: &mut aether_actor::WireCtx<'_, '_>) {}
+   |        ^^^^
+
+error: `wire` returns the birth's result: write `fn wire(..) -> Result<(), BootError>` and end it with `Ok(())`; an `Err` fails the birth and whoever asked for the actor is told
+  --> tests/ui/rejects_wire_without_result.rs:53:8
+   |
+53 |     fn wire(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>) {}
+   |        ^^^^

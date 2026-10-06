@@ -28,12 +28,13 @@ impl WasmActor for Holder {
         Ok(Holder { outcome: SpawnOutcome::default() })
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let spawned = ctx.spawn_inline_child::<Holder, Needy>(Subname::Named("needy"), &());
         self.outcome = SpawnOutcome {
             spawned: spawned.is_ok(),
             dependency_not_live: matches!(spawned, Err(SpawnError::DependencyNotLive)),
         };
+        Ok(())
     }
 
     #[handler::request]

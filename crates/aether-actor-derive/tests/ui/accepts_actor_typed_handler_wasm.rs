@@ -29,8 +29,9 @@ impl aether_actor::WasmActor for TypedProbe {
         Ok(TypedProbe)
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), aether_actor::ActorInitError> {
         let _ = ctx.sender();
+        Ok(())
     }
 
     #[handler::tell]

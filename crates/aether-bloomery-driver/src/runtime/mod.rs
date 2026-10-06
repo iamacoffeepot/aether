@@ -229,9 +229,10 @@ impl NativeActor for BundleDriver {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         let startup = mem::take(&mut state.startup);
         state.perform(ctx, startup);
+        Ok(())
     }
 
     /// The held ticket is stored before the commands run, because the core

@@ -28,8 +28,9 @@ impl NativeActor for UncoveredStreamRouter {
         Ok(())
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]

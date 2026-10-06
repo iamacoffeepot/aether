@@ -34,8 +34,9 @@ impl WasmActor for Gate {
     }
 
     /// Count each run of the hook, without sending anything.
-    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.wired += 1;
+        Ok(())
     }
 
     #[handler::request]
@@ -66,8 +67,9 @@ impl WasmActor for Peer {
     }
 
     /// Report each run of the hook, so a test can count it.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
     }
 
     fn dehydrate(&self) -> PeerState {

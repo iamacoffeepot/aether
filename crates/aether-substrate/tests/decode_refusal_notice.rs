@@ -103,8 +103,9 @@ impl NativeActor for NoticedAsker {
         Ok(Self { notices, me: None })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         state.me = cast_self(ctx, Self::NAMESPACE);
+        Ok(())
     }
 
     #[aether_actor::handler::tell]
@@ -141,8 +142,9 @@ impl NativeActor for FallbackAsker {
         Ok(Self { arrivals, me: None })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         state.me = cast_self(ctx, Self::NAMESPACE);
+        Ok(())
     }
 
     #[aether_actor::handler::tell]

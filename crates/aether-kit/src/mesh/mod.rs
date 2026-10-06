@@ -131,8 +131,9 @@ impl WasmActor for MeshViewer {
     /// subscribe; the reply warn-drops and the viewer simply never
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Render>();
+        Ok(())
     }
 
     /// Emit cached faces and request the active eye when this DSL cache has

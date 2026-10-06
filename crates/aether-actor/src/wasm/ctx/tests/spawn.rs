@@ -4,9 +4,9 @@
 
 use super::{
     __validate_inline_child_placement, ActorTypeTag, Addressable, ChildOf, FailingChild, LifecycleProbe,
-    NO_INBOUND_SOURCE, NestingParent, PROBE_UNWIRE_COUNT, PROBE_WIRE_COUNT, Registry, STUB_INIT_CONFIG, SpawnError,
-    StubChild, StubConfig, SucceedingChild, WasmCtx, WasmPlacementFacts, install_inline_child, panicking_resolver,
-    stub_resolver,
+    NO_INBOUND_SOURCE, NestingParent, PROBE_UNWIRE_COUNT, PROBE_WIRE_COUNT, PROBE_WIRE_FAILS, PROBE_WIRE_REFUSAL,
+    Registry, STUB_INIT_CONFIG, SpawnError, StubChild, StubConfig, SucceedingChild, WasmCtx, WasmPlacementFacts,
+    install_inline_child, panicking_resolver, stub_resolver,
 };
 use crate::model::Subname;
 use crate::model::ctx::{Erased, Unchecked};
@@ -380,6 +380,37 @@ fn despawn_inline_child_runs_unwire() {
     assert!(removed, "despawning a resident child returns true");
     assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once");
     assert!(registry.take(probe).is_none(), "the despawned child's slot is gone");
+}
+
+/// Issue 7463 (ADR-0247 rule 3): an inline child whose `wire` returns an
+/// error fails its spawn with that error, runs its `unwire`, and leaves no
+/// slot. Catches the error dropped (the spawn would answer the alias of a
+/// child that never wired), the failed child reinserted, and a child that
+/// entered `wire` dropped without its `unwire`.
+#[test]
+fn an_inline_child_whose_wire_fails_fails_its_spawn_and_is_unwired() {
+    let registry = Registry::new();
+    registry.set_self_id(0x9400);
+    PROBE_WIRE_COUNT.set(0);
+    PROBE_UNWIRE_COUNT.set(0);
+    PROBE_WIRE_FAILS.set(true);
+
+    let probe = MailboxId(0x9401);
+    let spawned = install_inline_child::<LifecycleProbe>(
+        &registry,
+        probe,
+        ChildRecord { full_subname: String::from("probe"), parent: 0x9400, ..ChildRecord::default() },
+        (),
+    );
+    PROBE_WIRE_FAILS.set(false);
+
+    let Err(SpawnError::WireFailed(error)) = spawned else {
+        panic!("a child whose wire returned an error must fail its spawn; got {spawned:?}");
+    };
+    assert_eq!(error.message(), PROBE_WIRE_REFUSAL, "the spawn error carries the child's own message");
+    assert_eq!(PROBE_WIRE_COUNT.get(), 1, "the child's wire was entered once");
+    assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "a child that entered wire runs its unwire");
+    assert!(registry.take(probe).is_none(), "the failed child's slot is gone");
 }
 
 /// Issue 2746: a `replace_component` reconstruct runs `init` +

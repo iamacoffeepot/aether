@@ -28,8 +28,9 @@ impl NativeActor for ColdHttpHandler {
         Ok(ColdHttpHandlerState)
     }
 
-    fn wire(_state: &mut ColdHttpHandlerState, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut ColdHttpHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_owned(), method: None, shared: false });
+        Ok(())
     }
 
     #[handler::request]

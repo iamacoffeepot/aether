@@ -27,8 +27,9 @@ impl WasmActor for Gate {
         Ok(Gate { label: config.label, wired: 0 })
     }
 
-    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, _ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.wired += 1;
+        Ok(())
     }
 
     #[handler::request]
@@ -57,8 +58,9 @@ impl WasmActor for Peer {
         Ok(Peer { count: 0 })
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
     }
 
     fn dehydrate(&self) -> PeerState {

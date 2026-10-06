@@ -58,8 +58,9 @@ impl WasmActor for HttpHandler {
         Ok(HttpHandler)
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     /// Route an inbound HTTP request to a status + body and reply the
@@ -185,8 +186,9 @@ impl WasmActor for StreamingHttpHandler {
 
     /// The cap reads this actor's accept-set off the catch-all binding to
     /// take the streaming path.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     /// Open a streamed `200` response. The body arrives later, one chunk per
@@ -243,8 +245,9 @@ impl WasmActor for WebSocketHandler {
         Ok(WebSocketHandler { connections: BTreeMap::new() })
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -415,12 +418,13 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// common "route to me" case; the send goes to the declared
     /// `HttpServerCapability`, so it reads exactly as the `#[http::route]`
     /// macro's injected registration does.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/routed-stream".to_string(),
             method: None,
             shared: false,
         });
+        Ok(())
     }
 
     /// Open a streamed `200` response. Dispatched here through the specific

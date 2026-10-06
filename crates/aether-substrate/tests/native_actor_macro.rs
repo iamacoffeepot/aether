@@ -968,8 +968,9 @@ impl NativeActor for TypedWireCap {
         Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         ctx.send_detached::<MacroProbeCap>(&Greet { tag: 13 });
+        Ok(())
     }
 
     fn unwire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
@@ -1026,8 +1027,9 @@ impl NativeActor for OmittedCtxCap {
         Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send_detached::<MacroProbeCap>(&Greet { tag: 17 });
+        Ok(())
     }
 
     fn unwire(&mut self, ctx: &mut NativeCtx<'_>) {

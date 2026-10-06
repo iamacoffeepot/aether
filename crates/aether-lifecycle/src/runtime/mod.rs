@@ -650,8 +650,9 @@ mod tests {
             Ok(Self)
         }
 
-        fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) {
+        fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
             ctx.send::<LifecycleCapability>(&<LifecycleCapability as Publisher>::subscribe_request::<Tick>());
+            Ok(())
         }
 
         #[handler::event]

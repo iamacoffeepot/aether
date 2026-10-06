@@ -45,7 +45,7 @@ impl WasmActor for QuietProbe {
     }
 
     /// Pull the bundle's asset through the load window (open during `wire`).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         // The blob verb goes first, so it is the call that traps for an
         // instance spawned without its module's bytes, whose window has no code.
         self.asset_blob = ctx.asset_blob("asset_fixture.txt");
@@ -66,6 +66,7 @@ impl WasmActor for QuietProbe {
             blob_len: ctx.asset_blob("asset_empty.bin").map(|blob| BlobReader::open(&blob).len()),
             copied_len: ctx.asset("asset_empty.bin").map(|bytes| bytes.len() as u64),
         };
+        Ok(())
     }
 
     /// Emits `typed_send_alive` on every delivery.

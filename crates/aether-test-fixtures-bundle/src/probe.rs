@@ -76,10 +76,11 @@ impl WasmActor for Probe {
     /// `aether.lifecycle` (ADR-0082). `Key` and `TextInput` originate at
     /// windows, so the probe subscribes to every window through
     /// `aether.window` (ADR-0164).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, TextInput>();
+        Ok(())
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
@@ -147,8 +148,9 @@ impl WasmActor for KeyProbe {
         Ok(KeyProbe)
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
+        Ok(())
     }
 
     /// Broadcasts a `key_observed` for each `Key` dispatch, as [`Probe`]

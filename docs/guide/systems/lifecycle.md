@@ -157,7 +157,9 @@ post-init with mail allowed — the same site as an [input](input.md) subscribe,
 addressing a different cap. `wire` receives a `WireCtx`, the window-bearing
 context that also serves the assets a component ships in
 `aether.asset.<path>` sections (ADR-0163); it `Deref`s to `WasmCtx`, so every
-send and subscribe verb reads the same as in a handler. The `wire` context is
+send and subscribe verb reads the same as in a handler. `wire` returns
+`Result<(), ActorInitError>` and ends in `Ok(())`; an `Err` fails the load
+(see [the actor model](../foundations/actor-model.md)). The `wire` context is
 typed by your actor like a handler's: `WireCtx<'_, '_>` reads as
 `WireCtx<'_, '_, Self>`. Declare the lifecycle cap as a dependency and name the
 publisher and the stage:
@@ -165,9 +167,10 @@ publisher and the stage:
 ```rust
 #[actor(root, depends(LifecycleCapability))]
 impl WasmActor for Camera {
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
         ctx.subscribe::<LifecycleCapability, Render>();
+        Ok(())
     }
 }
 ```

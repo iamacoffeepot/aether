@@ -158,13 +158,24 @@ impl Registry {
         }
     }
 
+    /// End the pending birth `token` names, once its activation has closed
+    /// at its execution home: the `Starting` route goes, the cost
+    /// reservation rolls back, and the mail parked behind the route
+    /// continues as mail to an unknown recipient.
+    ///
+    /// The token alone decides. The owner asked for most cancellations
+    /// (`cancel_requested`), but a birth whose `wire` failed is reported by
+    /// its own activation job with no such request (ADR-0247 rule 3), and
+    /// its route and parked mail must go the same way. A token is minted
+    /// once per birth, so a report for a birth already promoted, cancelled,
+    /// or replaced matches nothing.
     pub(super) fn cancel_completed_locked(
         inner: &mut Inner,
         id: MailboxId,
         token: ActivationToken,
         publication: &mut Publication,
     ) -> Vec<RouteContinuation> {
-        let valid = inner.pending_births.get(&id).is_some_and(|birth| birth.token == token && birth.cancel_requested);
+        let valid = inner.pending_births.get(&id).is_some_and(|birth| birth.token == token);
         if !valid {
             return Vec::new();
         }
