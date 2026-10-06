@@ -186,7 +186,7 @@ impl NativeActor for WasmTrampoline {
     /// Ask this instance to close (ADR-0241 §8). The request shuts the
     /// trampoline down and holds its answer; the close that follows the
     /// handler drains the mail still queued to the guest, releases the guest
-    /// through [`Self::unwire`], which answers this request `Ok`, and then
+    /// through its `unwire` hook, which answers this request `Ok`, and then
     /// tombstones the name, retires its route to `Dropped`, and sends each
     /// watcher of the mailbox and of its inline-child aliases a
     /// `MonitorNotice`. A later load of the name is refused as retired, and
