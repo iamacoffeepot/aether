@@ -49,7 +49,9 @@ use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::chassis::Chassis;
 use crate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use crate::chassis::ctx::register_relay_inbox;
 use crate::chassis::error::BootError;
+use crate::chassis::inbox::SettlingInbox;
 use crate::config::ConfigMember;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
@@ -201,6 +203,21 @@ pub fn try_registered_ref(
     registry
         .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
         .map(|id| registry.resolve_live(id).expect("a freshly registered inbox proves"))
+}
+
+/// Register a relay inbox under `name` the way `ChassisCtx::claim_mailbox`
+/// does, and return its bound [`SettlingInbox`]: the registry handler relays
+/// each obligation-armed envelope through the inbox's feed, so the framework
+/// drain owns the discharge. A test that consumes a claimed mailbox's mail
+/// without booting the claimer takes its inbox from here, so it opens no
+/// channel of its own.
+///
+/// # Panics
+/// Panics if `name` is already registered.
+pub fn relay_inbox(registry: &Arc<Registry>, mailer: &Arc<Mailer>, name: &str) -> SettlingInbox {
+    let (id, receiver, _wake_slot) =
+        register_relay_inbox(&boot_authority(), registry, mailer, name).expect("the fixture name is free");
+    SettlingInbox::new_at(id, receiver, Arc::clone(mailer))
 }
 
 /// Retire the route `reference` proves the way `Registry::drop_mailbox`

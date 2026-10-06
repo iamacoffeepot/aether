@@ -46,14 +46,9 @@ pub(super) fn consume_lifecycle_reply(mail: InboundMail) -> LifecycleReplyOutcom
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, mpsc};
-
     use aether_kinds::{LifecycleAdvance, Shutdown, Tick};
     use aether_lifecycle::{LifecycleCapability, LifecycleConfig, LifecycleGraphData, LifecycleParams};
-    use aether_substrate::SettlingInbox;
-    use aether_substrate::actor::native::envelope::Envelope;
-    use aether_substrate::mail::registry::InboxHandler;
-    use aether_substrate::testing::{boot_test_chassis_with, fresh_substrate, registered_ref};
+    use aether_substrate::testing::{boot_test_chassis_with, fresh_substrate, relay_inbox};
 
     use super::*;
     use crate::driver::FRAME_SETTLEMENT_CAP;
@@ -88,16 +83,10 @@ mod tests {
             LifecycleParams { graph },
         );
 
-        // Register the reply inbox exactly as `claim_mailbox` does: forward
-        // the obligation-armed envelope onto the `SettlingInbox`'s channel,
-        // carrying its guard with it so the framework drain owns the
-        // discharge.
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
-            let _ = tx.send(dispatch);
-        });
-        let reply_ref = registered_ref(&registry, "aether.lifecycle.advance_reply", handler);
-        let inbox = SettlingInbox::new(reply_ref, rx, Arc::clone(&mailer));
+        // Register the reply inbox exactly as `claim_mailbox` does: relay
+        // the obligation-armed envelope into the `SettlingInbox`, carrying
+        // its guard with it so the framework drain owns the discharge.
+        let inbox = relay_inbox(&registry, &mailer, "aether.lifecycle.advance_reply");
         let lifecycle = chassis.root_pusher::<LifecycleCapability>();
 
         for (stage, expected) in

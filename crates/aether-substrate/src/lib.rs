@@ -90,7 +90,7 @@ pub use chassis::builder::{
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, ReplyTarget, RootPusher, RouteReadProbe, RunError,
 };
 pub use chassis::ctx::{
-    ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, MailboxWakeSlot, SharedActorSlots,
+    ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxWakeSlot, SharedActorSlots,
 };
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};

@@ -1,9 +1,17 @@
-//! ADR-0106: the framework drain that backs every `Receiver<Envelope>` in
-//! the substrate (the universal `SettlingInbox`).
+//! ADR-0106: the framework drain that backs every inbox channel in the
+//! substrate (the universal `SettlingInbox`).
+//!
+//! An inbox channel is opened only by `inbox_channel`, which returns the
+//! two sealed halves: an `InboxReceiver`, which a [`SettlingInbox`] is
+//! built from and which owns the channel's only strong sender, and an
+//! `InboxFeed`, the weak handle a registry inbox handler sends through.
+//! Nothing outside this module can name the sender, so nothing can keep one
+//! alive past the inbox.
 //!
 //! A mailbox claimed via [`ChassisCtx::claim_mailbox`](crate::chassis::ctx::ChassisCtx::claim_mailbox)
-//! carries a [`SettlingInbox`] — the receiver plus the `Arc<Mailer>`,
-//! the claim's [`MailboxId`], and a drain-owned reply-id counter.
+//! carries a [`SettlingInbox`] — the channel's receiver and strong sender
+//! plus the `Arc<Mailer>`, the claim's [`MailboxId`], and a drain-owned
+//! reply-id counter.
 //! The only way to reach an inbound envelope on the **sink face** is one
 //! of [`SettlingInbox::try_next`], [`SettlingInbox::recv_timeout`], or
 //! [`SettlingInbox::drain`], each of which wraps the envelope in an
@@ -20,9 +28,27 @@
 //! [`Envelope`] so the native actor dispatcher
 //! ([`NativeBinding`](crate::actor::native::NativeBinding)) keeps its
 //! existing explicit `record_finished` + `discharge` tail unchanged.
-//! Teardown still settles: `Drop` drains whatever is still queued and
-//! settles each guard, so an armed envelope left in the dispatcher's inbox
-//! at binding teardown settles rather than leaking (#1716).
+//!
+//! Teardown settles every envelope the channel ever accepted (#1716,
+//! #7460). An inbox stops accepting mail only by being dropped, and its
+//! field order does it in two steps: the strong sender is released first,
+//! so no later `InboxFeed::send` is accepted (it hands the envelope back
+//! and the relay settles it), and then the queue drains with a blocking
+//! receive, which returns only once the queue is empty and no send is
+//! still in progress, because a send in progress holds the sender it
+//! upgraded. A send that began before the drop is therefore settled by the
+//! drain, and one that began after it is settled at the relay. The wait is
+//! bounded by one in-progress `send` call: a feed holds an upgraded sender
+//! for nothing else, and no other strong sender exists.
+//!
+//! There is no closed-but-alive inbox. Mail that reaches an actor between
+//! its close tail and the freeing of its slot is accepted, never
+//! dispatched (a finalized slot's cycle returns without draining), and
+//! settled by this drain. The drain does not log what it settles: a pool
+//! worker's thread-local deque can hold the last reference to a slot, so
+//! the drain can run inside a thread-local destructor at thread exit,
+//! where a log event reaches thread-local state that is already gone and
+//! aborts the process.
 //!
 //! Settling on scope exit rather than on payload access is load-bearing:
 //! ADR-0080 §6 requires a reply's `Sent` to be recorded before the
@@ -33,12 +59,11 @@
 //! consumer never reaches the bare, lineage-less `send_reply`.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use aether_actor::ErasedActorRef;
 use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
 
 use crate::actor::native::envelope::Envelope;
@@ -80,12 +105,91 @@ impl ReplyLineage {
     }
 }
 
-/// The sealed inbound surface that backs every `Receiver<Envelope>` in
-/// the substrate (ADR-0106 + #1716).
+/// Open an inbox channel and return its two sealed halves: the
+/// [`InboxReceiver`] a [`SettlingInbox`] is built from, and the
+/// [`InboxFeed`] a registry inbox handler sends through.
 ///
-/// Owns the inbox receiver, an `Arc<Mailer>` (for settlement discharge
-/// and lineage-joined replies), the claim's [`MailboxId`], and a
-/// reply-id counter.
+/// This is the only place an inbox channel is opened, so the strong sender
+/// inside the returned [`InboxReceiver`] is the only one that outlives a
+/// single [`InboxFeed::send`] call.
+pub(crate) fn inbox_channel() -> (InboxReceiver, InboxFeed) {
+    let (sender, receiver) = mpsc::channel::<Envelope>();
+    let sender = Arc::new(sender);
+    let feed = InboxFeed { sender: Arc::downgrade(&sender) };
+    (InboxReceiver { sender, receiver }, feed)
+}
+
+/// The receiving half of an inbox channel before it is bound to a mailbox:
+/// the receiver and the channel's only strong sender.
+///
+/// It exists because a claim learns its [`MailboxId`] from the registration
+/// that needs the handler, which needs the [`InboxFeed`]; each claim binds
+/// it into a [`SettlingInbox`] before it returns. The fields are private
+/// and have no accessor, so the sender cannot leave this module. An
+/// `InboxReceiver` dropped unbound has no mailer to settle queued mail
+/// through, so every path that publishes the feed's handler goes on to
+/// bind it; one is dropped unbound only when its handler was never
+/// published.
+pub(crate) struct InboxReceiver {
+    sender: Arc<mpsc::Sender<Envelope>>,
+    receiver: mpsc::Receiver<Envelope>,
+}
+
+/// The sending half of an inbox channel: a weak handle to the strong
+/// sender its [`SettlingInbox`] owns. Cloning yields a second handle to the
+/// same inbox.
+#[derive(Clone)]
+pub(crate) struct InboxFeed {
+    sender: Weak<mpsc::Sender<Envelope>>,
+}
+
+/// What [`InboxFeed::send`] did with an envelope. Each refusal hands the
+/// envelope back so the caller settles it.
+///
+/// An enum of its own rather than a `Result`: a refusal carries the whole
+/// envelope, and the delivered path moves nothing.
+#[must_use = "a refused envelope is still armed: the caller settles it"]
+pub(crate) enum FeedOutcome {
+    /// The envelope is on the inbox's queue.
+    Queued,
+    /// Refused: the inbox is gone (its drop released the strong sender).
+    Closed(Envelope),
+    /// Refused: the sender upgraded but the receiver was gone.
+    ReceiverGone(Envelope),
+}
+
+impl FeedOutcome {
+    /// Whether the envelope was queued.
+    #[cfg(test)]
+    pub(crate) fn is_queued(&self) -> bool {
+        matches!(self, Self::Queued)
+    }
+}
+
+impl InboxFeed {
+    /// Queue `env` on the inbox, or hand it back.
+    ///
+    /// The upgraded sender is released before this returns, so a caller
+    /// that wakes the inbox's owner afterwards holds no sender while it
+    /// does: an owner whose last reference the wake path releases can drop
+    /// its inbox on this thread without waiting on this thread's own send.
+    pub(crate) fn send(&self, env: Envelope) -> FeedOutcome {
+        let Some(sender) = self.sender.upgrade() else {
+            return FeedOutcome::Closed(env);
+        };
+        match sender.send(env) {
+            Ok(()) => FeedOutcome::Queued,
+            Err(mpsc::SendError(env)) => FeedOutcome::ReceiverGone(env),
+        }
+    }
+}
+
+/// The sealed inbound surface that backs every inbox channel in the
+/// substrate (ADR-0106 + #1716).
+///
+/// Owns the inbox receiver, the channel's only strong sender, an
+/// `Arc<Mailer>` (for settlement discharge and lineage-joined replies),
+/// the claim's [`MailboxId`], and a reply-id counter.
 ///
 /// **Sink face** — for out-of-crate caps and the desktop window driver:
 /// [`Self::try_next`], [`Self::recv_timeout`], [`Self::drain`]. Each
@@ -96,60 +200,120 @@ impl ReplyLineage {
 /// `try_recv`, which yields a raw [`Envelope`] so the dispatcher keeps
 /// its explicit `record_finished` + `discharge` tail.
 ///
-/// Dropping a `SettlingInbox` drains whatever is still queued and lets
-/// each guard settle, so a teardown that abandons mail (the #1704 shape:
-/// a queued reply envelope dropped on driver teardown, or an armed
-/// envelope in the dispatcher's inbox at binding teardown — #1716)
-/// becomes a settled drain instead of an armed drop.
+/// Dropping a `SettlingInbox` releases its sender and then drains whatever
+/// was queued, waiting for any send still in progress, and lets each guard
+/// settle. A teardown that abandons mail (the #1704 shape: a queued reply
+/// envelope dropped on driver teardown, or an armed envelope in the
+/// dispatcher's inbox at binding teardown — #1716), or that races a send
+/// (#7460), becomes a settled drain instead of an armed drop.
 pub struct SettlingInbox {
+    /// The channel's only strong sender. Field order is load-bearing: this
+    /// field is declared, and so dropped, before `queue`, whose `Drop` is
+    /// the blocking drain. Releasing the sender first is what lets that
+    /// drain end; moved below `queue`, the drain would wait on the inbox's
+    /// own sender forever.
+    sender: Arc<mpsc::Sender<Envelope>>,
+    queue: InboxQueue,
+}
+
+/// The receiving side of a [`SettlingInbox`]: the receiver and what it
+/// takes to settle an envelope. A type of its own so that its `Drop`, the
+/// final drain, runs after the inbox's sender field has been dropped.
+struct InboxQueue {
     id: MailboxId,
     receiver: mpsc::Receiver<Envelope>,
     mailer: Arc<Mailer>,
     reply_counter: ReplyLineage,
 }
 
+impl InboxQueue {
+    fn wrap(&self, env: Envelope) -> InboundMail {
+        InboundMail {
+            env,
+            mailer: Arc::clone(&self.mailer),
+            self_mailbox: self.id,
+            reply_counter: self.reply_counter.clone(),
+        }
+    }
+}
+
+impl Drop for InboxQueue {
+    fn drop(&mut self) {
+        // The inbox's strong sender is already gone (field order on
+        // `SettlingInbox`), so no later feed upgrade succeeds and the only
+        // senders left are the ones sends already in progress hold. The
+        // blocking receive returns `Err` only once those are released and
+        // the queue is empty, so a send that raced this drop is settled
+        // here instead of being destroyed armed by the receiver's own drop
+        // (#7460). Each wrapped envelope's guard records `Finished` +
+        // disarms on drop, so teardown is a settled drain (#1704, #1716).
+        //
+        // Nothing is logged here: this can run inside a thread-local
+        // destructor at worker exit (see the module docs), where a log
+        // event aborts the process.
+        while let Ok(env) = self.receiver.recv() {
+            drop(self.wrap(env));
+        }
+    }
+}
+
 impl fmt::Debug for SettlingInbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SettlingInbox").field("id", &self.id).finish_non_exhaustive()
+        f.debug_struct("SettlingInbox").field("id", &self.queue.id).finish_non_exhaustive()
     }
 }
 
 impl SettlingInbox {
-    /// Build a `SettlingInbox` over `receiver` with a fresh reply-id
-    /// counter. Production callers receive one already built on the
-    /// [`MailboxClaim`](crate::chassis::ctx::MailboxClaim) returned by
-    /// `claim_mailbox`; the explicit constructor is `pub` so out-of-crate
-    /// tests can pair a channel with a registered inbox handler and drive
-    /// the guard directly, passing the proof of that registered inbox as
-    /// `target`.
-    #[must_use]
-    pub fn new(target: ErasedActorRef, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
-        Self::new_at(target.id(), receiver, mailer)
+    /// Bind `receiver` to the mailbox at `id`, with a fresh reply-id
+    /// counter. Production callers outside the crate receive one already
+    /// built on the [`MailboxClaim`](crate::chassis::ctx::MailboxClaim)
+    /// returned by `claim_mailbox`; this form serves substrate-internal
+    /// inboxes that hold no proof yet: a claim, and a Starting route before
+    /// its owner promotes it.
+    pub(crate) fn new_at(id: MailboxId, receiver: InboxReceiver, mailer: Arc<Mailer>) -> Self {
+        Self::new_with_lineage(id, receiver, mailer, ReplyLineage::new())
     }
 
-    /// The positional form of [`Self::new`], for substrate-internal
-    /// inboxes that hold no proof yet: a claim, and a Starting route
-    /// before its owner promotes it. Same fresh reply-id counter.
-    pub(crate) fn new_at(id: MailboxId, receiver: mpsc::Receiver<Envelope>, mailer: Arc<Mailer>) -> Self {
-        Self { id, receiver, mailer, reply_counter: ReplyLineage::new() }
-    }
-
-    /// Build a `SettlingInbox` over `receiver`, sharing the given
+    /// Bind `receiver` to the mailbox at `id`, sharing the given
     /// `reply_lineage` counter. Used by
     /// [`NativeBinding::install_inbox`](crate::actor::native::NativeBinding::install_inbox)
     /// so the dispatcher's inbox and the binding's reply allocator draw
     /// from one coherent disjoint id space.
     pub(crate) fn new_with_lineage(
         id: MailboxId,
-        receiver: mpsc::Receiver<Envelope>,
+        receiver: InboxReceiver,
         mailer: Arc<Mailer>,
         reply_lineage: ReplyLineage,
     ) -> Self {
-        Self { id, receiver, mailer, reply_counter: reply_lineage }
+        let InboxReceiver { sender, receiver } = receiver;
+        Self { sender, queue: InboxQueue { id, receiver, mailer, reply_counter: reply_lineage } }
+    }
+
+    /// Queue `env` through the inbox's own sender: mail that must be in the
+    /// queue before the actor is live (`after_init`, bootstrap, and parked
+    /// mail), so the spawn and activation paths hold no sender.
+    ///
+    /// The send cannot fail: an inbox always holds its sender, and the
+    /// receiver is this inbox's own field. A refused send is therefore a
+    /// broken invariant (ADR-0063): a debug build panics, and a release
+    /// build logs the error and settles the envelope so its chain still
+    /// closes. The settle comes first so the panic never unwinds past an
+    /// armed envelope.
+    pub(crate) fn preload(&self, env: Envelope) {
+        if let Err(mpsc::SendError(env)) = self.sender.send(env) {
+            tracing::error!(
+                target: "aether_substrate::capability",
+                mailbox = %self.queue.id,
+                kind = %env.kind,
+                "preloaded mail refused by the inbox's own receiver — mail discarded",
+            );
+            drop(self.queue.wrap(env));
+            debug_assert!(false, "SettlingInbox::preload: the inbox's own receiver refused the send");
+        }
     }
 
     /// Re-home this inbox's reply-id minting onto `reply_lineage`,
-    /// replacing the fresh counter [`Self::new`] gave it. Additive
+    /// replacing the fresh counter [`Self::new_at`] gave it. Additive
     /// (ADR-0160 §1): a driver-as-actor mailbox is reserved at the Claim
     /// stage (ADR-0155 §4) through `claim_mailbox`, which builds the
     /// [`SettlingInbox`] with its own fresh [`ReplyLineage`]; when the
@@ -163,7 +327,7 @@ impl SettlingInbox {
     /// [`Self::new_with_lineage`].
     #[must_use]
     pub(crate) fn relineage(mut self, reply_lineage: ReplyLineage) -> Self {
-        self.reply_counter = reply_lineage;
+        self.queue.reply_counter = reply_lineage;
         self
     }
 
@@ -172,16 +336,7 @@ impl SettlingInbox {
     /// stamps it on a root whose reply the claimer drains here, so the
     /// claim's position never leaves the crate.
     pub(crate) fn reply_source(&self, correlation: u64) -> Source {
-        Source::with_correlation(SourceAddr::Component(self.id), correlation)
-    }
-
-    fn wrap(&self, env: Envelope) -> InboundMail {
-        InboundMail {
-            env,
-            mailer: Arc::clone(&self.mailer),
-            self_mailbox: self.id,
-            reply_counter: self.reply_counter.clone(),
-        }
+        Source::with_correlation(SourceAddr::Component(self.queue.id), correlation)
     }
 
     /// Take the next queued envelope without blocking, wrapped in an
@@ -191,7 +346,7 @@ impl SettlingInbox {
     /// is discharged.
     #[must_use]
     pub fn try_next(&self) -> Option<InboundMail> {
-        self.receiver.try_recv().ok().map(|env| self.wrap(env))
+        self.queue.receiver.try_recv().ok().map(|env| self.queue.wrap(env))
     }
 
     /// Block up to `timeout` for the next envelope, wrapped in an
@@ -199,7 +354,7 @@ impl SettlingInbox {
     /// the desktop driver's synchronous lifecycle-reply gate.
     #[must_use]
     pub fn recv_timeout(&self, timeout: Duration) -> Option<InboundMail> {
-        self.receiver.recv_timeout(timeout).ok().map(|env| self.wrap(env))
+        self.queue.receiver.recv_timeout(timeout).ok().map(|env| self.queue.wrap(env))
     }
 
     /// Drain every currently-queued envelope, invoking `on_mail` for each
@@ -209,8 +364,8 @@ impl SettlingInbox {
     /// empty. Use [`Self::try_next`] when the per-mail body needs the
     /// surrounding `&mut self` (the closure here cannot also borrow it).
     pub fn drain(&self, mut on_mail: impl FnMut(InboundMail)) {
-        while let Ok(env) = self.receiver.try_recv() {
-            on_mail(self.wrap(env));
+        while let Ok(env) = self.queue.receiver.try_recv() {
+            on_mail(self.queue.wrap(env));
         }
     }
 
@@ -218,18 +373,7 @@ impl SettlingInbox {
     /// yielding the raw [`Envelope`]. Returns `None` when the inbox is
     /// empty or disconnected.
     pub(crate) fn try_recv(&self) -> Option<Envelope> {
-        self.receiver.try_recv().ok()
-    }
-}
-
-impl Drop for SettlingInbox {
-    fn drop(&mut self) {
-        // Settle anything still queued: each wrapped envelope's guard
-        // records `Finished` + disarms on drop, so teardown is a settled
-        // drain rather than an armed drop (#1704, #1716).
-        while let Ok(env) = self.receiver.try_recv() {
-            drop(self.wrap(env));
-        }
+        self.queue.receiver.try_recv().ok()
     }
 }
 
@@ -273,7 +417,7 @@ pub struct InboundMail {
 impl InboundMail {
     /// #1757: build a guard for a native dispatcher's *retained* inbound
     /// (via [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)).
-    /// Mirrors [`SettlingInbox::wrap`], but the mailer / claimed mailbox /
+    /// Mirrors a [`SettlingInbox`]'s own wrap, but the mailer / claimed mailbox /
     /// reply-lineage are passed explicitly because the native dispatcher
     /// owns those on its
     /// [`NativeBinding`](crate::actor::native::NativeBinding) rather than
@@ -375,9 +519,13 @@ const _: fn() = || {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::thread;
+
     use super::*;
     use crate::testing::boot_authority;
 
+    use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
     use crate::chassis::settlement::SettlementRegistry;
     use crate::mail::MailRef;
     use crate::mail::SourceAddr;
@@ -409,6 +557,12 @@ mod tests {
         )
     }
 
+    /// Queue `env` on an open inbox through its feed, as a registry inbox
+    /// handler does.
+    fn queue(feed: &InboxFeed, env: Envelope) {
+        assert!(feed.send(env).is_queued(), "an open inbox accepts the mail");
+    }
+
     /// Every consumer arm settles the inbound: a payload-reading consume,
     /// an unmatched drop (fields never touched), a closure `drain`, and
     /// teardown of the `SettlingInbox` itself with mail still queued.
@@ -419,12 +573,12 @@ mod tests {
 
         // (1) consume — read the payload, then drop.
         {
-            let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+            let (receiver, feed) = inbox_channel();
+            let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 1);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE)).unwrap();
+            queue(&feed, armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE));
             let mail = inbox.try_next().expect("one queued");
             let _ = mail.payload();
             drop(mail);
@@ -433,36 +587,36 @@ mod tests {
 
         // (2) unmatched drop — never touch the fields, just drop.
         {
-            let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+            let (receiver, feed) = inbox_channel();
+            let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 2);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, Some(MailId::new(id, 12)), Some(root), Source::NONE)).unwrap();
+            queue(&feed, armed_env(id, Some(MailId::new(id, 12)), Some(root), Source::NONE));
             drop(inbox.try_next().expect("one queued"));
             settle.recv().expect("unmatched-drop arm settles the root");
         }
 
         // (3) closure drain.
         {
-            let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+            let (receiver, feed) = inbox_channel();
+            let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 3);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, Some(MailId::new(id, 13)), Some(root), Source::NONE)).unwrap();
+            queue(&feed, armed_env(id, Some(MailId::new(id, 13)), Some(root), Source::NONE));
             inbox.drain(|_mail| {});
             settle.recv().expect("drain arm settles the root");
         }
 
         // (4) teardown — mail queued, SettlingInbox dropped.
         {
-            let (tx, rx) = mpsc::channel();
-            let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+            let (receiver, feed) = inbox_channel();
+            let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 4);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, Some(MailId::new(id, 14)), Some(root), Source::NONE)).unwrap();
+            queue(&feed, armed_env(id, Some(MailId::new(id, 14)), Some(root), Source::NONE));
             drop(inbox);
             settle.recv().expect("teardown drain settles the queued root");
         }
@@ -480,9 +634,9 @@ mod tests {
         mailer.record_sent_inflight(guard_root);
         let guard_rx = settlement.subscribe_settlement(guard_root);
 
-        let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
-        tx.send(armed_env(id, None, Some(guard_root), Source::NONE)).unwrap();
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
+        queue(&feed, armed_env(id, None, Some(guard_root), Source::NONE));
         // Drop without reading — an inbound with no mail id must not settle anything.
         drop(inbox.try_next().expect("one queued"));
         assert!(guard_rx.try_recv().is_err(), "an inbound with no mail id discharges no root");
@@ -512,10 +666,10 @@ mod tests {
         mailer.record_sent_inflight(root);
         let settle = settlement.subscribe_settlement(root);
 
-        let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
-        tx.send(armed_env(id, Some(MailId::new(id, 21)), Some(root), sender)).unwrap();
+        queue(&feed, armed_env(id, Some(MailId::new(id, 21)), Some(root), sender));
 
         let mail = inbox.try_next().expect("one queued");
         assert!(
@@ -554,12 +708,12 @@ mod tests {
             .try_register_inbox_with_id(&boot_authority(), reply_target, "test.inbox.reply_id_target", handler)
             .expect("register reply target");
 
-        let (tx, rx) = mpsc::channel();
-        let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 1);
         // A lineage-less inbound (no root) still mints a high-space
         // reply id — the id space is the drain's, not the inbound's.
-        tx.send(armed_env(id, None, None, sender)).unwrap();
+        queue(&feed, armed_env(id, None, None, sender));
 
         let mail = inbox.try_next().expect("one queued");
         mail.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
@@ -570,5 +724,108 @@ mod tests {
         assert!(reply_id.correlation_id >= ReplyLineage::BASE, "reply id sits in the reply-lineage space");
         assert_eq!(reply_id.sender, id, "reply id is stamped with the claimed mailbox");
         reply_env.discharge();
+    }
+
+    /// #7460: a send that began before the inbox closed is settled by the
+    /// closing drain. Catches a final drain made non-blocking again, and the
+    /// sender field moved below the queue so it is released after the drain
+    /// instead of before it: either
+    /// lets the drop finish while a relay still holds an upgraded sender,
+    /// so the send lands on a channel nobody drains and the receiver's own
+    /// drop destroys the envelope armed.
+    #[test]
+    fn a_send_in_progress_is_settled_by_the_closing_drain() {
+        let (_registry, mailer, settlement) = test_env();
+        let id = MailboxId(0x7460);
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
+
+        let queued_root = MailId::new(id, 1);
+        mailer.record_sent_inflight(queued_root);
+        let queued_settled = settlement.subscribe_settlement(queued_root);
+        queue(&feed, armed_env(id, Some(MailId::new(id, 11)), Some(queued_root), Source::NONE));
+
+        let racing_root = MailId::new(id, 2);
+        mailer.record_sent_inflight(racing_root);
+        let racing_settled = settlement.subscribe_settlement(racing_root);
+        let racing = armed_env(id, Some(MailId::new(id, 12)), Some(racing_root), Source::NONE);
+
+        // A send in progress: the upgraded sender `InboxFeed::send` holds
+        // between its upgrade and its return.
+        let held = feed.sender.upgrade().expect("an open inbox's sender upgrades");
+
+        thread::scope(|scope| {
+            let dropping = scope.spawn(move || drop(inbox));
+
+            // The queued mail settles only inside the drop's drain, which
+            // runs after the close, so the drop is now waiting on `held`.
+            queued_settled.recv().expect("the closing drain settles the queued mail");
+
+            let sent = held.send(racing);
+            if let Err(mpsc::SendError(refused)) = sent {
+                refused.discharge();
+                panic!("the closing drain returned while a send was still in progress");
+            }
+            drop(held);
+
+            dropping.join().expect("the inbox drops without an obligation leak");
+        });
+
+        racing_settled.try_recv().expect("the closing drain settles the mail whose send was in progress");
+    }
+
+    /// #7460: once the inbox is dropped, the feed refuses and the relay
+    /// settles the mail and reports its kind. Catches a feed that keeps the
+    /// channel alive past its inbox, which would queue mail nothing ever
+    /// drains, and a relay that disarms a refused mail without recording
+    /// its `Finished`, which leaves its root in flight forever (#7116).
+    #[test]
+    fn a_send_after_the_inbox_dropped_is_refused_and_settled() {
+        let (_registry, mailer, settlement) = test_env();
+        let id = MailboxId(0x7461);
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
+
+        let root = MailId::new(id, 1);
+        mailer.record_sent_inflight(root);
+        let settled = settlement.subscribe_settlement(root);
+        drop(inbox);
+
+        let late = armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE);
+        let outcome = relay_or_transfer(late, &feed, &MailboxWakeSlot::default(), &Arc::downgrade(&mailer));
+
+        let RelayOutcome::SenderGone { kind } = outcome else {
+            panic!("a dropped inbox refuses the mail: {outcome:?}");
+        };
+        assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
+        settled.try_recv().expect("the relay settles the refused mail");
+    }
+
+    /// #7460: the relay holds no sender while it wakes. Catches an upgraded
+    /// sender held across the wake hook: a slot whose last reference the
+    /// wake path releases drops its inbox on the relaying thread, and that
+    /// inbox's blocking drain would then wait on the sender its own thread
+    /// holds.
+    #[test]
+    fn the_wake_hook_runs_with_no_sender_held() {
+        let (_registry, mailer, _settlement) = test_env();
+        let id = MailboxId(0x7462);
+        let (receiver, feed) = inbox_channel();
+        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
+
+        let senders_at_wake = Arc::new(AtomicUsize::new(0));
+        let wake = MailboxWakeSlot::default();
+        wake.set(Arc::new({
+            let feed = feed.clone();
+            let senders_at_wake = Arc::clone(&senders_at_wake);
+            move || senders_at_wake.store(feed.sender.strong_count(), Ordering::SeqCst)
+        }));
+
+        let mail = armed_env(id, Some(MailId::new(id, 11)), None, Source::NONE);
+        let outcome = relay_or_transfer(mail, &feed, &wake, &Arc::downgrade(&mailer));
+
+        assert!(matches!(outcome, RelayOutcome::Delivered), "an open inbox takes the mail: {outcome:?}");
+        assert_eq!(senders_at_wake.load(Ordering::SeqCst), 1, "only the inbox's own sender is held during the wake");
+        drop(inbox);
     }
 }

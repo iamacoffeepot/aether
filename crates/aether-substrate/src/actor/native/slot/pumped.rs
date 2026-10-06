@@ -271,7 +271,8 @@ mod tests {
     use crate::actor::native::local::with_stamped;
     use crate::actor::native::{Dispatch, Held, Pending};
     use crate::actor::registry::ActorRegistry;
-    use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox};
+    use crate::chassis::ctx::{MailboxWakeSlot, relay_or_transfer};
+    use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox, inbox_channel};
     use crate::chassis::settlement::{
         GateFailure, PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
     };
@@ -489,8 +490,8 @@ mod tests {
         });
     }
 
-    /// Register the pumped mailbox (forwarding armed envelopes onto the
-    /// binding's inbox channel, exactly as `claim_mailbox` does), build a
+    /// Register the pumped mailbox (relaying armed envelopes through the
+    /// inbox's feed, exactly as `claim_mailbox` does), build a
     /// spawner-backed binding, install a seeded slots box, and assemble the
     /// `PumpedSlot`. `settling` chooses the install path — `false` builds a
     /// fresh inbox via `install_inbox`, `true` installs a claim-shaped
@@ -508,12 +509,16 @@ mod tests {
         settling: bool,
         wake_tx: Option<crossbeam_channel::Sender<PumpWake>>,
     ) -> PumpedSlot<PumpProbe> {
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
-            let _ = tx.send(d);
-            if let Some(wake_tx) = &wake_tx {
+        let (receiver, feed) = inbox_channel();
+        let wake_slot = MailboxWakeSlot::default();
+        if let Some(wake_tx) = wake_tx {
+            wake_slot.set(Arc::new(move || {
                 let _ = wake_tx.send(PumpWake::Mail);
-            }
+            }));
+        }
+        let handler_mailer = Arc::downgrade(&fx.mailer);
+        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
+            let _ = relay_or_transfer(d, &feed, &wake_slot, &handler_mailer);
         });
         fx.registry
             .try_register_inbox_with_id(&boot_authority(), self_id, "test.pumped.probe", handler)
@@ -528,10 +533,10 @@ mod tests {
             Some(Arc::clone(&fx.spawner)),
         ));
         if settling {
-            let inbox = SettlingInbox::new_at(self_id, rx, Arc::clone(&fx.mailer));
+            let inbox = SettlingInbox::new_at(self_id, receiver, Arc::clone(&fx.mailer));
             binding.install_settling_inbox(inbox.relineage(binding.reply_lineage()));
         } else {
-            binding.install_inbox(rx);
+            binding.install_inbox(receiver);
         }
 
         let slots = Box::new(ActorSlots::new());

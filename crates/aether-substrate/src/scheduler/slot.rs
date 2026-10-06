@@ -451,7 +451,7 @@ impl WakeSink {
 }
 
 /// Sender-side wake hook the chassis hands to the inbox sender path
-/// (PR C wires this into `MailboxSender`). Holds a [`Weak<dyn
+/// (installed on the mailbox's `MailboxWakeSlot`). Holds a [`Weak<dyn
 /// Drainable>`] to the slot — the chassis registry owns the strong
 /// reference, so the wake handle going stale just means the slot was
 /// already dropped and we silently no-op.

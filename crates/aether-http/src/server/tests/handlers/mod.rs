@@ -52,7 +52,8 @@ pub(super) use uncovered::UncoveredStreamRouter;
 /// handler, beside the chassis that keeps them live: the route table's unit
 /// tests claim and release routes for them. The server is composed disabled,
 /// so the handlers' own `wire` registrations are refused and never touch the
-/// table under test.
+/// table under test. The boot mail those registrations and their refusals
+/// make has settled before the caller sees the chassis.
 pub(in crate::server) fn router_holders()
 -> (PassiveChassis<TestChassis>, ProtocolRef<HttpRouter>, ProtocolRef<HttpRouter>) {
     let (registry, mailer) = fresh_substrate();
@@ -62,6 +63,8 @@ pub(in crate::server) fn router_holders()
         .with_actor::<FixedBodyHttpHandler>(())
         .build_passive()
         .expect("caps boot");
+    chassis.await_boot_settled();
+
     let a = chassis.actor_ref::<EchoHttpHandler>().narrow::<HttpRouter>();
     let b = chassis.actor_ref::<FixedBodyHttpHandler>().narrow::<HttpRouter>();
 
