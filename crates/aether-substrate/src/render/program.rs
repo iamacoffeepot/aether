@@ -61,6 +61,8 @@ pub enum ProgramInputView {
     Plain,
     /// `texture_2d_array<f32>`.
     Array,
+    /// `texture_3d<f32>`.
+    Volume,
 }
 
 /// The sampler that accompanies one program input's color texture.
@@ -94,7 +96,7 @@ pub enum ProgramDepthSampler {
 /// once a pipeline is built against the layout, cannot be described.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProgramInput {
-    /// `texture_2d<f32>` or `texture_2d_array<f32>`.
+    /// `texture_2d<f32>`, `texture_2d_array<f32>` or `texture_3d<f32>`.
     Color { view: ProgramInputView, sampler: ProgramInputSampler },
     /// `texture_depth_2d`.
     Depth { sampler: ProgramDepthSampler },
@@ -114,6 +116,7 @@ impl ProgramInput {
                 let view_dimension = match view {
                     ProgramInputView::Plain => wgpu::TextureViewDimension::D2,
                     ProgramInputView::Array => wgpu::TextureViewDimension::D2Array,
+                    ProgramInputView::Volume => wgpu::TextureViewDimension::D3,
                 };
                 (wgpu::TextureSampleType::Float { filterable }, view_dimension)
             }

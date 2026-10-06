@@ -3,6 +3,11 @@
 //! declared wrap and mips, and the comparison sampler of a depth read,
 //! built once per device.
 //!
+//! The declared wrap is the address mode on all three axes. The third
+//! matters only for a volume, where a `Repeat` binding tiles along the
+//! depth as it does across the slice and, linear-filtered, blends the
+//! last slice into the first.
+//!
 //! The substrate's shared pair (`TextureBindings::sampler` /
 //! `nearest_sampler`) clamps and reads no mip chain, which is all the
 //! quad and material paths ask for. A program binding declares its own
@@ -77,7 +82,8 @@ impl ProgramSamplers {
 /// `Mips::Base` pins the level of detail to zero, so a texture that
 /// carries a chain still reads its base level; `Mips::Chain` leaves the
 /// range open and blends between levels when the texture is
-/// linear-filtered.
+/// linear-filtered. `wrap` is the address mode on `u`, `v` and `w`
+/// alike, so a volume's third axis clamps or repeats as declared.
 fn build_sampler(device: &wgpu::Device, filter: Filter, wrap: Wrap, mips: Mips) -> wgpu::Sampler {
     let address_mode = match wrap {
         Wrap::Clamp => wgpu::AddressMode::ClampToEdge,

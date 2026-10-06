@@ -529,6 +529,7 @@ fn program_input(plan: &ProgramPlan, input: ResolvedInput) -> ProgramInput {
     let view = match spec.shape {
         SlotShape::Target(_) | SlotShape::Texture => ProgramInputView::Plain,
         SlotShape::TextureArray => ProgramInputView::Array,
+        SlotShape::TextureVolume => ProgramInputView::Volume,
     };
     let sampler = match spec.sampling {
         Sampling::Texel => ProgramInputSampler::None,

@@ -262,7 +262,7 @@ fn read_as(spec: TransientSpec) -> SlotSpec {
 fn target_extent(spec: SlotSpec) -> Option<SlotExtent> {
     match spec.shape {
         SlotShape::Target(extent) => Some(extent),
-        SlotShape::Texture | SlotShape::TextureArray => None,
+        SlotShape::Texture | SlotShape::TextureArray | SlotShape::TextureVolume => None,
     }
 }
 
@@ -1428,19 +1428,22 @@ fn fs_copy(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     /// A read-only texture attached as a render target: the dispatch
     /// check asks only that a written binding's texture is writable, so
     /// a writable texture of any size bound at a `Texture` binding would
-    /// be rendered into at a size the graph never agreed to. The pass
-    /// before the final one is the writer here, so the refusal is the
-    /// pass rule and not the final-output rule.
+    /// be rendered into at a size the graph never agreed to. An array
+    /// or a volume there has no two-dimensional attachment at all, and
+    /// the dispatch check would index the plain-texture map with its id.
+    /// The pass before the final one is the writer here, so the refusal
+    /// is the pass rule and not the final-output rule.
     #[test]
-    fn a_pass_writing_a_texture_binding_is_refused() {
-        let mut mail =
-            copy_program(vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8), read_only(SlotShape::Texture)]);
-        mail.passes
-            .insert(0, pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Binding { index: 2 }, 0, 4));
+    fn a_pass_writing_a_read_only_binding_is_refused() {
+        for shape in [SlotShape::Texture, SlotShape::TextureArray, SlotShape::TextureVolume] {
+            let mut mail = copy_program(vec![full(TextureFormat::Rgba8), full(TextureFormat::Rgba8), read_only(shape)]);
+            let writer = pass("fs_copy", vec![InputSlot::Binding { index: 0 }], OutputSlot::Binding { index: 2 }, 0, 4);
+            mail.passes.insert(0, writer);
 
-        let reason = rejection(&mail);
-        assert!(reason.contains("pass 0: binding 2"), "the refusal names pass and binding: {reason}");
-        assert!(reason.contains("read only"), "read-only class: {reason}");
+            let reason = rejection(&mail);
+            assert!(reason.contains("pass 0: binding 2"), "{shape:?}: the refusal names pass and binding: {reason}");
+            assert!(reason.contains("read only"), "{shape:?}: read-only class: {reason}");
+        }
     }
 
     /// The final output's size is the reference every extent scales

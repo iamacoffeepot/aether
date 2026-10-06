@@ -104,6 +104,9 @@ mod texture;
 // Texture arrays in the texture registry (ADR-0246 decision 6): fixed
 // side and layer count, each layer written in place.
 mod texture_array;
+// Volume textures in the texture registry (ADR-0246 decision 6): width
+// by height by depth, given whole at creation and immutable after.
+mod texture_volume;
 
 // The cap-root re-exports source these names through `runtime`. The
 // `RenderTuning*` trio is the derive-Config surface (ADR-0090) the chassis
@@ -134,12 +137,12 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 
 use super::{
     CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
-    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, DRAW_TRIANGLE_BYTES,
-    DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
-    DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, Frame, Occluded, PreSettled, ProgramDestroy,
-    ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability,
-    UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances, UpdateTexture, ViewProjection,
-    WriteTextureLayer,
+    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, CreateTextureVolume,
+    CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture,
+    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
+    Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
+    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
+    UpdateInstances, UpdateTexture, ViewProjection, WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -1071,6 +1074,22 @@ impl NativeActor for RenderCapability {
         state.textures.write_layer(mail);
     }
 
+    /// `CreateTextureVolume` (ADR-0246 decision 6), on the owned texture
+    /// registry. Validation and id assignment read no device, so the
+    /// reply is given here, before the first device exists as after; the
+    /// volume realizes at the first dispatch that binds it.
+    #[handler::request]
+    fn on_create_texture_volume(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateTextureVolume,
+    ) -> CreateTextureVolumeResult {
+        if let Err(error) = state.service_device_for_request() {
+            return CreateTextureVolumeResult::Err { error };
+        }
+        state.textures.create_volume(mail)
+    }
+
     /// `CreateGeometry` (ADR-0171), on the owned geometry registry —
     /// validation and id assignment are CPU-side, so the reply needs no
     /// booted GPU; the buffers realize lazily at first GPU use.
@@ -1864,6 +1883,33 @@ mod tests {
             "the unparsable register gets its own refusal: {refused:?}",
         );
         assert!(render.read(|state| state.awaiting_device.is_empty()), "nothing waits once the device is installed");
+    }
+
+    /// Catches a volume create routed through the device wait: its answer
+    /// reads no device, and on desktop a boot component that waited would
+    /// hold no id until a window attached. With no device and none
+    /// configured, the create is answered inside the call and nothing is
+    /// left waiting.
+    #[test]
+    fn a_volume_create_before_the_first_device_is_answered_at_once() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+
+        let created: CreateTextureVolumeResult = render.request(&CreateTextureVolume {
+            format: TextureFormat::R16Float,
+            width: 2,
+            height: 2,
+            depth: 2,
+            pixels: Blob::from(vec![0; 16]),
+        });
+
+        assert!(
+            matches!(created, CreateTextureVolumeResult::Ok { .. }),
+            "the create is accepted with no device: {created:?}",
+        );
+        render.read(|state| {
+            assert!(state.gpu.is_none(), "precondition: no device was booted to answer it");
+            assert!(state.awaiting_device.is_empty(), "a volume create never waits for the device");
+        });
     }
 
     /// Issue #2831. Catches a `destroy_texture` that leaves a user-owned

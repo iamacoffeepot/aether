@@ -13,6 +13,7 @@ use aether_substrate::render::{
 use aether_substrate::session_ids::SessionIds;
 
 use super::texture_array::StagedTextureArray;
+use super::texture_volume::StagedTextureVolume;
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
 use crate::{TextureFormat, TextureSampling, TextureUsage};
 
@@ -156,21 +157,25 @@ pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 /// ADR-0103 assigns instrument ids, so ids are stable for the session
 /// and depend only on creation order.
 ///
-/// `entries` holds the plain textures and `arrays` the texture arrays
-/// (ADR-0246 decision 6). Both draw ids from `ids`, so an id names a
-/// plain texture or an array and never both, and a reader that looks an
-/// id up in `entries` alone treats an array id as unknown.
+/// `entries` holds the plain textures, `arrays` the texture arrays and
+/// `volumes` the volume textures (ADR-0246 decision 6). All three draw
+/// ids from `ids`, so an id names one of them and never two, and a
+/// reader that looks an id up in `entries` alone treats an array or a
+/// volume id as unknown.
 pub struct TextureRegistry {
     pub ids: SessionIds<u32>,
     pub entries: HashMap<u32, StagedTexture>,
     pub arrays: HashMap<u32, StagedTextureArray>,
+    pub volumes: HashMap<u32, StagedTextureVolume>,
 }
 
-/// What a texture id names: a plain texture or a texture array.
+/// What a texture id names: a plain texture, a texture array or a
+/// volume texture.
 #[derive(Clone, Copy)]
 pub enum BoundTexture<'a> {
     Plain(&'a StagedTexture),
     Array(&'a StagedTextureArray),
+    Volume(&'a StagedTextureVolume),
 }
 
 impl BoundTexture<'_> {
@@ -178,17 +183,28 @@ impl BoundTexture<'_> {
         match self {
             Self::Plain(entry) => entry.format,
             Self::Array(array) => array.format,
+            Self::Volume(volume) => volume.format,
         }
     }
 
     /// Whether a sampler reading this texture filters nearest. A plain
     /// texture says so at creation and a format that cannot be filtered
-    /// forces it; an array has no sampling of its own, so its format
-    /// alone decides.
+    /// forces it; an array or a volume has no sampling of its own, so
+    /// its format alone decides.
     pub fn nearest(self) -> bool {
         match self {
             Self::Plain(entry) => entry.sampling == TextureSampling::Nearest || !entry.format.filterable(),
             Self::Array(array) => !array.format.filterable(),
+            Self::Volume(volume) => !volume.format.filterable(),
+        }
+    }
+
+    /// The word a dispatch warning uses for what was bound.
+    pub fn kind_name(self) -> &'static str {
+        match self {
+            Self::Plain(_) => "a plain texture",
+            Self::Array(_) => "a texture array",
+            Self::Volume(_) => "a volume texture",
         }
     }
 }
@@ -197,20 +213,29 @@ impl TextureRegistry {
     pub fn new() -> Self {
         // The window stops one below `WHITE_TEXTURE_ID` so the reserved
         // sentinel is structurally unreachable rather than merely far away.
-        Self { ids: SessionIds::range(0, WHITE_TEXTURE_ID - 1), entries: HashMap::new(), arrays: HashMap::new() }
+        Self {
+            ids: SessionIds::range(0, WHITE_TEXTURE_ID - 1),
+            entries: HashMap::new(),
+            arrays: HashMap::new(),
+            volumes: HashMap::new(),
+        }
     }
 
-    /// What `texture_id` names, or `None` for an id in neither map.
+    /// What `texture_id` names, or `None` for an id in none of the maps.
     pub fn resolve(&self, texture_id: u32) -> Option<BoundTexture<'_>> {
         let plain = self.entries.get(&texture_id).map(BoundTexture::Plain);
-        plain.or_else(|| self.arrays.get(&texture_id).map(BoundTexture::Array))
+        plain
+            .or_else(|| self.arrays.get(&texture_id).map(BoundTexture::Array))
+            .or_else(|| self.volumes.get(&texture_id).map(BoundTexture::Volume))
     }
 
     /// A view of a realized texture for a program binding: the default
-    /// view of a plain texture, and an array view of an array. The
-    /// dimension is stated for an array because the default view of a
-    /// one-layer texture is two-dimensional, which cannot stand at an
-    /// array-typed binding.
+    /// view of a plain texture, an array view of an array, and a
+    /// three-dimensional view of a volume. The dimension is stated for an
+    /// array because the default view of a one-layer texture is
+    /// two-dimensional, which cannot stand at an array-typed binding, and
+    /// for a volume so the view never depends on what a default resolves
+    /// to.
     ///
     /// # Panics
     /// Panics if the id is unknown or its texture is not realized,
@@ -230,6 +255,12 @@ impl TextureRegistry {
                     ..wgpu::TextureViewDescriptor::default()
                 })
             }
+            BoundTexture::Volume(volume) => {
+                volume.realized.as_ref().expect("realized before encode").create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D3),
+                    ..wgpu::TextureViewDescriptor::default()
+                })
+            }
         }
     }
 
@@ -238,7 +269,8 @@ impl TextureRegistry {
     /// their CPU pixels and become upload-ready for the replacement
     /// device; writable textures have no staging and therefore restart
     /// unstaged, so their next realization clears them. An array keeps
-    /// the blob of every written layer and re-uploads those.
+    /// the blob of every written layer and re-uploads those, and a
+    /// volume keeps the blob it was created from and re-uploads that.
     #[allow(dead_code, reason = "device-loss runtime wiring lands in the next recovery slice")]
     pub fn invalidate_device_resources(&mut self) {
         for entry in self.entries.values_mut() {
@@ -247,6 +279,9 @@ impl TextureRegistry {
         }
         for array in self.arrays.values_mut() {
             array.invalidate_device_resources();
+        }
+        for volume in self.volumes.values_mut() {
+            volume.invalidate_device_resources();
         }
     }
 
@@ -359,8 +394,9 @@ impl TextureRegistry {
         }
     }
 
-    /// Release a registered texture or texture array; the two share one
-    /// id space, so one verb serves both maps. Same fire-and-forget
+    /// Release a registered texture, texture array or volume texture;
+    /// the three share one id space, so one verb serves every map. Same
+    /// fire-and-forget
     /// disposition as [`Self::update`].
     pub fn destroy(&mut self, mail: DestroyTexture) {
         if mail.texture_id == WHITE_TEXTURE_ID {
@@ -372,7 +408,9 @@ impl TextureRegistry {
             return;
         }
         let released_plain = self.entries.remove(&mail.texture_id).is_some();
-        let released = released_plain || self.arrays.remove(&mail.texture_id).is_some();
+        let released_array = self.arrays.remove(&mail.texture_id).is_some();
+        let released_volume = self.volumes.remove(&mail.texture_id).is_some();
+        let released = released_plain || released_array || released_volume;
         if !released {
             tracing::warn!(
                 target: "aether_render",

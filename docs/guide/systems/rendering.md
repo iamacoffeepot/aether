@@ -52,9 +52,10 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.view_projection` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
 | `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, `R32Float`, `R16Float`, or `Rgba16Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
-| `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture or texture array; fire-and-forget |
+| `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture, texture array or volume texture; fire-and-forget |
 | `aether.render.create_texture_array` | `{ format, side, layers, mips }` → `create_texture_array_result` | register a texture array of a fixed side and layer count; reply carries the `texture_id` |
 | `aether.render.write_texture_layer` | `{ texture_id, layer, pixels }` | replace every level of one layer of a texture array, in place; fire-and-forget |
+| `aether.render.create_texture_volume` | `{ format, width, height, depth, pixels }` → `create_texture_volume_result` | register a volume texture with its whole contents; reply carries the `texture_id` |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
 | `aether.render.draw_screen_triangles` | `{ space, clip, triangles }` | per-tick pixel-space triangles at any orientation; accumulates into the frame |
 | `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed, optionally textured boxes evaluated as a distance field; accumulates into the frame |
@@ -78,8 +79,10 @@ JSON callers sending the same byte array as before. `R8` samples contribute thei
 (`vec4(r, 0, 0, 1)`), which is mainly a substrate for material passes; ordinary
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
 texture when the producer knows it is no longer used. It releases a
-[texture array](render-programs.md#the-texture-array-resource) the same way:
-the two share one id space, and an array is read only by a render program.
+[texture array](render-programs.md#the-texture-array-resource) or a
+[volume texture](render-programs.md#the-volume-texture-resource) the same way:
+the three share one id space, and an array or a volume is read only by a
+render program.
 
 `blend` picks how the sampled texel lays over what is already there, and the
 choice is about what the source's colour channels already carry. `Straight` —
@@ -248,7 +251,8 @@ device state becomes live and the whole render capability becomes unusable.
 
 Public ids do not change across a successful replacement. Sampled textures
 upload again from their retained CPU pixels, texture arrays from the retained
-blob of each written layer, and registered geometry realizes again from its
+blob of each written layer, volume textures from the blob they were created
+with, and registered geometry realizes again from its
 retained vertex/index bytes. GPU-only writable textures keep
 their ids but restart transparent; an actor that needs their contents sends its
 ordinary program dispatch on the next repaint. A capture that was ready but

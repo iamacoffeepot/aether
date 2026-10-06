@@ -272,9 +272,9 @@ pub struct UpdateTexture {
 }
 
 /// `aether.render.destroy_texture` — release a previously-created
-/// texture or texture array from the render cap's session-scoped texture
-/// registry; the two share one id space, so this is the destroy path of
-/// both. Fire-and-forget; an unknown `texture_id` or the reserved
+/// texture, texture array or volume texture from the render cap's
+/// session-scoped texture registry; the three share one id space, so this
+/// is the destroy path of each. Fire-and-forget; an unknown `texture_id` or the reserved
 /// internal white-texture id logs and drops. Dropping the registry entry
 /// releases staged pixels and any realized GPU resources.
 #[aether_data::kind(name = "aether.render.destroy_texture")]
@@ -344,7 +344,7 @@ impl HeldReply for CreateTextureArrayResult {
 /// is all of a layer's levels or none of them.
 ///
 /// Fire-and-forget. An unknown `texture_id`, an id that names a plain
-/// texture, a `layer` at or past the array's layer count, pixel bytes
+/// texture or a volume, a `layer` at or past the array's layer count, pixel bytes
 /// that are not resident in this process, or a wrong `pixels` length
 /// logs a warning and leaves the layer as it was. The engine keeps the
 /// pixels it is given, so a written layer survives a render device
@@ -354,6 +354,54 @@ pub struct WriteTextureLayer {
     pub texture_id: u32,
     pub layer: u32,
     pub pixels: Blob,
+}
+
+/// `aether.render.create_texture_volume` — register a volume texture
+/// (ADR-0246 decision 6): `width` by `height` by `depth` texels in
+/// `format`, the resource a `SlotShape::TextureVolume` program binding
+/// takes.
+///
+/// `pixels` is the whole volume: `depth` slices, slice 0 first, each
+/// slice row-major and top-down, with nothing between slices. Its length
+/// is exactly `width * height * depth * format.bytes_per_pixel()` bytes.
+/// Texture coordinate `w = 0` is the near face of slice 0, so slice `k`
+/// is centred at `w = (k + 0.5) / depth`.
+///
+/// A volume is immutable: no kind writes it after creation, and new
+/// contents are a new volume. It has one mip level. It is read linear
+/// when `format` can be filtered and nearest when it cannot (`R32Float`),
+/// and a linear read interpolates on all three axes, between slices as
+/// between texels.
+///
+/// The id comes from the sequence `CreateTexture` draws from, so one
+/// `texture_id` names a texture, an array or a volume and never two of
+/// them, and `DestroyTexture` releases any of the three. Each dimension
+/// is checked against the three-dimensional limit every render device is
+/// requested at, so the create needs no device: it is answered inside the
+/// call, before the render device exists as after, and the wgpu texture
+/// is realized at the first dispatch that binds the volume. The engine
+/// keeps the pixels it is given, so a volume survives a render device
+/// replacement under the same id. Reply: `CreateTextureVolumeResult`.
+#[aether_data::kind(name = "aether.render.create_texture_volume")]
+pub struct CreateTextureVolume {
+    pub format: TextureFormat,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub pixels: Blob,
+}
+
+/// Reply to `CreateTextureVolume`. `Ok` carries the assigned
+/// `texture_id` — thread it into a `TextureVolume` entry of
+/// `ProgramDispatch.bindings`. `Err` carries a human-readable reason, one
+/// per class: pixel bytes that are not resident in this process, a zero
+/// dimension, a dimension past `max_texture_dimension_3d` (named against
+/// the limit), a volume whose byte size overflows, or a `pixels` length
+/// that is not the volume's byte count. A refused create consumes no id.
+#[aether_data::kind(name = "aether.render.create_texture_volume_result")]
+pub enum CreateTextureVolumeResult {
+    Ok { texture_id: u32 },
+    Err { error: String },
 }
 
 /// Storage format of one vertex attribute in a geometry layout
@@ -1033,7 +1081,7 @@ impl Samples {
 ///
 /// Only a `Target` has an extent, so only a `Target` can be a pass
 /// output: the executor has to know the size of what it attaches. The
-/// other two shapes are read-only, take a texture of any size, and are
+/// other three shapes are read-only, take a texture of any size, and are
 /// sampled by the fragment stage of any pass, by the authored vertex
 /// stage of a draw pass, and by a compute pass.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
@@ -1053,9 +1101,17 @@ pub enum SlotShape {
     /// its output is refused at register, and a dispatch that binds a
     /// texture that is not an array there is dropped.
     TextureArray,
+    /// A volume texture of any width, height and depth, read only. The
+    /// shader declares it `texture_3d<f32>` and reads it with a
+    /// three-component coordinate; a pass naming it as its output is
+    /// refused at register, and a dispatch that binds a texture that is
+    /// not a volume there is dropped.
+    TextureVolume,
 }
 
-/// How a `Filtered` binding addresses a coordinate outside `0..1`.
+/// How a `Filtered` binding addresses a coordinate outside `0..1`, on
+/// every axis the bound texture has: the third axis of a volume wraps as
+/// the first two do.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Wrap {
     /// The edge texel extends outward.
@@ -1601,14 +1657,15 @@ pub struct ProgramPass {
 /// `@group(0) @binding(0) var<uniform>`; its input slots bind in
 /// declaration order at group 1 — input `n` is the texture at
 /// `@binding(2 * n)`, `texture_2d<f32>` for a transient or a `Target`
-/// or `Texture` binding and `texture_2d_array<f32>` for a
-/// `TextureArray`, plus the `sampler` at `@binding(2 * n + 1)` for a
+/// or `Texture` binding, `texture_2d_array<f32>` for a `TextureArray`
+/// and `texture_3d<f32>` for a `TextureVolume`, plus the `sampler` at `@binding(2 * n + 1)` for a
 /// transient or a binding whose sampling is `Filtered`. A `Texel`
 /// binding has no sampler and leaves
 /// `@binding(2 * n + 1)` unused, so the numbering of the inputs after
 /// it does not move; the shader reads it with `textureLoad`. A module
-/// whose entry point disagrees with the slots — it reads an array where
-/// a plain texture is declared, or uses a sampler on a `Texel` input —
+/// whose entry point disagrees with the slots — it reads an array or a
+/// volume where a plain texture is declared, or uses a sampler on a
+/// `Texel` input —
 /// fails pipeline creation and replies `Err`. Group 1 is visible to the fragment stage
 /// of every pass, to the authored vertex stage of a draw pass and to a
 /// compute pass. What a pass's fragment entry returns composes with its
@@ -1721,8 +1778,10 @@ impl HeldReply for ProgramRegisterResult {
 /// wrong binding or geometry count, an unknown texture or geometry id,
 /// a binding whose format disagrees with its declared slot, a `Target`
 /// binding whose size is not the reference extent scaled by its
-/// declared extent (a `Texture` binding takes any size), a
-/// `TextureArray` binding whose texture is not an array, a written
+/// declared extent (a `Texture` binding takes any size), a binding
+/// whose texture is not the kind its shape takes (a plain texture for
+/// `Target` and `Texture`, an array for `TextureArray`, a volume for
+/// `TextureVolume`), a written
 /// binding whose texture is not writable, a geometry
 /// whose layout disagrees with its declared slot, a wrong number of
 /// draw-set lists, an unknown draw-set id, a draw set whose layouts are
