@@ -161,6 +161,7 @@ pub struct WindowInfo {
     pub mode: WindowMode,
     pub width: u32,
     pub height: u32,
+    pub scale_factor: f32,
     pub focused: bool,
     pub occluded: bool,
     pub presentation: WindowPresentation,

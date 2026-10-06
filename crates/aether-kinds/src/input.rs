@@ -120,9 +120,10 @@ pub struct MouseMove {
 /// own, so a harness test injects whatever value it wants observed, and
 /// every in-tree one injects `scale_factor: 1.0`. A client that needs to
 /// map pixel-space input (e.g. `MouseMove`) to clip-space geometry
-/// subscribes to this kind and caches the latest value; the initial value
-/// arrives right after the component's auto-subscribe fires, without any
-/// request/reply dance.
+/// subscribes to this kind and caches the latest value. A subscription
+/// delivers changes from then on, so a component that wires after the window
+/// opened reads the current `width`, `height`, and `scale_factor` from the
+/// `aether.window.list` reply, then keeps them current from this kind.
 #[aether_data::kind(name = "aether.window_size", partial_eq)]
 pub struct WindowSize {
     pub window: ErasedActorPath,

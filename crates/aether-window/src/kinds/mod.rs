@@ -43,7 +43,7 @@ pub struct WindowSpec {
 /// Public state for one live window. `path` is the window's canonical actor
 /// path (`aether.window/aether.window.instance:main`), the text every
 /// window-originated event carries and `capture_frame` takes.
-#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WindowInfo {
     pub path: ErasedActorPath,
     pub name: String,
@@ -51,6 +51,9 @@ pub struct WindowInfo {
     pub mode: WindowMode,
     pub width: u32,
     pub height: u32,
+    /// Physical pixels per logical pixel as the display last reported it: `1.0` on
+    /// the synthetic backend, and the value `WindowSize.scale_factor` publishes.
+    pub scale_factor: f32,
     pub focused: bool,
     pub occluded: bool,
     pub presentation: WindowPresentation,
@@ -62,7 +65,7 @@ pub struct WindowInfo {
 pub struct ListWindows;
 
 /// Reply to [`ListWindows`].
-#[aether_data::kind(name = "aether.window.list_result", eq)]
+#[aether_data::kind(name = "aether.window.list_result", partial_eq)]
 pub enum ListWindowsResult {
     Ok { windows: Vec<WindowInfo> },
     Err { error: String },
@@ -75,7 +78,7 @@ pub struct CreateWindow {
 }
 
 /// Reply to [`CreateWindow`].
-#[aether_data::kind(name = "aether.window.create_result", eq)]
+#[aether_data::kind(name = "aether.window.create_result", partial_eq)]
 pub enum CreateWindowResult {
     Ok { window: WindowInfo },
     Err { error: String },
@@ -505,7 +508,7 @@ pub struct InjectWindowEvent {
 }
 
 /// Published after a newly created window is fully attached.
-#[aether_data::kind(name = "aether.window.opened", eq)]
+#[aether_data::kind(name = "aether.window.opened", partial_eq)]
 pub struct WindowOpened {
     pub window: WindowInfo,
 }

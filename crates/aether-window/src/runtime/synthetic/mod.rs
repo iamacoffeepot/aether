@@ -89,6 +89,7 @@ impl SyntheticWindows {
             mode: spec.mode,
             width,
             height,
+            scale_factor: 1.0,
             focused: false,
             occluded: width == 0 || height == 0,
             presentation: spec.presentation,

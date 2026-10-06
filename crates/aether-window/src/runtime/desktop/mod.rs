@@ -227,6 +227,7 @@ impl DesktopWindowState {
             mode: self.mode.clone(),
             width: self.width,
             height: self.height,
+            scale_factor: self.scale_factor,
             focused: self.focused,
             occluded: self.occluded,
             presentation: self.presentation,
@@ -1558,6 +1559,24 @@ mod tests {
             WindowSize { window, width: 1280, height: 960, scale_factor: 2.0 },
             "the size is the physical one winit reported and the factor rides beside it",
         );
+    }
+
+    /// Fails if the listed row reports a constant factor instead of the window's
+    /// own, which passes at the `1.0` every other window fixture uses.
+    #[test]
+    fn a_listed_window_reports_its_scale_factor() {
+        let mut rig = rig();
+        rig.desktop_turn(|state, _ctx| {
+            insert_scaled_window(state, 2.0);
+        })
+        .expect("the desktop manager is live");
+
+        rig.send(&ListWindows);
+        let ListWindowsResult::Ok { windows } = rig.reply() else {
+            panic!("desktop manager list succeeds");
+        };
+
+        assert_eq!(windows.into_iter().map(|window| window.scale_factor).collect::<Vec<_>>(), [2.0]);
     }
 
     /// Fails if the focus arm records the state without publishing it, or
