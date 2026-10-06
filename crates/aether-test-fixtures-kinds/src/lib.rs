@@ -854,7 +854,7 @@ impl From<PathRefused> for PathAnswer {
 /// in `wire` and sends a [`Bump`] through it. `child_target` is the path a
 /// holder hands the inline child it spawns in `wire`; with none it spawns no
 /// child.
-#[aether_data::kind(name = "aether.test_fixtures.path_holder_config", default, no_serde)]
+#[aether_data::kind(name = "aether.test_fixtures.path_holder.config", default, no_serde)]
 pub struct PathHolderConfig {
     pub target: Option<ProtocolPath<PathPoking>>,
     pub child_target: Option<ProtocolPath<PathPoking>>,

@@ -1,10 +1,10 @@
-//! What a guest's decode may consult: [`guest_ctx`], the context every guest
+//! What a guest's decode may consult: `guest_ctx`, the context every guest
 //! decode starts from, and [`decode_config`], a guest's decode of its
 //! `Config` (ADR-0231 §3, #7501).
 //!
 //! A `ProtocolPath<P>` proves its claim at decode by asking the context
 //! whether the route standing at the path published every row of `P`. On
-//! wasm32 the context borrows [`GuestRoutes`], whose answer comes from the
+//! wasm32 the context borrows `GuestRoutes`, whose answer comes from the
 //! host's registry through the `route_rows_p32` host fn — the read a native
 //! decode makes — so a guest decodes a protocol path wherever a native actor
 //! can: in mail, in its config, in an inline child's config, and in saved
