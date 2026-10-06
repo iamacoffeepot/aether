@@ -57,14 +57,15 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
-use aether_render::{RenderCapability, ViewProjection};
+use aether_render::{RenderCapability, ViewProjection, ViewportExtent};
 use aether_window::WindowCapability;
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;
-/// Aspect used before the first `WindowSize` arrives. The substrate
-/// re-pulses `WindowSize` every tick so this only shows for one frame.
-const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
+/// Viewport used before the first `WindowSize` arrives, a 16:9 aspect. The
+/// substrate re-pulses `WindowSize` every tick so this only shows for one
+/// frame.
+const DEFAULT_EXTENT: ViewportExtent = ViewportExtent { width: 1280, height: 720 };
 
 /// Compiled defaults used when a created camera leaves an `Option`
 /// field unset, or when a mode-switch lands without all fields seeded.
@@ -149,10 +150,12 @@ impl OrbitState {
         self.target + orientation * Vec3::new(0.0, 0.0, self.distance)
     }
 
-    fn view_proj(&self, aspect: f32) -> [f32; 16] {
-        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
-        let proj = Mat4::perspective_rh(self.fov_y_rad, aspect, Z_NEAR, Z_FAR);
-        (proj * view).to_cols_array()
+    fn view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.eye(), self.target, Vec3::Y)
+    }
+
+    fn projection(&self, aspect: f32) -> Mat4 {
+        Mat4::perspective_rh(self.fov_y_rad, aspect, Z_NEAR, Z_FAR)
     }
 }
 
@@ -183,12 +186,16 @@ impl TopdownState {
         Vec3::new(self.center.x, self.center.y, defaults::TOPDOWN_EYE_HEIGHT)
     }
 
-    fn view_proj(&self, aspect: f32) -> [f32; 16] {
+    fn view(&self) -> Mat4 {
         let target = Vec3::new(self.center.x, self.center.y, 0.0);
-        let view = Mat4::look_at_rh(self.eye(), target, Vec3::Y);
+
+        Mat4::look_at_rh(self.eye(), target, Vec3::Y)
+    }
+
+    fn projection(&self, aspect: f32) -> Mat4 {
         let half_w = self.extent * aspect;
-        let proj = Mat4::orthographic_rh(-half_w, half_w, -self.extent, self.extent, Z_NEAR, Z_FAR);
-        (proj * view).to_cols_array()
+
+        Mat4::orthographic_rh(-half_w, half_w, -self.extent, self.extent, Z_NEAR, Z_FAR)
     }
 }
 
@@ -212,10 +219,31 @@ impl ModeState {
         }
     }
 
-    fn view_proj(&self, aspect: f32) -> [f32; 16] {
+    fn view(&self) -> Mat4 {
         match self {
-            Self::Orbit(s) => s.view_proj(aspect),
-            Self::Topdown(s) => s.view_proj(aspect),
+            Self::Orbit(state) => state.view(),
+            Self::Topdown(state) => state.view(),
+        }
+    }
+
+    fn projection(&self, aspect: f32) -> Mat4 {
+        match self {
+            Self::Orbit(state) => state.projection(aspect),
+            Self::Topdown(state) => state.projection(aspect),
+        }
+    }
+
+    /// The view the renderer applies, for a viewport of `extent`.
+    fn view_projection(&self, extent: ViewportExtent) -> ViewProjection {
+        let aspect = extent.width as f32 / extent.height as f32;
+
+        ViewProjection {
+            view: self.view(),
+            projection: self.projection(aspect),
+            eye: self.eye(),
+            near: Z_NEAR,
+            far: Z_FAR,
+            extent,
         }
     }
 
@@ -243,7 +271,9 @@ struct CameraState {
 pub struct CameraComponent {
     cameras: HashMap<String, CameraState>,
     active: Option<String>,
-    aspect: f32,
+    /// The window's size in physical pixels, which sets the projection's
+    /// aspect.
+    extent: ViewportExtent,
 }
 
 /// Multi-camera component. Hosts N named cameras, ticks all, publishes
@@ -281,7 +311,7 @@ impl WasmActor for CameraComponent {
                 })),
             },
         );
-        Ok(CameraComponent { cameras, active: Some("main".to_owned()), aspect: DEFAULT_ASPECT })
+        Ok(CameraComponent { cameras, active: Some("main".to_owned()), extent: DEFAULT_EXTENT })
     }
 
     /// Subscribe the lifecycle stages the camera advances against
@@ -332,8 +362,7 @@ impl WasmActor for CameraComponent {
         if let Some(name) = &self.active
             && let Some(cam) = self.cameras.get(name)
         {
-            let view_proj = cam.mode.view_proj(self.aspect);
-            ctx.send::<RenderCapability>(&ViewProjection { view_proj });
+            ctx.send::<RenderCapability>(&cam.mode.view_projection(self.extent));
         }
     }
 
@@ -345,7 +374,7 @@ impl WasmActor for CameraComponent {
         self.eye_result()
     }
 
-    /// Track live window aspect so 3D / orthographic projections stay
+    /// Track the live window size so 3D / orthographic projections stay
     /// unsquashed on non-square windows.
     ///
     /// # Agent
@@ -354,7 +383,7 @@ impl WasmActor for CameraComponent {
     #[handler::event]
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
-            self.aspect = size.width as f32 / size.height as f32;
+            self.extent = ViewportExtent { width: size.width, height: size.height };
         }
     }
 

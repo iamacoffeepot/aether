@@ -45,7 +45,7 @@ use aether_harness_substrate_capture::{
 };
 use aether_kinds::{CachedFontMetrics, ClipRect, CostTailResult, QuadScale, QuadSpace};
 use aether_math::{Mat4, Rgba, Vec3};
-use aether_render::{DrawShapes, RenderCapability, Shape, ViewProjection};
+use aether_render::{DrawShapes, RenderCapability, Shape, ViewProjection, ViewportExtent};
 use aether_text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
     MEMORY_FONT_NAMESPACE, TextCapability,
@@ -867,15 +867,20 @@ fn text_draws_world_space_label() {
     let proj = Mat4::perspective_rh(fov_y, aspect, 0.1, 100.0);
     let up = Vec3::new(0.0, 1.0, 0.0);
 
-    let view_near = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO, up);
-    let view_far = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 20.0), Vec3::ZERO, up);
+    let view_from_eye = |eye: Vec3| ViewProjection {
+        view: Mat4::look_at_rh(eye, Vec3::ZERO, up),
+        projection: proj,
+        eye,
+        near: 0.1,
+        far: 100.0,
+        extent: ViewportExtent { width: frame_width, height: frame_height },
+    };
+
     let orbit_x = 10.0_f32 * (PI / 4.0).sin();
     let orbit_z = 10.0_f32 * (PI / 4.0).cos();
-    let view_orbit = Mat4::look_at_rh(Vec3::new(orbit_x, 0.0, orbit_z), Vec3::ZERO, up);
-
-    let vp_near = (proj * view_near).to_cols_array();
-    let vp_far = (proj * view_far).to_cols_array();
-    let vp_orbit = (proj * view_orbit).to_cols_array();
+    let vp_near = view_from_eye(Vec3::new(0.0, 0.0, 10.0));
+    let vp_far = view_from_eye(Vec3::new(0.0, 0.0, 20.0));
+    let vp_orbit = view_from_eye(Vec3::new(orbit_x, 0.0, orbit_z));
 
     let anchor = [0.0_f32, 0.0, 0.0];
     let draw_dist = DrawText {
@@ -902,13 +907,7 @@ fn text_draws_world_space_label() {
     // settle it so subsequent captures can render immediately.
     harness
         .execute(vec![
-            (
-                "cam",
-                HarnessOp::send_and_settle(
-                    &harness.actor_ref::<RenderCapability>(),
-                    &ViewProjection { view_proj: vp_near },
-                ),
-            ),
+            ("cam", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &vp_near)),
             ("prime", HarnessOp::send_and_settle(&harness.actor_ref::<TextCapability>(), &draw_dist)),
             ("settle", HarnessOp::advance(2)),
         ])
@@ -921,10 +920,7 @@ fn text_draws_world_space_label() {
         .execute(vec![(
             "s",
             HarnessOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &ViewProjection { view_proj: vp_near }),
-                    envelope("aether.text", &draw_dist),
-                ],
+                vec![envelope("aether.render", &vp_near), envelope("aether.text", &draw_dist)],
                 vec![],
             ),
         )])
@@ -936,10 +932,7 @@ fn text_draws_world_space_label() {
         .execute(vec![(
             "s",
             HarnessOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &ViewProjection { view_proj: vp_far }),
-                    envelope("aether.text", &draw_dist),
-                ],
+                vec![envelope("aether.render", &vp_far), envelope("aether.text", &draw_dist)],
                 vec![],
             ),
         )])
@@ -964,10 +957,7 @@ fn text_draws_world_space_label() {
         .execute(vec![(
             "s",
             HarnessOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &ViewProjection { view_proj: vp_near }),
-                    envelope("aether.text", &draw_px),
-                ],
+                vec![envelope("aether.render", &vp_near), envelope("aether.text", &draw_px)],
                 vec![],
             ),
         )])
@@ -980,10 +970,7 @@ fn text_draws_world_space_label() {
         .execute(vec![(
             "s",
             HarnessOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &ViewProjection { view_proj: vp_far }),
-                    envelope("aether.text", &draw_px),
-                ],
+                vec![envelope("aether.render", &vp_far), envelope("aether.text", &draw_px)],
                 vec![],
             ),
         )])
@@ -1008,10 +995,7 @@ fn text_draws_world_space_label() {
         .execute(vec![(
             "s",
             HarnessOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &ViewProjection { view_proj: vp_orbit }),
-                    envelope("aether.text", &draw_px),
-                ],
+                vec![envelope("aether.render", &vp_orbit), envelope("aether.text", &draw_px)],
                 vec![],
             ),
         )])

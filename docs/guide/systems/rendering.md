@@ -49,7 +49,8 @@ the `RenderCapability` actor. It handles these payload kinds:
 | Kind | Shape | Semantics |
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
-| `aether.view_projection` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
+| `aether.view_projection` | `{ view, projection, eye, near, far, extent }` | a view of the world; the renderer applies `projection * view`, and the latest value wins |
+| `aether.render.view_from` | `{ source }` → `view_from_result` | follow the view source at the path `source`, in place of the one followed before |
 | `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, `R32Float`, `R16Float`, or `Rgba16Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture, texture array or volume texture; fire-and-forget |
@@ -212,10 +213,33 @@ or it disappears on the next commit-current frame.
 
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
-wgpu's uniform layout, so the 64 bytes upload with no transpose). Each
-`aether.view_projection` mail overwrites it wholesale; nothing blends or stacks. Before
-any camera publishes, the matrix is identity, so vertices render in clip space
-1:1.
+wgpu's uniform layout, so the 64 bytes upload with no transpose). An
+`aether.view_projection` mail carries the two halves apart, as `aether-math`
+values: `view` (world → view) and `projection` (view → clip), with the `eye` in
+world space, the `near` and `far` depth planes, and the viewport `extent` in
+physical pixels the projection was built for. The renderer stores
+`projection * view`, and each mail overwrites it wholesale; nothing blends or
+stacks. Before any view arrives, the matrix is identity, so vertices render in
+clip space 1:1.
+
+**The renderer follows a view source.** A view source is an actor that
+publishes `aether.view_projection` to whoever subscribed to it. It covers the
+`ViewSource` protocol: a viewer sends it `aether.render.view_subscribe`, and it
+sends that viewer its current view at once and each later one as the view
+changes, until the viewer sends `aether.render.view_unsubscribe`. Both kinds are
+empty; the source takes its subscriber from the mail's sender. The renderer is
+one such viewer, and `aether.render.view_from { source }` tells it which source
+to follow: it unsubscribes from the source it followed before, subscribes to the
+one at the path `source`, and replies `view_from_result`. So the active camera
+is the source the renderer follows, one mail switches it, and two cameras do not
+overwrite each other through this path. A path that does not prove — no actor
+has stood at it, the actor there does not handle both subscription kinds, or it
+has closed — is answered `Err` naming the path and why, and the renderer keeps
+the source it had. When the followed source closes, the renderer follows nothing
+and keeps the last view it was sent. A component that draws through its own
+render program subscribes to the same source and is sent the same views. An
+actor that computes its own view may still send `aether.view_projection`
+straight to `aether.render`; it overwrites whatever a followed source sent.
 
 **Depth test is on.** The offscreen target carries a `Depth32Float` depth buffer
 tested `LessEqual`, so **larger world-z draws on top**. The convention that
@@ -303,7 +327,11 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 Address the cap by type — `ctx.send::<RenderCapability>(..)` — and send
-`DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). A
+`DrawTriangle`s. If you're a camera, be a view source: handle `ViewSubscribe` by
+typing `ctx.sender()` with `ctx.cast::<Subscriber<ViewProjection>>()`, keep the
+reference, and send each `ViewProjection` through it with `ctx.send_to`; handle
+`ViewUnsubscribe` by dropping it. A camera then names no recipient, and the
+renderer takes its view once `aether.render.view_from` names the camera. A
 component that depends on render does not stand up on headless at all; one
 that subscribes `Render` without depending on render gets the lifecycle's
 refusal at wire time on a graph that omits the stage.

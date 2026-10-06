@@ -1,49 +1,58 @@
 //! Test-fixture component that renders a solid unit cube through a
 //! fixed camera, so a `SubstrateHarness` capture scenario can assert the
-//! full render pipeline end-to-end: camera + `view_proj` + world-space
-//! geometry + depth test + GPU readback (issue 1454).
+//! full render pipeline end-to-end: view source + view and projection +
+//! world-space geometry + depth test + GPU readback (issue 1454).
 //!
 //! The existing offscreen capture fixture (`probe`) paints a single
-//! flat NDC triangle at identity `view_proj`, which touches none of
+//! flat NDC triangle at the identity view, which touches none of
 //! the camera path. This fixture instead emits a twelve-triangle
-//! world-space cube centered at the origin (corners at ±0.5) and
-//! publishes a hand-computed `ViewProjection { view_proj }` that frames the
-//! cube as a centered silhouette. The camera sits in the all-positive
-//! octant looking back at the origin, so three faces are visible and
-//! the view is non-axis-aligned — the depth test actually orders the
-//! faces rather than collapsing to a flat quad.
+//! world-space cube centered at the origin (corners at ±0.5) and is the
+//! reference [`ViewSource`](aether_render::ViewSource): it publishes a
+//! hand-computed `ViewProjection` that frames the cube as a centered
+//! silhouette. The camera sits in the all-positive octant looking back at
+//! the origin, so three faces are visible and the view is
+//! non-axis-aligned — the depth test actually orders the faces rather
+//! than collapsing to a flat quad.
 //!
 //! Behaviour:
 //!
-//! - `init` computes the `view_proj` once (perspective × look-at,
-//!   built from `aether-math`) and stores it. The matrix is fixed, so
+//! - `init` computes the framing view once (a look-at and a perspective,
+//!   built from `aether-math`) and stores it. The view is fixed, so
 //!   every captured frame is deterministic.
 //! - `wire` subscribes `Tick` on `aether.lifecycle` (ADR-0082),
 //!   mirroring the reference camera and the probe.
-//! - On each tick the fixture publishes the stored `ViewProjection` to the
-//!   chassis render mailbox, then emits the cube's twelve
-//!   `DrawTriangle`s as one batch — six faces, each a distinct flat color
-//!   so the silhouette reads as one solid blob. Vertices carry world `z`, so
-//!   the `Depth32Float` / `LessEqual` test draws nearer faces over
-//!   farther ones.
+//! - `ViewSubscribe` is answered with the stored view, sent through the
+//!   sender cast to a `ViewProjection` subscriber. The renderer sends it
+//!   when it is told to follow this fixture with `aether.render.view_from`;
+//!   until then the renderer holds its identity view and the cube is
+//!   unframed.
+//! - On each tick the fixture emits the cube's twelve `DrawTriangle`s as
+//!   one batch — six faces, each a distinct flat color so the silhouette
+//!   reads as one solid blob. Vertices carry world `z`, so the
+//!   `Depth32Float` / `LessEqual` test draws nearer faces over farther
+//!   ones.
 
 use core::f32::consts::FRAC_PI_4;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Subscriber, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_math::{Mat4, Rgb, Vec3};
-use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
+use aether_render::{
+    DrawTriangle, RenderCapability, Vertex, ViewProjection, ViewSubscribe, ViewUnsubscribe, ViewportExtent,
+};
 
 /// Half-extent of the unit cube: corners sit at ±`HALF` on every axis,
 /// so the cube spans one world unit and is centered at the origin.
 const HALF: f32 = 0.5;
 
-/// Aspect ratio the `view_proj` is built for. The cube scenario boots
-/// the harness at 128×96, so a 4:3 aspect keeps the projected silhouette
-/// undistorted. A small mismatch with the real frame only scales the
-/// silhouette slightly; the capture asserts leave margin for it.
-const ASPECT: f32 = 128.0 / 96.0;
+/// Viewport the projection is built for, in physical pixels. The cube
+/// scenario boots the harness at 128×96, so this 4:3 viewport keeps the
+/// projected silhouette undistorted. A small mismatch with the real frame
+/// only scales the silhouette slightly; the capture asserts leave margin
+/// for it.
+const VIEWPORT_WIDTH: u16 = 128;
+const VIEWPORT_HEIGHT: u16 = 96;
 
 /// Vertical field of view in radians (45°). Combined with the eye
 /// distance below it sizes the cube to a healthy fraction of the frame
@@ -56,20 +65,26 @@ const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;
 
 pub struct Cube {
-    view_proj: [f32; 16],
+    view: ViewProjection,
 }
 
 impl Cube {
-    /// World-to-clip matrix that frames the cube. The eye sits in the
-    /// all-positive octant and looks back at the origin, so the +X,
-    /// +Y, and +Z faces are all visible and no cube edge is parallel
-    /// to a frame axis. `proj * view` is the column-major product the
-    /// chassis uploads verbatim as the `view_proj` uniform.
-    fn framing_view_proj() -> [f32; 16] {
+    /// The view that frames the cube. The eye sits in the all-positive
+    /// octant and looks back at the origin, so the +X, +Y, and +Z faces
+    /// are all visible and no cube edge is parallel to a frame axis. The
+    /// renderer applies `projection * view`.
+    fn framing_view() -> ViewProjection {
         let eye = Vec3::new(1.8, 1.5, 2.2);
-        let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
-        let proj = Mat4::perspective_rh(FIELD_OF_VIEW_Y_RADIANS, ASPECT, Z_NEAR, Z_FAR);
-        (proj * view).to_cols_array()
+        let aspect = f32::from(VIEWPORT_WIDTH) / f32::from(VIEWPORT_HEIGHT);
+
+        ViewProjection {
+            view: Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+            projection: Mat4::perspective_rh(FIELD_OF_VIEW_Y_RADIANS, aspect, Z_NEAR, Z_FAR),
+            eye,
+            near: Z_NEAR,
+            far: Z_FAR,
+            extent: ViewportExtent { width: u32::from(VIEWPORT_WIDTH), height: u32::from(VIEWPORT_HEIGHT) },
+        }
     }
 
     /// The cube's twelve world-space triangles. Each of the six faces
@@ -117,7 +132,7 @@ impl WasmActor for Cube {
     const NAMESPACE: &'static str = "test.cube";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Cube { view_proj: Cube::framing_view_proj() })
+        Ok(Cube { view: Cube::framing_view() })
     }
 
     /// Subscribe `Tick` so the chassis tick fanout drives `on_tick`.
@@ -127,18 +142,49 @@ impl WasmActor for Cube {
         ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
-    /// Publish the fixed camera, then emit the cube. The camera goes
-    /// first so the chassis's `view_proj` uniform holds the framing
-    /// matrix before the triangles are rasterized in the same frame.
+    /// Emit the cube.
     ///
     /// # Agent
     /// Not sent manually; the substrate's tick fanout fires it once per
     /// advance for every `aether.lifecycle`-subscribed mailbox. A
     /// `capture_frame` taken after one tick shows the centered cube
-    /// silhouette.
+    /// silhouette once the renderer follows this fixture's view.
     #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, _: Tick) {
-        ctx.send::<RenderCapability>(&ViewProjection { view_proj: self.view_proj });
         ctx.send_many::<RenderCapability>(&Cube::triangles());
+    }
+
+    /// Send the framing view to the subscribing sender. The view never
+    /// changes, so this one send is the whole publication and the fixture
+    /// keeps no subscriber: a source whose view moves keeps the cast
+    /// reference and sends each later view through it.
+    ///
+    /// # Agent
+    /// Sent by a viewer that wants the view; the renderer sends it
+    /// when `aether.render.view_from` names this fixture. A sender that
+    /// does not take `aether.view_projection` silently is sent nothing.
+    #[handler::tell]
+    fn on_view_subscribe(&mut self, ctx: &mut WasmCtx<'_, Self>, _: ViewSubscribe) {
+        let Some(sender) = ctx.sender() else {
+            tracing::warn!("view subscribe arrived with no sender; ignoring");
+            return;
+        };
+        let Some(viewer) = ctx.cast::<Subscriber<ViewProjection>>(sender) else {
+            tracing::warn!("view subscribe sender does not take a view projection; ignoring");
+            return;
+        };
+
+        ctx.send_to(viewer, &self.view);
+    }
+
+    /// Nothing to release: the fixed view is sent once, at subscribe, and
+    /// no subscriber is kept.
+    ///
+    /// # Agent
+    /// Sent by a viewer that no longer wants the view; the renderer sends
+    /// it when it is told to follow another source.
+    #[handler::tell]
+    fn on_view_unsubscribe(&mut self, _ctx: &mut WasmCtx<'_, Self>, _: ViewUnsubscribe) {
+        let _ = self;
     }
 }

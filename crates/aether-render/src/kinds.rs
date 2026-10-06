@@ -12,10 +12,10 @@
 //! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
 //! draw kinds below import them from there.
 
-use aether_actor::HeldReply;
+use aether_actor::{HeldReply, PathRefused, ProtocolPath};
 use aether_data::{Blob, ErasedActorPath, MailId};
 use aether_kinds::{ClipRect, QuadSpace};
-use aether_math::{Rgb, Rgba};
+use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -95,19 +95,85 @@ pub struct DrawTriangle {
 /// per-triangle wire footprint.
 pub const DRAW_TRIANGLE_BYTES: usize = size_of::<DrawTriangle>();
 
-/// View-projection state: column-major `view_proj` matrix (world → clip).
-/// The desktop chassis's `aether.view_projection` sink writes the latest
-/// payload into the GPU uniform every frame; the WGSL vertex shader
-/// multiplies each vertex position by this matrix. Column-major layout
-/// matches wgpu's uniform upload — 64 bytes uploaded verbatim, no transpose.
-/// Camera components emit this on every `Tick`; the substrate reads only
-/// the most recent value before issuing the next draw. Before the first
-/// `ViewProjection` arrives, the uniform holds identity and vertices render
-/// in clip-space 1:1 (the pre-camera behaviour).
-#[repr(C)]
-#[aether_data::kind(name = "aether.view_projection", pod, default, partial_eq)]
+/// A viewport's size in physical pixels.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ViewportExtent {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A view of the world: `view` takes world space to view space, `projection`
+/// takes view space to clip space, and the rest is what a drawer needs beside
+/// them: the `eye` in world space, the `near` and `far` depth planes, and the
+/// viewport `extent` the projection was built for. Both matrices are
+/// column-major, as `aether-math` and wgpu hold them.
+///
+/// A [`ViewSource`] sends one to each subscriber when its view changes, and
+/// the renderer is such a subscriber once [`ViewFrom`] names the source it
+/// follows. The renderer applies `projection * view` to every world-space
+/// vertex and keeps the latest value it was sent; before the first one
+/// arrives it holds identity, so vertices render in clip space 1:1. An actor
+/// that computes its own view may also send this straight to `aether.render`.
+#[aether_data::kind(name = "aether.view_projection", partial_eq)]
 pub struct ViewProjection {
-    pub view_proj: [f32; 16],
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub eye: Vec3,
+    pub near: f32,
+    pub far: f32,
+    pub extent: ViewportExtent,
+}
+
+/// Ask a [`ViewSource`] to send the sender its [`ViewProjection`]: the
+/// current one at once, and each later one as the view changes. The source
+/// takes its subscriber from the mail's sender, so the kind has no fields.
+#[aether_data::kind(name = "aether.render.view_subscribe", copy, eq)]
+pub struct ViewSubscribe;
+
+/// Ask a [`ViewSource`] to stop sending the sender its [`ViewProjection`].
+/// A sender that never subscribed changes nothing.
+#[aether_data::kind(name = "aether.render.view_unsubscribe", copy, eq)]
+pub struct ViewUnsubscribe;
+
+/// An actor that publishes [`ViewProjection`] to whoever sent it
+/// [`ViewSubscribe`]: a camera, to the renderer and to any other component
+/// that draws through the same view.
+///
+/// A `#[handler::tell]` taking `ViewSubscribe` and one taking
+/// `ViewUnsubscribe` cover the rows. The subscribe handler types the mail's
+/// sender with `ctx.cast::<Subscriber<ViewProjection>>()`, keeps the
+/// reference, and sends through it with `ctx.send_to`.
+#[aether_actor::protocol]
+pub trait ViewSource {
+    fn subscribe(mail: ViewSubscribe);
+    fn unsubscribe(mail: ViewUnsubscribe);
+}
+
+/// Tell the renderer which [`ViewSource`] to take its view from. The renderer
+/// unsubscribes from the source it followed before and subscribes to this
+/// one, so one mail switches the active camera and two sources never both
+/// feed the renderer through this path. When the followed source closes the
+/// renderer follows nothing and keeps the last view it was sent. Reply:
+/// [`ViewFromResult`].
+#[aether_data::kind(name = "aether.render.view_from", no_serde, eq)]
+pub struct ViewFrom {
+    pub source: ProtocolPath<ViewSource>,
+}
+
+/// Reply to [`ViewFrom`]. `Err` names the `source` path and why it did not
+/// prove (ADR-0231 §3): no route has stood at it, its route does not cover
+/// [`ViewSource`], or no live actor stands at it now. A refused request
+/// changes nothing: the renderer keeps following the source it had.
+#[aether_data::kind(name = "aether.render.view_from_result", eq)]
+pub enum ViewFromResult {
+    Ok,
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for ViewFromResult {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
 }
 
 /// Pixel storage format for a registered render texture.
