@@ -191,14 +191,15 @@ unsafe extern "C" {
     /// answered; one naming no `Live` route answers no rows.
     #[link_name = "published_rows_p32"]
     pub fn published_rows(position: u64) -> u64;
-    /// ADR-0231 §11: the path of the route record at `position`, the
-    /// position of a sender the host stamped. The return is the packed
+    /// ADR-0231 §11: the canonical path of the route record at `position`,
+    /// the position of a reference the guest holds; the guest half of the
+    /// native `NativeCtx::actor_path` read. The return is the packed
     /// `(ptr << 32) | len` of a live guest buffer holding the wire-encoded
-    /// answer, a `__SenderPath`, which the SDK decodes and frees as
+    /// answer, a `__ActorPath`, which the SDK decodes and frees as
     /// [`asset_catalog`] does. Any position is answered; one holding no
     /// route record answers no path.
-    #[link_name = "sender_path_p32"]
-    pub fn sender_path(position: u64) -> u64;
+    #[link_name = "actor_path_p32"]
+    pub fn actor_path(position: u64) -> u64;
     /// ADR-0079 §8: watch the actor at `target` for the calling actor `from`,
     /// through the watched type whose tag is `tag`, and return the
     /// watch's id. A standing watch of that watcher, target, and watched type
@@ -438,7 +439,7 @@ pub unsafe fn published_rows(_position: u64) -> u64 {
     panic!("aether-actor: published_rows called outside the FFI guest");
 }
 
-/// Host-side stub for the FFI `aether::sender_path` import (ADR-0231 §11).
+/// Host-side stub for the FFI `aether::actor_path` import (ADR-0231 §11).
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
 /// # Safety
@@ -449,8 +450,8 @@ pub unsafe fn published_rows(_position: u64) -> u64 {
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_family = "wasm"))]
 #[must_use]
-pub unsafe fn sender_path(_position: u64) -> u64 {
-    panic!("aether-actor: sender_path called outside the FFI guest");
+pub unsafe fn actor_path(_position: u64) -> u64 {
+    panic!("aether-actor: actor_path called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::watch` import (ADR-0079 §8).

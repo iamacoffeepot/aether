@@ -33,7 +33,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[cold]
     fn refused_sender<P: CastTarget, K: Kind>(&self) -> SenderRefused {
         let position = self.sender().map(|sender| sender.id().0);
-        let sender = position.and_then(address::sender_path);
+        let sender = position.and_then(address::actor_path);
         let rows = position.and_then(|position| address::published_rows(position).rows);
         let refused = SenderRefused::of::<P>(sender, rows.as_deref());
 

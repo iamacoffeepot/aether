@@ -73,12 +73,13 @@ pub use reference::{ActorRef, Direct, ErasedActorRef, HandsOff, ProtocolRef, Tar
 pub use request_context::{RequestContextTable, split_state_envelope};
 // The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32` and
 // `route_rows_p32` answer (ADR-0231 §4, §3), and the `live_route_p32` answer
-// (ADR-0230 §3, #7205), and the `sender_path_p32` answer (ADR-0231 §11): the
-// substrate's host fns encode them, and `WasmCtx::resolve_path`,
+// (ADR-0230 §3, #7205), and the `actor_path_p32` answer (ADR-0231 §11), the
+// position-to-path read beside them: the substrate's host fns encode them,
+// and `WasmCtx::resolve_path`,
 // `WasmCtx::cast`, a guest's `ProtocolPath` decode, `WasmCtx::resolve`, and a
 // dispatch arm's refusal of its sender decode them.
 #[doc(hidden)]
-pub use wasm::bridge::address::{__LiveRoute, __PublishedRows, __ResolvedPath, __SenderPath};
+pub use wasm::bridge::address::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath};
 // Both transports send through flat verbs and hold no typed handle: wasm
 // actors through [`WasmCtx`], native actors through
 // `aether_substrate::actor::native::NativeCtx`.

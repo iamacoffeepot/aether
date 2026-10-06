@@ -162,7 +162,7 @@ The rules:
 | 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`) and for the window's and the lifecycle capability's subscriber references (`ProtocolRef<Subscriber<K>>`, `crates/aether-window/src/runtime/subscribers.rs`, `crates/aether-lifecycle/src/subscribers.rs`); the `monitor` bound is not |
 | 9 | Relays | built: `forward_to` takes a typed `Target`, so a relay compiles only for a kind its target's type or protocol lists, and `DeferredReply::hand_off` exists |
 | 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`). The checks read the declaration lists: the native birth check (`crates/aether-substrate/src/actor/native/dependencies.rs`) and `export!`'s guest `Dependency` records read `Declared::Depends` through `DependencyList`, and `export!`'s inline-child coverage check reads `Declared::Spawns` through `ListedIn`, so a hand-written `Declared` is checked as an emitted one is. A type no `#[actor]` built still writes its own `Contracts` and dispatch (#6887, #6888) |
-| 11 | A handler's sender requirement | built: `HandlesKind::Sender`, its mirror `Contract::Sender`, `Anyone`, `SentBy`, and `Target::Sender` (`crates/aether-actor/src/model/`, `crates/aether-actor/src/reference/target.rs`), bounded on every typed send verb of both ctxs, on `InlineChild::send`, on `InlineParent::send` through `AllHandle<K, A>`, and on `subscribe`. `#[actor]` reads the fourth parameter of a tell or a request (`crates/aether-actor-derive/src/handler_parse.rs`) and its arm calls the cast helper before the handler: native in `crates/aether-substrate/src/actor/native/ctx/inbound.rs`, guest in `crates/aether-actor/src/wasm/ctx/sender.rs`, whose refused tell returns `DISPATCH_REFUSED_SENDER` for the host to answer (`crates/aether-substrate/src/actor/wasm/component/dispatch.rs`). The guest names its sender through one host fn, `sender_path_p32`. Its first consumers are the tcp capability's `connect_self` and `bind_listener_self`. Not built: the requirement in the handler manifests, so `describe_handlers` does not show it and a relay cannot refuse before delivery |
+| 11 | A handler's sender requirement | built: `HandlesKind::Sender`, its mirror `Contract::Sender`, `Anyone`, `SentBy`, and `Target::Sender` (`crates/aether-actor/src/model/`, `crates/aether-actor/src/reference/target.rs`), bounded on every typed send verb of both ctxs, on `InlineChild::send`, on `InlineParent::send` through `AllHandle<K, A>`, and on `subscribe`. `#[actor]` reads the fourth parameter of a tell or a request (`crates/aether-actor-derive/src/handler_parse.rs`) and its arm calls the cast helper before the handler: native in `crates/aether-substrate/src/actor/native/ctx/inbound.rs`, guest in `crates/aether-actor/src/wasm/ctx/sender.rs`, whose refused tell returns `DISPATCH_REFUSED_SENDER` for the host to answer (`crates/aether-substrate/src/actor/wasm/component/dispatch.rs`). The guest names its sender through one host fn, `actor_path_p32`, the guest half of the native `actor_path` read. Its first consumers are the tcp capability's `connect_self` and `bind_listener_self`. Not built: the requirement in the handler manifests, so `describe_handlers` does not show it and a relay cannot refuse before delivery |
 
 ### 1. The static reply check
 
@@ -1199,8 +1199,15 @@ one notice for every refusal made before a handler runs.
 
 On a guest receiver the arm runs the same cast through `WasmCtx::cast`. The
 guest holds only the sender's position, so it reads the sender's path for its
-log line and its reply through one host fn, `sender_path_p32`, called only on
-the refusal path. A refused request is answered by the guest with its typed
+log line and its reply through one host fn, `actor_path_p32`, called only on
+the refusal path. It is the guest half of the native `NativeCtx::actor_path`
+read: the position of a reference the guest holds goes in, the canonical path
+of the route record there comes out, a position holding no record answers no
+path, and nothing is minted. It closes the missing direction among the
+guest's address reads: `resolve_path_p32`, `live_route_p32`, and
+`route_rows_p32` take a path, `published_rows_p32` takes a position and
+answers rows, and this takes a position and answers the path. No guest ctx
+verb exposes it. A refused request is answered by the guest with its typed
 reply. A refused tell returns the dispatch code `DISPATCH_REFUSED_SENDER`,
 and the host frees the reply handle and answers the notice to a reply target
 that opted in, as the native arm does. The notice the host writes names the
