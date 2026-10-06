@@ -26,6 +26,13 @@
 //! waits for the `ListComponents` the [`Watcher`] mails the host from its
 //! notice to be queued there.
 //!
+//! No scenario here covers a ledger whose `wire` watched and then refused or
+//! trapped. A registration that outlived such a birth would post its notice
+//! to a mailbox whose guest holds no row for it, which runs nothing, so the
+//! harness cannot tell a leak from a release. The cover is the substrate's
+//! `dropping_a_guest_that_watched_leaves_both_monitor_indices_empty`, which
+//! reads the registry's indices after the instance drops.
+//!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`), and only
 //! under `AETHER_ALLOW_WASM_SKIP=1`.
 
@@ -44,9 +51,9 @@ use aether_kinds::{
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::{BootError, MonitorHandle};
 use aether_test_fixtures_kinds::{
-    WIRE_REFUSAL, WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold,
-    WatchLedgerConfig, WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider,
-    WatchRelease, WatchThrough, WireOutcome,
+    WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig,
+    WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease,
+    WatchThrough, WireOutcome,
 };
 use aether_test_fixtures_republish::{WatchClerk, WatchDesk, WatchLedger, WatchPeer};
 
@@ -538,48 +545,6 @@ fn a_watch_made_after_an_unwatch_takes_a_new_id() {
 
     assert_eq!(report(&mut harness, &ledger).handled, [provider_departure(2, second)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the handler ran once");
-}
-
-/// Load a ledger whose `wire` watches the provider and then fails as
-/// `outcome` says, and return the refusal. Then load a fresh ledger at the
-/// same name, close the provider, and require that the fresh ledger handled
-/// no notice.
-///
-/// Catches a registration that outlives a cancelled birth and is honoured
-/// under the mailbox the fresh ledger reuses.
-fn a_failed_wire_leaves_no_watch(outcome: WireOutcome) -> Option<String> {
-    let family = family()?;
-    let mut harness = pooled();
-
-    let Err(SubstrateHarnessError::Load(error)) = load_ledger(&mut harness, &family.v1, &wire_watch(9, outcome)) else {
-        panic!("a ledger whose wire fails must not load");
-    };
-    let ledger = plain_ledger(&mut harness, &family.v1);
-
-    close_provider(&mut harness);
-
-    assert_eq!(report(&mut harness, &ledger).handled, [], "the fresh ledger handled no notice");
-    assert_eq!(harness.count_observed(WatchDeparture::NAME), 0);
-
-    Some(error)
-}
-
-#[test]
-fn a_ledger_whose_wire_watched_and_refused_leaves_no_watch() {
-    let Some(error) = a_failed_wire_leaves_no_watch(WireOutcome::Refuses) else {
-        return;
-    };
-
-    assert!(error.contains(WIRE_REFUSAL), "the refusal carries the guest's own message: {error}");
-}
-
-#[test]
-fn a_ledger_whose_wire_watched_and_trapped_leaves_no_watch() {
-    let Some(error) = a_failed_wire_leaves_no_watch(WireOutcome::Traps) else {
-        return;
-    };
-
-    assert!(error.contains("wire trapped"), "the refusal says the guest trapped in wire: {error}");
 }
 
 /// Catches rows left on the retired guest, contexts not restored when the
