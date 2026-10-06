@@ -1136,10 +1136,9 @@ mod control_plane {
     // `TexturedQuad` / `DrawTexturedQuads`) moved to
     // `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
-    // central: the `aether.text.draw` kind below consumes `QuadSpace`,
-    // and `aether-kinds` has no dependency on `aether-render`, so
-    // moving them would close a cycle — they're sibling-kind-consumed and
-    // therefore pinned here.
+    // central: `aether-kinds` has no dependency on `aether-render`, and
+    // consumers upstream of the renderer name them, so they are pinned
+    // here.
 
     /// Screen/framebuffer-pixel clip rectangle applied after projection.
     ///
@@ -1193,12 +1192,10 @@ mod control_plane {
         World { anchor: [f32; 3], scale: QuadScale },
     }
 
-    // ADR-0105 text surface. The `aether.text` capability composes the
-    // textured-quad surface above into glyphs: load a TTF off the hot
-    // path under a session-scoped `font_id`, then draw a string every
-    // frame in immediate mode. Structured-shaped; `space` reuses
-    // `QuadSpace` so a screen-space HUD string and a world-anchored
-    // label ride the same discriminant.
+    // ADR-0105 text surface. The renderer draws text itself (the
+    // `aether.render.create_font` / `font_metrics` / `draw_text` kinds live
+    // in `aether-render`); the metrics table a guest measures with stays
+    // here, beside the wasm-safe scaling in `text_metrics`.
 
     /// One glyph's horizontal advance, in font units (em-square
     /// subdivisions), keyed by the Unicode scalar value (`char as u32`)
@@ -1218,7 +1215,7 @@ mod control_plane {
     /// subdivisions — so a consumer caches this table once and scales any
     /// measure to a draw size locally with
     /// `value * size_pixels / units_per_em`, the exact linear scaling the
-    /// `aether.text` cap applies as it lays a string out. The
+    /// renderer applies as it lays a string out. The
     /// per-codepoint `advances` fold the cmap in; a codepoint the font
     /// has no glyph for advances by `default_advance` (the `.notdef`
     /// glyph's advance), matching the draw path. Carried in

@@ -86,7 +86,7 @@
 //! trait method's own signature, so the default body type-checks against
 //! `WasmCtx<'_, Self>` / `NativeCtx<'_, Self>`. A default body that reaches
 //! another actor needs the adopter to declare it, so the set states that reach
-//! as a supertrait (`trait Shared: DependsOn<TextCapability>`, say), and the
+//! as a supertrait (`trait Shared: DependsOn<AudioCapability>`, say), and the
 //! expansion adds `Sized` to the supertraits, because the typed ctx needs a
 //! sized `Self` and every adopter is a concrete actor. A member that spells
 //! `Erased` keeps the erased view: its arm erases before the call. An override

@@ -15,9 +15,8 @@
 //!
 //! Gated by the `render` feature on `aether-substrate`. That gate does
 //! not currently keep wgpu out of the chassis that don't draw:
-//! `aether-chassis` enables the feature unconditionally and reaches
-//! wgpu a second way through `aether-text` -> `aether-render`, so hub
-//! and headless link it too. Decoupling them is future work.
+//! `aether-chassis` enables the feature unconditionally, so hub and
+//! headless link it too. Decoupling them is future work.
 
 mod capture;
 mod material;

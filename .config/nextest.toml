@@ -17,7 +17,7 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # binaries rather than profile-wide: a unit test that fails twice in a row is
 # not contention, and a profile-wide retry would quietly soften every gate.
 [[profile.ci.overrides]]
-filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
+filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-http) | package(=aether-render)) & kind(test)"
 retries = 1
 
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles
@@ -179,22 +179,6 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # first-match-wins ordering is unconstrained here.
 [[profile.ci.overrides]]
 filter = "package(=aether-fleet) & kind(test)"
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-# The `aether-text` text scenario binary (rehomed from the bundle's
-# `substrate_harness_scenario` dispatcher, issue #3772) boots a wgpu
-# `SubstrateHarness` per test and runs a dozen GPU captures; on CI's
-# shared 2-core runner the frames rasterize in software under
-# full-suite contention, so the binary stretches well past the 60s
-# steady-state cap while still making timely progress. It ran under
-# the bundle's 180s `kind(test)` cap above before the move; carry the
-# same wall-clock backstop — a deadlock guard a healthy run never
-# reaches. `kind(test)` scopes it to the integration binary; the
-# crate's unit tests keep the 60s default. Ordering: nextest applies
-# the first matching override per setting, so any narrower
-# `aether-text` binary override must be listed before this one.
-[[profile.ci.overrides]]
-filter = "package(=aether-text) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # Trybuild fixtures spawn a nested `cargo` build per `.rs` fixture.

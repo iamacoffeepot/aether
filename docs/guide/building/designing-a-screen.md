@@ -337,7 +337,7 @@ and each is the general form of a specific complaint.
   go; when they ask for its *look* to change, change the look.
 - **A box is sized from measured text, never from a character count.**
   A plate, a tooltip, a toast, a list cell: its width comes from the
-  face's real advances (the font metrics `aether.text` reports), not
+  face's real advances (the font metrics `aether.render` reports), not
   from characters times an average. Over a proportional face the average
   is wrong by a glyph every few words, and the text walks out of the box
   the estimate drew. If the measure is not available yet, draw nothing
@@ -400,7 +400,8 @@ component:
 - **Shapes**: plates, rules and control faces are `aether.render.draw_shapes`
   boxes, rounded, stroked or shadowed, under an optional clip
   ([Rendering & camera](../systems/rendering.md)).
-- **Text**: runs are `aether.text` draws, and `aether-text` reports real font
+- **Text**: runs are `aether.render.draw_text` draws, and
+  `aether.render.font_metrics` reports real font
   metrics (`FontMetrics`, `GlyphAdvance`), so a screen measures a string
   instead of counting characters ([Text](../systems/text.md)).
 - **Input**: pointer, key and window-size mail come from a subscription on

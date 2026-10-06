@@ -19,32 +19,38 @@ layout, identity/runtime split, test placement — see
 
 ## The exemplar
 
-Trace [`crates/aether-text/src/`][text] while you read.
-`TextCapability` owns the `aether.text` mailbox: a config-free CPU-only
-cap that keeps a little per-session state — a font registry and a glyph
-atlas — while typed request contexts correlate the work in flight. It
-answers both kind flavors this recipe teaches. `aether.text.draw` is fire-and-forget;
-`aether.text.load_font` is reply-bearing. It's small enough to hold in
-your head and exercises every step below. Verify its names against the
+Trace [`crates/aether-audio/src/`][audio] while you read.
+`AudioCapability` owns the `aether.audio` mailbox: a capability with a
+small config, a synth on a thread of its own, and per-session state — the
+bank assemblies and track loads in flight, each holding the reply it owes.
+It answers both kind flavors this recipe teaches. `aether.audio.note_on`
+is fire-and-forget; `aether.audio.load_instrument` is reply-bearing, and
+answered later. The synth and its DSP are most of the crate and none of
+this recipe: read the identity, the `#[runtime] impl`, and the load path,
+which between them exercise every step below. Verify its names against the
 current source as you go — a capability is a recompile-class recipe, so
 the symbols here rot faster than the explainers (see
 [the staleness rule](#staleness)).
 
-The identity lives in [`text/lib.rs`][lib]; the state and handler bodies
-in [`text/runtime/mod.rs`][runtime]; the owned kinds in
-[`text/kinds.rs`][kinds].
+The identity lives in [`audio/lib.rs`][lib]; the state and the handler
+list in [`audio/runtime/mod.rs`][runtime], with the handler bodies in
+[`audio/runtime/handlers.rs`][handlers] and the load bookkeeping in
+[`audio/runtime/load.rs`][load]; the owned kinds in
+[`audio/kinds.rs`][kinds].
 
-[text]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src
-[lib]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/lib.rs
-[runtime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/mod.rs
-[kinds]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs
+[audio]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src
+[lib]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/lib.rs
+[runtime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/mod.rs
+[handlers]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/handlers.rs
+[load]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/runtime/load.rs
+[kinds]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/kinds.rs
 
 ## 1. Name the mailbox
 
 A capability's mailbox name is its `NAMESPACE` const. Chassis-owned
-mailboxes live under the `aether.<name>` prefix — `aether.text`,
-`aether.audio`, `aether.fs`. Peers that declare `depends(TextCapability)`
-address the cap by type — `ctx.send::<TextCapability>(&kind)` — which resolves to a
+mailboxes live under the `aether.<name>` prefix — `aether.audio`,
+`aether.render`, `aether.fs`. Peers that declare `depends(AudioCapability)`
+address the cap by type — `ctx.send::<AudioCapability>(&kind)` — which resolves to a
 compile-time-const mailbox id derived from `NAMESPACE`, so there's no
 host round-trip for addressing. Pick a name that isn't already claimed;
 the builder rejects a collision at boot
@@ -60,15 +66,15 @@ X` in the runtime module names the runtime through `type State`
 (ADR-0123):
 
 ```rust
-// text/lib.rs — the identity half, always-on.
+// audio/lib.rs — the identity half, always-on.
 use aether_actor::actor;
 
-/// `aether.text` cap identity: a ZST carrying only the addressing —
+/// `aether.audio` cap identity: a ZST carrying only the addressing —
 /// `Addressable` (`NAMESPACE`, `Resolver`), the per-handler `HandlesKind`
 /// markers, and the singleton name-inventory entry, all emitted always-on
-/// by `#[actor]`.
-#[actor(singleton)]
-pub struct TextCapability;
+/// by `#[actor]`. Its `aether.fs` reads are declared.
+#[actor(singleton, root, depends(FsCapability))]
+pub struct AudioCapability;
 
 // The runtime half — state, substrate-typed imports, and the `#[runtime]
 // impl NativeActor` — lives in `runtime/`, gated once here on the cap's
@@ -79,58 +85,55 @@ mod runtime;
 ```
 
 ```rust
-// text/runtime/mod.rs — the runtime half, gated by the `mod runtime;`
+// audio/runtime/mod.rs — the runtime half, gated by the `mod runtime;`
 // line above. The substrate-typed imports enter only on a native build.
-use super::TextCapability;
-use crate::kinds::{DrawText, LoadFont, LoadFontResult};
-use crate::fs::{FsCapability, Read, ReadResult};
+use super::AudioCapability;
+use super::kinds::{LoadInstrument, LoadInstrumentResult, NoteOn};
 use aether_actor::runtime;
-use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
-/// The cap's mutable state — the font registry and glyph atlas.
-/// `#[handler::<class>]`s receive it as `state: &mut Self::State`.
-pub struct TextCapabilityState { /* … */ }
+/// The cap's mutable state — the synth's event queue and the loads in
+/// flight. `#[handler::<class>]`s receive it as `state: &mut Self::State`.
+pub struct AudioCapabilityState { /* … */ }
 
 #[runtime]
-impl NativeActor for TextCapability {
-    type State = TextCapabilityState;
-    type Config = ();
-    const NAMESPACE: &'static str = "aether.text";
+impl NativeActor for AudioCapability {
+    type State = AudioCapabilityState;
+    type Config = AudioConfig;
+    const NAMESPACE: &'static str = "aether.audio";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<TextCapabilityState, BootError> {
-        Ok(TextCapabilityState::new())
+    fn init(config: AudioConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<AudioCapabilityState, BootError> {
+        // … start the synth `config.output` asks for, or run without one …
     }
 
-    // Fire-and-forget: the handler returns `()`. `draw` lays the string
-    // out and emits textured quads to `aether.render` the same tick.
+    // Fire-and-forget: the handler returns `()`. `note_on` pushes one
+    // event onto the synth's queue.
     #[handler::tell]
-    fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
-        // … rasterize glyphs, send the quad batch …
+    fn on_note_on(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
+        state.handle_note_on(ctx, mail);
     }
 
-    // Reply-bearing, answered later: hold the owed `LoadFontResult`, keep
-    // the held reply with the font's waiters in state, and answer it from
-    // `on_read_result` or the parse completion. Only the font's first
-    // waiter forwards the `aether.fs.read`.
-    // See "text's held-reply variant" below.
+    // Reply-bearing, answered later: hold the owed `LoadInstrumentResult`
+    // and forward the `.sfz` read with the held reply as its context.
+    // See "audio's held-reply variant" below.
     #[handler::request]
-    fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: LoadFont) -> Pending<LoadFontResult> {
-        let (pending, held) = ctx.hold::<LoadFontResult>();
-        if state.join_font_load(&mail.namespace, &mail.path, |waiters| waiters.load.push(held)) {
-            TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path);
-        }
-        pending
+    fn on_load_instrument(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: LoadInstrument,
+    ) -> Pending<LoadInstrumentResult> {
+        state.handle_load_instrument(ctx, mail)
     }
 }
 ```
 
 The pieces:
 
-- **The identity ZST** — `pub struct TextCapability;` carries no state.
+- **The identity ZST** — `pub struct AudioCapability;` carries no state.
   `#[actor(singleton)]` emits its always-on `Addressable` + `HandlesKind<K>`
   markers, so a wasm guest writing
-  `ctx.send::<TextCapability>(&kind)` under `depends(TextCapability)`
+  `ctx.send::<AudioCapability>(&kind)` under `depends(AudioCapability)`
   compile-checks even on a
   build where the runtime half is gated out.
 - **`#[actor(singleton)]`** declares the cardinality — `singleton` for a
@@ -143,7 +146,7 @@ The pieces:
   identity never restates them. A `super`-rooted, glob, or `#[cfg]`-gated
   `use` is left behind (it would resolve differently one module down), so a
   kind reached that way still needs an import in the identity file.
-- **`#[runtime] impl NativeActor for TextCapability`** carries the
+- **`#[runtime] impl NativeActor for AudioCapability`** carries the
   behaviour. The `#[runtime]` attribute emits the runtime surface ungated
   — the `#[cfg(feature = "runtime")]` rides the `mod runtime;` line in
   `lib.rs`, so every impl already exists only on a build where the runtime
@@ -152,15 +155,16 @@ The pieces:
   state. It lives in the feature-gated `runtime` module so it never
   compiles into a wasm build, and `#[handler::<class>]`s receive it as
   `state: &mut Self::State`.
-- **`type Config`** is `()` for a config-free cap, or a real struct
-  ([step 3](#3-give-it-a-config-if-it-needs-one)). The chassis builder
-  threads it into `init`.
+- **`type Config`** is the struct of the cap's knobs — `AudioConfig`
+  here — or `()` for a cap with none
+  ([step 3](#3-give-it-a-config-if-it-needs-one)). The chassis resolves it
+  and hands it into `init`.
 - **`init(config, ctx)`** builds the runtime state (it returns
   `Self::State`, not `Self`). The mailbox is already claimed; `ctx` is a
   `NativeInitCtx` exposing `self_wake::<K>()` and `actor_probe()` for a
   thread the cap spawns, `publish_handle` for a driver-facing handle
-  bundle, and `guest_ctx` for a wasm guest host — text just builds plain
-  CPU state. `init` runs before the dispatcher
+  bundle, and `guest_ctx` for a wasm guest host — audio uses none of them:
+  it starts its synth thread and keeps the handle. `init` runs before the dispatcher
   starts and before any peer's dispatcher runs — no mail yet. Return
   `Err(BootError::…)` to abort the chassis build.
 - **`wire(&mut self, ctx) -> Result<(), BootError>`** (optional, default
@@ -169,7 +173,7 @@ The pieces:
   `init`. Return `Err(BootError::…)` to abort the chassis build; the cap's
   `unwire` still runs, with every cap that wired before it.
   **`unwire(&mut self, ctx)`** (optional) is the symmetric pre-shutdown
-  hook. Text needs neither.
+  hook. Audio needs neither.
 - **`#[handler::<class>] fn on_x(state: &mut Self::State, ctx, mail: K)`** infers
   the kind from its third parameter. The first parameter is the runtime
   state, threaded explicitly because the identity carries none — take
@@ -178,58 +182,62 @@ The pieces:
   locks](../foundations/actor-model.md). The handler receives `mail` by
   value.
 
-### Reply-bearing handlers, and text's held-reply variant
+### Reply-bearing handlers, and audio's held-reply variant
 
 A self-contained reply-bearing handler returns its reply kind (`-> R`,
 ADR-0112): the handler computes the answer this turn and the dispatcher
 sends it back. A fire-and-forget handler returns `()`.
 
-Text's `load_font` answers **later**, because it can't answer this turn —
-it must round-trip `aether.fs` first. It is still a `#[handler::request]`,
-declared `-> Pending<LoadFontResult>` (ADR-0243): `ctx.hold::<LoadFontResult>()`
-returns the `Pending<LoadFontResult>` receipt the handler returns, which
-sets its row, and a `Held<LoadFontResult>` ticket that answers the one
-`LoadFontResult` from a later turn. `hold` requires the reply kind to implement
-`HeldReply`, whose hand-written `unanswered()` is the failure the engine sends
-in its place if the capability closes first while the engine keeps running
-(an engine teardown sends nothing):
+Audio's `load_instrument` answers **later**, because it can't answer this
+turn — it must round-trip `aether.fs` first, once for the `.sfz` file and
+once for each sample it names. It is still a `#[handler::request]`,
+declared `-> Pending<LoadInstrumentResult>` (ADR-0243):
+`ctx.hold::<LoadInstrumentResult>()` returns the
+`Pending<LoadInstrumentResult>` receipt the handler returns, which sets its
+row, and a `Held<LoadInstrumentResult>` ticket that answers the one
+`LoadInstrumentResult` from a later turn. `hold` requires the reply kind to
+implement `HeldReply`, whose hand-written `unanswered()` is the failure the
+engine sends in its place if the capability closes first while the engine
+keeps running (an engine teardown sends nothing):
 
-1. **`on_load_font`** holds the reply and pushes the `Held` onto the font's
-   waiters in actor state: `font_loads` maps a font's `(namespace, path)` to
-   a `FontWaiters { load: Vec<Held<LoadFontResult>>, metrics:
-   Vec<Held<FontMetricsResult>> }`, one list per owed reply shape, so
-   answering a request in the wrong shape is a compile error. Only the
-   font's first waiter forwards an `aether.fs.read`, with
-   `ctx.send_with_context::<FsCapability>(&read, FontRead { namespace, path })`,
-   which compiles because `TextCapability` declares `depends(FsCapability)`.
-   A `font_metrics` grab that misses the resident registry joins the same
-   waiters, so every request for one font shares one read and one parse.
+1. **`on_load_instrument`** holds the reply. With no synth to load into it
+   answers `Err` at once. Otherwise it forwards an `aether.fs.read` for the
+   `.sfz` with
+   `ctx.send_with_context::<FsCapability>(&read, AudioLoadContext::Instrument { held })`,
+   which compiles because `AudioCapability` declares `depends(FsCapability)`.
+   The held reply rides the read's request context, so each request has
+   its own read and its own reply: nothing is shared between two loads,
+   even of one file.
 2. **`on_read_result`** takes the context back with
-   `ctx.take_context::<FontRead>()`, which names the font. On the error arm
-   it removes the font's waiters and answers each with its own kind's `Err`.
-   On success it stages the off-thread parse
+   `ctx.take_context::<AudioLoadContext>()`, and the context says which
+   read this answers. For the `.sfz` it parses the file, moves the held
+   reply into a `BankAssembly` kept in state under a minted `assembly_id`,
+   and sends one read per sample, each with
+   `AudioLoadContext::Sample { assembly_id, slot }`. A read or parse that
+   fails answers the held reply with `Err` there and then.
+3. When the last sample arrives it stages the decode and assembly off the
+   actor's turn
    ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
-   §9), which owes no reply of its own: the waiters stay in state, and the
-   task carries only a kind naming the font:
+   §9). The task owes no reply of its own: the assembly stays in state
+   with its held reply, and the task carries only a kind naming it:
 
    ```rust
-   ctx.stage_blocking_with::<FontParseOutput, FontParse>(FontParse { namespace, path, name })
-       .start(ctx, move || parse_font_bytes(bytes));
+   ctx.stage_blocking_with::<BankAssemblyOutput, BankAssemblyKey>(BankAssemblyKey { assembly_id })
+       .start(ctx, move || assemble_bank(name, &regions, &sample_bytes, target_rate));
    ```
-3. **`on_font_parsed`** (the `#[handler(task)]` completion) receives
-   `TaskDone<FontParseOutput>`, takes its `FontParse` with
-   `ctx.take_context()`, removes the font's waiters, registers the parsed
-   font once under a session-scoped `font_id`, and answers every waiter with
-   `held.answer(ctx, …)`: a `LoadFontResult::Ok { … }` for each load, a
-   `FontMetricsResult::Ok { … }` for each grab.
+4. **`on_instrument_assembled`** (the `#[handler(task)]` completion)
+   receives `TaskDone<BankAssemblyOutput>`, takes its `BankAssemblyKey`
+   with `ctx.take_context()`, removes the assembly, registers the bank
+   under a session-scoped instrument id, and answers the request with
+   `assembly.held.answer(ctx, …)`.
 
-Trace the full correlation in `runtime/mod.rs` rather than reading it
-re-explained here.
+Trace the full correlation in `runtime/handlers.rs` and `runtime/load.rs`
+rather than reading it re-explained here.
 
 The kinds a handler receives must exist in the substrate kind inventory
-so the dispatcher can decode the wire bytes. Text **owns** its kinds:
-`LoadFont`, `LoadFontResult`, `DrawText`, and the rest live in
-[`text/kinds.rs`][kinds] beside the cap that dispatches them (ADR-0121),
+so the dispatcher can decode the wire bytes. Audio **owns** its kinds:
+`NoteOn`, `LoadInstrument`, `LoadInstrumentResult`, and the rest live in
+[`audio/kinds.rs`][kinds] beside the cap that dispatches them (ADR-0121),
 always-on and wasm-safe (they need only `aether-data` + `serde`). Their
 `inventory::submit!` descriptor entries ride the `Kind` derive, so
 `aether_kinds::descriptors::all()` surfaces them. Registering a kind whose
@@ -250,10 +258,11 @@ an MCP-spawned caller's reply never landed (iamacoffeepot/aether#1321).
 
 ## 3. Give it a config if it needs one
 
-A config-free cap uses `type Config = ();` — text does, holding only CPU
-state. A cap with tunables declares a struct and derives `Config` on it,
-so its knobs flow through the same config-file/env/argv source stack every
-other cap uses rather than a raw `env::var` read. That dance —
+A cap with tunables declares a struct and derives `Config` on it, so its
+knobs flow through the same config-file/env/argv source stack every other
+cap uses rather than a raw `env::var` read. Audio's is `AudioConfig`: where
+the synth's samples go, and the sample rate to ask for. A cap with no knobs
+uses `type Config = ();`. That dance —
 `#[derive(aether_substrate::Config)]`, the emitted overlay, the struct's
 TOML section, and flattening the overlay into the chassis CLI — is
 [Configuration](../systems/configuration.md). You do not hand the resolved
@@ -271,7 +280,7 @@ where `params` is the cap's composer-supplied construction input (`A::Params`),
 not its config:
 
 ```rust
-builder.with_actor::<TextCapability>(())
+builder.with_actor::<AudioCapability>(())
 ```
 
 Composing a cap also accumulates its `A::Config` member into the chassis config
@@ -279,7 +288,12 @@ aggregate (ADR-0156), which is what puts its knobs in `--print-config` and the
 unknown-key sweep. When a composer needs to pin an explicit config value rather
 than let the stack resolve it, `with_actor_configured::<X>(params, config)` is
 the paired form — the `A::Config` type binds the value to the actor at the call,
-so an orphaned override can't be written.
+so an orphaned override can't be written. Audio's handler tests boot it that
+way, to run the synth with no device:
+
+```rust
+builder.with_actor_configured::<AudioCapability>((), AudioConfig { output: AudioOutput::Null, requested_sample_rate: None })
+```
 
 Where that line goes depends on which chassis should carry the cap:
 
@@ -287,8 +301,8 @@ Where that line goes depends on which chassis should carry the cap:
   [`crates/aether-chassis/src/boot.rs`][common], the
   shared composition those two chassis call. `FsCapability` lives here. Put
   a cap here only when both chassis serve it and everything it depends on;
-  `TextCapability` depends on render, which headless does not serve, so it
-  is not here. Adding it to the `.with_actor::<_>()` chain is all it takes: the
+  `AudioCapability` needs an audio device, which headless does not serve,
+  so it is not here. Adding it to the `.with_actor::<_>()` chain is all it takes: the
   `--describe` manifest is claim-derived ([ADR-0155][adr155]), so a cap
   appears in the roster the moment it claims a mailbox — there is no
   parallel namespace list to keep in lockstep.
@@ -299,8 +313,8 @@ Where that line goes depends on which chassis should carry the cap:
   required config through `SubstrateHarnessEnv`.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
-  the chassis crates. `TextCapability` is composed in the desktop and
-  harness chains, beside the render each serves; the desktop
+  the chassis crates. `AudioCapability` is composed in the desktop chain
+  alone. The desktop
   `RenderCapability` is booted as a pumped actor by the desktop driver
   (`ctx.boot_pumped_actor::<RenderCapability>(…)`) because it must run on the
   winit thread.
@@ -315,7 +329,7 @@ A pumped actor is **reserved at the Claim stage**, before any passive's
 `reserve_pumped::<A>()` and terminates in `build_passive_with_start(|passive| …)`,
 whose start boots the actor with `passive.boot_pumped_actor::<A>(…)`. The
 reservation is a live route, so a passive may declare `depends(A)` on a pumped
-actor (`TextCapability` declares `depends(RenderCapability)`), and mail sent to
+actor, and mail sent to
 the slot waits in its inbox until the pump boots. A reservation that is never
 booted fails the build, naming the slot: a plain `build_passive()` boots
 nothing, so a reservation fails it too.
@@ -337,11 +351,12 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 [adr232]: https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md
 [common]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis/src/boot.rs
 [substrateharness]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs
+[fsruntime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-fs/src/runtime/mod.rs
 
 ## 5. Passive cap or driver?
 
 Most capabilities are **passive**: they sit on a dispatcher and answer
-mail, added with `with_actor`. `TextCapability` is passive. An executable chassis
+mail, added with `with_actor`. `AudioCapability` is passive. An executable chassis
 also composes exactly one **driver** — the cap that owns the chassis main thread
 and its lifetime (the winit loop on desktop and the std timer on headless). The
 shared `SignalDriverCapability` from `aether-chassis`, which the hub and the
@@ -360,12 +375,12 @@ only when standing up a new chassis kind.
 
 ### Heavy native deps
 
-Text's runtime half pulls `fontdue`, a native-only dependency, through its
+Audio's runtime half pulls `cpal`, a native-only dependency, through its
 generic `runtime` feature on the `mod runtime;` line:
 `#[cfg(feature = "runtime")] mod runtime;`. The identity markers stay
-always-on (so guests still address the cap by type) while `fontdue` only
-enters when the feature is on. The renderer's `wgpu` (`render-runtime`)
-and audio's `cpal` (`audio-runtime`) gate the same way. A cap whose runtime
+always-on (so guests still address the cap by type) while `cpal` only
+enters when the feature is on. The renderer's `wgpu` and `fontdue` gate
+the same way. A cap whose runtime
 needs no heavy dep still gates its `mod runtime;` line on the generic
 `runtime` feature, so the split holds without minting a cap-specific gate.
 
@@ -374,20 +389,21 @@ needs no heavy dep still gates its `mod runtime;` line on the generic
 A native cap compiles into the substrate, so its tests drive a real
 handler with mail — no wasm, no FFI, no MCP session. (`export!`'s FFI
 shims are wasm32-only and belong to *components*, not capabilities; a
-native cap has nothing to cross-compile.) Text's in-crate pattern, in its
-`#[cfg(all(test, feature = "runtime"))] mod tests`:
+native cap has nothing to cross-compile.) The in-crate pattern is the
+pumped rig, which audio's own unit tests do not use; read it in
+[`crates/aether-fs/src/runtime/mod.rs`][fsruntime], whose `PumpedFs`
+fixture boots `FsCapability` this way:
 
 1. Boot the cap pumped on a real chassis, driven the way a pumped chassis
    driver drives its slot (ADR-0161 §Decision 2): `fresh_substrate()` gives
    the `(Arc<Registry>, Arc<Mailer>)` seed, `boot_bare_test_chassis(&registry,
    &mailer)` builds the passive chassis over it, and
    `PumpedDriver::boot(chassis, config, params)` boots the cap on that
-   chassis and drains once. Register a stand-in for each cap it depends on
-   first, with `testing::registered_ref` — text's fixture stands in at
-   `aether.render` and `aether.fs`, each forwarding the dispatch it receives
-   onto a channel the test reads.
+   chassis and drains once. A cap that depends on another registers a
+   stand-in for it first, with `testing::registered_ref`, whose closure
+   forwards each dispatch it receives onto a channel the test reads.
 2. Send mail through the pumped slot, never call a handler directly:
-   `cap.send_and_settle(cap.chassis().actor_ref::<TextCapability>(), &LoadFont { … }, None)`
+   `cap.send_and_settle(cap.chassis().actor_ref::<FsCapability>(), &Read { … }, None)`
    tracks the send as a chassis root and pumps the slot until that root
    settles, so the mail runs through the cap's `#[actor]`-generated dispatch
    exactly as production would — including a `-> Pending<R>` handler's
@@ -415,13 +431,15 @@ token as `testing::token_root(n)`, so it names no mailbox. The in-flight
 lineage a `NativeCtx` constructor takes is optional: `None` for a context with
 no inbound chain, `Some(root)` for one running inside a chain.
 
-Two scenario tests in `aether-text`'s `text_scenario.rs` anchor the held-reply
-flow. Each sends two `load_font`s and a `font_metrics` grab for one path before
-any is dispatched, so the later requests join the first one's read.
-`requests_for_one_font_share_one_read_and_each_get_their_own_reply` proves the
-three share one `aether.fs.read` and that each is answered in its own reply
-kind. `a_failed_font_read_answers_every_request_waiting_on_it` proves a failed
-read answers every waiting request, not just the one that started it.
+Three tests in `aether-audio`'s `tests/handlers.rs` anchor the held-reply
+flow, over a `SubstrateHarness` composing the real cap beside `aether.fs`.
+`load_instrument_assembles_the_bank_and_assigns_increasing_ids` proves the
+read, the sample fan-out and the assembly end in one answer per request.
+`concurrent_bank_loads_of_one_sample_answer_their_own_callers` proves two
+loads in flight at once, naming the same sample, each answer their own
+caller, because each read is told apart by its request context and not by
+its path. `load_instrument_replies_err_for_each_failed_step` proves every
+failure arm answers the held reply.
 
 For an end-to-end check across the real in-process boundaries — rendering, the
 frame loop, and the capabilities explicitly installed by its reduced builder —
@@ -433,8 +451,9 @@ tool uses. Supply namespace roots when the scenario needs `aether.fs`.
 
 If the cap fronts a load-bearing path, exercise it once live: bring up the
 [MCP harness](../mcp-harness.md), `spawn_substrate`, `send_mail` one of
-its kinds at the cap's mailbox name (`send_mail` a `draw` or `load_font`
-at `aether.text`), and read `actor_logs` for `aether.text`. Unit tests and
+its kinds at the cap's mailbox name (`send_mail` a `note_on` or a
+`set_master_gain` at `aether.audio`), and read `actor_logs` for
+`aether.audio`. Unit tests and
 clippy don't exercise the spawned-engine reply route (the
 `SourceAddr::Component` reply gotcha lives there), so a live smoke catches
 what the in-process test can't.
@@ -443,7 +462,7 @@ what the in-process test can't.
 
 This recipe carries file paths and symbol names, so confirm them against
 the current source before following it. The exemplar is
-[`crates/aether-text/src/`][text] — if a name here doesn't
+[`crates/aether-audio/src/`][audio] — if a name here doesn't
 match what's in the tree, fix the recipe as part of your change. The
 pointer is to the real cap, not a frozen copy, exactly so it tracks the
 code.

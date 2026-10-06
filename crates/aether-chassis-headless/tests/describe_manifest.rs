@@ -39,14 +39,7 @@ fn headless_describe_emits_manifest() {
     // headless claims none of these mailboxes and a dependent is refused at
     // load. A shared compose helper that grew one of them back, or a stub
     // reintroduced to claim the mailbox, fails here.
-    for absent in [
-        "aether.render",
-        "aether.window",
-        "aether.clipboard",
-        "aether.audio",
-        "aether.text",
-        "aether.substrate_harness",
-    ] {
+    for absent in ["aether.render", "aether.window", "aether.clipboard", "aether.audio", "aether.substrate_harness"] {
         assert!(
             !manifest.caps.iter().any(|c| c == absent),
             "headless serves no {absent}, so the claim-derived roster must exclude it, got {:?}",

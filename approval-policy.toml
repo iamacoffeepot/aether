@@ -249,10 +249,6 @@ glob = "crates/aether-tcp/**"
 tier = "judge"
 
 [[rules]]
-glob = "crates/aether-text/**"
-tier = "judge"
-
-[[rules]]
 glob = "crates/aether-trace/**"
 tier = "judge"
 

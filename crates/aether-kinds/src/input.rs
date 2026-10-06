@@ -95,7 +95,7 @@ pub struct MouseMove {
 ///
 /// Every pixel quantity the engine puts on the wire is physical, and they
 /// agree: `width` / `height` here, `QuadSpace::Screen` (the space solid
-/// quads, textured quads, and `aether.text.draw` address), and the cursor
+/// quads, textured quads, and `aether.render.draw_text` address), and the cursor
 /// position on `MouseMove`, `MouseButton`, `MouseButtonRelease`, and
 /// `MouseWheel`. So pointer-against-screen-space math — hover, hit-testing,
 /// dragging a handle — compares the two directly and must **not** apply

@@ -12,14 +12,20 @@
 //! Desktop surfaces attach explicitly by window path; the surfaceless harness
 //! GPU boots lazily from `offscreen_size`.
 //!
-//! The drawing and texture kinds, plus the three chassis-internal driver
+//! The drawing, texture and text kinds, plus the three chassis-internal driver
 //! kinds, live in [`kinds`] and compile always-on, so a wasm guest gets the
 //! kind types for typed addressing without the GPU stack behind the `runtime`
 //! feature. That runtime half splits along cohesion seams: `pipeline`,
 //! `texture`, `geometry`, `overlay`, `material`, `surface`, and `capture`. The
 //! capture-request and `FrameCheck` kinds stay in `aether-kinds`, consumed
 //! upstream by `aether-mcp` and the substrate core, as do the `QuadSpace` and
-//! `QuadScale` projection types the `aether.text` kinds share.
+//! `QuadScale` projection types and the `FontMetrics` table a guest measures
+//! text with.
+//!
+//! The renderer draws text itself (ADR-0248 §10): `create_font` registers a
+//! font from a blob, `font_metrics` reports its table, and `draw_text` lays
+//! strings out into one overlay batch over a reserved glyph-atlas texture.
+//! That runtime half is the `text` submodule.
 //!
 //! A chassis with no GPU composes no render actor at all, so a component that
 //! depends on [`RenderCapability`] is refused where it would stand up.
@@ -49,9 +55,10 @@ pub use kinds::*;
 // `kinds` module (re-exported above).
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    DEFAULT_CLEAR_COLOR, DrawSet, DrawSetRegistry, DrawSetRows, GeometryRegistry, HeldDraw, InstancesRegistry,
-    RealizedGeometry, RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
-    RenderTuningOverlay, StagedGeometry, StagedInstances, WHITE_TEXTURE_ID, apply_manifest_clear_color,
+    DEFAULT_CLEAR_COLOR, DrawSet, DrawSetRegistry, DrawSetRows, GLYPH_ATLAS_TEXTURE_ID, GeometryRegistry, HeldDraw,
+    InstancesRegistry, RealizedGeometry, RenderCapabilityState, RenderParams, RenderTuningConfig,
+    RenderTuningConfigLayer, RenderTuningOverlay, StagedGeometry, StagedInstances, WHITE_TEXTURE_ID,
+    apply_manifest_clear_color,
 };
 
 // What the desktop driver tells render about a window surface's present,
