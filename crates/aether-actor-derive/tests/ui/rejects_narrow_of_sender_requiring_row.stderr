@@ -1,0 +1,55 @@
+error[E0271]: type mismatch resolving `<Window as Contract<TakeFocus>>::Sender == Anyone`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:85:57
+   |
+85 |         let taking = ctx.actor_ref::<Window>().narrow::<Taking>();
+   |                                                ------   ^^^^^^ type mismatch resolving `<Window as Contract<TakeFocus>>::Sender == Anyone`
+   |                                                |
+   |                                                required by a bound introduced by this call
+   |
+note: expected this to be `Anyone`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:62:94
+   |
+62 |     fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _mail: TakeFocus, sender: ProtocolRef<FocusHolder>) {
+   |                                                                                              ^^^^^^^^^^^
+   = note: required for `Window` to implement `CoversRows<(Row<TakeFocus, Silent>,)>`
+   = note: required for `Taking` to implement `CoveredBy<Window>`
+note: required by a bound in `ActorRef::<R>::narrow`
+  --> $WORKSPACE/crates/aether-actor/src/reference/actor_ref.rs
+   |
+   |     pub const fn narrow<P: CoveredBy<R>>(self) -> ProtocolRef<P> {
+   |                            ^^^^^^^^^^^^ required by this bound in `ActorRef::<R>::narrow`
+
+error[E0277]: `ActorRef<Window>` cannot take a held `Dialed` for `DialSelf`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:93:24
+   |
+93 |     takes_a_held_reply(window);
+   |                        ^^^^^^ no row of this target answers `DialSelf` with `Dialed` from any sender
+   |
+   = help: the trait `HandsOff<DialSelf, Dialed>` is not implemented for `ActorRef<Window>`
+   = note: a held reply hands off to an `ActorRef<T>` whose handler for `DialSelf` replies `Dialed` and takes no `sender` parameter, or a `ProtocolRef<P>` whose row for `DialSelf` is `Row<DialSelf, Dialed>`; an `ErasedActorRef` proves no row (#6895)
+note: required by a bound in `takes_a_held_reply`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:90:37
+   |
+90 | fn takes_a_held_reply(_target: impl HandsOff<DialSelf, Dialed>) {}
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `takes_a_held_reply`
+
+error[E0271]: type mismatch resolving `<Window as Contract<TakeFocus>>::Sender == Anyone`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:97:54
+   |
+97 |     let _path = ActorPath::<Window>::root().narrow::<Taking>();
+   |                                             ------   ^^^^^^ type mismatch resolving `<Window as Contract<TakeFocus>>::Sender == Anyone`
+   |                                             |
+   |                                             required by a bound introduced by this call
+   |
+note: expected this to be `Anyone`
+  --> tests/ui/rejects_narrow_of_sender_requiring_row.rs:62:94
+   |
+62 |     fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _mail: TakeFocus, sender: ProtocolRef<FocusHolder>) {
+   |                                                                                              ^^^^^^^^^^^
+   = note: required for `Window` to implement `CoversRows<(Row<TakeFocus, Silent>,)>`
+   = note: required for `Taking` to implement `CoveredBy<Window>`
+note: required by a bound in `aether_actor::path::protocol_path::<impl ActorPath<R>>::narrow`
+  --> $WORKSPACE/crates/aether-actor/src/path/protocol_path.rs
+   |
+   |     pub fn narrow<P: CoveredBy<R>>(&self) -> ProtocolPath<P> {
+   |                      ^^^^^^^^^^^^ required by this bound in `aether_actor::path::protocol_path::<impl ActorPath<R>>::narrow`

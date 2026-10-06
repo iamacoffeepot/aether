@@ -6,7 +6,7 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
+use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, __SenderPath, AssetCatalog};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
@@ -800,6 +800,37 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let answer = __PublishedRows { rows };
             let bytes = wire::to_vec(&answer)
                 .map_err(|error| wasmtime::Error::msg(format!("published_rows: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0231 §11 — a guest's dispatch arm refuses a sender its
+    // handler's `sender: ProtocolRef<P>` requirement does not admit, and must
+    // name that sender: in the error it logs, and in the `PathRefused` a
+    // request's reply is built from, which carries the sender's path. The
+    // guest holds only the sender's position, and the reply is sent inside
+    // the same dispatch, before the handler would have run, so no mail can
+    // serve the read. The host reads the path through
+    // `NativeBinding::stamped_sender` and `NativeBinding::actor_path`, the
+    // two reads behind the native `NativeCtx::sender` and
+    // `NativeCtx::actor_path`, so the guest and native refusals name the
+    // sender the same way.
+    //
+    // The guest passes the position. The host encodes the answer as one
+    // `__SenderPath` — the canonical path of the route record there, and none
+    // for a position that holds no record — and delivers it as the packed
+    // `(ptr << 32) | len`, like `published_rows_p32`. The path is the name
+    // `describe_component` and every reply's sender already expose, and the
+    // host mints nothing, so a guest that passes an arbitrary position gets
+    // no reference from it. It is called only on the refusal path.
+    linker.func_wrap(
+        "aether",
+        "sender_path_p32",
+        |mut caller: Caller<'_, ComponentCtx>, position: u64| -> wasmtime::Result<u64> {
+            let binding = &caller.data().binding;
+            let path = binding.stamped_sender(MailboxId(position)).map(|sender| binding.actor_path(sender).to_string());
+            let bytes = wire::to_vec(&__SenderPath { path })
+                .map_err(|error| wasmtime::Error::msg(format!("sender_path: encode failed: {error}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;

@@ -35,6 +35,7 @@ impl WasmActor for A {
 
 impl Contract<Unhandled> for A {
     type Reply = Silent;
+    type Sender = aether_actor::Anyone;
     type Index = Here;
 }
 

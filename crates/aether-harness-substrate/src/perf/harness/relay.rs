@@ -63,8 +63,12 @@ impl aether_actor::Addressable for Relay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for Relay {}
-impl aether_actor::HandlesKind<Ping> for Relay {}
-impl aether_actor::HandlesKind<CountQuery> for Relay {}
+impl aether_actor::HandlesKind<Ping> for Relay {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<CountQuery> for Relay {
+    type Sender = aether_actor::Anyone;
+}
 /// The type-level mirror of [`Dispatch::capabilities`], row for row and in the
 /// same order, so a [`Relay`] reference narrows to the protocols its dispatch
 /// answers, such as [`PerfParticipant`](super::PerfParticipant).
@@ -75,10 +79,12 @@ impl aether_actor::Contracts for Relay {
 }
 impl aether_actor::Contract<Ping> for Relay {
     type Reply = Silent;
+    type Sender = aether_actor::Anyone;
     type Index = Here;
 }
 impl aether_actor::Contract<CountQuery> for Relay {
     type Reply = CountReport;
+    type Sender = aether_actor::Anyone;
     type Index = There<Here>;
 }
 impl aether_actor::Lifecycle<Self> for Relay {

@@ -4,10 +4,10 @@
 // borrows their fields.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{ActorInitError, CoveredBy, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+use aether_actor::{ActorInitError, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 use aether_tcp::{
     BindListenerResult, BindListenerSelf, ConnectResult, ConnectSelf, SessionClosed, SessionData, SessionWrite,
-    TcpCapability, TcpConsumer,
+    TcpCapability,
 };
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
@@ -159,13 +159,3 @@ impl WasmActor for TcpLoadProbe {
         }
     }
 }
-
-// The probe binds and dials with `BindListenerSelf` / `ConnectSelf`, and the
-// tcp cap casts the sender to `TcpConsumer` at receipt (ADR-0231 §4), refusing
-// a sender whose published rows lack either silent row. Checking coverage here
-// turns a handler change that would make that cast refuse the probe into a
-// build error instead of a FleetHarness run that times out waiting for frames.
-const _: () = {
-    const fn covered<P: CoveredBy<R>, R>() {}
-    covered::<TcpConsumer, TcpLoadProbe>();
-};

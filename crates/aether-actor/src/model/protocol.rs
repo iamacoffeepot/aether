@@ -91,6 +91,11 @@ pub trait RowSet: rows_sealed::Sealed {
     /// [`Contracts::CONTRACTS`](crate::Contracts::CONTRACTS), so the two lists
     /// compare directly.
     const CONTRACTS: &'static [(KindId, ReplyContract)];
+
+    /// Each row's kind name, in tuple order beside [`CONTRACTS`](Self::CONTRACTS):
+    /// what a refused sender's log line and answer name the row it lacks by
+    /// (ADR-0231 §11).
+    const KIND_NAMES: &'static [&'static str];
 }
 
 mod covers_sealed {
@@ -170,20 +175,48 @@ macro_rules! row_tuples {
         impl<$($kind: Kind, $reply: RowReply),+> RowSet for ($(Row<$kind, $reply>,)+) {
             const CONTRACTS: &'static [(KindId, ReplyContract)] =
                 &[$((<$kind as Kind>::ID, <$reply as ReplyShape>::CONTRACT)),+];
+            const KIND_NAMES: &'static [&'static str] = &[$(<$kind as Kind>::NAME),+];
         }
 
         impl<T, $($kind: Kind, $reply: RowReply),+> covers_sealed::Sealed<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply, Sender = Anyone>),+
         {
         }
 
         impl<T, $($kind: Kind, $reply: RowReply),+> CoversRows<($(Row<$kind, $reply>,)+)> for T
         where
-            $(T: Contract<$kind, Reply = $reply>),+
+            $(T: Contract<$kind, Reply = $reply, Sender = Anyone>),+
         {
         }
     };
+}
+
+impl rows_sealed::Sealed for () {}
+
+// The empty row set, which only [`Anyone`] names: a protocol written with
+// `#[protocol]` lists at least one row.
+impl RowSet for () {
+    const CONTRACTS: &'static [(KindId, ReplyContract)] = &[];
+    const KIND_NAMES: &'static [&'static str] = &[];
+}
+
+impl<T: ?Sized> covers_sealed::Sealed<()> for T {}
+
+impl<T: ?Sized> CoversRows<()> for T {}
+
+/// The sender requirement of a handler that asks nothing of its sender
+/// (ADR-0231 §11): a protocol with no rows, which every type covers, the
+/// erased ctx's [`Erased`](crate::Erased) included.
+///
+/// It is [`HandlesKind::Sender`](super::HandlesKind::Sender) for every
+/// handler that takes no `sender: ProtocolRef<P>` parameter, which `#[actor]`
+/// writes, and what a hand-written `HandlesKind` impl names. It is never a
+/// cast target and never a reference's protocol.
+pub struct Anyone;
+
+impl Protocol for Anyone {
+    type Rows = ();
 }
 
 row_tuples!(

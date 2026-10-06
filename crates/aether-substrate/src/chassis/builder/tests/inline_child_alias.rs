@@ -40,8 +40,12 @@ impl Addressable for AliasWatcher {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for AliasWatcher {}
-impl HandlesKind<AliasWatchOrder> for AliasWatcher {}
-impl HandlesKind<aether_kinds::MonitorNotice> for AliasWatcher {}
+impl HandlesKind<AliasWatchOrder> for AliasWatcher {
+    type Sender = aether_actor::Anyone;
+}
+impl HandlesKind<aether_kinds::MonitorNotice> for AliasWatcher {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for AliasWatcher {
     type Config = ();
     type Params = (Sender<ErasedActorRef>, Sender<Option<ErasedActorRef>>, Sender<()>);
@@ -181,7 +185,9 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Host {}
-    impl HandlesKind<DespawnOrder> for Host {}
+    impl HandlesKind<DespawnOrder> for Host {
+        type Sender = aether_actor::Anyone;
+    }
     impl aether_actor::Lifecycle<Self> for Host {
         type Config = ();
         type Params = Sender<bool>;

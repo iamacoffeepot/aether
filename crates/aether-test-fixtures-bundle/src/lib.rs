@@ -35,6 +35,7 @@ mod peer_routing;
 mod probe;
 mod protocol_path;
 mod quiet_probe;
+mod sender_gate;
 mod source_forwarder;
 mod source_observer;
 mod stateful_replace;
@@ -66,6 +67,7 @@ pub use peer_routing::{ParentPeerCaller, ParentPeerStandIn, ParentPeerTarget};
 pub use probe::{KeyProbe, Probe, ProbeWithConfig};
 pub use protocol_path::{PathHolder, PathHolderChild};
 pub use quiet_probe::QuietProbe;
+pub use sender_gate::{SenderGate, SenderGateHolder};
 pub use source_forwarder::SourceForwarder;
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, RehydrateTrap, Sidecar};
@@ -131,6 +133,8 @@ aether_actor::export!(
         WireFault,
         WireRefuser,
         PathHolder,
+        SenderGate,
+        SenderGateHolder,
     ],
     private = [InlineChild, InlineDespawnChild, InlineContextAsker, PathHolderChild],
 );

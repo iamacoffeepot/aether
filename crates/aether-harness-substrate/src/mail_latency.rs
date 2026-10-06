@@ -86,8 +86,12 @@ impl aether_actor::Addressable for RingRelay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for RingRelay {}
-impl aether_actor::HandlesKind<Ping> for RingRelay {}
-impl aether_actor::HandlesKind<RingLink> for RingRelay {}
+impl aether_actor::HandlesKind<Ping> for RingRelay {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<RingLink> for RingRelay {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for RingRelay {
     type Config = Self;
     type Params = ();
@@ -183,7 +187,9 @@ impl aether_actor::Addressable for HoldRelay {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for HoldRelay {}
-impl aether_actor::HandlesKind<Ping> for HoldRelay {}
+impl aether_actor::HandlesKind<Ping> for HoldRelay {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for HoldRelay {
     type Config = ();
     type Params = ();

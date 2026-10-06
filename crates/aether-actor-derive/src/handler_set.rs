@@ -133,16 +133,16 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
-    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_context_by_value, attr_is_fallback, attr_is_handler,
-    check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor, extract_handler_kind_type,
-    extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_departed_handler, reject_duplicate_handler_kinds, silent_call,
+    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, allow_context_by_value, attr_is_fallback,
+    attr_is_handler, check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor,
+    extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args,
+    parse_handler_class, reject_departed_handler, reject_duplicate_handler_kinds, reject_sender_parameter, silent_call,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
-    ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
-    contract_row_impl, contract_rows_expr, declaration_list, native_reply_contract, owned_reason, position_past,
-    refusal_answer, reply_marker_impl, row_entry, static_reason,
+    ContractRow, ReplyMarkerSite, concat_contract_rows, conjoined_cfg_predicate, contract_element, contract_element_ty,
+    contract_row_impl, contract_rows_expr, declaration_list, handles_kind_impl, native_reply_contract, owned_reason,
+    position_past, refusal_answer, reply_marker_impl, row_entry, static_reason,
 };
 use crate::wasm_expand::wasm_arm_body;
 
@@ -374,7 +374,16 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         };
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
-        let response_context = intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
+        // ADR-0231 §11: a set handler states nothing about its sender. The
+        // requirement belongs to one actor's row, and a set's rows are pasted
+        // onto every adopter through a bridge that carries no protocol path.
+        reject_sender_parameter(
+            &f.sig,
+            "a `#[handler_set]` handler",
+            "the set's rows are pasted onto every adopter, and the requirement is one actor's own",
+        )?;
+        let IntentParameters { response_context, .. } =
+            intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.unwrap_or_default();
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
         allow_context_by_value(&mut f.attrs, response_context.as_ref());
@@ -406,6 +415,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             class,
             unchecked_reason: args.reason,
             response_context,
+            sender: None,
         });
     }
 
@@ -669,12 +679,13 @@ fn handler_markers(h: &HandlerFn, position: usize, cfgs: &[syn::Attribute]) -> [
     let self_ty = quote! { $ty };
     let site = ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs };
     [
-        quote! {
-            #(#cfgs)*
-            impl ::aether_actor::HandlesKind<#kind_ty> for $ty {}
-        },
+        handles_kind_impl(kind_ty, None, &site),
         reply_marker_impl(h.class, &h.reply, kind_ty, &site),
-        contract_row_impl(h.class, &h.reply, kind_ty, &position_past(quote! { $base }, position), &site),
+        contract_row_impl(
+            ContractRow { class: h.class, reply: &h.reply, kind_ty, sender: None },
+            &position_past(quote! { $base }, position),
+            &site,
+        ),
     ]
 }
 

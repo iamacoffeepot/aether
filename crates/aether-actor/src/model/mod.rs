@@ -41,9 +41,9 @@ pub use self::declared::{
 pub use self::declared::{dependency_records_len, write_dependency_records};
 #[doc(hidden)]
 pub use self::protocol::ProtocolCast;
-pub use self::protocol::{At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
+pub use self::protocol::{Anyone, At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
 pub use self::publish::{Publisher, Publishes, Subscriber};
-pub use self::sendable::SendableTo;
+pub use self::sendable::{SendableTo, SentBy};
 
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the
 /// actor's own `NAMESPACE`, and whatever args the strategy needs, produce
@@ -655,7 +655,9 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// Per-handler-kind marker: `R: HandlesKind<K>` means actor `R` has a
 /// `#[handler]` method accepting kind `K`. Auto-emitted by the
 /// `#[actor]` proc-macro alongside the dispatch table — one impl per
-/// handler kind. Authors never write these by hand.
+/// handler kind. An actor's author never writes one by hand; a hand-written
+/// impl is test or harness scaffolding for a target with no `#[actor]` block,
+/// and it names [`Anyone`] as its [`Sender`](HandlesKind::Sender).
 ///
 /// Gates [`SendableTo<R>`] on the flat typed send verbs (`ctx.send::<R>`)
 /// and [`Target<K>`](crate::Target) on [`ActorRef<R>`](crate::ActorRef)
@@ -674,7 +676,23 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
     label = "`{Self}` does not handle `{K}`",
     note = "a `#[fallback]` does not count as handling a kind"
 )]
-pub trait HandlesKind<K: Kind>: Addressable {}
+pub trait HandlesKind<K: Kind>: Addressable {
+    /// What the handler requires of the actor that sends it `K`
+    /// (ADR-0231 §11): the protocol the sender must cover, or [`Anyone`] when
+    /// it asks nothing.
+    ///
+    /// `#[actor]` reads it from the handler's signature. A `#[handler::tell]`
+    /// or `#[handler::request]` that takes a fourth parameter
+    /// `sender: ProtocolRef<P>` requires `P`, and every other handler requires
+    /// [`Anyone`]. That one parameter drives two checks, so they cannot
+    /// drift. Every typed send verb bounds the sending actor against this
+    /// type ([`SentBy`]), so an actor that lacks one of `P`'s handlers cannot
+    /// build the send. And the handler's dispatch arm casts the mail's sender
+    /// to `P` before the handler runs and hands it the proven reference, so
+    /// mail from a route the build cannot see, such as a relayed call or mail
+    /// with no sender, is refused and never reaches the handler.
+    type Sender: Protocol;
+}
 
 /// Per-handler reply marker: `R: Replies<K, Reply = O>` means actor `R`
 /// accepts `K` and its single-reply handler returns kind `O`.

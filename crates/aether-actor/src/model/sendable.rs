@@ -1,9 +1,9 @@
 //! [`SendableTo`]: the payload bound of the flat typed send verbs
 //! (ADR-0232 §2).
 
-use aether_data::ActorMail;
+use aether_data::{ActorMail, Kind};
 
-use super::HandlesKind;
+use super::{CoveredBy, HandlesKind};
 
 mod sealed {
     use aether_data::ActorMail;
@@ -54,3 +54,37 @@ mod sealed {
 pub trait SendableTo<R>: ActorMail + sealed::Sealed<R> {}
 
 impl<K: ActorMail, R: HandlesKind<K>> SendableTo<R> for K {}
+
+mod sent_sealed {
+    use aether_data::Kind;
+
+    use crate::model::{CoveredBy, HandlesKind};
+
+    /// The seal: only the blanket impl below admits a sender.
+    pub trait Sealed<A, R> {}
+
+    impl<K: Kind, A, R: HandlesKind<K>> Sealed<A, R> for K where R::Sender: CoveredBy<A> {}
+}
+
+/// A kind the actor `A` may send to `R` (ADR-0231 §11): `K: SentBy<A, R>`
+/// holds when `A` covers the protocol `R`'s handler for `K` requires of its
+/// sender, [`HandlesKind::Sender`].
+///
+/// Every flat typed verb carries it beside [`SendableTo<R>`], with `A` the
+/// ctx's own actor, so a receiver that names `sender: ProtocolRef<P>` on its
+/// handler is sent that kind only by an actor with a handler for each of
+/// `P`'s kinds. A handler that takes no sender parameter requires
+/// [`Anyone`](crate::Anyone), which every `A` covers, so its sends build as
+/// before. Sealed: the one impl is the blanket below.
+///
+/// A sender that lacks a handler fails here with the coverage error naming
+/// the handler it lacks:
+///
+/// ```text
+/// error[E0277]: `HalfConsole` has no contract row for `KeyFocusLost`
+///   = note: required for `KeyFocusHolder` to implement `CoveredBy<HalfConsole>`
+///   = note: required for `TakeKeyFocus` to implement `SentBy<HalfConsole, Window>`
+/// ```
+pub trait SentBy<A, R>: sent_sealed::Sealed<A, R> {}
+
+impl<K: Kind, A, R: HandlesKind<K>> SentBy<A, R> for K where R::Sender: CoveredBy<A> {}

@@ -68,11 +68,13 @@ impl<'a, A> InlineParent<'a, A> {
 
 impl<A: Declared> InlineParent<'_, A> {
     /// Send `payload` to the parent, checked against every declared parent's
-    /// handler set. Routes in place through the cluster membrane and inherits
-    /// the handler's in-flight causal chain (ADR-0080 §7).
+    /// handler set and against what each parent's handler requires of its
+    /// sender, which `A` must cover (ADR-0231 §11). Routes in place through
+    /// the cluster membrane and inherits the handler's in-flight causal chain
+    /// (ADR-0080 §7).
     pub fn send<K: ActorMail>(&self, payload: &K)
     where
-        A::Parents: AllHandle<K>,
+        A::Parents: AllHandle<K, A>,
     {
         self.inline.route_or_enqueue(self.id.0, K::ID.0, encode_guest(payload), 1, ChainMode::Inherit, self.sender);
     }

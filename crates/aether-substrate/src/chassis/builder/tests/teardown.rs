@@ -278,7 +278,9 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         type Resolver = aether_actor::Many;
     }
     impl aether_actor::Root for Exploder {}
-    impl HandlesKind<Boom> for Exploder {}
+    impl HandlesKind<Boom> for Exploder {
+        type Sender = aether_actor::Anyone;
+    }
 
     impl aether_actor::Lifecycle<Self> for Exploder {
         type Config = ();

@@ -32,6 +32,14 @@
 //! exactly that canonical name, or none, as one [`__PublishedRows`],
 //! delivered the same way. This is the transport under a guest's decode of a
 //! `ProtocolPath<P>`, which checks the protocol's rows against the answer.
+//!
+//! A fifth sibling is the guest half of the `sender_path_p32` host fn
+//! (ADR-0231 §11): the guest hands the host the position of the sender the
+//! host stamped on the mail being dispatched, and the host answers the path
+//! of the route record there, or none, as one [`__SenderPath`], delivered the
+//! same way. This is the transport under a dispatch arm's refusal of a sender
+//! its handler's requirement does not admit, which names the sender in its
+//! log line and in the request's reply.
 
 use aether_data::{ErasedActorPath, KindId, ReplyContract, wire};
 use alloc::string::String;
@@ -127,6 +135,48 @@ pub fn published_rows(position: u64) -> __PublishedRows {
     let bytes = unsafe { take_delivered(ptr, len) };
     wire::from_bytes(&bytes).unwrap_or_else(|error| {
         panic!("aether-actor: published_rows: the host's answer does not decode as __PublishedRows: {error}")
+    })
+}
+
+/// The host's answer to one `sender_path_p32` call, wire-encoded into the
+/// buffer it delivers. The ABI between the substrate's host fn and this SDK,
+/// defined once here beside [`__ResolvedPath`] so the two sides cannot
+/// disagree on its shape.
+///
+/// Not part of the public API: a guest reaches it only inside a dispatch
+/// arm's refusal of its sender, and the substrate names it only to encode
+/// the answer.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct __SenderPath {
+    /// The canonical path of the route record at the position, or `None`
+    /// when no record stands there.
+    pub path: Option<String>,
+}
+
+/// Ask the host for the path of the route record at `position`, and decode
+/// its answer. `None` when no record stands there.
+///
+/// # Panics
+///
+/// Panics when the delivered bytes do not decode as a [`__SenderPath`], or
+/// the path in them is outside the ADR-0166 grammar: the host and this SDK
+/// disagree on the ABI, which no guest can recover from (ADR-0063).
+pub fn sender_path(position: u64) -> Option<ErasedActorPath> {
+    // SAFETY: FFI import; the host always hands back a live `(ptr, len)`, or
+    // traps.
+    let packed = unsafe { raw::sender_path(position) };
+    let (ptr, len) = unpack(packed);
+    // SAFETY: the return is always a live host-delivered buffer.
+    let bytes = unsafe { take_delivered(ptr, len) };
+    let answer: __SenderPath = wire::from_bytes(&bytes).unwrap_or_else(|error| {
+        panic!("aether-actor: sender_path: the host's answer does not decode as __SenderPath: {error}")
+    });
+
+    answer.path.map(|text| {
+        ErasedActorPath::new(&text).unwrap_or_else(|error| {
+            panic!("aether-actor: sender_path: the host answered `{text}`, which is not an actor path: {error}")
+        })
     })
 }
 

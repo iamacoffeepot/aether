@@ -146,7 +146,9 @@ impl crate::WasmDispatch<Self> for SucceedingChild {
     }
 }
 
-impl HandlesKind<()> for SucceedingChild {}
+impl HandlesKind<()> for SucceedingChild {
+    type Sender = crate::Anyone;
+}
 
 // Child-only: `SucceedingChild` has no `Root` record, so a live one always
 // has a recorded parent.
@@ -160,9 +162,13 @@ impl super::HasParent for SucceedingChild {
 
 // Both declared parents of `SucceedingChild` handle `()`, so the parent-door
 // test can send it up.
-impl HandlesKind<()> for NestingParent {}
+impl HandlesKind<()> for NestingParent {
+    type Sender = crate::Anyone;
+}
 
-impl HandlesKind<()> for LifecycleProbe {}
+impl HandlesKind<()> for LifecycleProbe {
+    type Sender = crate::Anyone;
+}
 
 impl ErasedWasmActor for SucceedingChild {
     fn erased_namespace(&self) -> &'static str {

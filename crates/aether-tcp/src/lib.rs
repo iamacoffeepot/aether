@@ -35,9 +35,12 @@
 //! A consumer covers the [`TcpConsumer`] protocol: it handles
 //! [`SessionData`] and [`SessionClosed`] silently. The explicit `consumer`
 //! is a `ProtocolPath<TcpConsumer>` proven at decode, a path that does not
-//! prove is answered `Err(Consumer(..))`, and a `_self` request casts its
-//! sender to the protocol at receipt, so every session holds its consumer as
-//! a `ProtocolRef<TcpConsumer>`.
+//! prove is answered `Err(Consumer(..))`, and a `_self` request's handler
+//! requires the protocol of its sender (ADR-0231 §11): the send builds only
+//! for an actor that covers it, the engine casts the sender before the
+//! handler runs, and a sender that does not cover it is answered
+//! `Err(Consumer(..))`. So every session holds its consumer as a
+//! `ProtocolRef<TcpConsumer>`.
 //!
 //! Listener (mailed to `aether.tcp.listener:<name>`):
 //! - `Close` → cooperative shutdown via `ctx.shutdown()`

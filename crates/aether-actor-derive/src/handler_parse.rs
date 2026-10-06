@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
@@ -41,6 +41,11 @@ pub struct HandlerFn {
     /// The stored request context a `#[handler::response]` takes as its fourth
     /// parameter (ADR-0243 §10), which the dispatch arm fills before the call.
     pub response_context: Option<ResponseContext>,
+    /// The protocol `P` of a `sender: ProtocolRef<P>` fourth parameter
+    /// (ADR-0231 §11): what the handler requires of its sender. It is the
+    /// row's `HandlesKind::Sender`, which the typed sends bound against, and
+    /// the cast the dispatch arm runs before the call.
+    pub sender: Option<Type>,
 }
 
 pub struct FallbackFn {
@@ -330,19 +335,81 @@ pub fn parse_handler_class(attr: &Attribute, args: &HandlerArgs) -> syn::Result<
     }
 }
 
+/// What an intent handler's fourth parameter is (#7201, ADR-0231 §11): a
+/// response's stored request context, a tell's or request's sender
+/// requirement, or neither. One handler never has both, since each is the
+/// fourth parameter of a different intent.
+#[derive(Default)]
+pub struct IntentParameters {
+    pub response_context: Option<ResponseContext>,
+    pub sender: Option<Type>,
+}
+
+/// `P` when `ty` spells `ProtocolRef<P>`: any path whose last segment is
+/// `ProtocolRef` with one type argument. The macro has no type resolution, so
+/// the match is syntactic, as it is for `Departed<W>` and `Pending<R>`.
+pub fn sender_protocol_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "ProtocolRef" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(GenericArgument::Type(protocol)) if args.args.len() == 1 => Some(protocol),
+        _ => None,
+    }
+}
+
+/// The protocol of a signature's `sender: ProtocolRef<P>` fourth parameter,
+/// read syntactically, or `None` when it has no such parameter.
+pub fn sender_parameter(sig: &Signature) -> Option<&Type> {
+    let FnArg::Typed(pt) = sig.inputs.get(3)? else {
+        return None;
+    };
+    sender_protocol_type(&pt.ty)
+}
+
+/// Refuse a `sender: ProtocolRef<P>` parameter where `what` cannot take one
+/// (ADR-0231 §11), naming the two attributes that do. `why` says what about
+/// the handler rules the requirement out.
+pub fn reject_sender_parameter(sig: &Signature, what: &str, why: &str) -> syn::Result<()> {
+    let Some(fourth) = sig.inputs.get(3) else {
+        return Ok(());
+    };
+    if sender_parameter(sig).is_none() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        fourth,
+        format!(
+            "{what} takes no `sender: ProtocolRef<P>` parameter: {why}. Only `#[handler::tell]` and \
+             `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle \
+             (ADR-0231 §11)"
+        ),
+    ))
+}
+
 /// Check a handler's signature against its [`HandlerIntent`] (#7201) and read
-/// a `#[handler::response]`'s fourth parameter. `request` must answer
-/// (`-> O` or `-> Pending<O>`); `tell`, `event`, and `response` answer
-/// nothing. Only `response` takes a fourth parameter, `context: C` or
-/// `context: Option<C>`, and never on a native `&[K]` slice handler, because
-/// a batched cast is never a reply. Each refusal names the attribute that
-/// fits. The kind extractors have already bounded the parameter count at four.
+/// its fourth parameter. `request` must answer (`-> O` or `-> Pending<O>`);
+/// `tell`, `event`, and `response` answer nothing. A `tell` or a `request`
+/// may take `sender: ProtocolRef<P>`, what it requires of its sender
+/// (ADR-0231 §11); a `response` may take `context: C` or
+/// `context: Option<C>` (ADR-0243 §10); an `event` takes no fourth parameter.
+/// A native `&[K]` slice handler takes neither: a batched cast is never a
+/// reply, and it is the high-rate path the per-mail cast stays off. Each
+/// refusal names the attribute that fits.
+/// The kind extractors have already bounded the parameter count at four.
 pub fn check_intent_signature(
     intent: HandlerIntent,
     reply: &HandlerReply,
     sig: &Signature,
     is_slice: bool,
-) -> syn::Result<Option<ResponseContext>> {
+) -> syn::Result<IntentParameters> {
     let word = intent.word();
     match (intent, reply) {
         (HandlerIntent::Request, HandlerReply::None) => {
@@ -367,14 +434,38 @@ pub fn check_intent_signature(
         _ => {}
     }
     let Some(fourth) = sig.inputs.get(3) else {
-        return Ok(None);
+        return Ok(IntentParameters::default());
     };
+    if let Some(protocol) = sender_parameter(sig) {
+        match intent {
+            HandlerIntent::Tell | HandlerIntent::Request => {}
+            HandlerIntent::Event => reject_sender_parameter(
+                sig,
+                "`#[handler::event]`",
+                "an event arrives from a publisher this actor subscribed to, so its sender is the actor's own choice",
+            )?,
+            HandlerIntent::Response => reject_sender_parameter(
+                sig,
+                "`#[handler::response]`",
+                "a response answers this actor's own request, so its sender is whoever the actor asked",
+            )?,
+        }
+        if is_slice {
+            reject_sender_parameter(
+                sig,
+                "a batched `mail: &[K]` handler",
+                "a batched cast is the high-rate path, and the engine's cast of the sender stays off it",
+            )?;
+        }
+        return Ok(IntentParameters { response_context: None, sender: Some(protocol.clone()) });
+    }
     if intent != HandlerIntent::Response {
         return Err(syn::Error::new_spanned(
             fourth,
             format!(
                 "`#[handler::{word}]` takes three parameters. A fourth parameter is the stored request \
-                 context, which only `#[handler::response]` takes (ADR-0243 §10)"
+                 context, which only `#[handler::response]` takes (ADR-0243 §10), or `sender: ProtocolRef<P>`, \
+                 which a `#[handler::tell]` or `#[handler::request]` takes (ADR-0231 §11)"
             ),
         ));
     }
@@ -398,9 +489,11 @@ pub fn check_intent_signature(
         && args.args.len() == 1
         && let Some(GenericArgument::Type(inner)) = args.args.first()
     {
-        return Ok(Some(ResponseContext { ty: inner.clone(), optional: true }));
+        let response_context = Some(ResponseContext { ty: inner.clone(), optional: true });
+        return Ok(IntentParameters { response_context, sender: None });
     }
-    Ok(Some(ResponseContext { ty: (*pt.ty).clone(), optional: false }))
+    let response_context = Some(ResponseContext { ty: (*pt.ty).clone(), optional: false });
+    Ok(IntentParameters { response_context, sender: None })
 }
 
 /// A wasm actor's departure handler (ADR-0079 §8): a `#[handler::event]`
@@ -467,6 +560,12 @@ pub fn check_watch_signature(
     let Some(fourth) = sig.inputs.get(3) else {
         return Ok(None);
     };
+    reject_sender_parameter(
+        sig,
+        "a `Departed<W>` handler",
+        "a departure is the engine's notice about an actor this one watched, and its fourth parameter is the \
+         watch's context",
+    )?;
     let FnArg::Typed(pt) = fourth else {
         return Err(syn::Error::new_spanned(fourth, "the context parameter must be `context: C`"));
     };
@@ -584,6 +683,50 @@ pub fn silent_call(
         };
         #handler_call
     }
+}
+
+/// The statements a dispatch arm runs before a handler that takes
+/// `sender: ProtocolRef<P>`, and the argument it then passes (ADR-0231 §11),
+/// shared by the wasm and native arms. `None` for a handler with no sender
+/// parameter, whose arm gets no cast and no branch.
+///
+/// The engine casts the inbound sender to `P` on the full dispatch ctx
+/// `__aether_ctx`, through the hidden helper each transport defines:
+/// `__sender_or_refuse::<P, K>()` for a tell, and
+/// `__sender_or_answer::<P, K, O>()` for a request replying `O`, which answers
+/// a refused sender with `O::from(PathRefused)`. Both log the refusal and
+/// return `Err` carrying what the arm returns, which `refused` turns into the
+/// arm's own return expression from the bound name `__aether_refused`. The
+/// request helper is spanned at the reply type, so a reply that is not
+/// `From<PathRefused>` fails there.
+#[derive(Default)]
+pub struct SenderArm {
+    pub prelude: TokenStream2,
+    pub argument: TokenStream2,
+}
+
+pub fn sender_arm(
+    sender: Option<&Type>,
+    kind_ty: &Type,
+    reply: Option<&Type>,
+    refused: &TokenStream2,
+) -> Option<SenderArm> {
+    let protocol = sender?;
+    let prove = reply.map_or_else(
+        || quote! { __aether_ctx.__sender_or_refuse::<#protocol, #kind_ty>() },
+        |reply_ty| {
+            quote_spanned! {reply_ty.span()=>
+                __aether_ctx.__sender_or_answer::<#protocol, #kind_ty, #reply_ty>()
+            }
+        },
+    );
+    let prelude = quote! {
+        let __aether_sender = match #prove {
+            ::core::result::Result::Ok(__aether_proven) => __aether_proven,
+            ::core::result::Result::Err(__aether_refused) => return #refused,
+        };
+    };
+    Some(SenderArm { prelude, argument: quote! { , __aether_sender } })
 }
 
 /// The ctx parameter's angle-bracketed **type** arguments in declaration
@@ -863,6 +1006,9 @@ pub struct NativeActorHandlerFn {
     /// [`HandlerFn::response_context`]. The intent word itself leaves no other
     /// trace once [`check_intent_signature`] has passed (#7201).
     pub response_context: Option<ResponseContext>,
+    /// A tell's or request's sender requirement (ADR-0231 §11); see
+    /// [`HandlerFn::sender`].
+    pub sender: Option<Type>,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
@@ -1198,6 +1344,7 @@ pub fn extract_native_actor_handler_kind(
     is_split: bool,
     allow_context: bool,
 ) -> syn::Result<(Type, bool)> {
+    reject_sender_on_unchecked(sig, allow_context)?;
     if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,
@@ -1247,6 +1394,21 @@ fn handler_arity_fits(sig: &Signature, allow_context: bool) -> bool {
     sig.inputs.len() == 3 || (allow_context && sig.inputs.len() == 4)
 }
 
+/// Refuse `sender: ProtocolRef<P>` on a handler with no intent word, which is
+/// an unchecked handler (ADR-0231 §11), ahead of the bare arity error that
+/// would not say why. `allow_context` is set exactly when the handler has an
+/// intent word, whose fourth parameter [`check_intent_signature`] judges.
+fn reject_sender_on_unchecked(sig: &Signature, allow_context: bool) -> syn::Result<()> {
+    if allow_context {
+        return Ok(());
+    }
+    reject_sender_parameter(
+        sig,
+        "`#[handler::unchecked(..)]`",
+        "it gives up the reply check, so the engine has no declared reply to refuse a request through",
+    )
+}
+
 /// Extract `K` from a handler method's third parameter (`arg: K`).
 /// Accepts any type path — trait-bound validation lives in the
 /// generated call site: the `mail.decode_typed::<K>()` in the
@@ -1254,6 +1416,7 @@ fn handler_arity_fits(sig: &Signature, allow_context: bool) -> bool {
 /// so unsupported types surface as a trait-bound error pointing at
 /// the user's signature.
 pub fn extract_handler_kind_type(sig: &Signature, allow_context: bool) -> syn::Result<Type> {
+    reject_sender_on_unchecked(sig, allow_context)?;
     if !handler_arity_fits(sig, allow_context) {
         return Err(syn::Error::new_spanned(
             sig,

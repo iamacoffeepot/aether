@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 /// A session holds its consumer as a `ProtocolRef<TcpConsumer>`, so its
 /// fan-out compiles only for these two kinds. The explicit `consumer` field of
 /// [`Connect`] and [`BindListener`] is a `ProtocolPath<TcpConsumer>`, and the
-/// reflexive [`ConnectSelf`] and [`BindListenerSelf`] cast their sender to it,
-/// so a consumer that would warn-drop either kind is refused before any
-/// socket is dialed or bound.
+/// handlers of the reflexive [`ConnectSelf`] and [`BindListenerSelf`] require
+/// it of their sender (ADR-0231 §11), so a consumer that would warn-drop
+/// either kind is refused before any socket is dialed or bound: an actor
+/// that lacks either handler cannot build the send.
 #[aether_actor::protocol]
 pub trait TcpConsumer {
     /// One reassembled length-prefix frame.
@@ -55,8 +56,11 @@ pub struct BindListener {
 /// the consumer: every accepted session delivers its inbound frames and
 /// close notices to the actor that sent this mail. The host-stamped sender
 /// is already proven, so a component binds itself without naming its own
-/// position; the cap casts it to [`TcpConsumer`] at receipt and replies
-/// `Err` without binding when its published rows do not cover the protocol.
+/// position. The cap's handler requires [`TcpConsumer`] of its sender
+/// (ADR-0231 §11): `ctx.send::<TcpCapability>(&BindListenerSelf { .. })`
+/// builds only for an actor with silent handlers for [`SessionData`] and
+/// [`SessionClosed`], and a sender that reaches the cap another way, such as
+/// a relayed call, is answered `Err(Consumer(..))` without binding.
 /// `addr` and `name` mean what they mean on [`BindListener`].
 /// Reply: `BindListenerResult`.
 #[aether_data::kind(name = "aether.tcp.bind_listener_self")]
@@ -87,10 +91,13 @@ pub struct Connect {
 /// `aether.tcp.connect_self` — [`Connect`] with the sender as the
 /// consumer: the dialed session delivers its inbound frames and close
 /// notices to the actor that sent this mail. The host-stamped sender is
-/// already proven, so a component dials without naming its own position;
-/// the cap casts it to [`TcpConsumer`] at receipt and replies `Err` without
-/// dialing when its published rows do not cover the protocol. `addr` and
-/// `name` mean what they mean on [`Connect`]. Reply: [`ConnectResult`].
+/// already proven, so a component dials without naming its own position.
+/// The cap's handler requires [`TcpConsumer`] of its sender (ADR-0231 §11):
+/// `ctx.send::<TcpCapability>(&ConnectSelf { .. })` builds only for an actor
+/// with silent handlers for [`SessionData`] and [`SessionClosed`], and a
+/// sender that reaches the cap another way, such as a relayed call, is
+/// answered `Err(Consumer(..))` without dialing. `addr` and `name` mean what
+/// they mean on [`Connect`]. Reply: [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect_self")]
 pub struct ConnectSelf {
     pub addr: String,
@@ -115,12 +122,13 @@ pub enum ConnectResult {
 /// Why a [`Connect`] or [`ConnectSelf`] dialed no session.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ConnectError {
-    /// The explicit `consumer` path did not prove (ADR-0231 §3): no route
-    /// has stood at it, its route does not cover [`TcpConsumer`], or its
-    /// actor has closed.
+    /// The consumer did not prove: the explicit `consumer` path
+    /// (ADR-0231 §3), where no route has stood at it, its route does not
+    /// cover [`TcpConsumer`], or its actor has closed; or the sender of a
+    /// [`ConnectSelf`] (ADR-0231 §11), named by its path, whose route does
+    /// not cover the protocol.
     Consumer(PathRefused),
-    /// The requested address and a human-readable dial, spawn, or `_self`
-    /// consumer failure.
+    /// The requested address and a human-readable dial or spawn failure.
     Failed { addr: String, error: String },
 }
 
@@ -161,13 +169,14 @@ pub enum BindListenerResult {
 /// Why a [`BindListener`] or [`BindListenerSelf`] bound nothing.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum BindListenerError {
-    /// The explicit `consumer` path did not prove (ADR-0231 §3): no route
-    /// has stood at it, its route does not cover [`TcpConsumer`], or its
-    /// actor has closed.
+    /// The consumer did not prove: the explicit `consumer` path
+    /// (ADR-0231 §3), where no route has stood at it, its route does not
+    /// cover [`TcpConsumer`], or its actor has closed; or the sender of a
+    /// [`BindListenerSelf`] (ADR-0231 §11), named by its path, whose route
+    /// does not cover the protocol.
     Consumer(PathRefused),
-    /// The requested address and a human-readable reason: a `_self` consumer
-    /// refusal, an addr parse failure, port-in-use, an OS bind error, or a
-    /// namespace collision.
+    /// The requested address and a human-readable reason: an addr parse
+    /// failure, port-in-use, an OS bind error, or a namespace collision.
     Failed { addr: String, error: String },
 }
 

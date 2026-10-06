@@ -42,7 +42,9 @@ impl aether_actor::Addressable for SubstrateHarnessObserver {
     type Resolver = aether_actor::One;
 }
 
-impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {}
+impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {
+    type Sender = aether_actor::Anyone;
+}
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the harness's
@@ -1030,4 +1032,80 @@ pub struct WatchClerkSpawn {
     pub key: String,
     pub target: String,
     pub tag: u32,
+}
+
+/// Issue 7532: what a sender gate requires of whoever sends it a
+/// [`SenderGateTake`] or a [`SenderGateDial`] (ADR-0231 §11): a silent handler for the
+/// [`SenderGateGranted`] it mails back.
+#[aether_actor::protocol]
+pub trait SenderGateGrantee {
+    fn granted(mail: SenderGateGranted);
+}
+
+/// Issue 7532: a tell whose handler takes `sender: ProtocolRef<SenderGateGrantee>`.
+/// A gate that runs it mails the sender a [`SenderGateGranted`] carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.take", copy)]
+pub struct SenderGateTake {
+    pub tag: u32,
+}
+
+/// Issue 7532: a request whose handler takes
+/// `sender: ProtocolRef<SenderGateGrantee>`. A gate that runs it mails the sender a
+/// [`SenderGateGranted`] carrying `tag` and answers [`SenderGateDialed::Ok`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.dial", copy)]
+pub struct SenderGateDial {
+    pub tag: u32,
+}
+
+/// Issue 7532: the reply to [`SenderGateDial`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.dialed", eq)]
+pub enum SenderGateDialed {
+    /// The gate's handler ran for the dial carrying `tag`.
+    Ok { tag: u32 },
+    /// The engine refused the dial's sender before the handler ran.
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for SenderGateDialed {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
+}
+
+/// Issue 7532: what a gate mails the sender it was handed, through the
+/// proven reference, carrying the tag of the mail that ran its handler.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.granted", copy, eq)]
+pub struct SenderGateGranted {
+    pub tag: u32,
+}
+
+/// Issue 7532: ask a gate how many times each of its two handlers ran.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.query", copy, default)]
+pub struct SenderGateQuery;
+
+/// Issue 7532: the reply to [`SenderGateQuery`].
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.report", copy, eq)]
+pub struct SenderGateReport {
+    pub takes: u32,
+    pub dials: u32,
+}
+
+/// Issue 7532: tells a gate holder to send its gate a [`SenderGateTake`] and a
+/// [`SenderGateDial`], each carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.trigger", copy)]
+pub struct SenderGateTrigger {
+    pub tag: u32,
+}
+
+/// Issue 7532: ask a gate holder what it has heard back from its gate.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_query", copy, default)]
+pub struct SenderGateHolderQuery;
+
+/// Issue 7532: the reply to [`SenderGateHolderQuery`]: the tag of each
+/// [`SenderGateGranted`] the holder received, in order, and each
+/// [`SenderGateDialed`] it was answered with.
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_report", eq)]
+pub struct SenderGateHolderReport {
+    pub granted: Vec<u32>,
+    pub dialed: Vec<SenderGateDialed>,
 }

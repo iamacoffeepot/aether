@@ -38,7 +38,9 @@ fn with_actor_boots_dispatches_and_tears_down() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for ProbeCap {}
-    impl HandlesKind<Ping> for ProbeCap {}
+    impl HandlesKind<Ping> for ProbeCap {
+        type Sender = aether_actor::Anyone;
+    }
 
     impl aether_actor::Lifecycle<Self> for ProbeCap {
         type Config = ();
@@ -127,7 +129,9 @@ fn with_actor_stamps_local_for_init_and_handler() {
         type Resolver = aether_actor::One;
     }
     impl aether_actor::Root for LocalProbe {}
-    impl HandlesKind<Tick> for LocalProbe {}
+    impl HandlesKind<Tick> for LocalProbe {
+        type Sender = aether_actor::Anyone;
+    }
 
     // Newtype-per-slot is the Local convention: each
     // logical storage gets its own type, so two probes that
@@ -218,7 +222,9 @@ macro_rules! counting_cap {
             type Resolver = aether_actor::One;
         }
         impl aether_actor::Root for $type {}
-        impl HandlesKind<$ping> for $type {}
+        impl HandlesKind<$ping> for $type {
+            type Sender = aether_actor::Anyone;
+        }
         impl aether_actor::Lifecycle<Self> for $type {
             type Config = ();
             type Params = Arc<AtomicU32>;

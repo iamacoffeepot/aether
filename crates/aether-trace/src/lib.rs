@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 
 // Handler-signature kind must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<DispatchTraced> for X {}` always-on,
+// `#[actor]` emits `impl HandlesKind<DispatchTraced> for X { type Sender = aether_actor::Anyone; }` always-on,
 // outside the `feature = "runtime"` gate. The reply kind
 // (`DispatchTracedAck`) is named only by the gated handler body, so it
 // rides the runtime gate below.

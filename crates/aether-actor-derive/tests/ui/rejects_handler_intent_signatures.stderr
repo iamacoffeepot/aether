@@ -16,7 +16,7 @@ error: `#[handler::response]` answers nothing, so it returns `()`. A handler tha
 77 |     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, ping: Ping) -> Pong {
    |                                                                             ^^^^^^^
 
-error: `#[handler::event]` takes three parameters. A fourth parameter is the stored request context, which only `#[handler::response]` takes (ADR-0243 §10)
+error: `#[handler::event]` takes three parameters. A fourth parameter is the stored request context, which only `#[handler::response]` takes (ADR-0243 §10), or `sender: ProtocolRef<P>`, which a `#[handler::tell]` or `#[handler::request]` takes (ADR-0231 §11)
   --> tests/ui/rejects_handler_intent_signatures.rs:93:78
    |
 93 |     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping, _context: Pong) {}

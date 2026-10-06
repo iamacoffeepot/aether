@@ -231,16 +231,6 @@ pub struct ListenerSpawnKey {
     pub listener_name: String,
 }
 
-/// Type a `_self` request's sender as the session consumer (ADR-0231 §4's
-/// guard cast), or name why it cannot be one: the mail has no actor sender,
-/// or the sender's published rows do not cover [`TcpConsumer`].
-fn cast_consumer<A>(ctx: &NativeCtx<'_, A>, request: &str) -> Result<ProtocolRef<TcpConsumer>, String> {
-    let sender = ctx.sender().ok_or_else(|| format!("{request} needs an actor sender to deliver frames to"))?;
-    ctx.cast::<TcpConsumer>(sender).ok_or_else(|| {
-        format!("{request} sender does not handle `SessionData` and `SessionClosed` silently (TcpConsumer)")
-    })
-}
-
 #[runtime]
 impl NativeActor for TcpCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -285,22 +275,26 @@ impl NativeActor for TcpCapability {
     /// Dial `mail.addr` with the sender as the session's consumer, as
     /// [`Self::on_connect`] does with an explicit consumer.
     ///
-    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
-    /// §4), so nothing is dialed for a sender that would warn-drop the
-    /// session's frames or its close notice.
+    /// The `sender` parameter is the requirement (ADR-0231 §11): an actor
+    /// sends this kind only when it covers [`TcpConsumer`], and the engine
+    /// casts the sender before this handler runs, so nothing is dialed for a
+    /// sender that would warn-drop the session's frames or its close notice.
     ///
     /// # Agent
-    /// Reply: `ConnectResult`. `Err` when the mail carries no actor sender
-    /// (a session has no inbox to deliver frames to), when the sender's
-    /// published rows do not handle `SessionData` and `SessionClosed`
-    /// silently, or on the errors `Connect` reports.
+    /// Reply: `ConnectResult`. A sender whose published rows do not handle
+    /// `SessionData` and `SessionClosed` silently is answered
+    /// `Err(Consumer(..))` naming it, without dialing; mail with no actor
+    /// sender (a session has no inbox to deliver frames to) is refused with
+    /// no reply. Otherwise `Err` on the errors `Connect` reports.
     #[handler::request]
-    fn on_connect_self(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ConnectSelf) -> Pending<ConnectResult> {
+    fn on_connect_self(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: ConnectSelf,
+        sender: ProtocolRef<TcpConsumer>,
+    ) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
-        match cast_consumer(ctx, "connect_self") {
-            Ok(consumer) => dial(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &ConnectResult::failed(mail.addr, error)),
-        }
+        dial(state, ctx, held, mail.addr, mail.name, Some(sender));
         pending
     }
 
@@ -380,26 +374,26 @@ impl NativeActor for TcpCapability {
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr` whose consumer
     /// is the sender, as [`Self::on_bind`] does with an explicit consumer.
     ///
-    /// The sender is cast to [`TcpConsumer`] once, at receipt (ADR-0231
-    /// §4), so nothing is bound for a sender that would warn-drop its
-    /// sessions' frames or close notices.
+    /// The `sender` parameter is the requirement (ADR-0231 §11): an actor
+    /// sends this kind only when it covers [`TcpConsumer`], and the engine
+    /// casts the sender before this handler runs, so nothing is bound for a
+    /// sender that would warn-drop its sessions' frames or close notices.
     ///
     /// # Agent
-    /// Reply: `BindListenerResult`. `Err` when the mail carries no actor
-    /// sender (a session has no inbox to deliver frames to), when the
-    /// sender's published rows do not handle `SessionData` and
-    /// `SessionClosed` silently, or on the errors `BindListener` reports.
+    /// Reply: `BindListenerResult`. A sender whose published rows do not
+    /// handle `SessionData` and `SessionClosed` silently is answered
+    /// `Err(Consumer(..))` naming it, without binding; mail with no actor
+    /// sender (a session has no inbox to deliver frames to) is refused with
+    /// no reply. Otherwise `Err` on the errors `BindListener` reports.
     #[handler::request]
     fn on_bind_self(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         mail: BindListenerSelf,
+        sender: ProtocolRef<TcpConsumer>,
     ) -> Pending<BindListenerResult> {
         let (pending, held) = ctx.hold::<BindListenerResult>();
-        match cast_consumer(ctx, "bind_listener_self") {
-            Ok(consumer) => bind_listener(state, ctx, held, mail.addr, mail.name, Some(consumer)),
-            Err(error) => held.answer(ctx, &BindListenerResult::failed(mail.addr, error)),
-        }
+        bind_listener(state, ctx, held, mail.addr, mail.name, Some(sender));
         pending
     }
 

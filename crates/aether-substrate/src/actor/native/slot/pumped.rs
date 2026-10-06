@@ -325,7 +325,9 @@ mod tests {
         const NAMESPACE: &'static str = "test.pumped.peer";
         type Resolver = One;
     }
-    impl HandlesKind<Poke> for Peer {}
+    impl HandlesKind<Poke> for Peer {
+        type Sender = aether_actor::Anyone;
+    }
 
     /// The toy actor the tests pump by hand. Its handlers exercise every
     /// dispatch path a pumped slot runs: a `-> R` reply, the framework

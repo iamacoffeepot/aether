@@ -5,11 +5,11 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, WatchHandlerFn, allow_abi_receiver,
-    allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature, check_watch_signature,
-    classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type, fill_ctx_actor,
-    handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
-    reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result, silent_call,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, SenderArm, WatchHandlerFn,
+    allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature,
+    check_watch_signature, classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type,
+    fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
+    reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result, sender_arm, silent_call,
     validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
@@ -17,9 +17,9 @@ use crate::manifest::{
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
-    DeclaredLists, ReplyMarkerSite, RowSpec, conjoined_cfg_predicate, contract_element, contract_row_impl,
-    contract_rows_expr, contracts_impl, declared_impl, position, refusal_answer, reply_marker_impl, rows_list,
-    watchable_actor_impl,
+    ContractRow, DeclaredLists, ReplyMarkerSite, RowSpec, conjoined_cfg_predicate, contract_element, contract_row_impl,
+    contract_rows_expr, contracts_impl, declared_impl, handles_kind_impl, position, refusal_answer, reply_marker_impl,
+    rows_list, watchable_actor_impl,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -153,8 +153,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                         watch_handlers.push(WatchHandlerFn { method: f, watched_ty, context_ty, cfgs });
                         continue;
                     }
-                    let response_context =
-                        intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
+                    let IntentParameters { response_context, sender } = intent
+                        .map(|i| check_intent_signature(i, &reply, &f.sig, false))
+                        .transpose()?
+                        .unwrap_or_default();
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -172,6 +174,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                         unchecked_reason: args.reason,
                         cfgs,
                         response_context,
+                        sender,
                     });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
@@ -571,14 +574,23 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // errors at the call site. The handler list above
     // is the single source of truth — adding a `#[handler]` automatically
     // updates senders' compile-time checks.
+    // ADR-0231 §11: the marker names what the handler requires of its sender,
+    // read from its `sender: ProtocolRef<P>` parameter, which the typed sends
+    // bound the sending actor against.
     let handles_kind_impls = handlers.iter().map(|h| {
-        let kind_ty = &h.kind_ty;
-        let cfgs = &h.cfgs;
-        quote! {
-            #(#cfgs)*
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
-        }
+        let impl_generics_ts = quote! { #impl_generics };
+        let self_ty_ts = quote! { #self_ty };
+        let where_clause_ts = quote! { #where_clause };
+        handles_kind_impl(
+            &h.kind_ty,
+            h.sender.as_ref(),
+            &ReplyMarkerSite {
+                impl_generics: &impl_generics_ts,
+                self_ty: &self_ty_ts,
+                where_clause: &where_clause_ts,
+                cfgs: &h.cfgs,
+            },
+        )
     });
     let reply_marker_impls = handlers.iter().map(|h| {
         let impl_generics_ts = quote! { #impl_generics };
@@ -604,9 +616,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // this actor's list through its bridge's `@rows` arm (ADR-0169).
     let contract_rows = handlers.iter().enumerate().map(|(index, h)| {
         contract_row_impl(
-            h.class,
-            &h.reply,
-            &h.kind_ty,
+            ContractRow { class: h.class, reply: &h.reply, kind_ty: &h.kind_ty, sender: h.sender.as_ref() },
             &position(index),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
@@ -1043,6 +1053,7 @@ fn departure_handler(watch_handlers: &[WatchHandlerFn]) -> syn::Result<HandlerFn
         class: HandlerClass::Single,
         unchecked_reason: None,
         response_context: None,
+        sender: None,
     })
 }
 
@@ -1110,10 +1121,18 @@ fn build_dispatch_body(
         // `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle and
         // holds the requester's settlement for the `Held<R>` minted beside
         // the receipt.
+        // ADR-0231 §11: an arm whose handler takes `sender: ProtocolRef<P>`
+        // casts the inbound sender to `P` first and passes the proven
+        // reference as the fourth argument. A sender the cast refuses never
+        // reaches the handler: the helper logs it and answers a request, and
+        // the arm returns the code the helper hands back.
+        let SenderArm { prelude: prove_sender, argument: sender } =
+            sender_arm(h.sender.as_ref(), k, h.reply.manifest_kind(), &quote! { __aether_refused }).unwrap_or_default();
         let (call, rc) = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => (
                 quote! {
-                    let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
+                    #prove_sender
+                    let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded #sender);
                     ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
@@ -1123,13 +1142,17 @@ fn build_dispatch_body(
             (HandlerClass::Single, HandlerReply::None) => {
                 let rc = quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE };
                 let call = silent_call(h.response_context.as_ref(), method, k, &rc, |context| {
-                    quote! { self.#method(#ctx.as_single(), __aether_decoded #context); }
+                    quote! {
+                        #prove_sender
+                        self.#method(#ctx.as_single(), __aether_decoded #context #sender);
+                    }
                 });
                 (call, rc)
             }
             (HandlerClass::Single, HandlerReply::Deferred(_)) => (
                 quote! {
-                    let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);
+                    #prove_sender
+                    let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded #sender);
                     __aether_ctx.__accept_pending(__aether_pending);
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_HOLD },

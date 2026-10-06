@@ -46,6 +46,7 @@ mod path;
 pub mod reference;
 mod refusal_answer;
 pub mod request_context;
+mod sender_refused;
 pub mod trace;
 pub mod wasm;
 
@@ -58,12 +59,12 @@ pub use local::Local;
 pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, AllHandle, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf, Contract,
-    Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap,
-    HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol,
-    Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo,
-    Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, WatchTarget, Watchable, Watches,
-    declared_dependencies, root_mailbox, validate_namespace_segment,
+    Actor, Addressable, AllHandle, Anyone, At, CallerAddressable, CallerScope, CallerScoped, CastTarget, ChildOf,
+    Contract, Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver,
+    DependsOn, Gap, HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN,
+    NamespaceError, One, Protocol, Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex,
+    RowReply, RowSet, SendableTo, SentBy, Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared,
+    WatchTarget, Watchable, Watches, declared_dependencies, root_mailbox, validate_namespace_segment,
 };
 pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError, TypedPath};
 #[doc(hidden)]
@@ -72,11 +73,12 @@ pub use reference::{ActorRef, Direct, ErasedActorRef, HandsOff, ProtocolRef, Tar
 pub use request_context::{RequestContextTable, split_state_envelope};
 // The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32` and
 // `route_rows_p32` answer (ADR-0231 §4, §3), and the `live_route_p32` answer
-// (ADR-0230 §3, #7205): the substrate's host fns encode them, and
-// `WasmCtx::resolve_path`, `WasmCtx::cast`, a guest's `ProtocolPath` decode,
-// and `WasmCtx::resolve` decode them.
+// (ADR-0230 §3, #7205), and the `sender_path_p32` answer (ADR-0231 §11): the
+// substrate's host fns encode them, and `WasmCtx::resolve_path`,
+// `WasmCtx::cast`, a guest's `ProtocolPath` decode, `WasmCtx::resolve`, and a
+// dispatch arm's refusal of its sender decode them.
 #[doc(hidden)]
-pub use wasm::bridge::address::{__LiveRoute, __PublishedRows, __ResolvedPath};
+pub use wasm::bridge::address::{__LiveRoute, __PublishedRows, __ResolvedPath, __SenderPath};
 // Both transports send through flat verbs and hold no typed handle: wasm
 // actors through [`WasmCtx`], native actors through
 // `aether_substrate::actor::native::NativeCtx`.
@@ -124,6 +126,19 @@ pub const DISPATCH_HANDLED_RELEASE: u32 = 3;
 /// [`DISPATCH_HANDLED`].
 pub const DISPATCH_HANDLED_HOLD: u32 = 4;
 
+/// Return code for "a single arm's handler requires something of its sender,
+/// and this mail's sender does not cover it, so the handler did not run"
+/// (ADR-0231 §11). The arm logged the refusal and sent no reply: it is a tell,
+/// or a request whose mail has no sender to name in one. The substrate frees
+/// the dispatch's reply handle, as for [`DISPATCH_HANDLED_RELEASE`], and
+/// answers the refusal notice `aether.mail.decode_refused` to a reply target
+/// that opted in to it, so a caller relayed through `aether.rpc.server` is
+/// told. A request the arm answered itself returns
+/// [`DISPATCH_HANDLED_RELEASE`] instead, so its caller gets one answer. A
+/// host that predates it reads it as an unrecognized class and keeps the
+/// handle, as for [`DISPATCH_HANDLED`].
+pub const DISPATCH_REFUSED_SENDER: u32 = 5;
+
 /// Status the guest's `on_dehydrate` export returns when a live held reply
 /// was left unsaved: refuse the replace (ADR-0243 §6). The substrate maps it
 /// onto the save-error rollback, which reinstates the old guest so the
@@ -161,6 +176,9 @@ pub mod __macro_internals {
     // row's reply with this selector, which refuses to compile when a
     // path-carrying request's reply cannot say so.
     pub use crate::refusal_answer::{Refusal, RefusalAnswer, refused_reply};
+    // ADR-0231 §11: what both transports' dispatch arms build, log, and
+    // answer from when a handler's sender requirement refuses the sender.
+    pub use crate::sender_refused::SenderRefused;
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, CrossesActors, Kind, KindId, ReplyContract, Schema};

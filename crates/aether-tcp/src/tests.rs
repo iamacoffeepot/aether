@@ -14,7 +14,10 @@ use super::{
     ListListeners, ListListenersResult, SessionClosed, SessionData, SessionWrite, TcpCapability, TcpConsumer,
     TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
-use aether_actor::{ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, actor};
+use aether_actor::{
+    ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked, Undeclared,
+    actor,
+};
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::spawn::Subname;
@@ -182,12 +185,31 @@ impl NativeActor for ConsumerHost {
     }
 }
 
+/// Starts [`DataOnlyConsumer`]'s relayed self-bind.
+#[aether_data::kind(name = "test.tcp.relay_bind_self", copy)]
+struct RelayBindSelf;
+
+/// What [`DataOnlyConsumer`] sends itself, so the turn that relays the bind
+/// has the consumer as its sender and reply target.
+#[aether_data::kind(name = "test.tcp.forward_bind_self", copy)]
+struct ForwardBindSelf;
+
+/// [`DataOnlyConsumer`]'s own forwarding row.
+#[aether_actor::protocol]
+trait ForwardingBind {
+    fn forward(mail: ForwardBindSelf) -> Undeclared;
+}
+
 /// Handles `SessionData` but not `SessionClosed`, so it does not cover
-/// [`TcpConsumer`]. Its `wire` binds a listener for itself with
-/// `BindListenerSelf` and forwards the reply to the test.
+/// [`TcpConsumer`] and cannot build `ctx.send::<TcpCapability>` of a
+/// `BindListenerSelf` (ADR-0231 §11). It reaches the cap the way a relay
+/// does: it proves the bytes through the boundary and forwards them from a
+/// turn it sent itself, so it is the mail's sender and reply target, and it
+/// forwards the cap's reply to the test.
 struct DataOnlyConsumer {
     replies: mpsc::Sender<BindListenerResult>,
     data_frames: usize,
+    me: Option<ProtocolRef<ForwardingBind>>,
 }
 
 #[actor(singleton, root, depends(TcpCapability))]
@@ -201,12 +223,29 @@ impl NativeActor for DataOnlyConsumer {
         replies: mpsc::Sender<BindListenerResult>,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { replies, data_frames: 0 })
+        Ok(Self { replies, data_frames: 0, me: None })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        ctx.send::<TcpCapability>(&BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) });
+        let me = ctx.resolve_path(&ErasedActorPath::new(Self::NAMESPACE).expect("a canonical path"));
+        self.me = me.ok().and_then(|me| ctx.cast(me));
         Ok(())
+    }
+
+    #[handler::tell]
+    fn on_relay(&mut self, ctx: &mut NativeCtx<'_>, _mail: RelayBindSelf) {
+        ctx.send_to(self.me.expect("the consumer cast itself at wire"), &ForwardBindSelf);
+    }
+
+    #[handler::unchecked(reason = "test: relays the self-bind, reply target pinned to this consumer")]
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: ForwardBindSelf) {
+        let _ = self;
+        let tcp = ErasedActorPath::new(TcpCapability::NAMESPACE).expect("a canonical path");
+        let bind = BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) };
+
+        ctx.deliver_forwarded(
+            ctx.accept_call(&tcp, <BindListenerSelf as Kind>::ID, bind.encode_into_bytes()).expect("the cap is live"),
+        );
     }
 
     #[handler::tell]
@@ -775,26 +814,32 @@ fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
     assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);
 }
 
-/// The reflexive form casts its sender at receipt: a `BindListenerSelf` from
-/// an actor that handles `SessionData` but not `SessionClosed` replies `Err`
-/// naming the protocol and binds nothing, rather than binding a listener
-/// whose sessions' close notices its consumer would warn-drop.
+/// The engine casts a `BindListenerSelf`'s sender before the cap's handler
+/// runs (ADR-0231 §11): relayed from an actor that handles `SessionData` but
+/// not `SessionClosed`, it is answered once with `Err(Consumer(..))` naming
+/// that actor and the row it lacks, and binds nothing. Fails if the handler
+/// runs for a sender the build could not check, which would bind a listener
+/// whose sessions' close notices its consumer warn-drops, or if the refused
+/// request is left unanswered.
 #[test]
-fn bind_listener_self_refuses_a_sender_that_does_not_cover_the_consumer_protocol() {
+fn bind_listener_self_refuses_a_relayed_sender_that_does_not_cover_the_consumer_protocol() {
     let (replies_tx, replies) = mpsc::channel();
     let (_registry, _mailer, rx, chassis) =
         boot_tcp_substrate_with(|builder| builder.with_actor::<DataOnlyConsumer>(replies_tx));
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let consumer = chassis.actor_ref::<DataOnlyConsumer>();
 
-    let reply = replies
-        .recv_timeout(SettlementConfig::from_env().to_cap())
-        .expect("the self-bind reply never reached its sender within the settlement cap");
-    match reply {
-        BindListenerResult::Err(BindListenerError::Failed { error, .. }) => {
-            assert!(error.contains("TcpConsumer"), "expected a consumer-protocol refusal, got: {error}");
-        }
-        other => panic!("a sender that does not cover TcpConsumer must not bind: {other:?}"),
-    }
+    send_and_settle(&chassis, consumer, &RelayBindSelf, None);
+
+    let sender = ErasedActorPath::new(DataOnlyConsumer::NAMESPACE).expect("a canonical path");
+    let lacked = PathRefusal::Uncovered { kind: <SessionClosed as Kind>::ID };
+    let reply = replies.try_recv().expect("the refused self-bind is answered before its chain settles");
+    assert!(
+        matches!(&reply, BindListenerResult::Err(BindListenerError::Consumer(PathRefused { path, reason }))
+            if *path == sender && *reason == lacked),
+        "the refused sender is answered naming it and the row it lacks: {reply:?}",
+    );
+    assert!(replies.try_recv().is_err(), "a refused self-bind sends exactly one reply");
 
     let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
     assert!(list.listeners.is_empty(), "a refused bind must spawn no listener: {:?}", list.listeners);

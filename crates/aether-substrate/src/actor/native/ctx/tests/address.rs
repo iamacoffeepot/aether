@@ -77,7 +77,9 @@ impl Addressable for OneDep {
     type Resolver = aether_actor::One;
 }
 
-impl HandlesKind<CastOnly> for OneDep {}
+impl HandlesKind<CastOnly> for OneDep {
+    type Sender = aether_actor::Anyone;
+}
 
 /// `actor_ref` on a child's ctx proves the root position a `One` dependency
 /// folds to, not a position beneath the child's own lineage, with no registry
