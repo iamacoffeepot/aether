@@ -2,7 +2,6 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
 
 use super::identity::BindingIdentity;
@@ -15,7 +14,7 @@ use crate::actor::native::{ActorProbe, NativeActor};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 use crate::chassis::ctx::ChassisCtx;
-use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
+use crate::chassis::inbox::{InboxReceiver, ReplyLineage, SettlingInbox};
 #[cfg(feature = "wasm")]
 use crate::mail::CostCells;
 use crate::mail::mailer::Mailer;
@@ -176,7 +175,7 @@ impl NativeBinding {
     /// Panics if called more than once — fail-fast per ADR-0063: the
     /// inbox slot is single-claim, so a second install indicates a
     /// chassis-wiring bug.
-    pub(crate) fn install_inbox(&self, inbox: Receiver<Envelope>) {
+    pub(crate) fn install_inbox(&self, inbox: InboxReceiver) {
         let settling = SettlingInbox::new_with_lineage(
             self.self_mailbox(),
             inbox,
@@ -187,8 +186,8 @@ impl NativeBinding {
     }
 
     /// Install an already-built [`SettlingInbox`] as this binding's inbox,
-    /// beside [`Self::install_inbox`] (which builds one from a raw
-    /// receiver). Additive (ADR-0160 §1): the pumped boot recovers a
+    /// beside [`Self::install_inbox`] (which binds one from an unbound
+    /// [`InboxReceiver`]). Additive (ADR-0160 §1): the pumped boot recovers a
     /// driver's Claim-stage [`MailboxClaim`](crate::chassis::ctx::MailboxClaim),
     /// re-lineages its inbox onto this binding's disjoint reply-id space
     /// (via [`SettlingInbox::relineage`]), and installs it here — so the
@@ -205,6 +204,37 @@ impl NativeBinding {
         self.inbox
             .set(Mutex::new(inbox))
             .unwrap_or_else(|_| panic!("NativeBinding::install_settling_inbox called after the inbox was installed"));
+    }
+
+    /// Close the installed inbox ([`SettlingInbox::close`]): a later send
+    /// to this actor is refused at the relay and settled there. Called by
+    /// the root shutdown and by the shared close tail, before the actor's
+    /// registry entry goes `Dead`. A binding with no inbox installed has
+    /// nothing to close. Idempotent.
+    ///
+    /// # Panics
+    /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063.
+    pub(crate) fn close_inbox(&self) {
+        if let Some(inbox) = self.inbox.get() {
+            inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").close();
+        }
+    }
+
+    /// Queue `env` on the installed inbox through the inbox's own sender
+    /// ([`SettlingInbox::preload`]): mail that must be queued before the
+    /// actor is live.
+    ///
+    /// # Panics
+    /// Panics if no inbox is installed, or if the inbox mutex is poisoned —
+    /// fail-fast per ADR-0063: a birth installs its inbox before it has
+    /// mail to preload.
+    pub(crate) fn preload_inbox(&self, env: Envelope) {
+        self.inbox
+            .get()
+            .expect("NativeBinding::preload_inbox called before the inbox was installed")
+            .lock()
+            .expect("inbox mutex poisoned; fail-fast per ADR-0063")
+            .preload(env);
     }
 
     /// The mailbox id the substrate routes inbound mail through to
@@ -516,10 +546,10 @@ impl NativeBinding {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
+    use crate::chassis::inbox::inbox_channel;
     use crate::mail::registry::{DispatchParts, OwnedDispatch};
     use crate::mail::{KindId, MailId, MailRef};
     use crate::testing::bare_substrate;
-    use std::sync::mpsc;
 
     /// `install_inbox` is single-claim — a second install panics.
     #[test]
@@ -527,10 +557,10 @@ mod tests {
     fn install_inbox_twice_panics() {
         let (_registry, mailer) = bare_substrate();
         let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (_tx1, rx1) = mpsc::channel::<Envelope>();
-        let (_tx2, rx2) = mpsc::channel::<Envelope>();
-        transport.install_inbox(rx1);
-        transport.install_inbox(rx2);
+        let (first, _first_feed) = inbox_channel();
+        let (second, _second_feed) = inbox_channel();
+        transport.install_inbox(first);
+        transport.install_inbox(second);
     }
 
     /// #1716 / step 2: an armed envelope left queued in the dispatcher's
@@ -548,14 +578,14 @@ mod tests {
         mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         let id = MailboxId(0x1756);
-        let (tx, rx) = mpsc::channel::<Envelope>();
+        let (receiver, feed) = inbox_channel();
 
         let root = MailId::new(id, 1);
         mailer.record_sent_inflight(root);
         let settle = settlement.subscribe_settlement(root);
 
         let transport = NativeBinding::new_for_test(Arc::clone(&mailer), id);
-        transport.install_inbox(rx);
+        transport.install_inbox(receiver);
 
         // Queue an armed envelope directly — bypasses the registry sink,
         // mirrors the production route_mail Inbox arm result.
@@ -567,7 +597,7 @@ mod tests {
             },
             id,
         );
-        tx.send(armed).unwrap();
+        assert!(feed.send(armed).is_queued(), "the open inbox accepts the mail");
 
         // Drop the transport; the SettlingInbox inside settles the queued mail.
         drop(transport);

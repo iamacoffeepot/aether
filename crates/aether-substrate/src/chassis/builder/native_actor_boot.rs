@@ -13,7 +13,7 @@ use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::local;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
-use crate::chassis::ctx::{ChassisCtx, MailboxSender, MailboxWakeSlot};
+use crate::chassis::ctx::{ChassisCtx, DropOnShutdownClaim, MailboxWakeSlot};
 use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::cost::CostCells;
@@ -25,7 +25,6 @@ use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 struct ClaimResources {
     mailbox_id: MailboxId,
     transport: Arc<NativeBinding>,
-    mailbox_sender: MailboxSender,
     wake_slot: Arc<MailboxWakeSlot>,
     slots: Box<ActorSlots>,
 }
@@ -127,22 +126,16 @@ where
         // per-frame drain barrier — settlement gating on the
         // LifecycleAdvance chain root is the frame-integration gate
         // now.
-        let claim_result = ctx
-            .claim_mailbox_drop_on_shutdown::<A>()
-            .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, claim.wake_slot));
-        let (mailbox_id, receiver, mailbox_sender, wake_slot) = match claim_result {
-            Ok(c) => c,
-            Err(e) => {
-                // State stays `Transitioning` — no further cleanup
-                // for the rollback loop to do.
-                return Err(e);
-            }
-        };
+        // A refused claim leaves the state `Transitioning` — no further
+        // cleanup for the rollback loop to do.
+        let DropOnShutdownClaim { id: mailbox_id, inbox, wake_slot } = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
 
         // Per-cap transport. `NativeBinding::from_ctx` pulls the
-        // chassis's aborter + spawner.
+        // chassis's aborter + spawner. The claim's inbox moves onto the
+        // binding's reply lineage so the two mint reply ids from one
+        // disjoint space, as the pumped boot does.
         let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id, canonical_name));
-        transport.install_inbox(receiver);
+        transport.install_settling_inbox(inbox.relineage(transport.reply_lineage()));
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
         // into TLS via `local::with_stamped` for the duration of
@@ -158,9 +151,7 @@ where
         slots.seed(ActorLogRing::with_capacity(ring_capacities.log));
         slots.seed(ActorTraceRing::with_growth(ring_capacities.trace, ring_capacities.trace_max));
 
-        self.state = BootState::Claimed {
-            resources: ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots },
-        };
+        self.state = BootState::Claimed { resources: ClaimResources { mailbox_id, transport, wake_slot, slots } };
         Ok(())
     }
 
@@ -273,7 +264,7 @@ where
         let BootState::Wired { resources, actor } = self.state else {
             panic!("PassiveBoot::spawn called in non-Wired state");
         };
-        let ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots } = resources;
+        let ClaimResources { mailbox_id, transport, wake_slot, slots } = resources;
 
         // Register a `DispatcherSlot` with the chassis worker pool. No
         // per-actor thread (issue 635 Phase 3 made `Pooled` the only
@@ -318,8 +309,7 @@ where
         // slot is installed. Record the reference the chassis handle's
         // `actor_ref` reads back.
         ctx.record_reference(Registry::activated::<A>(mailbox_id));
-        Ok(Box::new(PooledActorShutdown::<A> { slot: Some(slot), mailbox_sender: Some(mailbox_sender) })
-            as Box<dyn DynShutdown>)
+        Ok(Box::new(PooledActorShutdown::<A> { slot: Some(slot) }) as Box<dyn DynShutdown>)
     }
 
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
@@ -330,8 +320,8 @@ where
             // Any past-claim variant: release the mailbox claim. The
             // namespace hold stays, since a failed boot fails the build
             // (R-0046). `resources` (and any held actor) drop at the end of
-            // this match arm — dropping `transport` closes the installed
-            // receiver, dropping `mailbox_sender` closes the channel.
+            // this match arm — dropping `transport` drops the installed
+            // inbox, which closes its channel and settles what is queued.
             //
             // Before `wire` ran, the boot is aborting ahead of its spawn
             // pass: no dispatcher runs and no mail carries the id, so the
@@ -354,8 +344,8 @@ where
 /// 1. Sets the binding's `should_shutdown` flag so the next
 ///    [`crate::scheduler::Drainable::run_cycle`] observes the
 ///    signal and runs `unwire` + registry finalize.
-/// 2. Drops the [`MailboxSender`] so subsequent
-///    sends warn-and-discard.
+/// 2. Closes the binding's inbox so subsequent sends are settled and
+///    warn-logged at the relay.
 /// 3. Drops the slot Arc — the chassis-held strong ref. The pool
 ///    worker's strong ref (via the ready queue) drops at end of the
 ///    final cycle. The pool's `Drop` joins workers, so any in-flight
@@ -369,7 +359,6 @@ where
     A: NativeActor,
 {
     slot: Option<Arc<DispatcherSlot<A>>>,
-    mailbox_sender: Option<MailboxSender>,
 }
 
 impl<A> DynShutdown for PooledActorShutdown<A>
@@ -377,12 +366,14 @@ where
     A: NativeActor,
 {
     fn shutdown_dyn(mut self: Box<Self>) {
+        // Close the inbox before the slot is released, so a later send is
+        // refused at the relay; subsequent wakes silently no-op via
+        // WakeHandle's Weak failing to upgrade. A send already in progress
+        // lands in the queue and the inbox's drop settles it.
         if let Some(slot) = &self.slot {
             slot.binding().signal_engine_teardown();
+            slot.binding().close_inbox();
         }
-        // Drop sender first so the inbox closes; subsequent wakes
-        // silently no-op via WakeHandle's Weak failing to upgrade.
-        self.mailbox_sender.take();
         drop(self.slot.take());
     }
 }

@@ -25,17 +25,14 @@
 use std::any::TypeId;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use aether_actor::ErasedActorRef;
 
-use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::ActivationToken;
 
-/// One actor slot in the registry. `Live` carries the inbox sender
-/// (for direct mail routing into the dispatcher) and the actor's
+/// One actor slot in the registry. `Live` carries the actor's
 /// `TypeId`. `Dead` is a sentinel for entries
 /// whose dispatcher has joined and whose actor has dropped — mail
 /// addressed to the slot warn-drops, and `spawn_child` rejects the
@@ -46,15 +43,15 @@ use crate::mail::registry::effect::ActivationToken;
 /// dispatcher thread as `Box<A>`; the registry no longer holds a
 /// cross-thread share.
 ///
-/// `sender` is `Arc<Sender<Envelope>>` so the registry's sink
-/// handler can hold a `Weak<Sender>` and upgrade only while the
-/// actor is `Live`; on `mark_dead` the Arc drops and the weak
-/// upgrade fails, making mail addressed to a dead instanced
-/// mailbox warn-drop.
+/// The entry holds no part of the actor's inbox channel: the inbox owns
+/// its channel's only strong sender
+/// ([`SettlingInbox`](crate::chassis::inbox::SettlingInbox)), and the close
+/// tail closes it before this entry goes `Dead`, which is what makes mail
+/// addressed to a dead instanced mailbox warn-drop.
 #[derive(Clone)]
 pub enum ActorEntry {
     Starting { token: ActivationToken },
-    Live { sender: Arc<Sender<Envelope>>, type_id: TypeId },
+    Live { type_id: TypeId },
     Dead,
 }
 
@@ -199,11 +196,11 @@ impl ActorRegistry {
     /// refuses a tombstoned id before it gets here; this holds the same
     /// rule in the actor registry itself. Used by the spawn primitive
     /// after init succeeds.
-    pub(crate) fn insert_live(&self, id: MailboxId, sender: Arc<Sender<Envelope>>, type_id: TypeId) -> Result<(), ()> {
+    pub(crate) fn insert_live(&self, id: MailboxId, type_id: TypeId) -> Result<(), ()> {
         match self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063").entry(id) {
             Entry::Occupied(_) => Err(()),
             Entry::Vacant(slot) => {
-                slot.insert(ActorEntry::Live { sender, type_id });
+                slot.insert(ActorEntry::Live { type_id });
                 Ok(())
             }
         }
@@ -223,19 +220,13 @@ impl ActorRegistry {
     }
 
     /// Promote the exact token-owned reservation to its live entry.
-    pub(crate) fn promote_starting(
-        &self,
-        id: MailboxId,
-        token: ActivationToken,
-        sender: Arc<Sender<Envelope>>,
-        type_id: TypeId,
-    ) {
+    pub(crate) fn promote_starting(&self, id: MailboxId, token: ActivationToken, type_id: TypeId) {
         let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
         assert!(
             matches!(actors.get(&id), Some(ActorEntry::Starting { token: current }) if *current == token),
             "valid activation token must own its actor lifecycle reservation"
         );
-        actors.insert(id, ActorEntry::Live { sender, type_id });
+        actors.insert(id, ActorEntry::Live { type_id });
     }
 
     /// Remove only the lifecycle reservation owned by `token`.
@@ -484,7 +475,7 @@ impl ActorRegistry {
 #[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::Arc;
 
     #[test]
     fn fresh_registry_is_empty() {
@@ -496,12 +487,11 @@ mod tests {
     }
 
     /// Helper: insert a `Live` slot at `id` so `register_monitor`'s
-    /// liveness check passes. Uses a throwaway sender so the test
-    /// doesn't drag in `NativeActor`.
+    /// liveness check passes. Uses a stub type so the test doesn't drag
+    /// in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         struct Stub;
-        let (tx, _rx) = mpsc::channel::<Envelope>();
-        r.insert_live(id, Arc::new(tx), TypeId::of::<Stub>()).expect("fresh slot");
+        r.insert_live(id, TypeId::of::<Stub>()).expect("fresh slot");
     }
 
     #[test]
@@ -609,8 +599,7 @@ mod tests {
         insert_live_stub(&r, target);
         let _ = r.close_actor(target);
 
-        let (tx, _rx) = mpsc::channel::<Envelope>();
-        assert!(r.insert_live(target, Arc::new(tx), TypeId::of::<Stub>()).is_err());
+        assert!(r.insert_live(target, TypeId::of::<Stub>()).is_err());
         assert!(!r.is_live_at(target), "the closed slot stays dead");
     }
 

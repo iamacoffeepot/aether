@@ -9,7 +9,6 @@
 //! caller there is an external embedder thread, never a pool worker.
 
 use std::any::TypeId;
-use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -18,7 +17,6 @@ use aether_data::ErasedActorPath;
 #[cfg(any(test, feature = "test-support"))]
 use crossbeam_channel::Receiver;
 
-use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
@@ -168,7 +166,7 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
-        let StagedActor { identity, sender: tx, transport, slots, state, after_init } = staged;
+        let StagedActor { identity, feed, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name: full_name, .. } = identity;
 
         // Register sink + Live entry + pre-load mail. The actor
@@ -180,13 +178,11 @@ impl Spawner {
         // singleton claim — the actor_registry slot is keyed on
         // MailboxId which already passed the tombstone check).
         //
-        // The strong `Arc<Sender>` lives in the actor_registry's
-        // Live entry. The sink handler's `Weak<Sender>` upgrades only
-        // while the Arc is alive — i.e. while the actor's slot is
-        // Live. On `mark_dead` the Arc drops, the weak upgrade fails,
-        // and external mail addressed to the dead mailbox warn-drops.
-        let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
-        let weak_for_handler = Arc::downgrade(&strong_sender);
+        // The channel's only strong sender lives in the binding's inbox.
+        // The sink handler's feed is accepted only while that inbox is
+        // open — i.e. until the actor's close tail closes it, just before
+        // the slot goes `Dead` — after which external mail addressed to
+        // the dead mailbox is settled and warn-drops at the relay.
         // Issue 635 PR C: pool wake hook. Populated post-init below
         // (every actor is pool-dispatched since issue 1187); empty until
         // then so the closure's `get()` is a single relaxed atomic load.
@@ -210,7 +206,7 @@ impl Spawner {
             id,
             full_name.to_string(),
             Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &weak_for_handler, &wake_for_handler, &mailer_for_handler) {
+                match relay_or_transfer(dispatch, &feed, &wake_for_handler, &mailer_for_handler) {
                     RelayOutcome::Delivered => {}
                     RelayOutcome::SenderGone { kind } => {
                         tracing::warn!(
@@ -236,15 +232,12 @@ impl Spawner {
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
         // The chassis-side actor_registry no longer holds a clone of
-        // the actor — only the sender + type_id for routing.
+        // the actor — only its type_id.
         let mut actor = Box::new(state);
 
-        // Insert before pre-loading mail: the actor_registry holding
-        // the sender is the canonical record that the slot is live.
-        // The Arc<Sender> here is the same one the sink handler's
-        // Weak references — when `mark_dead` drops this entry, the
-        // weak upgrade fails for any further external mail.
-        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>()).is_err() {
+        // Insert before pre-loading mail: the actor_registry entry is the
+        // canonical record that the slot is live.
+        if self.actor_registry.insert_live(id, TypeId::of::<A>()).is_err() {
             // Hash collision against an existing Live entry on the
             // same id but a slot the mailbox registry didn't reject —
             // possible if a singleton + instanced collide on the same
@@ -259,7 +252,9 @@ impl Spawner {
             // id yet, so the record goes and the name stays free for a
             // later spawn (ADR-0079 §5). The `Err` of a route no longer
             // `Live` leaves nothing to undo. The actor itself (init
-            // succeeded) drops naturally as `actor` falls out of scope.
+            // succeeded) drops naturally as `actor` falls out of scope,
+            // and so does the binding: this function holds no sender, so
+            // its inbox's closing drain returns at once.
             let _ = self.registry.withdraw_claim(authority, id);
             return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }
@@ -323,22 +318,14 @@ impl Spawner {
         }
         transport.release_outbound_after_activation();
 
-        // Pre-load bootstrap mail. tx is alive (rx is held by the
-        // transport; nobody's polling yet), so these sends always
-        // succeed.
+        // Pre-load bootstrap mail through the inbox's own sender; nobody
+        // is polling yet.
         for env in after_init {
-            // mpsc::Sender::send only fails when the receiver
-            // disconnects; rx is alive here. Discard on the
-            // theoretical impossibility.
-            let _ = tx.send(env);
+            transport.preload_inbox(env);
         }
 
         // 8. Pool-register the dispatcher (every actor is pool-dispatched
         // since issue 1187 removed the per-thread `Dedicated` opt-out).
-        // The local strong Arc was the populator for the Weak handler
-        // ref; the actor_registry now holds an `Arc::clone` of the
-        // same Arc, so dropping the local doesn't break the weak.
-        drop(strong_sender);
         // Issue 635 PR C + Phase 3: register a `DispatcherSlot` with the
         // chassis worker pool. No per-actor thread. The wake hook on the
         // closure pushes the slot to the ready queue when an envelope
