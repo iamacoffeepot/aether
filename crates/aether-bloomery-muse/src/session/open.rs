@@ -481,7 +481,7 @@ mod tests {
         let tree = Ref::of_encoded(&Tree::empty()).expect("tree");
         let (own, _) = offered(tree);
         let echo_args = Ref::of_encoded(&EchoArgs::new("hi")).expect("args").erase();
-        let test_args = Ref::of_encoded(&TestArgs).expect("args").erase();
+        let test_args = Ref::of_encoded(&TestArgs::default()).expect("args").erase();
         let read_args = Ref::of_encoded(&ReadArgs::new(path("README"), None, None)).expect("args").erase();
         for (tools, required) in [
             (&own, required("proof.clippy", clippy_args)),

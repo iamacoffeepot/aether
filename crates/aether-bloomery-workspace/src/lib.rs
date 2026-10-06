@@ -58,6 +58,7 @@ pub use kinds::{
     Mounts, MountsError, Network, Outcome, Platform, PlatformError, Provides, Refusal, Resource, Run, RunError,
     RunRequest, RunResult, RustToolchain, RustToolchainError, Scratch, ScratchError, Step, StepOutcome, Steps,
     StepsError, StorageWake, Tool, ToolName, ToolNameError, ToolRecord, Tools, ToolsError, TreePath, TreePathError,
+    run_key,
 };
 
 pub use config::{DEFAULT_ENDPOINT, WorkspaceConfig};

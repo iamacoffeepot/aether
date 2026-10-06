@@ -71,6 +71,7 @@ fn run(environment: u8, steps: Vec<Step>) -> Result<RunRequest, Box<dyn Error>> 
         steps: Steps::new(steps)?,
         scratch: Scratch::new(Vec::new())?,
         network: Network::Off,
+        layer: None,
     })
 }
 
@@ -131,6 +132,7 @@ fn the_run_key_covers_the_environment_and_each_steps_tool_args_and_env_and_nothi
         RunRequest { scratch: Scratch::new(vec![TreePath::new("target")?])?, ..base.clone() },
         RunRequest { network: Network::On, ..base.clone() },
         RunRequest { steps: Steps::new(stdin)?, ..base.clone() },
+        RunRequest { layer: Some(Digest::from_bytes([7; 32])), ..base.clone() },
     ];
     for other in &same {
         assert_eq!(key(other), key(&base), "{other:?}");

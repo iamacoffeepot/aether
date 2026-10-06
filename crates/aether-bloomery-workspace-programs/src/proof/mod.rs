@@ -3,9 +3,10 @@
 //! 2, 4, 7, and 12; ADR-0234 decision 10).
 //!
 //! Each proof is a tool: its input is `Tooled<A, ProofBound>`, the
-//! session's current tree, the empty arguments the model writes, and the
-//! [`ProofBound`] the session binds, the environment, the vendor tree, the
-//! cargo config, and the test env. It asks the workspace for one run of two
+//! session's current tree, the arguments the model writes (`{}` for clippy
+//! and for a whole test run, or a test scope narrowing targets and filters),
+//! and the [`ProofBound`] the session binds, the environment, the vendor
+//! tree, the cargo config, and the test env. It asks the workspace for one run of two
 //! steps over the tree at `/work`, with the network off, the vendor tree at
 //! `/vendor`, and the bound's cargo config at `/.cargo`, which replaces
 //! crates.io with the vendor tree for every cargo in the run, including the
@@ -13,9 +14,9 @@
 //! files it rewrote, then the proof's cargo step. The workspace stops after
 //! the first step that exits other than 0.
 //!
-//! Both programs share one body, differing only in a private description: the cargo step's argv, whether the step takes the
-//! bound's test env, the summary name, and the function that turns the
-//! failed step's stdout and stderr into diagnostics.
+//! Both programs share one body, differing only in a private description:
+//! whether the step takes the bound's test env, the summary name, and the
+//! function that turns the failed step's stdout and stderr into diagnostics.
 //!
 //! The answer is an `Edited<ProofVerdict>`: the run's output tree, which
 //! holds fmt's fixes and any `Cargo.lock` update and becomes the session's
@@ -39,17 +40,19 @@ use aether_bloomery_workspace::StepOutcome;
 use aether_data::Ref;
 
 pub use config::cargo_config_artifacts;
-pub use input::{ClippyArgs, MAX_TEST_ENV, ProofBound, TestArgs, TestEnv, TestEnvError};
+pub use input::{
+    ClippyArgs, MAX_SCOPE_ENTRIES, MAX_SCOPE_ENTRY_BYTES, MAX_TEST_ENV, ProofBound, ScopeEntries, ScopeEntriesError,
+    ScopeEntry, ScopeEntryError, TestArgs, TestEnv, TestEnvError, TestScope,
+};
 pub use report::DIAGNOSTICS_MAX_BYTES;
 pub use result::ProofVerdict;
 
 use report::{Ended, clippy_diagnostics, test_diagnostics};
 
-/// What differs between the proofs: the cargo step's argv, whether it takes
-/// the bound's test env, the summary name, and how the failed step's outputs
+/// What differs between the proofs: whether the cargo step takes the
+/// bound's test env, the summary name, and how the failed step's outputs
 /// become diagnostics.
 struct Proof {
-    cargo: &'static [&'static str],
     takes_test_env: bool,
     step: &'static str,
     diagnostics: fn(&[u8], &[u8]) -> String,
@@ -57,13 +60,11 @@ struct Proof {
 
 /// The clippy proof's description: CI's lint command, no test env, so its run
 /// key and warm layer never vary with the bound's test env.
-const CLIPPY: Proof =
-    Proof { cargo: &run::CLIPPY_ARGS, takes_test_env: false, step: "cargo clippy", diagnostics: clippy_diagnostics };
+const CLIPPY: Proof = Proof { takes_test_env: false, step: "cargo clippy", diagnostics: clippy_diagnostics };
 
 /// The test proof's description: the workspace tests with the bound's test
 /// env on the test step only.
-const TEST: Proof =
-    Proof { cargo: &run::TEST_ARGS, takes_test_env: true, step: "cargo test", diagnostics: test_diagnostics };
+const TEST: Proof = Proof { takes_test_env: true, step: "cargo test", diagnostics: test_diagnostics };
 
 /// The `proof.clippy` program.
 pub struct ClippyProof;
@@ -84,7 +85,8 @@ impl Program for ClippyProof {
     type Result = Edited<ProofVerdict>;
 
     async fn run(input: Self::Input, env: &mut Env<Async>, workspace: Workspace) -> Result<Self::Result, Refusal> {
-        prove(&CLIPPY, input.tree(), input.bound(), &mut env, workspace).await
+        let cargo = run::clippy_args();
+        prove(&CLIPPY, input.tree(), input.bound(), &cargo, None, &mut env, workspace).await
     }
 }
 
@@ -94,10 +96,16 @@ pub struct TestProof;
 /// Formats the whole workspace with `cargo fmt` and runs its tests with the
 /// session's test env.
 ///
-/// Takes no arguments: pass `{}`. The proof always runs the whole workspace
-/// in the session's tree. The result is the tree after fmt, whether the tests
-/// passed, and, when they failed, each failing test's output and the targets
-/// that failed.
+/// Takes an optional scope: pass `{}` for the whole workspace, or
+/// `{"scope": {"targets": [...], "filters": [...]}}` to build and run only
+/// what the scope names. Targets each become a `--test <name>` pair over
+/// the unchanged `--workspace` package set, and filters pass after `--` to
+/// test binaries untouched. Crate unit tests select by filter only, matching
+/// that crate's module paths; for unit tests the scope saves run time only.
+/// A scoped pass adopts its formatted tree but never satisfies the `Done`
+/// gate, which still runs the whole workspace. The result is the tree after
+/// fmt, whether the tests passed, and, when they failed, each failing test's
+/// output and the targets that failed.
 #[program]
 impl Program for TestProof {
     const NAME: &'static str = "proof.test";
@@ -107,16 +115,22 @@ impl Program for TestProof {
     type Result = Edited<ProofVerdict>;
 
     async fn run(input: Self::Input, env: &mut Env<Async>, workspace: Workspace) -> Result<Self::Result, Refusal> {
-        prove(&TEST, input.tree(), input.bound(), &mut env, workspace).await
+        let args = env.read(input.args()).await?;
+        let cargo = run::test_args(args.scope());
+        prove(&TEST, input.tree(), input.bound(), &cargo, Some(args.scope()), &mut env, workspace).await
     }
 }
 
-/// Run `proof` over `tree` bound to `bound`: fmt first, then the proof's
-/// cargo step, answering the formatted tree with its verdict.
+/// Run `proof` over `tree` bound to `bound`: fmt first, then the cargo step
+/// `cargo`, answering the formatted tree with its verdict. `scope` is the
+/// test scope when proving `proof.test`, and `None` for clippy: a passing
+/// scoped run answers `PassedScoped`, while whole runs answer `Passed`.
 async fn prove(
     proof: &Proof,
     tree: Ref<Tree>,
     bound: Ref<ProofBound>,
+    cargo: &[String],
+    scope: Option<&TestScope>,
     env: &mut Env<Async>,
     mut workspace: Workspace,
 ) -> Result<Edited<ProofVerdict>, Refusal> {
@@ -126,8 +140,12 @@ async fn prove(
     } else {
         &[]
     };
+    let layer = match scope {
+        Some(scope) if !scope.is_whole() => Some(run::whole_key(&bound)?),
+        _ => None,
+    };
     let outcome = workspace
-        .run(run::request(tree, &bound, proof.cargo, extra)?)
+        .run(run::request(tree, &bound, cargo, extra, layer)?)
         .await?
         .map_err(|refusal| refused(format!("the workspace refused the run: {refusal:?}")))?;
 
@@ -142,8 +160,13 @@ async fn prove(
     };
 
     let summary = report::summary(&ended, proof.step, &formatted, diagnostics.as_deref());
-    let verdict = diagnostics
-        .map_or(ProofVerdict::Passed, |diagnostics| ProofVerdict::Failed { diagnostics: env.stage_text(&diagnostics) });
+    let scoped = scope.filter(|candidate| !candidate.is_whole()).cloned();
+    let failure = diagnostics.map(|text| ProofVerdict::Failed { diagnostics: env.stage_text(&text) });
+    let verdict = match (failure, scoped) {
+        (Some(failure), _) => failure,
+        (None, Some(scope)) => ProofVerdict::PassedScoped { scope },
+        (None, None) => ProofVerdict::Passed,
+    };
     Ok(Edited::new(outcome.tree, summary, env.stage_encoded(&verdict)?))
 }
 

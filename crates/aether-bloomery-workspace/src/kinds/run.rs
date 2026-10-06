@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use aether_actor::ProtocolPath;
 use aether_bloomery_kinds::{ArtifactStorage, Tree};
-use aether_data::{OpaqueBytes, Ref};
+use aether_data::{Digest, OpaqueBytes, Ref, hash_bytes};
 
 use crate::kinds::environment::{Environment, ToolName};
 use crate::kinds::order::{self, OrderError};
@@ -324,6 +324,54 @@ pub struct RunRequest {
     pub scratch: Scratch,
     /// Whether the run may reach the network.
     pub network: Network,
+    /// The run key whose bottom layer this run builds over as a guest, or
+    /// `None` to own its own layer. A guest never writes its layer: it sits
+    /// on the owner's bottom layer as an overlay's lower directory, so a
+    /// scoped run shares the whole run's warm layer instead of building cold
+    /// into its own. Estimates and admission never read this field: each
+    /// scope keeps its own run key and reservation while sharing one layer.
+    pub layer: Option<Digest>,
+}
+
+/// The domain tag every run key's hash input starts with.
+const RUN_KEY_DOMAIN: &[u8] = b"aether.workspace.run-key.v1";
+
+/// The digest of `environment` and the ordered `steps`, each step's tool,
+/// args, and env: what the run does, not who asked. The tree, the mounts,
+/// the scratch paths, the network, every step's stdin, and the guest layer
+/// are not in it, so two runs that do the same thing over different inputs
+/// share an estimate, and a guest shares its owner's estimate only when it
+/// does the same work.
+#[must_use]
+pub fn run_key(environment: Digest, steps: &Steps) -> Digest {
+    let mut input = Vec::from(RUN_KEY_DOMAIN);
+    run_key_field(&mut input, environment.as_bytes());
+    let steps = steps.as_slice();
+    run_key_count(&mut input, steps.len());
+    for step in steps {
+        run_key_field(&mut input, step.tool.as_str().as_bytes());
+        run_key_count(&mut input, step.args.len());
+        for arg in &step.args {
+            run_key_field(&mut input, arg.as_bytes());
+        }
+        run_key_count(&mut input, step.env.len());
+        for var in &step.env {
+            run_key_field(&mut input, var.key().as_bytes());
+            run_key_field(&mut input, var.value().as_bytes());
+        }
+    }
+    hash_bytes(&input)
+}
+
+/// Append `len` as a u64 LE.
+fn run_key_count(input: &mut Vec<u8>, len: usize) {
+    input.extend_from_slice(&u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes());
+}
+
+/// Append `bytes` prefixed by its length.
+fn run_key_field(input: &mut Vec<u8>, bytes: &[u8]) {
+    run_key_count(input, bytes.len());
+    input.extend_from_slice(bytes);
 }
 
 /// Run `request` over the storage `source` names. Answered with one

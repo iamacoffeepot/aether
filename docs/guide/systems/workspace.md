@@ -30,9 +30,14 @@ they produce.
 | `aether.workspace.run` | `source: ProtocolPath<ArtifactStorage>`, `request: RunRequest` | `aether.workspace.run_result` | `Ok(Outcome)`, `Err(RunError)`: `Refused(Refusal)`, `Exhausted(Resource)`, or `Failed { detail: Detail }` |
 
 `RunRequest` (`aether.workspace.run_request`) holds every field of a run but
-its source: `tree`, `environment`, `mounts`, `steps`, `scratch`, and `network`.
-It is what a program's `Workspace` call carries, so a program never names the
+its source: `tree`, `environment`, `mounts`, `steps`, `scratch`, `network`,
+and `layer`. It is what a program's `Workspace` call carries, so a program never names the
 storage its run reads and writes (see [From a program](#from-a-program)).
+`layer` is the run key whose bottom layer this run builds over as a guest, or
+`None` to own its own layer: a scoped test run names the whole run's key and
+sits on the whole-workspace test layer instead of building cold (see
+[Warm layers](#warm-layers)). Estimates and admission never read it: each
+scope keeps its own run key and reservation while sharing one layer.
 
 `ImageRef` is `<repository>@sha256:<64 lowercase hex>`, validated on
 construction and on decode. It never carries a tag, because a tag can move and
@@ -190,14 +195,16 @@ A run is warm when its tree's root holds a `Cargo.lock` file and cargo's
 target directory is one of its scratch paths: every step's environment names
 the same `CARGO_TARGET_DIR` of the form `/work/<scratch>`, or none names it
 and `target` is a scratch path. Every other run builds cold. The layer is
-keyed by the unit (the run's `source` path), the run key (see
+keyed by the unit (the run's `source` path), the base run key (see
 [Provisioning](#provisioning)), and the digest of the `Cargo.lock` blob, so a
-changed lock or environment writes a new layer beside the old one.
+changed lock or environment writes a new layer beside the old one. The base
+is the run's own key digest, or the guest digest its `layer` names: a scoped
+test run shares the whole run's bottom layer while keeping its own run key.
 
 | Case | What the run does |
 |---|---|
-| Miss | No pointer volume `aether-workspace-layer-<hex>`: the run builds into a fresh data volume labelled `aether.workspace.layer=<hex>` and `aether.workspace.layer.lock=<lock>`, mounted writable at the target directory. Once its steps ran to their exits, whatever the exit codes, it creates the pointer naming the data volume and labelled `aether.workspace.layer.tree=<tree>`, the hex digest of the run's tree, and the data volume stays. A run that ends any other way, or loses the pointer race, removes it. |
-| Hit | The pointer and the data volume it names both carry the hex. The run creates an upper and a work volume of its own and a `local`-driver `overlay` volume whose `lowerdir` is the data volume's `Mountpoint` and whose `upperdir` and `workdir` are theirs, mounted writable at the target directory. All three are removed with the run, so no run sees another's writes, and the bottom layer is never written again. |
+| Miss | No pointer volume `aether-workspace-layer-<hex>`: an owning run builds into a fresh data volume labelled `aether.workspace.layer=<hex>` and `aether.workspace.layer.lock=<lock>`, mounted writable at the target directory. Once its steps ran to their exits, whatever the exit codes, it creates the pointer naming the data volume and labelled `aether.workspace.layer.tree=<tree>`, the hex digest of the run's tree, and the data volume stays. A run that ends any other way, or loses the pointer race, removes it. A guest miss creates nothing and builds cold, so a scoped run without its whole layer yet leaves nothing the whole run could mistake for its own. |
+| Hit | The pointer and the data volume it names both carry the hex. The run creates an upper and a work volume of its own and a `local`-driver `overlay` volume whose `lowerdir` is the data volume's `Mountpoint` and whose `upperdir` and `workdir` are theirs, mounted writable at the target directory. All three are removed with the run, so no run sees another's writes, and the bottom layer is never written again. A guest hit overlays the same hex its base owns. |
 | Freshness | Every file reaches `/work` through the tar codec, which writes the canonical 1980 mtime, and cargo reuses a path crate's build when no source file is newer than it. So a hit uploads its tree through `encode_stamped` against the pointer's `aether.workspace.layer.tree`: every file, executable, or symlink that differs from that base tree carries the run's start in wall-clock seconds, and everything else, directories included, keeps the canonical mtime. Each run compares against the tree the layer was built over, never the previous run, because the layer's artifacts match that tree and no other: a file reverted to its base content is fresh again, and an edit made after any earlier run is still newer than the layer. A pointer with no tree label, written before the label existed, or a malformed one stamps every file, which is correct and only slower. A miss uploads the canonical stream: its layer holds no build output a stale mtime could fool. |
 | Anything else | A pointer or data volume labelled for another layer, a data volume gone, or a mountpoint holding `,`, `:`, or `\`: the run builds cold and logs why. |
 
@@ -329,8 +336,11 @@ create to the last step's exit.
 then the environment digest, the step count, and for each step in order its
 tool name, its args, and its env entries (keys and values, in the order
 given), every count and string length-prefixed. The tree, the mounts, the
-scratch paths, the network, and every step's stdin are not in it, so two runs
-doing the same work over different inputs share an estimate.
+scratch paths, the network, every step's stdin, and the guest layer are not in it, so two runs
+doing the same work over different inputs share an estimate. Each scope keeps
+its own run key and reservation while sharing one bottom layer (see
+[Warm layers](#warm-layers)): smaller runs reserve less after one observation,
+which is what unblocks concurrent sessions.
 
 **Estimate.** An `Ok` run, whatever its exit codes, records its peak memory
 (the highest stats sample of any step, less the reclaimable file cache) and
@@ -814,7 +824,8 @@ Each proof's input is a tool's, `Tooled<A, ProofBound>`
 | Part | What it is | Where the run sees it |
 |---|---|---|
 | the tree | the cargo workspace under proof: a Muse session's current tree, or a tree such as `import-commit` prints ([Importing a source tree](#importing-a-source-tree)) | `/work` |
-| `ClippyArgs` (`proof.clippy.args`) / `TestArgs` (`proof.test.args`) | the arguments the model writes: none, `{}` | nowhere |
+| `ClippyArgs` (`proof.clippy.args`) | the arguments the model writes: none, `{}` | nowhere |
+| `TestArgs` (`proof.test.args`) | the arguments the model writes: an optional scope, `{}` for the whole workspace (see [The test proof](#the-test-proof)) | nowhere: the scope shapes the test step's argv, never a mount |
 | `ProofBound.environment: Ref<Environment>` | the environment the caller reads from the head `(aether.workspace.environment, <platform>)` (the head move in [What the bootstrap sends](#what-the-bootstrap-sends)) | the root |
 | `ProofBound.vendor: Ref<Tree>` | the `Vendored.tree` of a `vendor.cargo` run over a source with the same `Cargo.lock` (see [Vendoring crate sources](#vendoring-crate-sources)) | `/vendor`, read-only |
 | `ProofBound.cargo_config: Ref<Tree>` | the tree holding `config.toml`, which replaces crates.io with `/vendor` and sets `net.offline`; fixed by the proof and staged beside the bound by `cargo_config_artifacts` | `/.cargo`, read-only |
@@ -850,7 +861,7 @@ refusal. The workspace stops after the first step that exits other than 0:
 
 | Run answer | Program answer |
 |---|---|
-| `Ok`, both steps exit `Some(0)` | `Passed` |
+| `Ok`, both steps exit `Some(0)` | `Passed` for a whole run, `PassedScoped { scope }` for a scoped test run |
 | `Ok`, the cargo step exits other than 0 | `Failed { diagnostics }`: the proof's diagnostics (see below) |
 | `Ok`, fmt alone, exiting other than 0 | `Failed { diagnostics }`: rustfmt's stderr; the cargo step did not run |
 | `Ok` with any other steps | the program's `Refused`, naming the count |
@@ -894,15 +905,34 @@ plus its doctest pass:
 `--no-fail-fast` lets one run report every failing target, not only the
 first. `--quiet` keeps cargo's status lines out of stderr and makes libtest
 print one character per passing test. Like clippy, the run takes no
-`--all-features`, so every proof run gets the same feature resolution. It
-takes no test-name filter either: the run key hashes every step's args and
-env, so each distinct filter would build cold into its own warm layer, while
-running the tests once the build is warm costs little beside that.
+`--all-features`, so every proof run gets the same feature resolution.
+
+The model may pass an optional scope to build and run only what its change
+touches: `targets` each become a `--test <name>` pair over the unchanged
+`--workspace` package set, and `filters` pass after a `--` separator cargo
+forwards to test binaries untouched. The recipes are: crate unit tests by
+filter only, an integration target such as `tests/demo.rs` by target only,
+both axes combined, and `{}` for the whole run. Most of this repository's
+tests are unit tests in `src/`, and cargo offers no way to build only one
+crate's unit tests without changing the package set, so a unit-test scope
+saves run time only: cargo builds the whole workspace test graph warm off
+the shared layer, and only matching tests execute. A scoped run sits on the
+whole-workspace test layer as a guest instead of building cold (see
+[Warm layers](#warm-layers)), and each scope keeps its own run key and
+estimate while sharing that layer. A scope that validates but names nothing
+is an ordinary failed proof through the existing stderr fallback, never a
+refusal.
 
 The test step also takes the bound's `test_env`, and only that step does, so
 clippy's run key and warm layer never vary with it. `TestEnv` holds at most
 32 variables with no repeated key; whoever opens the session supplies them,
-and each distinct env value yields its own run key and warm layer.
+and each distinct env value yields its own run key and warm layer. The scope
+is the same shape: at most 32 entries per axis, each 1 to 256 bytes matching
+`[A-Za-z0-9_][A-Za-z0-9_.:/-]*`, so no entry parses as a flag.
+
+The default is the whole workspace, and the `Done` gate still runs it: a
+scoped pass answers `PassedScoped { scope }`, which adopts its formatted
+tree but never marks proven, while whole passes keep bare `Passed`.
 
 A failed test step reports, in order: the build errors when the build failed
 (the `rendered` text of each `error` `compiler-message`); else the test

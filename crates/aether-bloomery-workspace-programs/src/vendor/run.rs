@@ -72,6 +72,7 @@ pub(super) fn request(input: &VendorInput) -> Result<RunRequest, Refusal> {
         scratch: Scratch::new(vec![path(TMP_SCRATCH)?])
             .map_err(|error| refused(format!("the scratch paths: {error}")))?,
         network: Network::On,
+        layer: None,
     })
 }
 

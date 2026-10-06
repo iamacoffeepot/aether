@@ -8,7 +8,7 @@ use aether_bloomery_workspace::testing::{
     LAYER_OVERLAY, LAYER_UPPER, LAYER_WORK, LayerScript, RUN_COLLECTOR, RUN_CONTAINER, RUN_VOLUME, RunScript,
     StubDaemon, StubReply, StubRequest, mountpoint,
 };
-use aether_bloomery_workspace::{Resource, RunError, RunResult};
+use aether_bloomery_workspace::{Resource, RunError, RunResult, run_key};
 use aether_data::Ref;
 
 use crate::run::{FLAGS, Inputs, built_work, outcome, over, run_against, script};
@@ -317,5 +317,95 @@ fn with_warm_layers_off_a_run_over_a_lock_builds_cold() -> TestResult {
     outcome(answer)?;
     let pointer_inspected = lines(&requests).iter().any(|line| line.starts_with(POINTER_LINE));
     assert!(!pointer_inspected, "a cold run inspects no layer");
+    Ok(())
+}
+
+#[test]
+fn a_scoped_run_builds_over_the_whole_layers_overlay() -> TestResult {
+    // Catches a guest that writes its own layer: after a whole run completes,
+    // a scoped request naming its base runs over an overlay of the same hex
+    // with no new data-volume or pointer create.
+    let inputs = locked()?;
+    let (environment, whole) = (inputs.hex(), inputs.request("tool", "target")?);
+    let whole_key = run_key(whole.environment.digest(), &whole.steps);
+    let tree = whole.tree.digest().to_string();
+    let output = built_work();
+    let stub = StubDaemon::bind()?;
+    let mut harness = inputs.boot(&stub, &warm_flags())?;
+    let whole_run = over(&harness, whole.clone());
+    let miss = LayerScript::Miss { data_volume: DATA, completes: true };
+    let (first, first_requests) =
+        answering(&stub, script(&environment, &output).layer_replies(&miss), || harness.run(&whole_run))?;
+    outcome(first)?;
+    let hex = layer_hex(&first_requests)?;
+
+    let mut scoped_steps = whole.steps.as_slice().to_vec();
+    scoped_steps[0].args.push("scoped".to_owned());
+    let scoped = aether_bloomery_workspace::RunRequest {
+        steps: aether_bloomery_workspace::Steps::new(scoped_steps).expect("scoped steps"),
+        layer: Some(whole_key),
+        ..whole.clone()
+    };
+    assert_ne!(
+        run_key(scoped.environment.digest(), &scoped.steps),
+        run_key(whole.environment.digest(), &whole.steps),
+        "a scoped run keeps its own run key"
+    );
+    let run = over(&harness, scoped);
+    let hit = LayerScript::Hit { hex: &hex, data_volume: DATA, tree: Some(&tree) };
+
+    let (answer, requests) = serving(stub, script(&environment, &output).layer_replies(&hit), || harness.run(&run))?;
+
+    outcome(answer)?;
+    let layer = [
+        format!("GET /v1.44/volumes/{DATA}"),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/volumes/create".to_owned(),
+        "POST /v1.44/volumes/create".to_owned(),
+    ];
+    let expected = warm_lines(&hex, &environment, &layer, &[], &[LAYER_UPPER, LAYER_WORK, LAYER_OVERLAY]);
+    assert_eq!(lines(&requests), expected);
+    assert!(layered_at_target(&body(&requests, 8)?, LAYER_OVERLAY), "the scoped run builds over its overlay");
+    Ok(())
+}
+
+#[test]
+fn a_scoped_run_without_its_whole_layer_builds_cold_without_creating_one() -> TestResult {
+    // Catches whole-run pollution on the miss path: a scoped request against
+    // a daemon with no pointer builds cold with no layer-volume or pointer
+    // create in its request lines.
+    let inputs = locked()?;
+    let (environment, whole) = (inputs.hex(), inputs.request("tool", "target")?);
+    let whole_key = run_key(whole.environment.digest(), &whole.steps);
+    let mut scoped_steps = whole.steps.as_slice().to_vec();
+    scoped_steps[0].args.push("scoped".to_owned());
+    let scoped = aether_bloomery_workspace::RunRequest {
+        steps: aether_bloomery_workspace::Steps::new(scoped_steps).expect("scoped steps"),
+        layer: Some(whole_key),
+        ..whole
+    };
+    let output = built_work();
+    let mut replies = script(&environment, &output).replies();
+    replies.insert(3, StubReply::with_length(404, r#"{"message":"No such volume"}"#));
+
+    let (answer, requests, _) = run_against(inputs, scoped, replies, &warm_flags())?;
+
+    outcome(answer)?;
+    let seen = lines(&requests);
+    let inspects_base = seen.iter().any(|line| line.starts_with(POINTER_LINE));
+    assert!(inspects_base, "a guest miss still inspects its base");
+    let creates = seen.iter().filter(|line| *line == "POST /v1.44/volumes/create").count();
+    assert_eq!(creates, 1, "only /work is created, no layer volume: {seen:?}");
+    let mut pointer_created = false;
+    for request in &requests {
+        let is_create = request.line() == "POST /v1.44/volumes/create";
+        let names_layer =
+            request.body.windows(b"aether-workspace-layer-".len()).any(|window| window == b"aether-workspace-layer-");
+        let creates_pointer = is_create && names_layer;
+        if creates_pointer {
+            pointer_created = true;
+        }
+    }
+    assert!(!pointer_created, "a guest miss creates no pointer: {seen:?}");
     Ok(())
 }
