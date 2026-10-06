@@ -77,6 +77,7 @@ mod aabb;
 mod color;
 mod mat;
 mod quat;
+mod ray;
 mod rect;
 mod rigid;
 #[cfg(test)]
@@ -87,6 +88,7 @@ pub use aabb::{Aabb, Axis};
 pub use color::{Hsl, Rgb, Rgba};
 pub use mat::Mat4;
 pub use quat::Quat;
+pub use ray::Ray;
 pub use rect::Rect2;
 pub use rigid::Rigid;
 pub use vec::{Vec2, Vec3, Vec4};
