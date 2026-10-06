@@ -1,7 +1,7 @@
 # The demo
 
 A teapot authored in the mesh DSL, drawn in the desktop chassis and framed
-by a camera you can steer from the keyboard. It is the shortest path from a
+by a camera you can steer with the mouse and the keyboard. It is the shortest path from a
 clone to something on screen: no operator, no MCP session, no mail sent by
 hand.
 
@@ -39,14 +39,19 @@ thing you would upload.
 ## What appears
 
 `teapot.dsl` from `crates/aether-mesh/examples/`, seen from a little above
-and to one side. The keys steer the camera:
+and to one side. The mouse and the keys steer the camera:
 
-| Keys | Move |
+| Input | Move |
 |---|---|
-| W / A / S / D | pan the orbit target across the ground |
-| ← / → | yaw around the target |
-| ↑ / ↓ | pitch |
-| Z / X | zoom in / out |
+| left-drag | orbit around the target |
+| wheel | zoom in / out |
+| right-drag or middle-drag | pan, keeping the point under the cursor under it |
+| W / A / S / D or the arrows | pan the target across the ground |
+| Q / E | turn around the target |
+
+The pans and the zoom scale with the camera's distance, so they feel the same
+close in and far out, and switching to another window releases whatever was
+held.
 
 The packaged window is titled `aether`; the developer run gets the chassis's
 own default title, because a boot manifest deliberately drops its chassis
@@ -60,7 +65,7 @@ depot manifest carries them.
 | `demo.json` | the depot spec `cargo xtask package --spec` reads |
 | `demo.boot.json` | the JSON boot manifest the dev run reads |
 | `camera.json` | the camera's init-config: its lens, the window it follows, and the `pose` that frames the subject |
-| `controller.json` | the camera controller's init-config: the camera it drives, rates and clamps |
+| `controller.json` | the camera controller's init-config: the camera it drives, the window whose input it reads, its rates and its zoom range |
 | `mesh.json` | the mesh viewer's init-config: the camera whose eye its outlines face |
 | `src/lib.rs` | the `aether.demo` component |
 

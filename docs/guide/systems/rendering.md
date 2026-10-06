@@ -386,21 +386,36 @@ frame.
     viewport size and drops its viewers, which the camera logs at warn: send
     `aether.render.view_from` again, and have any other viewer subscribe
     again.
-- **Driving a camera from the keyboard** is a peer component's job, not the
-  camera's. `aether-kit`'s `camera-controller` export, an instance at
-  `aether.kit.camera-controller:<key>`, subscribes `Key` / `KeyRelease` /
-  `Tick` and keeps a shadow of the pose it drives: at `wire` it proves the
-  camera its config names and asks it `aether.kit.camera.where`, and each tick
-  with a key held it steps the shadow and mails the camera the pose — WASD pan
-  the target across the ground, the arrows yaw and pitch, Z/X dolly the
-  distance, and an idle tick produces no mail. Its
-  `aether.kit.camera-controller.config` names the camera
-  (`"camera": "aether.kit.camera:main"`) and sets the per-tick rates and
-  clamps, so the camera stays a pose and a lens while the keyboard policy
-  lives in the controller. Load the camera first: a controller whose camera
-is not live fails its load. A pose sent to the camera
-  from elsewhere is replaced on the next held-key tick, since the keys step
-  the shadow.
+- **Driving a camera with the mouse and the keyboard** is a peer component's
+  job, not the camera's. `aether-kit`'s `camera-controller` export, an
+  instance at `aether.kit.camera-controller:<key>`, subscribes the window's
+  key, mouse and focus events and `Tick`, and sends the camera only
+  `aether.kit.camera.pose`, the message a script or an agent sends: at most
+  one a tick, and none while nothing is held.
+  - **Controls.** Left-drag orbits. The wheel zooms, multiplying the distance
+    per step within the config's `nearest` and `farthest`. Right-drag or
+    middle-drag pans with the grabbed point staying under the cursor. WASD
+    and the arrows pan the target across the ground at a rate that scales
+    with the camera's distance, and Q/E turn the camera about its target.
+    Key rates use the tick's elapsed time.
+  - **It reads before it writes.** A gesture starts when input arrives while
+    nothing is held: the controller asks the camera
+    `aether.kit.camera.where` and steps from the answer, and it forgets the
+    pose when the last key and button are released. A `pose`, `frame` or
+    `glide` sent from elsewhere between gestures stands, and the next
+    gesture continues from wherever the camera is.
+  - **It is a viewer of its camera.** It sends the camera
+    `aether.render.view_subscribe` and casts a drag pan's rays through the
+    view the drag began in, so the pan is exact for either lens with no
+    request per mouse move.
+  - **One window.** Its `aether.kit.camera-controller.config` names the
+    camera (`"camera": "aether.kit.camera:main"`) and the window whose input
+    it reads (`"window": "aether.window/aether.window.instance:main"`), and
+    sets the rates and the zoom range. Input from any other window is
+    ignored, and when its window loses focus it drops every held key and
+    button, whose releases went to another window.
+  - Load the camera first: a controller whose camera is not live fails its
+    load.
 - **A new drawing component** subscribes the `Render` stage and emits
   `DrawTriangle`s in world space, with `z` chosen against the depth convention
   (backdrop at `z = 0`, movers above). Multiple components can draw into one
