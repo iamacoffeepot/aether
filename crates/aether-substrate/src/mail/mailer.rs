@@ -39,6 +39,7 @@ use crate::mail::registry::{
     RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
+use crate::memory::{self, BlobStoreMemory, MemoryLedger, MemoryReport, OwnerMemory};
 use crate::runtime::thread_name;
 use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
@@ -124,6 +125,11 @@ pub struct Mailer {
     /// fold (that runs lock-free through the per-actor cache). Allocated
     /// empty by [`Self::new`] (like `trace_handle`).
     cost_table: Arc<CostTable>,
+    /// The engine's memory ledger: one row per live
+    /// [`MemoryGauge`](crate::memory::MemoryGauge), written by its owner as
+    /// its bytes change and read by [`Self::memory_report`]. A sibling of
+    /// [`Self::cost_table`], and like it never touched on mail dispatch.
+    memory_ledger: Arc<MemoryLedger>,
     /// ADR-0080 §6: the engine's one chassis-root correlation counter. Every
     /// chassis-root push mints `MailId(CHASSIS_MAILBOX_ID, n)` from here, so no
     /// two senders can mint the same root. Starts at 1; 0 is the sentinel.
@@ -177,6 +183,7 @@ impl Mailer {
             route_relay: OnceLock::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
+            memory_ledger: Arc::new(MemoryLedger::default()),
             chassis_roots: AtomicU64::new(1),
             blob_store: BlobStore::new().expect("spawn the blob reclaim thread"),
         }
@@ -510,6 +517,45 @@ impl Mailer {
     /// recipient-group cells from it at flush.
     pub fn cost_table(&self) -> &Arc<CostTable> {
         &self.cost_table
+    }
+
+    /// The engine's memory ledger. Crate-private: an actor mints its gauge
+    /// through [`NativeInitCtx::memory_gauge`](crate::actor::native::NativeInitCtx::memory_gauge),
+    /// and a hosted guest's ctx mints its own.
+    pub(crate) const fn memory_ledger(&self) -> &Arc<MemoryLedger> {
+        &self.memory_ledger
+    }
+
+    /// What the engine holds right now: the process's resident set, the blob
+    /// store's three counters, and one row per owner and label from the
+    /// ledger, sorted by owner then label. An owner the registry holds no
+    /// name for is named by its tagged id text, so no row is dropped. Two
+    /// gauges one owner holds under one label, as a guest and its
+    /// replacement do while a republish prepares, are one row with their
+    /// sum. The crate-private path behind
+    /// [`NativeCtx::memory_report`](crate::actor::native::ctx::NativeCtx::memory_report).
+    pub(crate) fn memory_report(&self) -> MemoryReport {
+        let mut owners: Vec<OwnerMemory> = self
+            .memory_ledger
+            .rows()
+            .into_iter()
+            .map(|row| OwnerMemory {
+                owner: self.registry.mailbox_name(row.owner).unwrap_or_else(|| row.owner.to_string()),
+                label: row.label,
+                bytes: memory::report_bytes(row.bytes),
+            })
+            .collect();
+        owners.sort_by(|a, b| (a.owner.as_str(), a.label).cmp(&(b.owner.as_str(), b.label)));
+
+        MemoryReport {
+            process_bytes: memory::resident_set_bytes(),
+            blob_store: BlobStoreMemory {
+                resident_bytes: memory::report_bytes(self.blob_store.resident_bytes()),
+                slab_bytes: memory::report_bytes(self.blob_store.slab_bytes()),
+                slab_member_bytes: memory::report_bytes(self.blob_store.slab_member_bytes()),
+            },
+            owners,
+        }
     }
 
     /// Hand `mail` to the substrate for dispatch. `Inbox`-bound

@@ -38,6 +38,7 @@ mod address;
 mod blob;
 mod cast;
 mod held;
+mod memory;
 mod outbox;
 mod watch;
 

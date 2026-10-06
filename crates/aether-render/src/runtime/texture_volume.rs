@@ -10,6 +10,7 @@
 //! record time and rebuilt from the blob on a replacement device.
 
 use aether_data::Blob;
+use aether_substrate::memory::MemoryCharge;
 
 use super::surface::render_limits;
 use super::texture::{TextureRegistry, wgpu_texture_format};
@@ -27,6 +28,10 @@ pub struct StagedTextureVolume {
     pub pixels: Blob,
     pub realized: Option<wgpu::Texture>,
     pub dirty: bool,
+    /// The volume's bytes on the render capability's `textures` memory
+    /// gauge. Held only to be dropped: the bytes are subtracted when the
+    /// entry drops.
+    pub _charge: MemoryCharge,
 }
 
 /// Byte count of a whole volume, which is the length
@@ -134,7 +139,16 @@ impl TextureRegistry {
 
         self.volumes.insert(
             texture_id,
-            StagedTextureVolume { format, width, height, depth, pixels, realized: None, dirty: true },
+            StagedTextureVolume {
+                format,
+                width,
+                height,
+                depth,
+                pixels,
+                realized: None,
+                dirty: true,
+                _charge: self.memory.charge(expected),
+            },
         );
         CreateTextureVolumeResult::Ok { texture_id }
     }

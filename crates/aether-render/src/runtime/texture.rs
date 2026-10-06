@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use aether_data::Blob;
+use aether_substrate::memory::{MemoryCharge, MemoryGauge};
 use aether_substrate::render::{
     RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_full,
 };
@@ -35,6 +36,11 @@ pub struct StagedTexture {
     pub pixels: TexturePixels,
     pub realized: Option<RealizedTexture>,
     pub dirty: bool,
+    /// The texture's declared pixel bytes on the render capability's
+    /// `textures` memory gauge: what it occupies once realized on the
+    /// device, sampled or writable. Held only to be dropped: the bytes are
+    /// subtracted when the entry drops.
+    pub _charge: MemoryCharge,
 }
 
 /// The staged pixels of a texture. A created texture holds the received
@@ -167,6 +173,8 @@ pub struct TextureRegistry {
     pub entries: HashMap<u32, StagedTexture>,
     pub arrays: HashMap<u32, StagedTextureArray>,
     pub volumes: HashMap<u32, StagedTextureVolume>,
+    /// What every staged texture, array, and volume charges its bytes to.
+    pub(super) memory: MemoryGauge,
 }
 
 /// What a texture id names: a plain texture, a texture array or a
@@ -210,7 +218,15 @@ impl BoundTexture<'_> {
 }
 
 impl TextureRegistry {
+    /// A registry whose bytes are counted on a gauge no report lists: the
+    /// form a test builds.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_memory(MemoryGauge::detached())
+    }
+
+    /// A registry whose textures charge their bytes to `memory`.
+    pub fn with_memory(memory: MemoryGauge) -> Self {
         // The window stops one below `WHITE_TEXTURE_ID` so the reserved
         // sentinel is structurally unreachable rather than merely far away.
         Self {
@@ -218,6 +234,7 @@ impl TextureRegistry {
             entries: HashMap::new(),
             arrays: HashMap::new(),
             volumes: HashMap::new(),
+            memory,
         }
     }
 
@@ -351,6 +368,7 @@ impl TextureRegistry {
                 pixels: TexturePixels::Received(mail.pixels),
                 realized: None,
                 dirty: mail.usage == TextureUsage::Sampled,
+                _charge: self.memory.charge(expected),
             },
         );
         CreateTextureResult::Ok { texture_id }
@@ -425,13 +443,16 @@ impl TextureRegistry {
     /// first use rather than at boot — a runtime that never draws a solid quad
     /// never allocates it.
     pub fn ensure_white(&mut self) {
+        let white = vec![255, 255, 255, 255];
+        let memory = &self.memory;
         self.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
             width: 1,
             height: 1,
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            pixels: TexturePixels::Received(Blob::from(vec![255, 255, 255, 255])),
+            _charge: memory.charge(white.len()),
+            pixels: TexturePixels::Received(Blob::from(white)),
             realized: None,
             dirty: true,
         });
@@ -506,6 +527,7 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 16])),
             realized: None,
             dirty: false,
+            _charge: MemoryGauge::detached().charge(16),
         };
         // Overwrite the bottom-right pixel (1, 1) with 0xAA bytes.
         assert!(texture.apply_subrect(1, 1, 1, 1, &[0xAA, 0xAA, 0xAA, 0xAA]));
@@ -535,6 +557,7 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 8])),
             realized: None,
             dirty: false,
+            _charge: MemoryGauge::detached().charge(8),
         };
 
         assert!(texture.apply_subrect(1, 0, 2, 2, &[10, 20, 30, 40]));

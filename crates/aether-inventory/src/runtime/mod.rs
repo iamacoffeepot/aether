@@ -13,12 +13,12 @@ use aether_actor::runtime;
 #[cfg(not(target_family = "wasm"))]
 use aether_data::ErasedActorPath;
 
-use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
+use super::{InventoryCapability, ListHandlers, ListKinds, ListMemory, Manifest, Resolve, ResolveAddress};
 
 #[cfg(not(target_family = "wasm"))]
-use super::{HandlersResult, ListKindsResult, ManifestResult, ResolveAddressResult, ResolveResult};
+use super::{HandlersResult, ListKindsResult, ListMemoryResult, ManifestResult, ResolveAddressResult, ResolveResult};
 #[cfg(not(target_family = "wasm"))]
-use crate::kinds::ResolvedName;
+use crate::kinds::{BlobStoreBytes, OwnerBytes, ResolvedName};
 
 pub use crate::kinds::{HandlerEntryWire, NameEntryWire, ParamKindWire, TemplateEntryWire};
 pub use aether_data::KindId;
@@ -135,6 +135,41 @@ impl NativeActor for InventoryCapability {
             })
             .collect();
         ListKindsResult { kinds }
+    }
+
+    /// Reply with what the engine holds right now, by owner: the process's
+    /// resident set size, the blob store's three byte counts, and one row
+    /// per owner and label from the engine's memory ledger.
+    ///
+    /// # Agent
+    /// Reply: `ListMemoryResult`. `owners` is one `{ owner, label, bytes }`
+    /// row per owner and label, sorted by owner then label: `linear memory`
+    /// for each live wasm component (named by its actor path), `textures`
+    /// and `geometry` for `aether.render`. `blob_store.slab_bytes` is part
+    /// of `blob_store.resident_bytes`; do not sum them. The rows do not sum
+    /// to `process_bytes`, which also holds everything no owner counts, and
+    /// is `None` on a platform with no reader. Ask about once a second, not
+    /// per frame.
+    // A field-for-field projection of `ctx.memory_report()`, which reads the
+    // ledger the engine's mailer holds, so the cap keeps no state for it.
+    #[handler::request]
+    fn on_list_memory(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ListMemory) -> ListMemoryResult {
+        let report = ctx.memory_report();
+        let owners = report
+            .owners
+            .into_iter()
+            .map(|row| OwnerBytes { owner: row.owner, label: row.label.into(), bytes: row.bytes })
+            .collect();
+
+        ListMemoryResult {
+            process_bytes: report.process_bytes,
+            blob_store: BlobStoreBytes {
+                resident_bytes: report.blob_store.resident_bytes,
+                slab_bytes: report.blob_store.slab_bytes,
+                slab_member_bytes: report.blob_store.slab_member_bytes,
+            },
+            owners,
+        }
     }
 
     /// Resolve each requested tagged-id string to its origin name,

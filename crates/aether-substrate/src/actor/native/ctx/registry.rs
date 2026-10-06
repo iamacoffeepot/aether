@@ -21,6 +21,7 @@ use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 #[cfg(feature = "wasm")]
 use crate::mail::registry::{AdmissionRefusal, Admitted};
+use crate::memory::MemoryReport;
 
 use super::NativeCtx;
 
@@ -46,6 +47,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn kind_descriptors(&self) -> Vec<KindDescriptor> {
         self.binding.kind_descriptors()
+    }
+
+    /// What the engine holds right now: the process's resident set size, the
+    /// blob store's three byte counts, and one row per owner and label. Each
+    /// owner is named by its actor path text, so no mailbox position crosses
+    /// this verb. Building it takes the memory ledger's lock once and reads
+    /// the process's size from the platform, so it is for a diagnostic asked
+    /// about once a second, not for a per-frame read.
+    ///
+    /// Consumer: the `aether.inventory` cap's `ListMemory` handler, which
+    /// projects the report onto the wire.
+    #[must_use]
+    pub fn memory_report(&self) -> MemoryReport {
+        self.binding.memory_report()
     }
 
     /// The origin name of one ADR-0064 tagged id, looked up in the one table
