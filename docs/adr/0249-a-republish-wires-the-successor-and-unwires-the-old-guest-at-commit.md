@@ -6,27 +6,36 @@
 Settles the question [ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md)
 left open about [ADR-0241](0241-code-is-published-not-loaded.md) §7: which
 lifecycle hooks a republish runs, on which guest, and which of them may refuse
-it. Tracked by #7529. This ADR is text only; the engine change is #7529's.
+it. In doing so it states the whole lifecycle contract: every hook, what can
+fail inside it, what its signature is, and what runs in every situation an
+actor can be in. Tracked by #7529. This ADR is text only; the engine change is
+#7529's.
 
-Three terms are used throughout. The **old guest** is the wasm instance that
+Four terms are used throughout. The **old guest** is the wasm instance that
 runs before a republish. The **successor** is the instance built from the new
 module to replace it (the code calls it the candidate). The **point of no
 return** is the moment the component host sends `Commit` to the members of a
 group, after the successor module's publish has settled
 (`finish_republish_publish`, `crates/aether-component/src/component/runtime/republish/mod.rs`).
+A hook **refuses** when it returns an error; a **trap** is a guest panic or
+fault, and for a native actor a panic.
+
+Everything under "Context" was read in the tree at `6577e30d9` unless a
+sentence says it was inferred or taken from another ADR.
 
 ## Context
 
 A guest has five lifecycle hooks: `init`, `wire`, `unwire`
 (`Lifecycle`, `crates/aether-actor/src/model/mod.rs`), and `on_dehydrate`,
 `on_rehydrate` (`WasmActor`, `crates/aether-actor/src/wasm/mod.rs`,
-[ADR-0101](0101-replace-hooks-on-ffiactor.md)). A birth runs `init` then
-`wire`, and a close runs `unwire`. A republish runs a different set.
+[ADR-0101](0101-replace-hooks-on-ffiactor.md)). A native actor has the first
+three. A birth runs `init` then `wire`, and a close runs `unwire`. A republish
+runs a different set.
 
 ### What a republish runs today
 
-Read at `6577e30d9`, in `WasmTrampolineState::prepare`, `start_candidate`,
-`rehydrate_candidate`, `commit` and `abort`
+From `WasmTrampolineState::prepare`, `start_candidate`, `rehydrate_candidate`,
+`commit` and `abort`
 (`crates/aether-component/src/trampoline/runtime/republish.rs`) and
 `reinstate` and `close_guest`
 (`crates/aether-component/src/trampoline/runtime/state.rs`).
@@ -50,15 +59,15 @@ abort:      successor dropped, no hooks; old guest: on_rehydrate -> wire (a seco
   fresh spawns fire `wire`").
 - **`on_rehydrate` runs only when the old guest saved state.**
   `rehydrate_candidate` calls `call_on_rehydrate` through
-  `saved.map_or(Ok(()), ..)`, so a successor of a guest that saved nothing
-  runs `init` and no other hook.
+  `saved.map_or(Ok(()), ..)`.
 - **An abort runs `wire` a second time on the old guest.** `reinstate` hands
   the old guest its own bundle through `on_rehydrate` and then calls
   `wire_guest`, because its `unwire` ran at prepare. A fault in that second
-  `wire` aborts the substrate: no birth is in flight to fail with it.
+  `wire` aborts the substrate.
 - **`unwire` does not reach inline children.** The `unwire` export runs the
-  entry actor's hook only; `despawn_inline_child` is the one path that runs a
-  child's `unwire` (`crates/aether-actor/src/wasm/ctx/spawn.rs`).
+  entry actor's hook only. `despawn_inline_child`
+  (`crates/aether-actor/src/wasm/ctx/spawn.rs`) is the one path that runs a
+  child's `unwire`, and a child that despawns itself mid-dispatch skips it.
 
 ### What that costs
 
@@ -68,7 +77,7 @@ whose `unwire` undoes its `wire` comes back with nothing: the old guest
 unsubscribed at prepare and the successor never subscribes. A new version's
 additions to `wire` never run on a live instance.
 
-Three kit components show it, each read in the tree.
+Three kit components show it.
 
 - `aether.kit.mesh` and `aether.kit.camera-controller` each declare an empty
   state kind (`MeshViewerState`, `ControllerState`) and save it in
@@ -83,30 +92,51 @@ Three kit components show it, each read in the tree.
   texture and never creates one. This follows from the code as read; it was
   not reproduced on a running engine.
 
-### Hooks that cannot say no, and one that fails silently
+### Failures that have no way to be reported
 
-- `on_rehydrate` returns `()`. The engine waits on it before the point of no
-  return, and it is where a successor learns that the old state does not fit
-  it, yet the only way it can stop the republish is to trap
-  (`call_on_rehydrate` propagates a trap, and `rehydrate_candidate` refuses
-  with "on_rehydrate failed"). The hook `#[actor]` generates for a declared
-  `type State` (`crates/aether-actor-derive/src/wasm_expand.rs`) handles a
-  bundle that does not decode by logging a warning and starting fresh. A
-  rebuilt inline child that fails its `init` or placement is skipped with a
-  warning and the republish goes on without it.
-- `on_dehydrate` returns `()`. Two framework paths refuse through it: a live
-  held reply that was not saved (`DEHYDRATE_HELD_UNSAVED`,
-  [ADR-0243](0243-typed-held-replies.md) §6) and a `save_state` the host
-  rejected (`take_save_error`). Both refuse the republish and the old guest
-  is reinstated with the state it saved.
-- **A trap in `on_dehydrate` is logged and the republish goes on.**
-  `Component::on_dehydrate`
-  (`crates/aether-substrate/src/actor/wasm/component/lifecycle.rs`) records
-  no error for a trap. The export saves state as its last step, so a trap
-  before it leaves no bundle: the successor is not rehydrated, its inline
-  children are not rebuilt, and the republish answers `Ok`. If another
-  member then aborts the group, the guest that trapped is reinstated and
-  runs more code.
+Two hooks can fail and return `()`. Their failures are reported by a trap, by
+a log line, or not at all.
+
+- **`on_rehydrate`.** A prior state that does not decode, a reference that no
+  longer proves, an inline child that cannot be rebuilt. The only way the
+  hook can stop the republish is to trap (`call_on_rehydrate` propagates it
+  and `rehydrate_candidate` refuses with "on_rehydrate failed"). The hook
+  `#[actor]` generates for a declared `type State`
+  (`crates/aether-actor-derive/src/wasm_expand.rs`) logs a warning and starts
+  fresh when the bundle does not decode. `reconstruct_inline_children` skips
+  a child that cannot be restored, with a warning.
+- **`on_dehydrate`.** A save the host rejects, a state that does not encode,
+  a held reply left live and unsaved. `WasmDropCtx::save_state` and
+  `save_state_kind` (`crates/aether-actor/src/wasm/ctx/drop.rs`) panic on the
+  first two: "Panics if the host `save_state` import returns non-zero" and
+  "Panics ... When `value` does not encode". The host records the first as a
+  save error before the guest panics (`take_save_error`), so the republish is
+  still refused. The third is a framework check that returns
+  `DEHYDRATE_HELD_UNSAVED` ([ADR-0243](0243-typed-held-replies.md) §6).
+- **A trap in `on_dehydrate` that records no save error is logged and the
+  republish goes on.** `Component::on_dehydrate`
+  (`crates/aether-substrate/src/actor/wasm/component/lifecycle.rs`) does
+  nothing else with it. The export saves as its last step, so no bundle
+  exists: the successor is not rehydrated, its inline children are not
+  rebuilt, and the republish answers `Ok`. If another member aborts the
+  group, the guest that trapped is reinstated and runs more code.
+
+### What a trap does today, by where it lands
+
+- A trap in a handler aborts the substrate
+  ([ADR-0063](0063-fail-fast-on-abnormal-component-lifecycle.md);
+  `deliver_to_guest`, `state.rs`).
+- A trap in `init` fails the birth or refuses the republish, and the guest is
+  dropped (`Component::instantiate`,
+  `crates/aether-substrate/src/actor/wasm/component/instantiate.rs`; `prepare`
+  puts the old guest back untouched).
+- A trap in `wire` at a birth fails the birth and the guest is released
+  without another call (`WireFault::Trapped`,
+  `crates/aether-substrate/src/actor/wasm/component/dispatch.rs`: "no more of
+  its code runs"; `WasmTrampoline::wire`).
+- A trap in the old guest's `on_rehydrate` after an abort aborts the
+  substrate (`reinstate`: "there is no other guest to fall back to").
+- A trap in `unwire` is logged and the close goes on (`Component::unwire`).
 
 ### What ADR-0247 left open
 
@@ -118,7 +148,79 @@ open "whether a republish is a close followed by a birth, in which case rules
 
 ## Decision
 
-### 1. Every guest instance has one fixed sequence
+### 1. A hook that can fail returns an error; a hook that cannot returns none
+
+A hook that can fail returns a result, and the returned error is the way it
+reports failure. A hook that cannot fail returns nothing. A trap is a bug and
+is never how a hook says no.
+
+"Can fail" means the hook's caller is waiting on it and could act on a no. The
+engine waits on a hook only before a point of no return: a birth going live,
+or a republish's `Commit`. So the same test gives both columns of the table
+below.
+
+| Hook | Its ctx | What can fail inside it | `// main` | `// plan` |
+| --- | --- | --- | --- | --- |
+| `init` (wasm) | `WasmInitCtx`: the asset catalog and load window; no mail | the config does not decode; an asset is missing; the author's own construction | `-> Result<Self, ActorInitError>` | unchanged |
+| `init` (native) | `NativeInitCtx` | the author's own construction | `-> Result<S, BootError>` | unchanged |
+| `on_rehydrate` (wasm) | `WasmCtx`: mail, resolve, inline spawn, held replies | the prior state does not decode; a reference no longer proves; a child cannot be rebuilt | `()` | `-> Result<(), ActorInitError>` |
+| `wire` (wasm) | `WireCtx`: `WasmCtx` plus the load window | a reference does not prove; an asset is missing; an inline spawn fails | `-> Result<(), ActorInitError>` | unchanged |
+| `wire` (native) | `NativeCtx` | the same kinds of failure | `-> Result<(), BootError>` | unchanged |
+| `on_dehydrate` (wasm) | `WasmDropCtx`: `save_state`, and today one send verb | the host rejects the save; the state does not encode; a held reply is live and unsaved | `()` | `-> Result<(), ActorInitError>` |
+| `unwire` (wasm, native) | `WasmCtx` / `NativeCtx` | nothing its caller could act on | `()` | unchanged |
+
+```rust
+// main
+fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
+fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: PriorState<'_>);
+fn save_state(&mut self, version: u32, bytes: &[u8]);                 // panics when the host refuses
+fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K);     // panics when the value does not encode
+
+// plan
+fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError>;
+fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: PriorState<'_>) -> Result<(), ActorInitError>;
+fn save_state(&mut self, version: u32, bytes: &[u8]) -> Result<(), ActorInitError>;
+fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) -> Result<(), ActorInitError>;
+```
+
+- **`on_rehydrate` gains a result** because decode, resolve and rebuild all
+  fail, and the engine is waiting.
+- **`on_dehydrate` gains a result** because all three of its failures are
+  real and two of them are reported by a panic today. The save verbs return
+  the error so the hook passes it on with `?`. The held-unsaved check becomes
+  an `Err` the export returns, in place of the `DEHYDRATE_HELD_UNSAVED` code.
+- **`unwire` keeps `()`.** It runs when the decision is already made: at
+  commit, at a close, or on a successor that has already lost. Its caller
+  can do nothing with a no. The fallible calls inside it (`resolve`,
+  `despawn_inline_child`, `unwatch`) hand their results to the author, who
+  skips what is already gone; the send verbs return nothing.
+- **The `type State` accessors keep their shapes.** `dehydrate(&self) -> State`
+  and `rehydrate(&mut self, State)` do not fail. The hooks `#[actor]`
+  generates around them return the save's result and the decode's.
+
+### 2. A guest that traps runs no more code
+
+One rule covers every trap, and it turns on whether the engine can do without
+the guest that trapped.
+
+- **The guest was going to be discarded, or can be.** It is dropped without
+  another call, and whatever was waiting on it fails. This is a newborn guest
+  in `init` or `wire`, a successor in `init`, `on_rehydrate` or `wire`, and
+  any guest in `unwire`.
+- **The guest is the live one and has to keep running.** The substrate
+  aborts (ADR-0063). This is a guest in a handler, the old guest in
+  `on_dehydrate`, and the old guest in `on_rehydrate` after an abort.
+
+Each case but one is today's behaviour, cited in the Context. The one that
+changes is the old guest's `on_dehydrate`: a trap there is a trap in the live
+guest, and it aborts the substrate where today it is logged and the republish
+goes on.
+
+A native actor is never a discardable second copy, so only the second case
+applies to it: a panic in a hook aborts the engine. ADR-0247's Context
+records that for `wire`; the other native hooks were not read for this ADR.
+
+### 3. Every guest instance has one fixed sequence
 
 ```
 init -> on_rehydrate (if state was carried) -> wire -> live -> on_dehydrate (if replaced) -> unwire -> dropped
@@ -143,66 +245,144 @@ successor:  init -> on_rehydrate (if carried) -> wire -> [commit] live
 abort:      successor: unwire -> dropped; old guest: on_rehydrate from its own bundle, no wire
 ```
 
-Inline children follow the same rule. A child the successor rebuilds runs
-`init`, `on_rehydrate` if its state was carried, and `wire`. The old guest's
-`unwire` at commit reaches its resident children first, then the entry actor,
-which is the order ADR-0247 rule 5 gives a close.
+A native actor's sequence is `init -> wire -> live -> unwire -> dropped`. It
+has no replace hooks and is never republished: a republish's members are
+guest trampolines (`Member::control: ProtocolRef<GuestControl>`), and a
+module that declares a boot is refused by the pre-checks
+(`crates/aether-component/src/component/runtime/republish/precheck.rs`).
 
-### 2. The steps of one member
+### 4. Every situation, hook by hook
 
-**Prepare.** All of it happens before the point of no return, and any step
-may refuse.
+Each table lists the hooks in the order they run. "Serves" names the ADR-0247
+rule the row holds. In every table, a trap follows §2 and is listed only
+where the outcome needs saying.
 
-1. The member closes its inbox gate. Mail for the guest waits in arrival
-   order (`forward_to_wasm`, `PreparedSlot::gated`).
-2. The successor is instantiated with its outbox held and its load window
-   open over the republish's code. `init` runs. The old guest has run no
-   hook yet, so a failed `init` leaves it untouched.
-3. The old guest runs `on_dehydrate`.
-4. The correlation cursor, reply table and watches move to the successor.
-   The save error and the carried-context check
-   (`check_carried_contexts`) are read.
-5. The successor runs `on_rehydrate`, if the old guest saved state.
-6. The successor and each child it rebuilt run `wire`. Its outbox is still
-   held, so nothing `wire` sends has left. The load window closes when
-   `wire` returns.
-7. The member answers `Ready`.
+#### A birth of a guest: a load, a spawn, a boot entry
 
-**Commit.** After the point of no return. No step can refuse.
+Every wasm door reaches one staging function (`stage_requested`, ADR-0247
+rule 4), so there is one table.
 
-1. The old guest runs `unwire`, children first. Its outbox is not held, so
-   its mail leaves now, ahead of anything the successor sent.
-2. The old guest is dropped.
-3. The successor's held outbox is flushed, in the order it sent, and its
-   staged inline aliases publish.
-4. The successor becomes the live guest and receives the gated mail in
-   order.
+| Step | Runs on | Can refuse | A refusal | A trap | Serves |
+| --- | --- | --- | --- | --- | --- |
+| The load window opens; `init` | the new guest | yes | the birth fails and its requester is told; the guest is dropped | the same | 3, 4 |
+| The accept set registers; `wire` | the new guest | yes | the birth fails and its requester is told; the guest runs `unwire` and is dropped | the birth fails; the guest is dropped with no further call | 3, 5 |
+| An inline spawn inside `wire`: the child's `init`, then the child's `wire` | the child | yes | the spawn answers `SpawnError::InitFailed` or `WireFailed` to the parent's `wire`, which decides; a child whose `wire` refused runs `unwire` and its alias is retired | a trap in the one wasm instance: the row above | 3, 5 |
+| The load window closes when `wire` returns; the guest is live | | | | | 3 |
 
-The order of 1 and 3 is the rule that makes a paired `unwire` and `wire`
-correct: when the old guest's `unwire` releases what the successor's `wire`
-makes again, the release reaches its recipient first and the mailbox ends up
-holding it.
+Read: `WasmTrampoline::init` and `wire`
+(`crates/aether-component/src/trampoline/runtime/mod.rs`), `wire_guest`,
+`install_inline_child`. One gap is ADR-0247's and stays open there: a
+`Publish` answers before its module's boot instance is born, so a boot whose
+birth fails is only logged.
 
-**Abort**, and a prepare that refused at its own step 3 to 6.
+#### A birth of a native actor
 
-- The successor runs `unwire` if its `wire` ran and did not trap, with its
-  outbox still held. Then its held outbox is discarded and it is dropped, so
-  nothing it sent from `init`, `on_rehydrate`, `wire` or `unwire` leaves.
-- The old guest takes back the reply table, cursor and watches, and gets back
-  the state it saved through its own `on_rehydrate`. It runs no `wire`: its
-  `unwire` never ran, so it is still wired.
-- The old guest receives the gated mail in order.
+| Step | Can refuse | A refusal | A panic | Serves |
+| --- | --- | --- | --- | --- |
+| `init` | yes | the birth fails; the requester is told | the engine aborts | 3 |
+| `wire` | yes | the birth fails; the actor is closed, which runs `unwire` | the engine aborts | 3, 5 |
 
-**A close while prepared** (`close_guest`'s prepared arm, reached by engine
-teardown; a drop of a member waits for the republish). The successor is
-released as an abort releases it. The old guest takes the reply table back,
-runs `unwire`, has each reply it still holds answered `unanswered`
-(`answer_held_at_close`), and is dropped. It gets no `on_rehydrate` first: it
-is closing, and `unwire` after `on_dehydrate` is the order every replaced
-guest runs.
+ADR-0247's Context counts three native birth sequences that differ in when
+the route goes `Live`. They were not read again for this ADR, and unifying
+them is ADR-0247's open single stepped birth. The hook order and the
+signatures above hold in all three.
+
+#### A close: a drop, an engine teardown, a birth cancelled after `wire`
+
+| Step | Runs on | Can refuse | A trap | Serves |
+| --- | --- | --- | --- | --- |
+| The mail still queued is drained | | | | 1 |
+| `unwire`, inline children first and deepest first, then the entry actor | the guest | no | logged; the close goes on | 5 |
+| Each reply the guest still holds is answered `unanswered`; engine teardown answers none | the host | | | 2 |
+| The guest is dropped; each drop request is answered `Ok` | | | | |
+| The name tombstones and each watcher is sent a `MonitorNotice` | the registry | | | 5 |
+
+Read: `on_drop_component`, `WasmTrampoline::unwire`, `close_guest`,
+`answer_held_at_close`. A slot whose guest was released by a trapped `wire`
+runs none of the guest rows.
 
 ```rust
-// main: close_guest, prepared arm
+// main: the unwire export
+<$component as Lifecycle<$component>>::unwire(instance, ..);      // the entry actor only
+
+// plan
+// each resident inline child's unwire, deepest first, then the entry actor's
+```
+
+An inline child that is despawned runs its own `unwire`, is dropped, and its
+alias is retired and spent (`despawn_inline_child`). A child that despawns
+itself mid-dispatch skips `unwire` today; under rule 5 it runs `unwire` when
+its dispatch returns, before its box drops. A native actor's close is
+ADR-0247 rule 5's one `close`: drain, `unwire`, release, registry tail.
+
+Closing a parent does not close a child that owns its own slot. That is
+ADR-0247's open question about what a closing actor owns, and stays there.
+
+#### A republish, prepare: before the point of no return
+
+| Step | Runs on | Can refuse | A refusal | A trap | Serves |
+| --- | --- | --- | --- | --- | --- |
+| The inbox gate closes; mail for the guest waits in order | the member | | | | 1 |
+| The load window opens over the republish's code; `init`, outbox held | the successor | yes | the republish is refused; the successor is dropped; the old guest has run no hook | the same | 3 |
+| `on_dehydrate` | the old guest | yes | the republish is refused; the old guest gets back what it saved and keeps running | the substrate aborts | 2, 3 |
+| The cursor, reply table and watches move; the carried contexts are checked | the member | yes | as the row above | | 2 |
+| `on_rehydrate`, if state was saved; inline children are rebuilt inside it | the successor | yes | the republish is refused; the successor is dropped | the same | 3 |
+| `wire`, outbox still held; rebuilt children wire as §6 gives | the successor | yes | the republish is refused; the successor runs `unwire` and is dropped | the republish is refused; the successor is dropped with no further call | 3, 5 |
+| The load window closes when `wire` returns; the member answers `Ready` | | | | | |
+
+Whenever the republish is refused after the old guest's `on_dehydrate` ran,
+the old guest is put back by the "abort" table below.
+
+#### A republish, commit: after the point of no return
+
+| Step | Runs on | Can refuse | A trap | Serves |
+| --- | --- | --- | --- | --- |
+| `unwire`, children first; its mail leaves now | the old guest | no | logged; the commit goes on | 5 |
+| The old guest is dropped | | | | |
+| The held outbox is flushed in the order it was sent; staged inline aliases publish | the successor | | | 1 |
+| The successor is the live guest and receives the gated mail in order | | | | 1, 3 |
+
+The old guest's `unwire` mail leaves before the successor's held mail. That
+order is what makes a paired `unwire` and `wire` correct: when the old guest
+releases what the successor's `wire` asks for again, the release reaches its
+recipient first and the mailbox ends up holding it.
+
+```rust
+// main: commit
+candidate.flush_held_outbox(ctx);
+drop(old);
+
+// plan
+old.unwire();                        // children first; not held, so it leaves first
+drop(old);
+candidate.flush_held_outbox(ctx);
+```
+
+#### A republish, abort: a refusal by this member or another, or a failed publish
+
+| Step | Runs on | Can refuse | A refusal | A trap | Serves |
+| --- | --- | --- | --- | --- | --- |
+| `unwire`, if its `wire` ran and did not trap; outbox still held | the successor | no | | logged | 5 |
+| The held outbox is discarded and the successor is dropped; nothing it sent from any hook leaves | the successor | | | | 1 |
+| The cursor, reply table and watches move back | the member | | | | 2 |
+| `on_rehydrate` with the bundle it saved, if it ran `on_dehydrate` | the old guest | yes | the instance closes by the close table; nothing is left to refuse | the substrate aborts | 3 |
+| No `wire`: the old guest never ran `unwire`, so it is still wired | | | | | 3 |
+| The old guest receives the gated mail in order | | | | | 1 |
+
+The old guest's `on_rehydrate` returning an error is the one refusal with no
+operation left to refuse. The guest is intact, as a guest whose `wire`
+returned an error is (`WireFault::Returned`), and it has said it cannot take
+its state back. It closes in order: `unwire`, its held replies answered
+`unanswered`, its name tombstoned. A trap there aborts the substrate, as it
+does today.
+
+#### A close while prepared
+
+`close_guest`'s prepared arm. A drop of a member waits for the republish
+(`parked_drops`), so engine teardown is what reaches it.
+
+```rust
+// main
 candidate.discard_held_outbox();
 old.resume_replies(candidate.take_pending_replies());
 old.answer_held_at_close();          // the old guest's unwire ran at prepare
@@ -215,7 +395,18 @@ old.unwire();                        // children first
 old.answer_held_at_close();
 ```
 
-### 3. `wire` is safe to run again for the same mailbox
+The successor is released as an abort releases it. The old guest gets no
+`on_rehydrate` first: it is closing, and `unwire` after `on_dehydrate` is the
+order every replaced guest runs. The gated mail drops and each chain
+settles, as today; ADR-0247 rule 1's `discard` is what gives it a record.
+
+#### What runs no hook
+
+A process that is killed, crashes or aborts runs nothing (ADR-0247 rule 5
+excludes it). A republish of identical bytes is a no-op and runs nothing
+(ADR-0241 §7).
+
+### 5. `wire` is safe to run again for the same mailbox
 
 `wire` runs once per guest instance. Across republishes it runs more than
 once for one mailbox, so an author writes it to be correct when what it sets
@@ -233,104 +424,96 @@ up is already standing.
   it once keeps a flag in saved state and checks it in `wire`.
   `on_rehydrate` runs before `wire` so that `wire` can read what was carried.
 - **An inline spawn in `wire` of a name that is already resident answers with
-  the resident child.** The successor's children were rebuilt before its
-  `wire` runs, so a `wire` that spawns its children finds them. Nothing is
-  initialised again. On `main` such a spawn runs a second `init` and replaces
-  the resident child's box without its `unwire` (`install_inline_child`,
-  `Registry::insert_child`).
+  the resident child.** Nothing is initialised again. On `main` such a spawn
+  runs a second `init` and replaces the resident child's box without its
+  `unwire` (`install_inline_child`, `Registry::insert_child`).
 
-A `wire` and `unwire` that are written as a pair need no guard: at commit the
-old guest's release arrives before the successor's request (§2).
+A `wire` and `unwire` written as a pair need no guard: at commit the old
+guest's release arrives before the successor's request (§4).
 
-### 4. A successor whose `wire` fails refuses the republish
+### 6. Inline children wire in birth order and unwire in the reverse
 
-A successor whose `wire` returns an error or traps refuses the republish of
-its group. The successor is dropped and the old guest keeps running. So does
-a rebuilt child whose `wire` fails: no spawn call is waiting for a
-`SpawnError::WireFailed`, so the republish is the requester that is told.
+At a birth a child exists only once something spawns it, and
+`install_inline_child` runs the child's `init` and then its `wire` inside the
+spawn call. `WasmInitCtx` has no spawn verb, so the earliest a child is born
+is inside its parent's `wire`. Two facts follow: a child's `wire` never runs
+before its parent's `wire` has started, and a spawn verb always answers with
+a child that has wired.
 
-The two faults differ as they do at a birth (`WireFault`,
-`crates/aether-substrate/src/actor/wasm/component/dispatch.rs`). A successor
-whose `wire` returned an error is intact and wired in part, so it runs
-`unwire` before it is dropped. A successor whose `wire` trapped runs no more
-code.
+A republish keeps both. The successor's children are rebuilt inside
+`on_rehydrate`, parents before descendants (`reconstruct_inline_children`),
+and are not wired there.
 
-### 5. A hook can refuse only while the engine is waiting on it
+1. The entry actor's `wire` runs.
+2. A spawn inside a `wire` that names a rebuilt child wires that child before
+   it answers, which is the moment the child wired at its birth. The same
+   holds one level down, inside the child's own `wire`.
+3. When an actor's `wire` returns, each of its rebuilt children that is still
+   unwired wires then, in rebuild order. These are the children a handler
+   spawned after the birth; at the birth they too wired after their parent
+   was wired.
 
-A hook can refuse only if the engine is waiting on it before the point of no
-return. For a birth the point of no return is the birth going live. For a
-republish it is `Commit`.
+A rebuilt child whose `wire` refuses or traps refuses the republish. So does
+a child that cannot be rebuilt: an unknown type tag, a placement the
+successor's module rejects, a failed `init`, a failed `on_rehydrate`. No
+spawn call is waiting for a `SpawnError`, so the republish is the requester
+that is told.
 
-| Hook | Runs on | The engine waits before the point of no return | It returns an error | It traps |
-| --- | --- | --- | --- | --- |
-| `init` | a new guest, at a birth or a prepare | yes | the birth fails, or the republish is refused; the guest is dropped and runs nothing more | the same |
-| `on_rehydrate` | the successor, at prepare | yes | the republish is refused; the successor is dropped | the same |
-| `wire` | a new guest, at a birth or a prepare | yes | the birth fails, or the republish is refused; the guest runs `unwire` and is dropped | the birth fails, or the republish is refused; the guest is dropped and runs nothing more |
-| `on_dehydrate` | the old guest, at prepare | yes | the republish is refused; the old guest gets back what it saved and keeps running | the republish is refused; see open question 2 for the guest |
-| `on_rehydrate` | the old guest, after a refusal or an abort | no: there is nothing left to refuse | the substrate aborts ([ADR-0063](0063-fail-fast-on-abnormal-component-lifecycle.md)) | the substrate aborts, as it does today |
-| `unwire` | the old guest at commit; any guest at its close; a successor that wired and lost | no | it returns nothing | the trap is logged and the drop proceeds |
+`unwire` runs the other way: every resident child before its parent, deepest
+first, the entry actor last. That is the order ADR-0247 rule 5 gives a close,
+and the order `despawn_inline_child` already uses for one child.
 
-`unwire` cannot refuse on any path. At commit the group has already won; at a
-close the actor is going whatever the hook says; for a successor that lost,
-the refusal has already been given.
-
-Signatures:
-
-```rust
-// main
-fn init(config: Self::Config, params: Self::Params, ctx: &mut Self::InitCtx<'_>) -> Result<S, Self::InitError>;
-fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) -> Result<(), Self::InitError>;
-fn unwire(state: &mut S, ctx: &mut Self::Ctx<'_>);
-fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
-fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: PriorState<'_>);
-
-// plan: on_rehydrate gains a result; the others keep their shape
-fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, Self>, prior: PriorState<'_>) -> Result<(), ActorInitError>;
-```
-
-Three rules follow from the table.
-
-- **`on_rehydrate` answers no.** An `Err` refuses the republish with the
-  message, as a failed `wire` does. A rebuilt child that cannot be restored
-  (an unknown type tag, a placement the successor's module rejects, a failed
-  `init`, a failed `on_rehydrate`) refuses the republish too, where today it
-  is skipped with a warning. What the hook generated for `type State` returns
-  when a bundle does not decode is open question 1.
-- **A trap in `on_dehydrate` refuses the republish.** It is recorded as a
-  refusal the way a held-unsaved result is, so no successor is ever built
-  from a guest that failed to save.
-- **The old guest's `on_rehydrate` on the abort path cannot refuse.** It is
-  given the bundle it wrote itself. An error or a trap there aborts the
-  substrate, as a trap there does on `main`.
-
-### 6. Held replies
+### 7. Held replies
 
 On `main` the old guest's `unwire` runs before its `on_dehydrate`, and the
 comments in `rehydrate_candidate` and `take_pending_replies` give the reason:
 both hooks "may still answer handles". Only `unwire` can. `Held::answer`
 takes a `WasmCtx` (`crates/aether-actor/src/wasm/ctx/held.rs`), which
-`unwire` has and `on_dehydrate`, whose ctx is `WasmDropCtx`, does not. So
-today a guest may answer a held reply in `unwire` on its way out of a
-republish, and `on_dehydrate` then finds it gone.
+`unwire` has and `on_dehydrate` does not. So today a guest may answer a held
+reply in `unwire` on its way out of a republish, and `on_dehydrate` then
+finds it gone.
 
 With `unwire` at commit that allowance ends. The rule is ADR-0243 §6 with no
 exception: at a republish a held reply is saved and carried to the successor,
-or the republish is refused. `on_dehydrate` runs first and refuses on a live
-held reply that was not saved, as it does today.
+or `on_dehydrate` returns an error and the republish is refused.
 
 Nothing in the tree relies on the allowance. A search of every `fn unwire`
 body under `crates/` found no wasm component or fixture that answers a held
 reply there, and `replace_held.rs` already pins the refusal
 (`an_unsaved_held_reply_refuses_the_replace_and_the_old_guest_answers`).
 
-At commit the old guest holds no reply. Every ticket it had was saved, and
-the reply table moved to the successor at prepare. Its `unwire` therefore
-answers none, and an answer it attempts for a saved ticket must be refused
-and logged, never delivered: the successor owns that reply. How the host
-treats an answer for a handle its table no longer holds was not read for this
-ADR, and the implementation confirms it with a test.
+At commit the old guest holds no reply: every ticket it had was saved, and
+the reply table moved to the successor at prepare. If its `unwire` answers a
+saved ticket anyway, the host finds no row for the handle, returns
+`REPLY_UNKNOWN_HANDLE` and sends nothing
+(`reply_mail_p32`, `crates/aether-substrate/src/actor/wasm/host_fns.rs`). The
+successor answers that reply once.
 
-### 7. The load window and the mail that arrives meanwhile
+### 8. `on_dehydrate` saves and does not send
+
+An aborted republish leaves no trace, and the old guest keeps running after
+one. Mail sent from `on_dehydrate` would break both: the old guest's outbox
+is not held, so the mail leaves before the point of no return and an abort
+cannot take it back.
+
+`on_dehydrate` is the hook that saves. The hook that announces a guest's
+departure is `unwire`, which now runs at commit, when the departure is
+certain. So `WasmDropCtx` loses its send surface.
+
+```rust
+// main
+impl MailSender for WasmDropCtx<'_> { fn send_detached_to(..) }
+
+// plan
+// WasmDropCtx implements Persistence only
+```
+
+No `on_dehydrate` body in the tree sends: a search of every override outside
+the SDK for a send verb found none. Holding the old guest's outbox from prepare was
+the other way to keep the rule. It adds a second held outbox per member to
+carry mail that has a better hook to be sent from.
+
+### 9. The load window and the mail that arrives meanwhile
 
 The successor's load window stays open until its `wire` returns, as a
 birth's does (`wire_guest` closes it whether or not `wire` succeeded). The
@@ -359,13 +542,13 @@ read.
 
 ### Why the contract has this shape: hooks read as mail
 
-The fallibility contract comes from reading each hook as a piece of
-specialised mail from the engine to the guest. `init` and `wire` read as
-requests: the engine sends them, waits, and takes an answer that may be no.
-`on_rehydrate` on a successor and `on_dehydrate` on the old guest read the
-same way, which is why they belong in the same column. `unwire` reads as a
-tell: by the time it is sent the decision is made, nobody is waiting, and
-there is no answer to give.
+The contract comes from reading each hook as a piece of specialised mail from
+the engine to the guest. `init`, `wire`, `on_rehydrate` on a successor and
+`on_dehydrate` on the old guest read as requests: the engine sends them,
+waits, and takes an answer that may be no. `unwire` reads as a tell: by the
+time it is sent the decision is made, nobody is waiting, and there is no
+answer to give. A request has a reply and a tell has none, which is §1's
+rule in other words.
 
 This is the reasoning only. Hooks stay trait methods called through the
 guest's exports. Making them literal mail kinds is out of scope and is a
@@ -378,27 +561,50 @@ first:
   that is mail needs a rule for its position that an inbox does not have.
 - **What the special ctxs become.** `WasmInitCtx` has no send surface,
   `WireCtx` carries the load window, and `WasmDropCtx` carries `save_state`
-  and no reply surface. A handler takes one ctx type. A hook that is mail
-  needs those differences expressed some other way.
+  and nothing else. A handler takes one ctx type. A hook that is mail needs
+  those differences expressed some other way.
+
+### The six rules of ADR-0247, checked
+
+- **Rule 1, every mail ends one way.** Gated mail is delivered to the winner
+  or discarded with a record at a close while prepared. A successor's held
+  mail is flushed or discarded whole. `on_dehydrate` sends none.
+- **Rule 2, every request gets one answer.** A held reply is carried or the
+  republish is refused; a close answers `unanswered`; the old guest's late
+  answer is refused by the host, so no reply is sent twice.
+- **Rule 3, one fixed sequence.** §3. No instance runs `wire` twice, and no
+  instance goes live without it. This removes the two departures on `main`:
+  the successor that never wires and the reinstated guest that wires twice.
+- **Rule 4, every instance gets the same birth.** A successor's birth has the
+  same hooks, the same load window and the same child order as a load's.
+- **Rule 5, what wired, unwires.** The old guest at commit, a successor that
+  wired and lost, both guests at a close while prepared, every inline child
+  before its parent, and a child that despawns itself.
+- **Rule 6, never refused for timing.** Mail waits at the gate; a load, spawn
+  or drop of a republishing namespace waits for the republish (ADR-0241 §7).
+  A second republish of a module in flight is still refused; that is
+  ADR-0241 §7's and is not changed here.
 
 ### Relationship to existing ADRs
 
-- **ADR-0247.** Its open question on ADR-0241 §7 is closed by §1: a
+- **ADR-0247.** Its open question on ADR-0241 §7 is closed by §3: a
   republish is a birth of the successor and a close of the old guest on a
   mailbox that continues, so rules 3 and 5 apply to each guest instance as
   written. ADR-0247 is Proposed and is edited in place to say so. Its other
   open mechanisms are untouched.
 - **ADR-0241 §7 and ADR-0243 §6.** The prepare, commit and abort steps
-  change as §2 gives them, and a held reply at a republish follows §6 here.
+  change as §4 gives them, and a held reply at a republish follows §7 here.
   Both ADRs are Proposed and describe the code as built, so their text
   changes in place with the implementation. This PR leaves them as they are.
-- **ADR-0101, ADR-0114, ADR-0016 §4.** Each is Accepted and states a piece
-  of today's order: "runs `wire` again" on an abort (ADR-0101's amendment),
-  "only fresh spawns fire `wire`" (ADR-0114's amendment), and a trap as the
-  only refusal from `on_rehydrate` (ADR-0016). Each gains its amendment line
+- **ADR-0101, ADR-0114, ADR-0016 §4, ADR-0113.** Each is Accepted and states
+  a piece of today's contract: "runs `wire` again" on an abort (ADR-0101's
+  amendment), "only fresh spawns fire `wire`" (ADR-0114's amendment), a trap
+  as the only refusal from `on_rehydrate` (ADR-0016), and a generated hook
+  that starts fresh when the state does not decode
+  ([ADR-0113](0113-kind-typed-actor-state.md)). Each gains its amendment line
   when this ADR is accepted.
-- **ADR-0063.** Unchanged. A trap where no other guest can take over still
-  aborts the substrate.
+- **ADR-0063.** Unchanged, and applied to one more place: the old guest's
+  `on_dehydrate`.
 
 ## Consequences
 
@@ -407,10 +613,10 @@ first:
 - A component's `wire` is the one place it sets up, on a birth and on a
   republish. A new version's additions to `wire` run on live instances.
 - A republish that aborts leaves no trace: the old guest's `unwire` never
-  ran, so nothing it would have released was released, and no hook runs
-  twice on one instance.
-- A successor that cannot set up says so and the republish is refused, where
-  today `on_rehydrate` can only log and run degraded.
+  ran, it sent nothing from `on_dehydrate`, and no hook runs twice on one
+  instance.
+- Every failure a hook can have has a returned error to travel in. An author
+  never has to trap, or log and run degraded, to say no.
 - A guest that fails to save its state can no longer be replaced by one that
   starts fresh.
 - `aether.kit.bundle` survives a republish with its texture.
@@ -422,44 +628,94 @@ first:
   guards it.
 - A guest can no longer answer a held reply on its way out of a republish. It
   carries the reply or the republish is refused.
+- A change to a `type State` kind's shape refuses the republish, where it
+  started fresh with a warning. An author who wants a fresh start on a
+  mismatch writes both hooks by hand and returns `Ok(())` when
+  `prior.decode_kind::<S>()` is `None`; `#[actor]` already refuses a
+  hand-written hook beside `type State`
+  (`tests/ui/rejects_state_with_manual_hook.rs`), so the choice is explicit.
+- A republish that today succeeds with a warning (a child that was not
+  rebuilt) is refused, and a trap in `on_dehydrate` aborts the substrate.
 - Prepare is longer by the successor's `wire`, so the inbox gate stays closed
   longer and a slow `wire` delays the group.
-- `on_rehydrate` changes signature on `WasmActor`, so every override changes.
-  The change is mechanical.
-- A republish that today succeeds with a warning (a child that was not
-  rebuilt, a trap in `on_dehydrate`) is refused.
+
+### What the implementation touches
+
+Counts are from a search of `crates/` at `6577e30d9`, outside the SDK's own
+definitions and the derive's source, fixtures and compile tests included.
+
+| Change | Sites |
+| --- | --- |
+| `on_dehydrate` gains `-> Result<(), ActorInitError>` | 14 overrides in 13 files |
+| `on_rehydrate` gains `-> Result<(), ActorInitError>` | 14 overrides in 12 files |
+| `save_state` / `save_state_kind` return a result | 15 call sites |
+| Generated hooks for `type State` | the one generator (`wasm_expand.rs`); the 24 files that declare the accessors change no source |
+| `WasmDropCtx` loses `MailSender` | no caller |
+| `wire` (wasm 68 overrides in 43 files; native 31 in 20) | no signature change |
+| `unwire` (wasm 13 overrides in 11 files; native 15 in 15) | no signature change |
+
+The overrides of the two replace hooks are in `aether-kit` (camera,
+camera-controller, mesh), `aether-test-fixtures-bundle`,
+`aether-test-fixtures-republish` and two derive compile tests. No shipped
+component declares `type State`; every user of the generated hooks is a
+fixture or a compile test.
+
+Engine and SDK work, each from a section above:
+
+- The trampoline's `prepare`, `commit`, `abort`, `reinstate` and
+  `close_guest` (§4).
+- `Component::on_dehydrate` reads a returned error and treats a trap as §2
+  gives; `call_on_rehydrate` reads a returned error.
+- The `wire` export wires rebuilt children (§6); the `unwire` export reaches
+  children; a self-despawned child runs `unwire`.
+- An inline spawn of a resident name answers the resident child (§5).
+- The `on_dehydrate` and `on_rehydrate` exports return the hook's error the
+  way the `wire` export does (`stage_init_failure`), and
+  `reconstruct_inline_children` returns a failure in place of a warning.
+- The load window stays open through `wire` (§9).
 
 ### Tests that flip
 
-Each was read at `6577e30d9`. They pin the order this ADR replaces, and the
-implementation rewrites them to pin the new one.
+Each pins the contract this ADR replaces, and the implementation rewrites it
+to pin the new one.
 
 - `crates/aether-component/tests/harness_guest_watch.rs`,
   `a_clerk_that_watched_in_its_own_wire_reports_before_and_after_its_desks_republish`:
-  asserts a rebuilt clerk's `wired` list is empty ("a rebuilt clerk runs no
-  wire", added by #7525). The module doc's paragraph saying a republish runs
-  no `wire` goes with it.
+  asserts a rebuilt clerk's `wired` list is empty (added by #7525). The
+  module doc's paragraph saying a republish runs no `wire` goes with it.
 - The same file, `a_wire_watch_stands_through_aborted_republishes`: asserts
-  `wired == vec![watch; aborts + 1]`, one rerun of `wire` per abort. An abort
-  runs no `wire`, so the list holds one entry.
+  `wired == vec![watch; aborts + 1]`. An abort runs no `wire`, so the list
+  holds one entry.
 - `crates/aether-component/tests/republish.rs`,
   `an_abort_after_ready_reinstates_and_rewires_the_ready_member`: asserts the
   ready gate's wire count is 2 and the refusing peer is wired again.
 - `crates/aether-component/tests/replace_rollback.rs`,
-  `a_reinstated_guest_is_wired_again`: asserts one more `WireObserved` after
-  the abort.
+  `a_reinstated_guest_is_wired_again`.
+- `crates/aether-component/tests/component.rs`,
+  `typed_state_decode_miss_boots_fresh`, with its fixture
+  `aether-test-fixtures-stateful-reshaped`: the republish is refused and the
+  old count stands.
 - `crates/aether-actor/src/wasm/ctx/tests/spawn.rs`,
-  `reconstruct_does_not_run_wire`: its stated purpose, that a reload is not a
-  first attach, no longer holds. Whether its literal assertion on
-  `reconstruct_one_child` survives depends on where the implementation wires
-  a rebuilt child.
+  `reconstruct_does_not_run_wire`: its literal assertion still holds, since a
+  rebuilt child wires in the `wire` step and not in the rebuild. Its stated
+  purpose, that a reload is not a first attach, does not.
+- Every fixture that refuses a republish by trapping in `on_rehydrate`
+  (`trap_on_rehydrate` in the republish and watch fixtures) keeps working,
+  since a successor's trap still refuses. The refusals that should be errors
+  move to a returned `Err`, and the message "on_rehydrate failed" that
+  `republish.rs` and `replace_rollback.rs` match on is kept for both.
 
 New cover the implementation owes: a successor's `wire` runs once and its
-mail leaves only at commit; a failed or trapped successor `wire` refuses the
+mail leaves only at commit; a refused or trapped successor `wire` refuses the
 group and the old guest's wire count is unchanged; the old guest's `unwire`
 mail precedes the successor's `wire` mail at one recipient; a rebuilt child
-is wired once and an old child is unwired; a trap in `on_dehydrate` refuses;
-an inline spawn of a resident name in `wire` answers the resident child.
+is wired once, at its spawn in `wire` or after its parent's `wire`; an old
+child is unwired before its parent; an `on_rehydrate` and an `on_dehydrate`
+that return an error each refuse; a trap in `on_dehydrate` aborts; a child
+that cannot be rebuilt refuses; an inline spawn of a resident name in `wire`
+answers the resident child; a close while prepared unwires both guests; the
+old guest's `on_rehydrate` returning an error after an abort closes the
+instance.
 
 ### Kit workarounds that go
 
@@ -469,59 +725,38 @@ an inline spawn of a resident name in `wire` answers the resident child.
   `crates/aether-kit/src/camera/controller/mod.rs`.
 - The `follow_window` call in `on_rehydrate` in
   `crates/aether-kit/src/camera/mod.rs`. The camera's saved pose, glide and
-  extent stay, since they are state it carries.
+  extent stay, since they are state it carries; its hook returns `Ok(())`
+  where it starts from the config on a mismatch, which is that author's
+  explicit choice.
 
 ### Neutral / forward
 
 - `docs/guide/systems/components.md` describes the load window as
   `init` + `wire` and says a reinstated guest "runs `wire` a second time";
-  both passages change with the implementation.
-- Nothing is added to the delivered-mail path. The change is in the
-  trampoline's prepare, commit, abort and close, and in the guest's `wire`
-  and `unwire` exports reaching inline children.
-- ADR-0247 rule 5's guest `unwire`, children first, is built by the same
-  change, for a close as well as for a commit.
+  both passages change with the implementation, as does the lifecycle bullet
+  in `CLAUDE.md`.
+- Nothing is added to the delivered-mail path.
 - This ADR moves to Accepted when #7529's implementation is in the code.
 
 ## Open questions
 
-1. **What the generated `on_rehydrate` does with a bundle that does not
-   decode.** The hook `#[actor]` writes for `type State` starts fresh with a
-   warning today ([ADR-0113](0113-kind-typed-actor-state.md), read in `wasm_expand.rs`). With a
-   result to return it can refuse the republish instead. Refusing means a
-   change to a state kind's shape cannot be republished onto a live instance
-   until its author writes a hand-written `on_rehydrate` that migrates or
-   discards; starting fresh means state is lost with only a log line.
-   Recommendation: refuse, and let an author who wants a fresh start say so
-   in a hand-written hook.
-2. **What becomes of an old guest whose `on_dehydrate` trapped.** The
-   republish is refused either way (§5). The guest's store is wherever the
-   trap left it. Reinstating it runs more of its code on that store;
-   aborting the substrate treats it as a trap in a handler is treated
-   (ADR-0063) and as `reinstate` already treats a trap in the old guest's
-   `on_rehydrate`. Recommendation: abort the substrate.
-3. **Whether an author can refuse from `on_dehydrate`.** The framework
-   already refuses through it. An author has no way to: the hook returns
-   `()`. The contract allows a result here, since the engine is waiting.
-   Recommendation: give it `-> Result<(), ActorInitError>` in the same change
-   as `on_rehydrate`, so every hook the engine waits on has the same shape.
-4. **Mail the old guest sends from `on_dehydrate`.** `WasmDropCtx` can send,
-   and the old guest's outbox is not held, so that mail leaves before the
-   point of no return and an abort does not take it back. This is unchanged
-   from `main`. Holding the old guest's outbox from prepare would close it,
-   at the cost of a second held outbox per member.
-5. **The order rebuilt children wire in.** At a birth a child's `wire`
-   completes inside its parent's spawn call, so a spawn always answers with a
-   wired child. To keep that on a republish, rebuilt children would wire
-   first, in the order they were rebuilt (a parent before its descendants),
-   and the entry actor last. Recommendation: that order.
+None of this ADR's own. Each question an earlier draft listed is settled
+above from the code or from precedent: the generated `on_rehydrate` (§1), a
+trap in `on_dehydrate` (§2), a result on `on_dehydrate` (§1), mail from
+`on_dehydrate` (§8), and the order children wire in (§6).
+
+Three things the tables point at stay open in ADR-0247, because each needs a
+mechanism that is outside a hook contract and is not designed: a module
+boot's birth failing with no requester to tell; closing a parent's
+separately slotted children; and the single stepped birth that would make
+the three native sequences one. None changes a hook's order or signature.
 
 ## Alternatives considered
 
 - **Leave the successor unwired and document `on_rehydrate` as the place to
   set up again.** This is today's behaviour. It needs a saved state for the
   hook to run at all, which is what the empty state kinds in the kit exist
-  for, and it puts set-up in a hook that cannot refuse.
+  for, and it puts set-up in a hook that could not refuse.
 - **Run `wire` on the successor and keep the old guest's `unwire` at
   prepare.** An abort would then have to wire the old guest again, which is
   the second `wire` on one instance this ADR removes, and the old guest's
@@ -537,6 +772,19 @@ an inline spawn of a resident name in `wire` answers the resident child.
   tombstone (ADR-0241 §8), held replies would be answered `unanswered`, and
   every reference to the instance would die. Keeping the mailbox is the
   point of a republish.
-- **Make hooks mail kinds now.** It would give the fallibility contract by
-  construction. The two open problems under "hooks read as mail" have no
-  design, and the contract does not need them solved to be stated.
+- **Keep the generated `on_rehydrate` starting fresh on a mismatch.** It
+  loses state with a log line as the only sign. A carried context of a kind
+  the successor does not declare already refuses the republish
+  (`check_carried_contexts`), and saved state is the same case.
+- **Reinstate an old guest whose `on_dehydrate` trapped.** It would run more
+  code on a store left wherever the trap found it, which is what ADR-0063
+  rules out for a handler.
+- **Give `unwire` a result.** Its caller could only log it, which the author
+  can do. A result nobody acts on reads as a way to refuse where there is
+  none.
+- **Wire every rebuilt child before the entry actor's `wire`.** A spawn would
+  still answer a wired child, but a child would wire before its parent's
+  `wire` had started, which never happens at a birth.
+- **Make hooks mail kinds now.** It would give the contract by construction.
+  The two open problems under "hooks read as mail" have no design, and the
+  contract does not need them solved to be stated.
