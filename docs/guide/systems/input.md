@@ -94,7 +94,9 @@ label, a 44-logical-pixel touch target — so it keeps its apparent size on any
 display. Divide to hand logical coordinates to a consumer that wants them. The
 desktop chassis publishes a fresh `WindowSize` on `ScaleFactorChanged` as well
 as on resize, so a subscriber that caches the latest value never carries a stale
-factor across a drag between displays; a synthetic window publishes `1.0`.
+factor across a drag between displays; a synthetic window publishes `1.0`. A
+component created after the window opened reads the factor from the
+`aether.window.list` reply, and a later window's from `WindowOpened`.
 
 ## Subscribe by kind and window
 
