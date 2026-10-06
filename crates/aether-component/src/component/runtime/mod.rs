@@ -348,7 +348,7 @@ impl NativeActor for ComponentHostCapability {
     /// Spawn an instance of a published type (ADR-0241 §9).
     ///
     /// # Agent
-    /// `Spawn { namespace, key, parent, config }`, where `namespace` is a
+    /// `Spawn { namespace, key, parent, config, code }`, where `namespace` is a
     /// published name `PublishResult` reported. The name the instance takes
     /// decides the answer: `NS` for a singleton (which names no `key`),
     /// `NS:key` for an instanced type (`NS:<counter>` when `key` is `None`),
@@ -360,7 +360,10 @@ impl NativeActor for ComponentHostCapability {
     /// instance itself answers, so an actor requester keeps the reply's
     /// stamped sender as its reference. A namespace no module publishes is
     /// refused, and a spawn of one whose module is republishing waits until
-    /// the republish answers.
+    /// the republish answers. `code` is the published module's bytes, brought
+    /// so the new instance reads its assets in `init` and `wire`; bytes of
+    /// any other module are refused, and `None` stands up an instance whose
+    /// load window serves no asset payload.
     #[handler::request]
     fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Spawn) -> Pending<SpawnResult> {
         let (pending, held) = ctx.hold::<SpawnResult>();

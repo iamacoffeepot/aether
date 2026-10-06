@@ -91,9 +91,12 @@ per replace: every reader today that re-reads the bytes (a replace's
 predecessor kinds and boot namespace, the inline contracts) reads the manifest
 instead. An asset's payload passes only through a load window (ADR-0163 §3),
 which reads the asset's recorded range from the code its opener brought (a
-load's or a republish's bytes) and lets go of that code when the window
-closes. A spawn from a publication brings no bytes, so its window answers the
-catalog and refuses a catalogued asset, naming `load_component`. An entry lives while anything holds it: a publication, a running
+load's, a spawn's, or a republish's bytes) and lets go of that code when the
+window closes. A spawn may bring the bytes of the module that publishes its
+namespace, and its window then reads that module's assets from them. A spawn
+that brings none answers the catalog and refuses a catalogued asset, naming
+the two doors that bring the bytes: a spawn with its code, and a load. An
+entry lives while anything holds it: a publication, a running
 instance, or a held `Module`. Compiled code lives while any entry over it does.
 
 A `Module` never leaves its engine. Compiled code is tied to the engine's
@@ -322,8 +325,11 @@ registry owner (§3), and the host reads it there.
   with `configs` as each listed instance's new config. Its reply names each
   namespace it bound, so a caller of a content-addressed module never
   recomputes the hash.
-- `Spawn { namespace, key, parent, config }` asks for an instance to exist,
-  and the name decides the answer. A live name: the reply names it and
+- `Spawn { namespace, key, parent, config, code: Option<Blob> }` asks for an
+  instance to exist, and the name decides the answer. `code` brings the
+  module's bytes for the new instance's load window (§2); the host checks
+  them in and refuses the spawn when they are not the module the namespace
+  is bound to, because the asset ranges the window reads are that module's. A live name: the reply names it and
   nothing is re-initialised. An absent name: the engine stands the instance
   up. A tombstoned name: the spawn is refused, because the name is spent
   (§8). The door spawns published guest types. A native namespace is

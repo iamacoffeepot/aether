@@ -15,7 +15,9 @@
 //! Each boot component is one `Publish` of its module to the component host,
 //! then one `Spawn` per instance key (issue #7155, ADR-0241 §9), sent to the
 //! generic `aether.component` mailbox, which is what makes the mechanism
-//! chassis-agnostic.
+//! chassis-agnostic. Each spawn brings the entry's code for its instance's
+//! load window, so a boot component reads its module's assets in `init` and
+//! `wire` (ADR-0163 §4).
 
 mod loader;
 

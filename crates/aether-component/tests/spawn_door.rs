@@ -145,7 +145,8 @@ fn publish(harness: &mut SubstrateHarness, wasm: &[u8]) {
 }
 
 fn spawn_gate(harness: &mut SubstrateHarness, key: &str) -> SpawnResult {
-    let spawn = Spawn { namespace: GATE.to_owned(), key: Some(key.to_owned()), parent: None, config: Vec::new() };
+    let spawn =
+        Spawn { namespace: GATE.to_owned(), key: Some(key.to_owned()), parent: None, config: Vec::new(), code: None };
     host_call(harness, &spawn)
 }
 
@@ -221,7 +222,8 @@ fn a_spawn_of_an_unpublished_namespace_is_refused() {
     // Catches: a spawn that stands a guest up from code nobody published.
     let mut harness = harness();
 
-    let spawn = Spawn { namespace: GATE.to_owned(), key: Some("a".to_owned()), parent: None, config: Vec::new() };
+    let spawn =
+        Spawn { namespace: GATE.to_owned(), key: Some("a".to_owned()), parent: None, config: Vec::new(), code: None };
     let refused: SpawnResult = host_call(&mut harness, &spawn);
 
     let SpawnResult::Err { error } = refused else {
@@ -237,8 +239,13 @@ fn a_spawn_of_a_native_namespace_is_refused_as_composed() {
     // `Live`.
     let mut harness = harness();
 
-    let spawn =
-        Spawn { namespace: DepartureWatcher::NAMESPACE.to_owned(), key: None, parent: None, config: Vec::new() };
+    let spawn = Spawn {
+        namespace: DepartureWatcher::NAMESPACE.to_owned(),
+        key: None,
+        parent: None,
+        config: Vec::new(),
+        code: None,
+    };
     let refused: SpawnResult = host_call(&mut harness, &spawn);
 
     let SpawnResult::Err { error } = refused else {
@@ -254,7 +261,13 @@ fn a_spawn_of_the_trampoline_label_is_refused_as_unpublished() {
     // publication table, which would answer it as a composed native type.
     let mut harness = harness();
 
-    let spawn = Spawn { namespace: WasmTrampoline::NAMESPACE.to_owned(), key: None, parent: None, config: Vec::new() };
+    let spawn = Spawn {
+        namespace: WasmTrampoline::NAMESPACE.to_owned(),
+        key: None,
+        parent: None,
+        config: Vec::new(),
+        code: None,
+    };
     let refused: SpawnResult = host_call(&mut harness, &spawn);
 
     let SpawnResult::Err { error } = refused else {
@@ -287,6 +300,7 @@ fn a_spawn_beneath_a_parent_lands_at_its_path() {
         key: Some("k".to_owned()),
         parent: Some(parent),
         config: Vec::new(),
+        code: None,
     };
     let spawned: SpawnResult = host_call(&mut harness, &spawn);
 

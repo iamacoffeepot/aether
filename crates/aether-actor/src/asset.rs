@@ -42,10 +42,11 @@
 //! The catalog is indexed host-side from the custom sections without
 //! instantiating the component (`aether-substrate`'s asset section
 //! indexer, #3969). Payloads are read from the recorded range in
-//! the module bytes the load (or republish) brought, for the duration of
-//! the window. An instance spawned from its publication brought no bytes,
-//! so its fetch of a catalogued asset by either verb traps, naming
-//! `load_component` (ADR-0163 §4).
+//! the module bytes the load, spawn, or republish brought, for the duration
+//! of the window. A spawn brings them in its `code` field, as a boot
+//! manifest entry's spawns do. An instance spawned without them fetches no
+//! payload: a catalogued asset traps by either verb, naming the two doors
+//! that bring the bytes, a spawn with its code and a load (ADR-0163 §4).
 
 use aether_data::Blob;
 use alloc::vec::Vec;
