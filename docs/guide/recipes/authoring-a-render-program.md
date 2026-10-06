@@ -536,8 +536,9 @@ a `ProgramRegisterResult` handler and dispatches once it has one:
 use aether_render::{ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability};
 
 // In an `#[actor(depends(RenderCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.send::<RenderCapability>(&self.build_register()); // a ProgramRegister value
+    Ok(())
 }
 
 #[handler::response]

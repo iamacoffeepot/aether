@@ -6,7 +6,7 @@ use aether_kinds::{ComponentCapabilities, DropResult};
 use aether_substrate::InboundMail;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Held, NativeCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle, WireFault};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -109,21 +109,25 @@ impl WasmTrampolineState {
     /// Run a guest's `wire` hook and publish the inline-child aliases it
     /// staged. A birth runs it once, and a reinstated guest runs it again
     /// (ADR-0241 §7), since its `unwire` ran at prepare.
-    pub(crate) fn wire_guest(ctx: &mut NativeCtx<'_, WasmTrampoline>, component: &mut Component, root: Option<MailId>) {
-        if let Err(e) = component.wire(root) {
-            tracing::error!(
-                target: "aether_component",
-                error = format!("{e:#}"),
-                "wasm guest `wire` hook returned error",
-            );
-        }
+    ///
+    /// A fault is the caller's to act on (ADR-0247 rule 3): a birth fails
+    /// with it, and a reinstatement aborts. The aliases a faulted guest
+    /// staged are not published; they go with the guest.
+    pub(crate) fn wire_guest(
+        ctx: &mut NativeCtx<'_, WasmTrampoline>,
+        component: &mut Component,
+        root: Option<MailId>,
+    ) -> Result<(), WireFault> {
+        let wired = component.wire(root);
         // ADR-0163 §3 (#3984): the asset load window closes when `wire`
         // returns — it lets go of the module's code so
         // `asset_fetch_p32` traps thereafter, retaining the catalog
         // metadata for the instance's life. Runs whether or not `wire`
-        // errored; the window's job (init + wire) is done either way.
+        // faulted; the window's job (init + wire) is done either way.
         component.close_load_window();
+        wired?;
         Self::stage_guest_aliases(ctx, component);
+        Ok(())
     }
 
     /// Deliver one envelope to a guest, then publish the inline-child
@@ -166,7 +170,8 @@ impl WasmTrampolineState {
     ///
     /// A trap in the old guest's `on_rehydrate` aborts the substrate
     /// (ADR-0063), as a trap in delivery does: there is no other guest to
-    /// fall back to.
+    /// fall back to. A fault in its second `wire` aborts the same way: no
+    /// birth is in flight to fail with it.
     pub(crate) fn reinstate(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -188,7 +193,9 @@ impl WasmTrampolineState {
                 ctx.path()
             ));
         }
-        Self::wire_guest(ctx, &mut old, None);
+        if let Err(fault) = Self::wire_guest(ctx, &mut old, None) {
+            ctx.fatal_abort(format!("component {} failed its wire after an aborted republish: {fault}", ctx.path()));
+        }
         self.slot = Slot::Live(Box::new(old));
         self.release_gated(ctx, gated);
     }

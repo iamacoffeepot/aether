@@ -33,8 +33,9 @@ impl WasmActor for EditorRegionProbe {
 
     /// Tell the shell which declared region this probe stands behind. The
     /// shell keeps this send's sender as the region's address.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<EditorShell>(&RegionAttach { region: self.region_name.clone() });
+        Ok(())
     }
 
     #[handler::event]

@@ -84,8 +84,9 @@ impl NativeActor for Autoloader {
         Ok(Self { remaining: components.into(), current: None, report })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         self.send_next(ctx);
+        Ok(())
     }
 
     /// The current entry's module published: resolve which of its bound

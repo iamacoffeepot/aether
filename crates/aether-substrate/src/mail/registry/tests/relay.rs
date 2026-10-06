@@ -15,7 +15,7 @@ use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{MailDispatch, Registry, canonical_mailbox_id};
 use crate::mail::{KindId, Mail};
 use crate::scheduler::{BatchBudget, WakeSink};
-use crate::testing::boot_authority as auth;
+use crate::testing::{await_signal, boot_authority as auth};
 
 use super::support::{starting_token, traced_unknown_mail};
 
@@ -39,8 +39,13 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
             Arc::new(move |dispatch: MailDispatch<'_>| {
                 let value = dispatch.payload[0];
                 if value == 1 {
-                    entered_sender.send(()).expect("ordering test waits for the first continuation");
-                    release_receiver.recv().expect("ordering test releases the running prefix");
+                    // Both results are ignored on purpose. When the test
+                    // thread is unwinding its ends of these channels are
+                    // gone, and a panic here runs inside the relay cycle
+                    // with the route lock held: it would poison the lock and
+                    // the lease's `Drop` would abort the process.
+                    let _ = entered_sender.send(());
+                    let _ = release_receiver.recv();
                 }
                 order_for_handler.lock().unwrap().push(value);
             }),
@@ -48,7 +53,7 @@ fn relay_running_prefix_owns_route_order_ahead_of_lease_close() {
         .id();
     mailer.relay_mail(Mail::new(target, KindId(1), vec![1], 1));
     let running = thread::spawn(move || drainable.run_cycle(BatchBudget::standard()));
-    entered_receiver.recv_timeout(Duration::from_millis(100)).expect("first continuation starts routing");
+    await_signal(&entered_receiver, "test.registry.relay_prefix_entered");
     assert!(
         relay.route_serialization_held_for_test(),
         "a running drained prefix retains route serialization through handler dispatch"

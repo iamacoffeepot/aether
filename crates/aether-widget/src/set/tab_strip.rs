@@ -319,8 +319,9 @@ impl WasmActor for TabStripWidget {
 
     /// Kick off the font-metrics request for the initial theme font; the tab
     /// widths depend on it.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Replace the labels / selection / theme in place from a re-sent config,

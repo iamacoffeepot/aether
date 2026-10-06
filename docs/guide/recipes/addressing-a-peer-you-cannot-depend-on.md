@@ -47,10 +47,11 @@ impl WasmActor for EditorRegion {
 
     // …
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.send::<EditorShell>(&RegionAttach { region: self.config.editor_region.clone() });
 
         // …
+        Ok(())
     }
 }
 ```

@@ -339,7 +339,7 @@ fn closed_actor_slot_is_released_and_freed() {
     let child_id = commit.id;
     let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
     owner.apply_once_then_observe_before_next_apply_for_test(|| {});
-    completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    completion.wait().unwrap();
 
     let slot = Arc::clone(
         &spawner

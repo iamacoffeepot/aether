@@ -49,9 +49,10 @@ impl WasmActor for Demo {
     /// from the camera `main`. Each replies to this send's sender, so the
     /// results arrive at [`Self::on_mesh_load_result`] and
     /// [`Self::on_view_from_result`].
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<MeshViewer>(&self.subject);
         ctx.send::<RenderCapability>(&ViewFrom { source: CameraComponent::main_path().narrow::<ViewSource>() });
+        Ok(())
     }
 
     /// The viewer's answer to the load: parsed and drawing, or why not.

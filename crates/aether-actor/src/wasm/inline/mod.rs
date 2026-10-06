@@ -971,8 +971,8 @@ mod tests {
     use crate::blob::guest::tracked::tracked_blob;
     use crate::mail::{Mail, PriorState};
     use crate::reference::ErasedActorRef;
-    use crate::wasm::ErasedWasmActor;
     use crate::wasm::ctx::NO_INBOUND_SOURCE;
+    use crate::wasm::{ActorInitError, ErasedWasmActor};
     use crate::{ActorTypeTag, WasmCtx};
     use aether_data::{MailboxId, RequestId};
     use alloc::boxed::Box;
@@ -1037,7 +1037,12 @@ mod tests {
             self.observed_source.set(ctx.sender().map(ErasedActorRef::id));
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_wire(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+        ) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
@@ -1077,7 +1082,12 @@ mod tests {
             ctx.despawn_inline_child(self.id);
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_wire(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+        ) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
@@ -1105,7 +1115,12 @@ mod tests {
             self.observed_reply.set(ctx.in_reply_to());
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_wire(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+        ) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(

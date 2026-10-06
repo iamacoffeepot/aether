@@ -97,8 +97,9 @@ impl aether_actor::Lifecycle<Self> for RingRelay {
     fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(config)
     }
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         state.next = state.successor.and_then(|successor| ctx.cast(successor.erase()));
+        Ok(())
     }
 }
 impl aether_actor::Declared for RingRelay {

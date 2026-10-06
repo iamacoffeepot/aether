@@ -54,8 +54,9 @@ impl WasmActor for Branch {
         Ok(Branch { bumps: 0 })
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let _ = ctx.spawn_inline_child::<Branch, Leaf>(Subname::Named("leaf"), &());
+        Ok(())
     }
 
     #[handler::tell]

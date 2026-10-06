@@ -8,8 +8,8 @@ use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, allow_context_by_value,
     attr_is_fallback, attr_is_handler, check_intent_signature, classify_handler_reply, ctx_names_actor,
     extract_handler_kind_type, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, silent_call, validate_addressable_consts,
-    validate_fallback_sig,
+    reject_duplicate_handler_kinds, rename_lifecycle_hooks, require_wire_result, silent_call,
+    validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -673,6 +673,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // from the trait fn via UFCS (passing the state as the `&mut self`
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
+    require_wire_result(&boot_hooks, "ActorInitError")?;
     let (has_wire, has_unwire, has_rehydrate) = rename_lifecycle_hooks(&mut boot_hooks);
     // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
     // `WasmCtx`, so an author can read assets in `wire` but not from a
@@ -692,9 +693,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             fn wire(
                 __aether_state: &mut Self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(#wire_ctx);
-                #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx);
+                #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx)
             }
         }
     } else {
@@ -842,8 +843,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             // upgrade the carried erased ctx to the actor once, where it is
             // born, and downgrade the `Unchecked` view here. `on_rehydrate` takes
             // the same typed ctx (#6533) and upgrades the same way below.
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
-                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single());
+            fn erased_wire(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single())
             }
             fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.__for_actor::<Self>().as_single());

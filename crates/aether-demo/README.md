@@ -87,8 +87,7 @@ The camera is an instance: its `name` is its key, so it answers at
 `aether.kit.camera:main`, and a second camera is a second entry with another
 name. The controller and the viewer each name that path in their config and
 prove it when they wire, so the camera entry comes first; one that names a
-camera that is not live logs the path at error and runs without it (no keys,
-no outlines). `aether.demo` declares the viewer and the renderer as
+camera that is not live fails its load, naming the path. `aether.demo` declares the viewer and the renderer as
 dependencies, and the component host refuses a load whose dependency is not
 live.
 

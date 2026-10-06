@@ -133,7 +133,7 @@ impl WasmActor for BundleComponent {
     /// exactly where ADR-0163 wants asset failures to land.
     ///
     /// [`on_create_texture_result`]: BundleComponent::on_create_texture_result
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
 
         let Some(pixels) = ctx.asset(TILE_ASSET_NAME) else {
@@ -142,7 +142,7 @@ impl WasmActor for BundleComponent {
                 asset = TILE_ASSET_NAME,
                 "bundle: embedded tile asset not found in the load window; nothing to make resident",
             );
-            return;
+            return Ok(());
         };
         let expected = TILE_WIDTH as usize * TILE_HEIGHT as usize * TextureFormat::Rgba8.bytes_per_pixel();
         if pixels.len() != expected {
@@ -153,7 +153,7 @@ impl WasmActor for BundleComponent {
                 expected,
                 "bundle: embedded tile has an unexpected byte length; skipping texture upload",
             );
-            return;
+            return Ok(());
         }
 
         ctx.send::<RenderCapability>(&CreateTexture {
@@ -164,6 +164,7 @@ impl WasmActor for BundleComponent {
             usage: TextureUsage::Sampled,
             pixels: Blob::from(pixels),
         });
+        Ok(())
     }
 
     /// Symmetric teardown (ADR-0163 §4). Destroys exactly the resident

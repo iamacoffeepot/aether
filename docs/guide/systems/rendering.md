@@ -310,9 +310,10 @@ hook:
 
 ```rust
 // In an `#[actor(depends(LifecycleCapability, RenderCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.subscribe::<LifecycleCapability, Tick>();
     ctx.subscribe::<LifecycleCapability, Render>();
+    Ok(())
 }
 
 #[handler::event]
@@ -396,7 +397,8 @@ frame.
   `aether.kit.camera-controller.config` names the camera
   (`"camera": "aether.kit.camera:main"`) and sets the per-tick rates and
   clamps, so the camera stays a pose and a lens while the keyboard policy
-  lives in the controller. Load the camera first. A pose sent to the camera
+  lives in the controller. Load the camera first: a controller whose camera
+is not live fails its load. A pose sent to the camera
   from elsewhere is replaced on the next held-key tick, since the keys step
   the shadow.
 - **A new drawing component** subscribes the `Render` stage and emits

@@ -788,3 +788,32 @@ pub struct CourierQueryResult {
 pub struct CourierState {
     pub hops: u32,
 }
+
+/// Issue 7463: what a `WireFault` fixture's `wire` does once it has sent its
+/// [`WireMarker`].
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WireOutcome {
+    /// `wire` returns `Ok(())` and the instance goes live.
+    #[default]
+    Succeeds,
+    /// `wire` returns an error whose message is [`WIRE_REFUSAL`].
+    Refuses,
+    /// `wire` panics, which the host sees as a trap.
+    Traps,
+}
+
+/// Issue 7463: the message a `WireFault` or `WireRefuser` fixture's `wire`
+/// returns as its error, which the birth's answer must carry.
+pub const WIRE_REFUSAL: &str = "wire refused: the fixture was told to fail";
+
+/// Issue 7463: the config of the `WireFault` fixture.
+#[aether_data::kind(name = "aether.test_fixtures.wire_fault.config", copy, default, eq)]
+pub struct WireFaultConfig {
+    pub outcome: WireOutcome,
+}
+
+/// Issue 7463: what a `WireFault` fixture mails the harness observer from
+/// `wire`, before the hook returns or traps. A birth holds its `wire` mail
+/// until it goes live, so the observer sees one only for a birth that did.
+#[aether_data::kind(name = "aether.test_fixture.wire_marker", default)]
+pub struct WireMarker;

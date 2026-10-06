@@ -242,3 +242,33 @@ fn held_key_pans_the_camera_over_the_painted_world() {
          kept moving with no key held",
     );
 }
+
+/// A controller whose config names a camera that is not live fails its load,
+/// and the refusal names the camera's path. A `wire` that logged the failure
+/// and carried on would stand up a controller that takes keys and moves
+/// nothing.
+#[test]
+fn a_controller_whose_camera_is_not_live_is_refused_at_load() {
+    let Some(kit_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&kit_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .with_render()
+        .with_component_host()
+        .build()
+        .expect("boot");
+
+    let refused = harness
+        .load::<CameraController>(LoadComponent {
+            wasm,
+            name: Some("main".to_owned()),
+            config: Vec::new(),
+            export: None,
+        })
+        .expect_err("a controller with no camera to drive does not load");
+
+    let reason = refused.to_string();
+    assert!(reason.contains("aether.kit.camera:main"), "the refusal names the camera's path: {reason}");
+}

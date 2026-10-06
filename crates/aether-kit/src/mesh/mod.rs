@@ -39,16 +39,16 @@
 //! [`MeshViewerConfig`] names one camera instance. At `wire` the viewer
 //! proves its path and subscribes to its view
 //! (`aether.render.view_subscribe`), and it keeps the eye of the last
-//! [`ViewProjection`] the camera sent. Until one arrives, or when the path
-//! does not prove (the camera must be live first), the filled mesh draws and
-//! the outlines are omitted. `unwire` unsubscribes. A republish does not run
-//! `wire`, so `on_rehydrate` subscribes again.
+//! [`ViewProjection`] the camera sent. Until one arrives the filled mesh
+//! draws and the outlines are omitted. A path that does not prove fails the
+//! viewer's birth, so the camera must be live first. `unwire` unsubscribes. A
+//! republish does not run `wire`, so `on_rehydrate` subscribes again.
 
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, ActorPath, ActorRef, Erased, Held, Pending, PriorState, WasmActor, WasmCtx};
-use aether_actor::{WasmDropCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorPath, ActorRef, Erased, Held, Pending, PriorState, ResolveError, WasmActor};
+use aether_actor::{WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_data::{Blob, BlobReader};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
@@ -157,9 +157,15 @@ impl WasmActor for MeshViewer {
     /// render cap discards anyway (ADR-0082 §7 / §11).
     ///
     /// Then subscribe to the camera's view.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    ///
+    /// # Errors
+    ///
+    /// When the config's camera path does not prove: the viewer's birth
+    /// fails and the load that asked is told which path.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Render>();
-        self.follow_camera(ctx);
+
+        self.follow_camera(ctx).map_err(|error| ActorInitError::new(format!("the mesh viewer's camera: {error}")))
     }
 
     /// Stop taking the camera's view.
@@ -175,8 +181,12 @@ impl WasmActor for MeshViewer {
 
     /// Subscribe to the camera again: a republish does not run `wire`, and
     /// the instance it replaced unsubscribed in `unwire`.
+    /// A rehydrate cannot refuse, so a camera that no longer proves is
+    /// logged and the viewer draws without outlines.
     fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
-        self.follow_camera(ctx);
+        if let Err(error) = self.follow_camera(ctx) {
+            tracing::error!(target: "aether_kit", %error, "the mesh viewer's camera does not prove; outlines are off");
+        }
     }
 
     /// Emit the cached faces, and the DSL outline loops solved for the eye
@@ -322,18 +332,14 @@ impl LoadOutcome {
 
 impl MeshViewer {
     /// Prove the config's camera path and subscribe to its view. A path that
-    /// does not prove is logged, and the viewer draws without outlines.
-    fn follow_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) {
-        self.followed = match ctx.resolve(&self.camera) {
-            Ok(camera) => {
-                ctx.send_to(camera, &ViewSubscribe);
-                Some(camera)
-            }
-            Err(error) => {
-                tracing::error!(target: "aether_kit", %error, "the mesh viewer's camera does not prove; outlines are off");
-                None
-            }
-        };
+    /// does not prove leaves the viewer following nothing.
+    fn follow_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) -> Result<(), ResolveError> {
+        self.followed = None;
+        let camera = ctx.resolve(&self.camera)?;
+        ctx.send_to(camera, &ViewSubscribe);
+        self.followed = Some(camera);
+
+        Ok(())
     }
 
     /// Parse `bytes` for `path`, replacing the split mesh cache on success

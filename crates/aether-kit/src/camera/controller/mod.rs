@@ -23,8 +23,10 @@
 //! `Frame`, a `Glide`) is replaced on the next held-key tick, since the
 //! shadow, not the camera, is what the keys step.
 //!
-//! A republish does not run `wire`, so `on_rehydrate` proves the camera and
-//! asks again; the shadow is whatever the camera answers.
+//! A controller whose camera does not prove at `wire` fails its birth, so
+//! load the camera first. A republish does not run `wire`, so `on_rehydrate`
+//! proves the camera and asks again; the shadow is whatever the camera
+//! answers.
 //!
 //! # Config
 //!
@@ -42,7 +44,8 @@
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, ActorRef, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorRef, PriorState, ResolveError, WasmActor, WasmCtx, WasmDropCtx};
+use aether_actor::{WasmInitCtx, actor};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::LifecycleCapability;
 use aether_math::{TAU, Vec3};
@@ -70,7 +73,8 @@ struct Held {
 /// The controller's hold on the camera it drives.
 #[derive(Debug, Clone, Copy)]
 enum Link {
-    /// The config's camera path did not prove; the keys move nothing.
+    /// Not wired yet, or a republish found the camera gone; the keys move
+    /// nothing.
     Unlinked,
     /// The camera is proven and has been asked where it is.
     Asked(ActorRef<CameraComponent>),
@@ -102,11 +106,18 @@ impl WasmActor for CameraController {
 
     /// Subscribe the all-window key streams and the tick stage, then prove
     /// the camera and ask where it is. `init`'s ctx can't mail.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    ///
+    /// # Errors
+    ///
+    /// When the config's camera path does not prove: a controller with no
+    /// camera would take keys and move nothing, so its birth fails and the
+    /// load that asked is told which path.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, KeyRelease>();
         ctx.subscribe::<LifecycleCapability, Tick>();
-        self.link_camera(ctx);
+
+        self.link_camera(ctx).map_err(|error| ActorInitError::new(format!("the controller's camera: {error}")))
     }
 
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
@@ -115,8 +126,12 @@ impl WasmActor for CameraController {
 
     /// Prove the camera and ask where it is again: a republish does not run
     /// `wire`, and a reference does not outlive the instance that proved it.
+    /// A rehydrate cannot refuse, so a camera that no longer proves is
+    /// logged and the keys move nothing.
     fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
-        self.link_camera(ctx);
+        if let Err(error) = self.link_camera(ctx) {
+            tracing::error!(target: "aether_kit", %error, "the controller's camera does not prove; the keys move nothing");
+        }
     }
 
     #[handler::event]
@@ -155,18 +170,14 @@ impl WasmActor for CameraController {
 
 impl CameraController {
     /// Prove the config's camera path and ask the camera where it is. A path
-    /// that does not prove is logged and leaves the controller unlinked.
-    fn link_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) {
-        self.link = match ctx.resolve(&self.config.camera) {
-            Ok(camera) => {
-                ctx.send_to(camera, &Where);
-                Link::Asked(camera)
-            }
-            Err(error) => {
-                tracing::error!(target: "aether_kit", %error, "the controller's camera does not prove; the keys move nothing");
-                Link::Unlinked
-            }
-        };
+    /// that does not prove leaves the controller unlinked.
+    fn link_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) -> Result<(), ResolveError> {
+        self.link = Link::Unlinked;
+        let camera = ctx.resolve(&self.config.camera)?;
+        ctx.send_to(camera, &Where);
+        self.link = Link::Asked(camera);
+
+        Ok(())
     }
 
     fn set_held(&mut self, code: u32, down: bool) {

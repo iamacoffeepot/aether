@@ -100,12 +100,13 @@ impl WasmActor for Web {
     // Claim the `/` catch-all so every request dispatches here. Register a
     // narrower prefix instead (see §Claiming routes) to own just one path
     // family and leave the rest to other handlers.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/".to_string(),
             method: None,
             shared: false,
         });
+        Ok(())
     }
 
     #[handler::request]
@@ -212,12 +213,13 @@ use aether_http::HttpServerCapability;
 use aether_http::kinds::RegisterRouteSelf;
 
 // In an `#[actor(depends(HttpServerCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
         prefix: "/api".to_string(),
         method: None,                        // or Some(HttpMethod::Get)
         shared: false,                       // true joins an ADR-0136 member set
     });
+    Ok(())
 }
 ```
 

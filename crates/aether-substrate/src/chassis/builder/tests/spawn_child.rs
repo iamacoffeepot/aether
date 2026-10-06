@@ -495,3 +495,217 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
 
     drop(chassis);
 }
+
+/// A handler-staged child whose `wire` returns an error (ADR-0247 rule 3).
+mod wire_failure {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    use crossbeam_channel::{Receiver, Sender};
+
+    use crate::actor::native::ctx::NativeCtx;
+    use crate::actor::native::spawn::{SpawnError, Subname};
+    use crate::actor::native::{SpawnOutcome, TaskDone};
+    use crate::chassis::builder::Builder;
+    use crate::mail::registry::Registry;
+    use crate::mail::{KindId, MailboxId};
+    use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
+    use crate::{BootError, NativeActor, NativeInitCtx};
+    use aether_actor::Addressable;
+
+    /// Asks a [`WireFailureParent`] to stage its [`WireFailingChild`].
+    #[aether_data::kind(name = "test.spawn_wire_failure.hatch")]
+    struct HatchWireFailure;
+
+    /// The mail a [`WireFailingChild`] sends its [`WireFailureSink`] from `wire`,
+    /// and the mail the test parks behind the child's `Starting` route.
+    #[aether_data::kind(name = "test.spawn_wire_failure.ping")]
+    struct WireFailurePing;
+
+    /// The key [`WireFailureParent`] stages every [`WireFailingChild`] under.
+    const WIRE_FAILURE_KEY: &str = "retry";
+    const WIRE_FAILURE_MESSAGE: &str = "the staged child's wire refused";
+
+    /// What the parent's completion handler saw for one staged birth.
+    #[derive(Debug, PartialEq, Eq)]
+    enum WireFailureSeen {
+        WireFailed(String),
+        Other(String),
+    }
+
+    /// The composed peer a [`WireFailingChild`] mails from `wire`.
+    struct WireFailureSink {
+        received: Arc<AtomicU32>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for WireFailureSink {
+        const NAMESPACE: &'static str = "test.spawn_wire_failure.sink";
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+
+        fn init((): (), received: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { received })
+        }
+
+        #[handler::tell]
+        fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _ping: WireFailurePing) {
+            self.received.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    /// The handles one [`WireFailingChild`] is built with: where it says its
+    /// `wire` was entered, what it waits on before failing, and where it counts
+    /// its `unwire`.
+    #[derive(Clone)]
+    struct WireFailureGate {
+        entered: Sender<()>,
+        open: Receiver<()>,
+        unwired: Arc<AtomicU32>,
+    }
+
+    /// A root whose handler stages one [`WireFailingChild`] and reports what the
+    /// birth's completion carried.
+    struct WireFailureParent {
+        gate: WireFailureGate,
+        seen: Sender<WireFailureSeen>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for WireFailureParent {
+        const NAMESPACE: &'static str = "test.spawn_wire_failure.parent";
+        type Config = ();
+        type Params = (WireFailureGate, Sender<WireFailureSeen>);
+
+        fn init((): (), (gate, seen): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { gate, seen })
+        }
+
+        #[handler::tell]
+        fn on_hatch(&mut self, ctx: &mut NativeCtx<'_>, _hatch: HatchWireFailure) {
+            let staged =
+                ctx.spawn_child::<WireFailingChild>(Subname::Named(WIRE_FAILURE_KEY), (), self.gate.clone()).stage();
+            if let Err(error) = staged {
+                let _ = self.seen.send(WireFailureSeen::Other(format!("{error:?}")));
+            }
+        }
+
+        #[handler(task)]
+        fn on_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<WireFailingChild>>) {
+            let seen = match done.into_output().result {
+                Err(SpawnError::WireFailed(BootError::Other(error))) => WireFailureSeen::WireFailed(error.to_string()),
+                Err(error) => WireFailureSeen::Other(format!("{error:?}")),
+                Ok(_) => WireFailureSeen::Other("the child went live".to_owned()),
+            };
+            let _ = self.seen.send(seen);
+        }
+    }
+
+    /// A handler-staged child whose `wire` mails the sink, says it was entered,
+    /// waits to be let through, and then returns an error.
+    struct WireFailingChild {
+        gate: WireFailureGate,
+    }
+
+    #[aether_actor::actor(instanced, child_of(WireFailureParent), depends(WireFailureSink))]
+    impl NativeActor for WireFailingChild {
+        const NAMESPACE: &'static str = "test.spawn_wire_failure.child";
+        type Config = ();
+        type Params = WireFailureGate;
+
+        fn init((): (), gate: WireFailureGate, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { gate })
+        }
+
+        fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
+            ctx.send::<WireFailureSink>(&WireFailurePing);
+            let _ = self.gate.entered.send(());
+            let _ = self.gate.open.recv();
+            Err(BootError::Other(Box::new(io::Error::other(WIRE_FAILURE_MESSAGE))))
+        }
+
+        fn unwire(&mut self, _ctx: &mut NativeCtx<'_, Self>) {
+            self.gate.unwired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        #[handler::tell]
+        fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _ping: WireFailurePing) {
+            let _ = self;
+        }
+    }
+
+    /// A handler-staged child whose `wire` returns an error (ADR-0247 rule 3).
+    /// Catches each of these:
+    ///
+    /// - the error swallowed, so the parent's spawn completes `Ok` or never
+    ///   completes (the completion must carry `SpawnError::WireFailed` with the
+    ///   hook's own message);
+    /// - the owner keeping the pending birth its own job reported failed: the
+    ///   mail parked behind the `Starting` route would never settle, and the
+    ///   route would stay, so the second birth under the same key would be
+    ///   refused as in use;
+    /// - the failed actor dropped instead of closed (its `unwire` would not
+    ///   run), or its held `wire` mail released (the sink would count it).
+    #[test]
+    fn staged_child_wire_failure_completes_the_spawn_with_the_error_and_ends_the_birth() {
+        let (registry, mailer) = bare_substrate();
+        let received = Arc::new(AtomicU32::new(0));
+        let unwired = Arc::new(AtomicU32::new(0));
+        let (entered_tx, entered) = crossbeam_channel::unbounded();
+        let (open, open_rx) = crossbeam_channel::unbounded();
+        let (seen_tx, seen) = crossbeam_channel::unbounded();
+        let gate = WireFailureGate { entered: entered_tx, open: open_rx, unwired: Arc::clone(&unwired) };
+        // The child's `wire` waits on the gate, so a second worker keeps the
+        // registry owner and the parent running meanwhile.
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_workers(Some(2))
+            .with_actor::<WireFailureSink>(Arc::clone(&received))
+            .with_actor::<WireFailureParent>((gate, seen_tx))
+            .build_passive()
+            .expect("the sink and the parent boot");
+        let parent = chassis.actor_ref::<WireFailureParent>();
+        let child_id = MailboxId(aether_data::with_tag(
+            aether_data::Tag::Mailbox,
+            aether_data::fold_lineage(
+                parent.id().0,
+                aether_data::ActorId::instanced(WireFailingChild::NAMESPACE, WIRE_FAILURE_KEY),
+            ),
+        ));
+
+        // The child is inside `wire`, so its route reads `Starting` and this
+        // mail parks behind it in the owner.
+        let (_, first) = chassis.send_tracked(parent, &HatchWireFailure, None);
+        await_signal(&entered, "test.spawn_wire_failure.first_wire_entered");
+        let starting = Registry::activated::<WireFailingChild>(child_id);
+        let (_, parked) = chassis.send_tracked(starting, &WireFailurePing, None);
+        open.send(()).expect("the child is waiting on the gate");
+        await_settled(&first, "test.spawn_wire_failure.first_hatch");
+        await_settled(&parked, "test.spawn_wire_failure.parked_ping");
+        // The parked mail continued only once the owner had ended the birth.
+        assert!(
+            !registry.route_lookup(KindId(0), child_id).is_starting(),
+            "a failed birth's Starting route is removed"
+        );
+        assert!(registry.entry_at(child_id).is_none(), "a failed birth publishes no route");
+
+        // The same key again: the first birth's reservation is gone.
+        let (_, second) = chassis.send_tracked(parent, &HatchWireFailure, None);
+        await_signal(&entered, "test.spawn_wire_failure.second_wire_entered");
+        open.send(()).expect("the child is waiting on the gate");
+        await_settled(&second, "test.spawn_wire_failure.second_hatch");
+
+        // The sink's inbox is in arrival order, so a `wire` ping released by
+        // either failed birth would be counted before this one.
+        let (_, probed) = chassis.send_tracked(chassis.actor_ref::<WireFailureSink>(), &WireFailurePing, None);
+        await_settled(&probed, "test.spawn_wire_failure.sink_probe");
+
+        let outcomes: Vec<WireFailureSeen> = seen.try_iter().collect();
+        let expected = WireFailureSeen::WireFailed(WIRE_FAILURE_MESSAGE.to_owned());
+        assert_eq!(outcomes, [expected, WireFailureSeen::WireFailed(WIRE_FAILURE_MESSAGE.to_owned())]);
+        assert_eq!(unwired.load(AtomicOrdering::SeqCst), 2, "each child that entered wire ran its unwire once");
+        assert_eq!(received.load(AtomicOrdering::SeqCst), 1, "no failed birth's wire mail reached the sink");
+
+        drop(chassis);
+    }
+}

@@ -22,8 +22,9 @@ impl WasmActor for Subject {
     }
 
     /// Spawns the helper inline once wired.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let _ = ctx.spawn_inline::<SubjectHelper>(Subname::Named("helper"), &());
+        Ok(())
     }
 
     fn dehydrate(&self) -> CountReport {

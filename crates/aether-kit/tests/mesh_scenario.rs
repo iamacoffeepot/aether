@@ -465,3 +465,30 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     assert_eq!(first_reply.path, dsl_path, "first reply keeps its path");
     assert_eq!(second_reply.path, obj_path, "second reply keeps its path");
 }
+
+/// A viewer whose config names a camera that is not live fails its load, and
+/// the refusal names the camera's path. A `wire` that logged the failure and
+/// carried on would stand up a viewer that never draws an outline, with
+/// nothing telling the loader why.
+#[test]
+fn a_viewer_whose_camera_is_not_live_is_refused_at_load() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
+    let sandbox = init_save_sandbox("kit-mesh");
+    let mut harness = SubstrateHarness::builder()
+        .with_render()
+        .with_component_host()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    let refused = harness
+        .load::<MeshViewer>(LoadComponent { wasm, name: None, config: Vec::new(), export: None })
+        .expect_err("a viewer with no camera to follow does not load");
+
+    let reason = refused.to_string();
+    assert!(reason.contains("aether.kit.camera:main"), "the refusal names the camera's path: {reason}");
+}

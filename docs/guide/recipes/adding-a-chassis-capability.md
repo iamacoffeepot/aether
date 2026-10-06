@@ -163,9 +163,11 @@ The pieces:
   CPU state. `init` runs before the dispatcher
   starts and before any peer's dispatcher runs — no mail yet. Return
   `Err(BootError::…)` to abort the chassis build.
-- **`wire(&mut self, ctx)`** (optional, default no-op) is the post-init
-  mail-allowed hook: peers are addressable here, so subscribe to input
-  streams or announce yourself from `wire`, not `init`.
+- **`wire(&mut self, ctx) -> Result<(), BootError>`** (optional, default
+  `Ok(())`) is the post-init mail-allowed hook: peers are addressable here,
+  so subscribe to input streams or announce yourself from `wire`, not
+  `init`. Return `Err(BootError::…)` to abort the chassis build; the cap's
+  `unwire` still runs, with every cap that wired before it.
   **`unwire(&mut self, ctx)`** (optional) is the symmetric pre-shutdown
   hook. Text needs neither.
 - **`#[handler::<class>] fn on_x(state: &mut Self::State, ctx, mail: K)`** infers

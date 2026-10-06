@@ -577,8 +577,9 @@ impl WasmActor for NumericWidget {
         Ok(Self::configured(config))
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Re-bound and restyle in place from a re-sent config. `initial` seeds the

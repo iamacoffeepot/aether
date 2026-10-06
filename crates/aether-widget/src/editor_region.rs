@@ -66,7 +66,7 @@ impl WasmActor for EditorRegion {
     /// Announce the region, then spawn the panel behind it. The panel owns no
     /// input and names no region: the shell's input reaches it through this
     /// actor's relay handlers.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         ctx.send::<EditorShell>(&RegionAttach { region: self.config.editor_region.clone() });
 
         let panel_config = PanelConfig { owns_input: false, editor_region: String::new(), ..self.config.clone() };
@@ -79,6 +79,7 @@ impl WasmActor for EditorRegion {
                 "editor region panel spawn failed; the region relays nothing",
             ),
         }
+        Ok(())
     }
 
     #[handler::event]

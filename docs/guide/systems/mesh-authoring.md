@@ -57,8 +57,8 @@ The viewer's config names the camera whose eye its outlines face
 (`{"camera": "aether.kit.camera:main"}`, which is also the default): load
 `aether_kit@aether.kit.camera` under that key first, and send
 `aether.render.view_from` naming it so the renderer draws through the same
-camera. A viewer loaded before its camera logs the path at error and draws
-without outlines.
+camera. A viewer loaded before its camera is refused at load, naming the
+path.
 
 ## DSL vocabulary
 
@@ -208,9 +208,8 @@ I/O and atomically replaces the cache when a load reply arrives. On each render
 it sends cached faces immediately. At `wire` it subscribes to the view of the
 camera its config names (`aether.render.view_subscribe`) and keeps the eye of
 each `ViewProjection` the camera sends; a DSL cache with outline loops rebuilds
-and submits them for that eye on each render. A camera that was not live when
-the viewer wired, or one that has not published a view yet, leaves the filled
-mesh visible and omits only the outlines. OBJ caches contain no outline loops. A chassis without
+and submits them for that eye on each render. A camera that has not published
+a view yet leaves the filled mesh visible and omits only the outlines. OBJ caches contain no outline loops. A chassis without
 `Render`, such as the production headless Tick-only graph, rejects the
 subscription; the actor can load but never submits geometry. The minimal hub
 does not host guest gameplay actors. Use desktop or the render-capable

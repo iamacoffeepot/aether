@@ -11,8 +11,9 @@ use crate::handler_parse::{
     TaskReplyMode, allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler,
     check_intent_signature, classify_handler_reply, classify_task_reply_mode, erase_unless_ctx_names_actor,
     extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor, handler_cfgs, parse_handler_args,
-    parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
-    silent_call, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
+    parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks, require_wire_result,
+    rewrite_self_state_first_param, silent_call, types_token_eq, validate_addressable_consts,
+    validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -441,6 +442,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             rewrite_self_state_first_param(m, concrete);
         }
     }
+    require_wire_result(&lifecycle_methods, "BootError")?;
     let (has_wire, has_unwire, _) = rename_lifecycle_hooks(&mut lifecycle_methods);
 
     // The concrete runtime state type: the declared `type State` for a split
@@ -863,8 +865,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             fn wire(
                 __aether_state: &mut #state_ty,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self>,
-            ) {
-                #self_ty::__aether_wire(__aether_state, __aether_ctx #erase);
+            ) -> ::core::result::Result<(), ::aether_substrate::BootError> {
+                #self_ty::__aether_wire(__aether_state, __aether_ctx #erase)
             }
         }
     } else {

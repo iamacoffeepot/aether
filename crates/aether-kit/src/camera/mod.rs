@@ -138,11 +138,16 @@ impl WasmActor for CameraComponent {
 
     /// Start following the window a `Window` viewport names. `init`'s ctx has
     /// no send surface, so the subscriptions and the list request go here.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    ///
+    /// Nothing here can fail: the window is named by a path the camera
+    /// compares and never proves, so a window that is not open yet is waited
+    /// for.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let follows_window = matches!(self.viewport, Viewport::Window(_));
         if follows_window {
             Self::follow_window(ctx);
         }
+        Ok(())
     }
 
     /// Save what a republish would otherwise reset (see the module docs).

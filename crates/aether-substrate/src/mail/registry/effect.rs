@@ -14,6 +14,7 @@ use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 use crate::actor::native::offload::blocking::DeferredCompletion;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
+use crate::chassis::error::BootError;
 
 use super::mailbox::MailboxEntry;
 use crate::mail::Mail;
@@ -196,11 +197,21 @@ pub trait PreparedSpawnActivation: Send {
 #[derive(Debug)]
 pub enum PreparedSpawnFailure {
     NativeHold(NativeHoldRefusal),
-    GuestNotPublished { namespace: String },
-    SubnameRetired { full_name: String },
-    SubnameInUse { full_name: String },
+    GuestNotPublished {
+        namespace: String,
+    },
+    SubnameRetired {
+        full_name: String,
+    },
+    SubnameInUse {
+        full_name: String,
+    },
     ActivationRejected,
     OwnerClosed,
+    /// The actor's `wire` hook returned an error (ADR-0247 rule 3). Reported
+    /// by the birth's own activation job, which closed the actor before it
+    /// went `Live`; the owner never decides this one.
+    WireFailed(BootError),
 }
 
 /// Owner-retained handle for one activation running at its execution home.
