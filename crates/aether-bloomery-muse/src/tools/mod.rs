@@ -156,7 +156,7 @@ pub struct ProofOffer {
 /// binding `proofs` into every call, each with what its offer cites besides
 /// `proofs` and its whole-workspace arguments.
 pub fn proof_offers(proofs: Ref<ProofBound>) -> Vec<ProofOffer> {
-    vec![proof::<ClippyProof>(proofs, &ClippyArgs), proof::<TestProof>(proofs, &TestArgs)]
+    vec![proof::<ClippyProof>(proofs, &ClippyArgs), proof::<TestProof>(proofs, &TestArgs::default())]
 }
 
 /// `P` offered over `proofs`, required with the arguments `workspace`.
@@ -263,16 +263,24 @@ async fn read_args<A: Storage>(env: &mut Env<Async>, args: Ref<A>) -> Result<Res
 mod tests {
     use aether_data::Ref;
 
-    use aether_bloomery_workspace_programs::proof::ProofVerdict;
+    use aether_bloomery_workspace_programs::proof::{ProofVerdict, ScopeEntries, ScopeEntry, TestScope};
 
     use super::proof_passed;
 
     #[test]
     fn only_a_passed_verdict_reads_as_passed() {
         // Catches a gate that compares the wrong digest, and so reruns every proof or never reruns a failed one.
+        // A scoped pass adopts its tree but never satisfies the gate: the
+        // whole-workspace run still runs at `Done`.
         let passed = Ref::of_encoded(&ProofVerdict::Passed).expect("verdict").erase();
         let failed = ProofVerdict::Failed { diagnostics: Ref::of_text("error: unused variable") };
         assert!(proof_passed(passed));
         assert!(!proof_passed(Ref::of_encoded(&failed).expect("verdict").erase()));
+        let scope = TestScope::new(
+            ScopeEntries::new(vec![ScopeEntry::new("session").expect("entry")]).expect("targets"),
+            ScopeEntries::default(),
+        );
+        let scoped = ProofVerdict::PassedScoped { scope };
+        assert!(!proof_passed(Ref::of_encoded(&scoped).expect("verdict").erase()));
     }
 }

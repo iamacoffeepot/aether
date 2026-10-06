@@ -55,6 +55,7 @@ impl Program for RunTool {
             steps: Steps::new(vec![step]).map_err(refused)?,
             scratch: Scratch::new(Vec::new()).map_err(refused)?,
             network: Network::Off,
+            layer: None,
         };
         let outcome = workspace.run(run).await?.map_err(|refusal| Refusal::Refused {
             reason: Detail::new(format!("the workspace refused: {refusal:?}")),

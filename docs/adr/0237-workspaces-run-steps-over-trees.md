@@ -388,7 +388,7 @@ the sandbox, or they make the program `Sampled`.
 
    | Piece | Mechanism |
    |---|---|
-   | Bottom layer | One per (unit, run key): the unit of ADR-0240 and the run key of decision 9. The first run for that key writes it; a Muse lane's warm-up proof over the base commit at session open is that run. After that it is read-only. It records the digest of the `Cargo.lock` it was built over, and a run whose tree carries a different `Cargo.lock` writes a new one; a changed environment is a new run key. A layer is trusted only once it is marked complete after its write, as a mount's pointer volume is (`crates/aether-bloomery-workspace/src/runtime/run/mounts.rs`). |
+   | Bottom layer | One per (unit, base run key): the unit of ADR-0240 and the base run key of decision 9, the run's own key digest or the guest digest its `RunRequest.layer` names. The first run for that base writes it; a Muse lane's warm-up proof over the base commit at session open is that run. After that it is read-only. A scoped test run names the whole run's key and sits on the whole-workspace test layer as a guest instead of building cold: a guest hit overlays the same hex its base owns, a guest miss builds cold without creating any volume, and a guest never holds a `Writing` layer. It records the digest of the `Cargo.lock` it was built over, and a run whose tree carries a different `Cargo.lock` writes a new one; a changed environment is a new run key. A layer is trusted only once it is marked complete after its write, as a mount's pointer volume is (`crates/aether-bloomery-workspace/src/runtime/run/mounts.rs`). |
    | Top layer | Every run gets its own copy-on-write overlay over the bottom layer: a Docker `local`-driver volume of type `overlay`, attached at cargo's target directory and removed with the run, so no run sees another's writes. It works unprivileged and adds about one second to a run. |
    | Location | Daemon volumes: the bottom layer is a data volume behind a pointer volume, and the top layer is the overlay volume over an upper and a work volume of the run's own. The overlay options take the volumes' `Mountpoint`s as the Engine API reports them. The daemon writes and removes every layer byte, so no host directory is created, and a remote daemon serves layers as a local one does: a step writes as uid 0, so its copy-ups could not be removed from a host directory by an actor that is not root, and an actor cannot reach a remote daemon's host at all. A workspace `Config` switch turns layers on; with it off, runs build cold as before. |
    | Freshness | Every file reaches `/work` through the tar codec at the canonical 1980 mtime, and cargo reuses a path crate's build when no source file is newer than it, so an unstamped upload would keep the first build's result for every crate. The pointer records the digest of the tree the bottom layer was built over (`aether.workspace.layer.tree`), and a run over a complete layer uploads its tree with every file, executable, or symlink that differs from that base tree stamped with the run's wall-clock start; everything else, directories included, keeps the canonical mtime. The diff is part of the encode walk, and a subtree equal to the base's is not compared further. Every run compares against the layer's base, never the previous run, because the layer's artifacts match that tree and no other: an edit made after any earlier run is still newer than the layer, and a file reverted to its base content is fresh again. A pointer that records no tree stamps every file. A fresh layer's run uploads the canonical stream, since its layer holds no build output yet. The base tree is not part of the layer's key, so a moving tree does not multiply bottom layers. |
@@ -408,7 +408,15 @@ the sandbox, or they make the program `Sampled`.
    - **Workspace-wide.** Cargo steps take `--workspace` and no package
      argument. Measured warm, one crate's `-p` took 18.9 s against 5.3 s for
      the workspace, because a narrower selection unifies features
-     differently and rebuilds shared dependencies.
+     differently and rebuilds shared dependencies. The test proof keeps the
+     `--workspace` package set and narrows by target and filter instead:
+     `targets` each become a `--test <name>` pair over unchanged packages,
+     and `filters` pass after a `--` separator cargo forwards untouched, so
+     the cargo-level build graph is identical by construction. A scoped run
+     names the whole run's key in `RunRequest.layer` and sits on the
+     whole-workspace test layer as a guest; each scope keeps its own run key
+     and estimate while sharing one layer, and the `Done` gate still runs the
+     whole workspace.
    - **`--offline`, not `--frozen`.** Today the clippy step passes
      `--frozen` (`proof/run.rs:49`), which refuses any change to
      `Cargo.lock`. With `--offline`, a change to a workspace-internal

@@ -96,6 +96,10 @@ pub struct Wanted {
     hex: String,
     /// The `Cargo.lock` blob's digest, in hex.
     lock: String,
+    /// Whether this run owns its layer (`None` guest base): an owner writes
+    /// a fresh bottom layer on a miss, while a guest builds cold without
+    /// creating any volume.
+    owned: bool,
 }
 
 impl Wanted {
@@ -107,11 +111,16 @@ impl Wanted {
 
 /// The layer `run` builds over, or `None` when it builds cold: `scratch`
 /// holds no target directory every step agrees on, or the tree has no lock.
+/// A run naming a guest base in `run.layer` builds over that base's layer
+/// instead of its own run key's, so a scoped run sits on the whole run's
+/// bottom layer; the run key, and with it the estimate, stays per scope.
 pub fn wanted(unit: &str, key: RunKey, run: &RunRequest, base_env: &[EnvVar], lock: Option<Digest>) -> Option<Wanted> {
-    let lock = lock?;
+    let lock_digest = lock?;
     let at = target(run, base_env)?;
-    let hex = id(unit, key, lock).to_string();
-    Some(Wanted { at, hex, lock: lock.to_string() })
+    let base = run.layer.unwrap_or_else(|| key.digest());
+    let owned = run.layer.is_none();
+    let hex = id(unit, base, lock_digest).to_string();
+    Some(Wanted { at, hex, lock: lock_digest.to_string(), owned })
 }
 
 /// The absolute target directory every step's merged environment names,
@@ -136,11 +145,12 @@ fn target_of<'a>(base: &'a [EnvVar], step: &'a [EnvVar]) -> Option<&'a str> {
     base.iter().chain(step).rfind(|var| var.key() == TARGET_VARIABLE).map(EnvVar::value)
 }
 
-/// The layer id: sha256 over the domain tag, then the unit, the run key, and
-/// the lock digest, each prefixed by its length as a u64 LE.
-fn id(unit: &str, key: RunKey, lock: Digest) -> Digest {
+/// The layer id: sha256 over the domain tag, then the unit, the base run key,
+/// and the lock digest, each prefixed by its length as a u64 LE. The base is
+/// the run's own key digest, or the guest digest its `layer` names.
+fn id(unit: &str, base: Digest, lock: Digest) -> Digest {
     let mut input = Vec::from(DOMAIN);
-    for field in [unit.as_bytes(), key.digest().as_bytes(), lock.as_bytes()] {
+    for field in [unit.as_bytes(), base.as_bytes(), lock.as_bytes()] {
         input.extend_from_slice(&u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
         input.extend_from_slice(field);
     }
@@ -215,11 +225,16 @@ impl Layer {
 }
 
 /// Make the volume `wanted` mounts: the run's overlay over a complete bottom
-/// layer, or a fresh bottom layer to write. `None` runs cold.
+/// layer, or a fresh bottom layer to write. `None` runs cold: a guest miss
+/// creates no volume, so a scoped run without its whole layer yet builds cold
+/// and leaves nothing the whole run could mistake for its own.
 pub fn prepare(engine: &Engine, cleanup: &mut Cleanup<'_>, wanted: Wanted) -> Result<Option<Layer>, Stop> {
     let pointer = VolumeName::new(&format!("{POINTER_PREFIX}{}", wanted.hex))
         .map_err(|error| RunError::Shape(format!("a layer pointer name is not a volume name: {error}")))?;
     let Some(pointing) = inspect(engine, &pointer)? else {
+        if !wanted.owned {
+            return Ok(None);
+        }
         let labels = BTreeMap::from([(LAYER_LABEL, wanted.hex.as_str()), (LOCK_LABEL, wanted.lock.as_str())]);
         let data = engine
             .create_volume(None, &labels, &BTreeMap::new())
@@ -365,7 +380,7 @@ mod tests {
     use aether_bloomery_kinds::Tree;
     use aether_data::{Digest, Ref, hash_bytes};
 
-    use super::{TREE_LABEL, base_of, wanted};
+    use super::{TREE_LABEL, base_of, id, wanted};
     use crate::runtime::engine::{Volume, VolumeName};
     use crate::runtime::provision::RunKey;
     use crate::{EnvVar, Mounts, Network, RunRequest, Scratch, Step, Steps, ToolName, TreePath};
@@ -394,6 +409,7 @@ mod tests {
             steps: Steps::new(steps)?,
             scratch: Scratch::new(scratch.iter().map(|&path| TreePath::new(path)).collect::<Result<_, _>>()?)?,
             network: Network::Off,
+            layer: None,
         })
     }
 
@@ -436,6 +452,40 @@ mod tests {
         assert_eq!(hex("a", 3), hex("a", 3));
         assert_ne!(hex("a", 3), hex("a", 4));
         assert_ne!(hex("a", 3), hex("b", 3));
+        Ok(())
+    }
+
+    #[test]
+    fn a_guest_shares_its_owners_hex_without_owning_it() -> TestResult {
+        // Catches identity divergence that would cold-build every scope: a
+        // scoped run names the whole run's key as its base and must sit on
+        // the same bottom layer hex, while never owning it.
+        let owner = run(&[&[]], &["target"])?;
+        let owner_key = RunKey::of(&owner);
+        let lock = Some(digest(3));
+        let owner_wanted = wanted("unit", owner_key, &owner, &[], lock).ok_or("an owner wants a layer")?;
+        assert!(owner_wanted.owned);
+
+        let mut scoped_steps = owner.steps.as_slice().to_vec();
+        scoped_steps[0].args.push("scoped".to_owned());
+        let guest = RunRequest { steps: Steps::new(scoped_steps)?, layer: Some(owner_key.digest()), ..owner };
+        assert_ne!(RunKey::of(&guest), owner_key, "a scoped run keeps its own run key");
+        let guest_wanted = wanted("unit", RunKey::of(&guest), &guest, &[], lock).ok_or("a guest wants a layer")?;
+        assert!(!guest_wanted.owned);
+        assert_eq!(guest_wanted.hex, owner_wanted.hex);
+        Ok(())
+    }
+
+    #[test]
+    fn an_owner_keeps_its_run_key_layer() -> TestResult {
+        // Catches layer invalidation: a run owning its layer is keyed by its
+        // own run key digest, exactly as before the guest field existed.
+        let owner = run(&[&[]], &["target"])?;
+        let key = RunKey::of(&owner);
+        let lock = digest(3);
+        let owner_wanted = wanted("unit", key, &owner, &[], Some(lock)).ok_or("an owner wants a layer")?;
+        assert!(owner_wanted.owned);
+        assert_eq!(owner_wanted.hex, id("unit", key.digest(), lock).to_string());
         Ok(())
     }
 

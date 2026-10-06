@@ -18,11 +18,208 @@ use super::config;
 #[kind(name = "proof.clippy.args")]
 pub struct ClippyArgs;
 
-/// The arguments of `proof.test`: none. The proof always runs over the
-/// whole workspace in the session's tree, so the model writes `{}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Storage)]
+/// The arguments of `proof.test`: an optional scope narrowing the run by
+/// target and filter. The default is the whole workspace, so the model
+/// writes `{}` for today's whole run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "proof.test.args")]
-pub struct TestArgs;
+pub struct TestArgs {
+    scope: TestScope,
+}
+
+impl TestArgs {
+    /// Accept test arguments over `scope`.
+    #[must_use]
+    pub const fn new(scope: TestScope) -> Self {
+        Self { scope }
+    }
+
+    /// The scope the run builds and runs.
+    #[must_use]
+    pub const fn scope(&self) -> &TestScope {
+        &self.scope
+    }
+}
+
+/// Most bytes one [`ScopeEntry`] may hold.
+pub const MAX_SCOPE_ENTRY_BYTES: usize = 256;
+
+/// Most entries one [`ScopeEntries`] axis may hold.
+pub const MAX_SCOPE_ENTRIES: usize = 32;
+
+/// Why [`ScopeEntry::new`] or decode refused a scope entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeEntryError {
+    /// The entry was empty.
+    Empty,
+    /// The entry was longer than [`MAX_SCOPE_ENTRY_BYTES`] bytes.
+    TooLong,
+    /// The first byte was not `[A-Za-z0-9_]`.
+    BadStart,
+    /// A later byte was not `[A-Za-z0-9_.:/-]`.
+    BadChar,
+}
+
+impl Invariant for ScopeEntryError {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too-long",
+            Self::BadStart => "bad-start",
+            Self::BadChar => "bad-char",
+        }
+    }
+}
+
+impl fmt::Display for ScopeEntryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(Invariant::reason(self))
+    }
+}
+
+impl Error for ScopeEntryError {}
+
+/// One scope entry: a cargo test target name or a libtest filter, 1 to
+/// [`MAX_SCOPE_ENTRY_BYTES`] bytes matching `[A-Za-z0-9_][A-Za-z0-9_.:/-]*`.
+/// The leading-dash refusal keeps no entry parsing as a cargo flag.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct ScopeEntry(String);
+
+impl ScopeEntry {
+    /// Accept a scope entry.
+    ///
+    /// # Errors
+    ///
+    /// [`ScopeEntryError`] names which rule failed.
+    pub fn new(entry: impl Into<String>) -> Result<Self, ScopeEntryError> {
+        let entry = entry.into();
+        Self::check(&entry)?;
+        Ok(Self(entry))
+    }
+
+    /// Borrow the entry.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(entry: &str) -> Result<(), ScopeEntryError> {
+        let Some((&first, rest)) = entry.as_bytes().split_first() else {
+            return Err(ScopeEntryError::Empty);
+        };
+        if entry.len() > MAX_SCOPE_ENTRY_BYTES {
+            return Err(ScopeEntryError::TooLong);
+        }
+        let start_ok = first.is_ascii_alphanumeric() || first == b'_';
+        if !start_ok {
+            return Err(ScopeEntryError::BadStart);
+        }
+        let rest_valid =
+            rest.iter().all(|&byte| byte.is_ascii_alphanumeric() || byte == b'_' || b".:/-".contains(&byte));
+        if !rest_valid {
+            return Err(ScopeEntryError::BadChar);
+        }
+        Ok(())
+    }
+}
+
+/// Why [`ScopeEntries::new`] or decode refused a scope list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeEntriesError {
+    /// The list held more than [`MAX_SCOPE_ENTRIES`] entries.
+    TooMany,
+}
+
+impl Invariant for ScopeEntriesError {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::TooMany => "too-many",
+        }
+    }
+}
+
+impl fmt::Display for ScopeEntriesError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(Invariant::reason(self))
+    }
+}
+
+impl Error for ScopeEntriesError {}
+
+/// One scope axis: at most [`MAX_SCOPE_ENTRIES`] entries, in the order
+/// supplied. Empty selects everything on that axis.
+#[derive(Debug, Clone, Default, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct ScopeEntries(Vec<ScopeEntry>);
+
+impl ScopeEntries {
+    /// Accept a scope list.
+    ///
+    /// # Errors
+    ///
+    /// [`ScopeEntriesError`] names which rule failed.
+    pub fn new(entries: Vec<ScopeEntry>) -> Result<Self, ScopeEntriesError> {
+        Self::check(&entries)?;
+        Ok(Self(entries))
+    }
+
+    /// Every entry, in the order supplied.
+    #[must_use]
+    pub fn as_slice(&self) -> &[ScopeEntry] {
+        &self.0
+    }
+
+    fn check(entries: &[ScopeEntry]) -> Result<(), ScopeEntriesError> {
+        if entries.len() > MAX_SCOPE_ENTRIES {
+            return Err(ScopeEntriesError::TooMany);
+        }
+        Ok(())
+    }
+}
+
+/// What a scoped `proof.test` builds and runs: the `--workspace` package
+/// set narrowed by integration-test target and by libtest filter. Targets
+/// each become a `--test <name>` pair, selecting integration test targets
+/// only; filters pass after a `--` separator cargo forwards to test
+/// binaries untouched. Unit tests in `src/` select by filter only: test
+/// names are `module::test` paths with no crate qualifier, so a filter
+/// matching that crate's module paths runs its unit tests while cargo
+/// builds the whole workspace test graph warm off the shared layer. For
+/// unit tests the scope saves run time only, never build narrowing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, aether_data::Storage)]
+pub struct TestScope {
+    targets: ScopeEntries,
+    filters: ScopeEntries,
+}
+
+impl TestScope {
+    /// Accept a scope over `targets` and `filters`.
+    #[must_use]
+    pub const fn new(targets: ScopeEntries, filters: ScopeEntries) -> Self {
+        Self { targets, filters }
+    }
+
+    /// Whether the scope selects the whole workspace: both axes empty.
+    #[must_use]
+    pub fn is_whole(&self) -> bool {
+        let no_targets = self.targets.as_slice().is_empty();
+        let no_filters = self.filters.as_slice().is_empty();
+        no_targets && no_filters
+    }
+
+    /// The integration-test targets, in the order supplied.
+    #[must_use]
+    pub fn targets(&self) -> &[ScopeEntry] {
+        self.targets.as_slice()
+    }
+
+    /// The libtest filters, in the order supplied.
+    #[must_use]
+    pub fn filters(&self) -> &[ScopeEntry] {
+        self.filters.as_slice()
+    }
+}
 
 /// Most variables one [`TestEnv`] may hold.
 pub const MAX_TEST_ENV: usize = 32;
@@ -167,7 +364,10 @@ mod tests {
     use aether_bloomery_workspace::EnvVar;
     use aether_data::wire::{decode_from_slice, encode_to_vec};
 
-    use super::{MAX_TEST_ENV, TestEnv, TestEnvError};
+    use super::{
+        MAX_SCOPE_ENTRIES, MAX_SCOPE_ENTRY_BYTES, MAX_TEST_ENV, ScopeEntries, ScopeEntriesError, ScopeEntry,
+        ScopeEntryError, TestEnv, TestEnvError, TestScope,
+    };
 
     fn distinct(count: usize) -> Vec<EnvVar> {
         (0..count).map(|index| EnvVar::new(format!("AETHER_TEST_{index}"), "1").expect("test variable")).collect()
@@ -191,5 +391,62 @@ mod tests {
         let most = TestEnv::new(distinct(MAX_TEST_ENV)).expect("the most entries are accepted");
         let bytes = encode_to_vec(&distinct(MAX_TEST_ENV)).expect("the inner list encodes");
         assert_eq!(decode_from_slice::<TestEnv>(&bytes).expect("decode accepts the most entries"), most);
+    }
+
+    /// `entry` refused by `new` with `error`, and by decode.
+    fn refused_entry(entry: String, error: ScopeEntryError) {
+        let bytes = encode_to_vec(&entry).expect("the inner string encodes");
+        assert_eq!(ScopeEntry::new(entry), Err(error));
+        assert!(decode_from_slice::<ScopeEntry>(&bytes).is_err(), "decode refuses what new refuses: {error}");
+    }
+
+    #[test]
+    fn scope_entries_refuse_empty_long_bad_start_and_bad_char_at_new_and_at_decode() {
+        // Catches unbounded or flag-injecting argv reaching cargo.
+        refused_entry(String::new(), ScopeEntryError::Empty);
+        refused_entry("a".repeat(MAX_SCOPE_ENTRY_BYTES + 1), ScopeEntryError::TooLong);
+        for entry in ["-scoped", "-test", "--", "-"] {
+            refused_entry(entry.to_owned(), ScopeEntryError::BadStart);
+        }
+        for entry in ["has space", "semi;colon", "back\\slash", "star*glob", "quote\"q"] {
+            refused_entry(entry.to_owned(), ScopeEntryError::BadChar);
+        }
+
+        for entry in ["a", "_", "0", "session", "aether-bloomery-workspace", "gate", "a/b:c.d-e_f", "MuseSpark"] {
+            let accepted = ScopeEntry::new(entry).expect("a neighbour accepts");
+            assert_eq!(accepted.as_str(), entry);
+            let bytes = encode_to_vec(&entry.to_owned()).expect("the inner string encodes");
+            assert_eq!(decode_from_slice::<ScopeEntry>(&bytes).expect("decode accepts a neighbour"), accepted);
+        }
+
+        let longest = "a".repeat(MAX_SCOPE_ENTRY_BYTES);
+        let accepted = ScopeEntry::new(longest.clone()).expect("the most bytes accept");
+        let bytes = encode_to_vec(&longest).expect("the inner string encodes");
+        assert_eq!(decode_from_slice::<ScopeEntry>(&bytes).expect("decode accepts the most bytes"), accepted);
+    }
+
+    #[test]
+    fn scope_lists_refuse_past_the_max_and_accept_the_max() {
+        // Catches an unbounded scope list reaching cargo's argv.
+        let entries = |count: usize| {
+            (0..count).map(|index| ScopeEntry::new(format!("target{index}")).expect("test entry")).collect::<Vec<_>>()
+        };
+        let bytes = encode_to_vec(&entries(MAX_SCOPE_ENTRIES + 1)).expect("the inner list encodes");
+        assert_eq!(ScopeEntries::new(entries(MAX_SCOPE_ENTRIES + 1)), Err(ScopeEntriesError::TooMany));
+        assert!(decode_from_slice::<ScopeEntries>(&bytes).is_err(), "decode refuses what new refuses");
+
+        let most = ScopeEntries::new(entries(MAX_SCOPE_ENTRIES)).expect("the most entries accept");
+        assert_eq!(most.as_slice().len(), MAX_SCOPE_ENTRIES);
+        let bytes = encode_to_vec(&entries(MAX_SCOPE_ENTRIES)).expect("the inner list encodes");
+        assert_eq!(decode_from_slice::<ScopeEntries>(&bytes).expect("decode accepts the most entries"), most);
+
+        let empty = ScopeEntries::new(Vec::new()).expect("empty accepts");
+        assert!(empty.as_slice().is_empty());
+        assert!(TestScope::default().is_whole());
+        let scoped = TestScope::new(
+            ScopeEntries::new(vec![ScopeEntry::new("session").expect("entry")]).expect("targets"),
+            ScopeEntries::default(),
+        );
+        assert!(!scoped.is_whole());
     }
 }

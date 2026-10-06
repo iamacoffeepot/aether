@@ -597,6 +597,7 @@ impl AsyncProgram for SampledWorkspace {
             steps: aether_bloomery_workspace::Steps::new(vec![step]).map_err(|_| Refusal::InputDecode)?,
             scratch: aether_bloomery_workspace::Scratch::new(Vec::new()).map_err(|_| Refusal::InputDecode)?,
             network: aether_bloomery_workspace::Network::Off,
+            layer: None,
         };
         let answered = workspace.run(run).await?;
         AFTER_AWAIT.set(true);

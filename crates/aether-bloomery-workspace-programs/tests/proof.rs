@@ -11,7 +11,8 @@ use aether_bloomery_workspace::{
     Outcome, RunError, RunResult, RustToolchain, StepOutcome, ToolName, ToolRecord, TreePath,
 };
 use aether_bloomery_workspace_programs::proof::{
-    ClippyArgs, ClippyProof, ProofBound, ProofVerdict, TestArgs, TestEnv, TestProof,
+    ClippyArgs, ClippyProof, ProofBound, ProofVerdict, ScopeEntries, ScopeEntry, TestArgs, TestEnv, TestProof,
+    TestScope,
 };
 use aether_data::{Cites, Digest, Kind, Ref, Storage, Utf8Text};
 
@@ -137,7 +138,7 @@ fn proved(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box
 
 /// Run the test proof over `steps`, answering reads from their outputs, and read back its result and verdict.
 fn proved_test(steps: Vec<(StepOutcome, [EncodedArtifact; 2])>) -> Result<Proved, Box<dyn Error>> {
-    proved_as::<TestProof, _>(&TestArgs, steps)
+    proved_as::<TestProof, _>(&TestArgs::default(), steps)
 }
 
 /// The staged text `diagnostics` cites.
@@ -161,6 +162,31 @@ fn a_pass_carries_the_formatted_tree_and_names_what_fmt_rewrote() -> TestResult 
         "`cargo clippy` passed. `cargo fmt` rewrote src/lib.rs, src/main.rs; read a rewritten file \
          again before you edit it."
     );
+    Ok(())
+}
+
+#[test]
+fn a_whole_test_pass_reports_bare_passed() -> TestResult {
+    // Catches an inverted branch that would mark a scoped run as whole, or a
+    // whole run as scoped.
+    let steps = vec![step(Some(0), b"", b"")?, step(Some(0), b"", b"")?];
+    let Proved { verdict, .. } = proved_test(steps)?;
+    assert_eq!(verdict, ProofVerdict::Passed);
+    Ok(())
+}
+
+#[test]
+fn a_scoped_test_pass_reports_passed_scoped_with_its_scope() -> TestResult {
+    // Catches an inverted branch, a dropped scope, or a seam encode failure:
+    // a scoped pass must cite the equal scope, never bare `Passed`.
+    let scope = TestScope::new(
+        ScopeEntries::new(vec![ScopeEntry::new("session").expect("entry")]).expect("targets"),
+        ScopeEntries::default(),
+    );
+    let args = TestArgs::new(scope.clone());
+    let steps = vec![step(Some(0), b"", b"")?, step(Some(0), b"", b"")?];
+    let Proved { verdict, .. } = proved_as::<TestProof, _>(&args, steps)?;
+    assert_eq!(verdict, ProofVerdict::PassedScoped { scope });
     Ok(())
 }
 

@@ -24,6 +24,6 @@ pub use path::{TreePath, TreePathError};
 pub use result::{Outcome, Refusal, Resource, RunError, RunResult, StepOutcome, ToolRecord};
 pub use run::{
     EnvVar, EnvVarError, MAX_STEPS, Mount, Mounts, MountsError, Network, Run, RunRequest, Scratch, ScratchError, Step,
-    Steps, StepsError,
+    Steps, StepsError, run_key,
 };
 pub use storage::StorageWake;

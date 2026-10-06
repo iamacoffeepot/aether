@@ -75,6 +75,7 @@ impl Inputs {
             steps: Steps::new(vec![step])?,
             scratch: Scratch::new(vec![TreePath::new(scratch)?])?,
             network: Network::Off,
+            layer: None,
         })
     }
 

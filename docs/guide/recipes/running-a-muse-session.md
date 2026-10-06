@@ -114,7 +114,9 @@ after=<seq>
   session's tree with `cargo fmt` and returns the formatted tree, which
   becomes the session's tree as an edit's does: `proof.clippy` checks it with
   workspace-wide `cargo clippy`, and `proof.test` runs its workspace tests
-  with the session's test env. The same flags also offer `vendor.list`,
+  with the session's test env, or a scoped subset while iterating (a crate's
+  unit tests by filter, an integration target by `--test` name, both
+  combined); the `Done` gate still runs the whole workspace. The same flags also offer `vendor.list`,
   `vendor.read`, and `vendor.grep`, which take `tree.list`'s, `tree.read`'s,
   and `tree.grep`'s arguments and read the `--vendor` tree, one directory per
   vendored crate, so the model reads a dependency's API before it calls it.
