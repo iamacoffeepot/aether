@@ -17,8 +17,9 @@ extern crate alloc;
 
 pub mod wire_corpus;
 
+use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -766,7 +767,7 @@ pub struct WireCountQuery;
 #[aether_data::kind(name = "aether.test_fixtures.courier.config", default)]
 pub struct CourierConfig {
     pub wasm: Vec<u8>,
-    pub drop: Option<aether_data::ErasedActorPath>,
+    pub drop: Option<ErasedActorPath>,
 }
 
 /// Issue 7086: asks the republish courier what its successor's requests to
@@ -817,3 +818,60 @@ pub struct WireFaultConfig {
 /// until it goes live, so the observer sees one only for a birth that did.
 #[aether_data::kind(name = "aether.test_fixture.wire_marker", default)]
 pub struct WireMarker;
+
+/// Issue 7501: the protocol the `PathHolder` fixture is handed a path to,
+/// one silent row over [`Bump`]. A guest that tells on `Bump` covers it.
+#[aether_actor::protocol]
+pub trait PathPoking {
+    fn bump(mail: Bump);
+}
+
+/// Issue 7501: ask the `PathHolder` fixture to keep `target`. The holder's
+/// decode proves the path, its handler resolves it, and it answers
+/// [`PathAnswer`]: `Ok` naming the path it kept, or the refusal.
+#[aether_data::kind(name = "aether.test_fixtures.path_attach", no_serde)]
+pub struct PathAttach {
+    pub target: ProtocolPath<PathPoking>,
+}
+
+/// Issue 7501: the reply to [`PathAttach`].
+#[aether_data::kind(name = "aether.test_fixtures.path_answer", eq)]
+pub enum PathAnswer {
+    /// The path proved and a live actor stands at it.
+    Ok { path: ErasedActorPath },
+    /// The path did not prove, at decode or at `resolve`.
+    Err(PathRefused),
+}
+
+impl From<PathRefused> for PathAnswer {
+    fn from(refused: PathRefused) -> Self {
+        Self::Err(refused)
+    }
+}
+
+/// Issue 7501: the config of the `PathHolder` fixture and of its inline
+/// child. `target` is the path the actor itself keeps; a holder resolves it
+/// in `wire` and sends a [`Bump`] through it. `child_target` is the path a
+/// holder hands the inline child it spawns in `wire`; with none it spawns no
+/// child.
+#[aether_data::kind(name = "aether.test_fixtures.path_holder.config", default, no_serde)]
+pub struct PathHolderConfig {
+    pub target: Option<ProtocolPath<PathPoking>>,
+    pub child_target: Option<ProtocolPath<PathPoking>>,
+}
+
+/// Issue 7501: ask a `PathHolder` or its inline child which paths it holds.
+#[aether_data::kind(name = "aether.test_fixtures.path_echo", default)]
+pub struct PathEcho;
+
+/// Issue 7501: the reply to [`PathEcho`]: the path the actor's config named,
+/// and the path the last [`PathAttach`] it accepted named. An inline child
+/// accepts none.
+#[aether_data::kind(name = "aether.test_fixtures.path_echoed", eq)]
+pub struct PathEchoed {
+    pub config: Option<ErasedActorPath>,
+    pub attached: Option<ErasedActorPath>,
+}
+
+/// Issue 7501: the subname a `PathHolder` spawns its inline child under.
+pub const PATH_HOLDER_CHILD: &str = "child";

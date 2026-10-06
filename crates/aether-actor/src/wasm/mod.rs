@@ -50,6 +50,7 @@ use crate::model::{Declared, ListIndex};
 
 pub mod bridge;
 pub mod ctx;
+pub mod decode;
 pub mod inline;
 mod raw;
 
@@ -1094,8 +1095,11 @@ macro_rules! __export_internal {
         /// scratch layout) before calling. `config_len == 0` passes
         /// through as `&[]` and resolves to the actor's compiled
         /// `Config::default()`. Non-empty bytes are decoded as the
-        /// actor's `Config`; a decode failure stages the message via
-        /// `init_failed_p32` and returns 1.
+        /// actor's `Config` through the guest decode context, so a
+        /// `ProtocolPath` in it is proven against the engine's published
+        /// routes; a decode failure stages the refusal, naming the actor,
+        /// the config kind, and the reason, via `init_failed_p32` and
+        /// returns 1.
         ///
         /// Returns `0` on success and non-zero when the actor's `init`
         /// returned `Err(ActorInitError)` or non-empty config bytes failed
@@ -1129,18 +1133,16 @@ macro_rules! __export_internal {
             let config = if config_len == 0 {
                 <<$component as $crate::Lifecycle<$component>>::Config as ::core::default::Default>::default()
             } else {
-                let Some(config) = <<$component as $crate::Lifecycle<$component>>::Config as $crate::__macro_internals::Kind>::decode_from_bytes(
-                    config_bytes,
-                ) else {
-                    let msg = ::core::concat!(
-                        "guest init: ",
-                        ::core::stringify!($component),
-                        " could not decode Config from bytes",
-                    );
-                    $crate::wasm::stage_init_failure(msg);
-                    return 1;
-                };
-                config
+                let decoded = $crate::wasm::decode::decode_config::<
+                    <$component as $crate::Lifecycle<$component>>::Config,
+                >(<$component as $crate::Addressable>::NAMESPACE, config_bytes);
+                match decoded {
+                    ::core::result::Result::Ok(config) => config,
+                    ::core::result::Result::Err(error) => {
+                        $crate::wasm::stage_init_failure(error.message());
+                        return 1;
+                    }
+                }
             };
             // ADR-0114 addressing amendment: capture the real folded
             // mailbox id the substrate hands the guest as this cluster's
@@ -2222,17 +2224,17 @@ macro_rules! __export_multi_internal {
         let config = if $config_bytes.is_empty() {
             <<$ty as $crate::Lifecycle<$ty>>::Config as ::core::default::Default>::default()
         } else {
-            let Some(config) = <
-                <$ty as $crate::Lifecycle<$ty>>::Config as $crate::__macro_internals::Kind
-            >::decode_from_bytes($config_bytes) else {
-                $crate::wasm::stage_init_failure(::core::concat!(
-                    "guest init: ",
-                    ::core::stringify!($ty),
-                    " could not decode Config from bytes",
-                ));
-                return 1;
-            };
-            config
+            let decoded = $crate::wasm::decode::decode_config::<<$ty as $crate::Lifecycle<$ty>>::Config>(
+                <$ty as $crate::Addressable>::NAMESPACE,
+                $config_bytes,
+            );
+            match decoded {
+                ::core::result::Result::Ok(config) => config,
+                ::core::result::Result::Err(error) => {
+                    $crate::wasm::stage_init_failure(error.message());
+                    return 1;
+                }
+            }
         };
         // ADR-0156 §2: empty params for now — resolve `Params` to its
         // compiled default, mirroring the empty-config path above.

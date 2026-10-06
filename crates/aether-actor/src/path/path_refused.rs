@@ -30,7 +30,7 @@ pub struct PathRefused {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathRefusal {
     /// The receiver has no published routes to check the path against: a
-    /// guest receiver today (ADR-0241).
+    /// decode with no registry behind it, such as one outside an engine.
     Unchecked,
     /// No route has stood at the path, or its route is still starting.
     Unpublished,

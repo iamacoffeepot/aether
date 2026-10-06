@@ -172,6 +172,18 @@ unsafe extern "C" {
     /// grammar; the SDK passes only a typed path's text.
     #[link_name = "live_route_p32"]
     pub fn live_route(path_ptr: u32, path_len: u32) -> u64;
+    /// ADR-0231 §3 (#7501): the rows of the `Live` or `Dropped` route
+    /// standing under exactly the canonical path at `(path_ptr, path_len)`, a
+    /// UTF-8 slice in guest memory copied out before the call returns. The
+    /// return is the packed `(ptr << 32) | len` of a live guest buffer
+    /// holding the wire-encoded answer, a `__PublishedRows`, which the SDK
+    /// decodes and frees as [`asset_catalog`] does. The host traps on an
+    /// out-of-bounds pointer, text that is not UTF-8, and text outside the
+    /// ADR-0166 path grammar; the SDK passes only a typed path's text. Its
+    /// one caller is the wasm32-only guest decode context, so it has no host
+    /// stub.
+    #[link_name = "route_rows_p32"]
+    pub fn route_rows(path_ptr: u32, path_len: u32) -> u64;
     /// ADR-0231 §4: the rows the route at `position` published while it is
     /// `Live`. The return is the packed `(ptr << 32) | len` of a live guest
     /// buffer holding the wire-encoded answer, a `__PublishedRows`, which the

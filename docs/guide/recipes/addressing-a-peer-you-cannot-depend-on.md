@@ -160,9 +160,9 @@ Under the design rules
 `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
 two ways: by casting the envelope sender at receipt, as the shell does, or by
 proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`) that the
-announcement carries. A guest has the cast, `WasmCtx::cast`, and the
-`ActorPath<R>` door, `WasmCtx::resolve` (#7205); its `ProtocolPath<P>` decode
-lands with ADR-0241.
+announcement carries. A guest has all three: the cast, `WasmCtx::cast`, and
+`WasmCtx::resolve` over either typed path, since a guest decodes a
+`ProtocolPath<P>` as a native actor does (#7205, #7501).
 
 A reply to the announcing mail itself needs no stored reference. The handler
 replies, as any handler does.

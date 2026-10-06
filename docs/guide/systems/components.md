@@ -331,6 +331,14 @@ Omit `type Config` and the macro synthesizes `()` and injects the unused argumen
 so a no-config `init` stays terse. A declared config kind shows up in the
 component's advertised capabilities, so `describe_kinds` can resolve its schema.
 
+A config may name a peer by path: an `ActorPath<R>` when the component needs
+one actor type, or a `ProtocolPath<P>` when it needs only a protocol. Its
+decode in `init` proves a `ProtocolPath<P>` against the routes published at
+that moment, so the peer is loaded first; a path that does not prove refuses
+the load.
+[Naming a peer by protocol](#naming-a-peer-by-protocol) has the rules and the
+cost.
+
 ## Spawning children inline
 
 A running instance can stand up another actor from its **own module** without a
@@ -613,7 +621,7 @@ way. It refuses one way, naming no position:
 
 It costs one host call reading the published route view. Call it once, at
 `wire` (a `WireCtx` derefs to `WasmCtx`) or at receipt, and keep the
-`ActorRef<R>` it returns; never re-resolve at a send. The verb is on the
+reference it returns; never re-resolve at a send. The verb is on the
 receive and `wire` ctx only, not on `WasmInitCtx`. The guest decides what a
 refusal means: returned from `wire`, as above, it fails the load with that
 message; handled, the instance goes live without the peer.
@@ -640,6 +648,65 @@ position:
 Any loaded component can reach any `Live` actor whose path it
 can spell, so a native actor that must not take guest mail cannot rely on its
 path being unknown.
+
+### Naming a peer by protocol
+
+An `ActorPath<R>` makes the guest depend on the crate of one actor type. A
+guest that needs only "an actor that handles protocol `P` stands here" takes
+a `ProtocolPath<P>` instead, in its config, in mail, or in an inline child's
+config
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§3, #7501). A kind that carries one is declared `no_serde`, since the path
+decodes only against an engine. A scene that draws from whatever publishes a
+view names it this way and never depends on a camera crate:
+
+```rust
+#[aether_data::kind(name = "example.scene.config", default, no_serde)]
+pub struct SceneConfig {
+    /// The actor to take the view from. `None` only in the compiled default.
+    pub view: Option<ProtocolPath<ViewSource>>,
+}
+
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+    let Some(path) = &self.config.view else {
+        return Err(ActorInitError::new("the scene's config names no view source"));
+    };
+    let source = ctx.resolve(path).map_err(|error| ActorInitError::new(error.to_string()))?;
+    ctx.send_to(source, &ViewSubscribe);
+    self.source = Some(source);
+    Ok(())
+}
+```
+
+Two proofs run, as they do for a native actor. The decode proves the path's
+type: that the route standing under exactly that path, `Live` or closed,
+published every row of `P`. `ctx.resolve` then proves liveness and mints the
+`ProtocolRef<P>`; it compares no rows.
+
+| Where it is refused | Refusal | When |
+|---|---|---|
+| decode | `Unpublished` | no route has stood at the path, or its actor is still starting |
+| decode | `Uncovered { kind }` | the route does not publish the protocol row `kind` |
+| `resolve` | `ResolveError::NotLive { path }` | the path proved, and its actor has closed |
+
+A config that does not decode refuses the load before `init` runs, and the
+load's error names the actor, the config kind, the path, and the reason:
+
+```text
+example.scene: config `example.scene.config` did not decode: aether wire: protocol path `aether.kit.camera:main` refused: no route has published at this path
+```
+
+So the target is loaded before the component whose config names it; a
+component's own path, and any actor born after it, does not prove. An inline
+spawn whose config does not decode returns `SpawnError::InitFailed` with the
+same text. A request whose path does not decode is answered through its
+reply's `From<PathRefused>`, and its handler does not run.
+
+Each `ProtocolPath<P>` field costs one host call per decode, which reads the
+route's rows into guest memory; nothing is cached. That suits a config, an
+attach, or a subscribe kind. A kind sent every frame carries no path: resolve
+once, keep the `ProtocolRef<P>`, and send through it. A kind with no
+`ProtocolPath` field makes no host call.
 
 A guest can load a component itself. It declares the component host,
 `depends(ComponentHostCapability)`, sends it `aether.component.load`, and keeps the
