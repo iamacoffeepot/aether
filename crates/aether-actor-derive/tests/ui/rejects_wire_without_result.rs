@@ -35,7 +35,6 @@ impl aether_actor::WasmActor for Guest {
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 
-#[allow(dead_code)]
 struct Cap;
 
 #[actor]
