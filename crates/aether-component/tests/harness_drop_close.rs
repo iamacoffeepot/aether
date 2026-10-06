@@ -16,7 +16,7 @@ use std::fs;
 
 use aether_actor::{HeldReply, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, LoadName};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, MonitorNotice, Publish, PublishResult};
@@ -25,12 +25,7 @@ use aether_substrate::MonitorHandle;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::Panel;
-
-// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
-// entries, the boot fixture's markers among them, are present in this test
-// binary.
-#[allow(unused_imports)]
-use aether_test_fixtures_kinds as _;
+use aether_test_fixtures_kinds::{BootObserved, BootTornDown};
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 /// An instanced export, so a load names its key.
@@ -211,11 +206,9 @@ fn a_drop_at_a_live_route_the_host_did_not_load_is_refused() {
     );
 }
 
-/// The boot fixture's markers (`aether-test-fixtures-boot`): its boot actor
-/// mails `BOOT_OBSERVED` from `wire` and `BOOT_TORN_DOWN` from `unwire`.
+/// The boot fixture (`aether-test-fixtures-boot`): its boot actor mails
+/// [`BootObserved`] from `wire` and [`BootTornDown`] from `unwire`.
 const BOOT_FIXTURE: &str = "aether_test_fixtures_boot";
-const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
-const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Catches a guest whose `unwire` export runs only on a drop addressed at
 /// it: a guest nobody dropped still runs `unwire` when its engine tears down,
@@ -238,11 +231,16 @@ fn engine_teardown_runs_the_unwire_of_a_guest_nobody_dropped() {
         panic!("the widget loads: {error}");
     }
     harness.execute(vec![("settle", HarnessOp::advance(1))]).expect("settle the boot's wire");
-    assert_eq!(harness.count_observed(BOOT_OBSERVED), 1, "the boot wired; observed: {:?}", harness.observed_kinds());
-    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 0, "a live boot has not run unwire");
+    assert_eq!(
+        harness.count_observed(BootObserved::NAME),
+        1,
+        "the boot wired; observed: {:?}",
+        harness.observed_kinds()
+    );
+    assert_eq!(harness.count_observed(BootTornDown::NAME), 0, "a live boot has not run unwire");
 
     assert_eq!(
-        harness.close_and_count_observed(BOOT_TORN_DOWN),
+        harness.close_and_count_observed(BootTornDown::NAME),
         1,
         "engine teardown closes the boot, and its close runs the guest's unwire",
     );
