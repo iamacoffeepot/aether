@@ -3,16 +3,20 @@
   "components": [
     {
       "wasm": "dist/components/aether_kit.wasm",
-      "export": "aether.kit.camera"
+      "export": "aether.kit.camera",
+      "name": "main",
+      "config_json": "crates/aether-demo/camera.json"
     },
     {
       "wasm": "dist/components/aether_kit.wasm",
       "export": "aether.kit.camera-controller",
+      "name": "main",
       "config_json": "crates/aether-demo/controller.json"
     },
     {
       "wasm": "dist/components/aether_kit.wasm",
-      "export": "aether.kit.mesh"
+      "export": "aether.kit.mesh",
+      "config_json": "crates/aether-demo/mesh.json"
     },
     {
       "wasm": "dist/components/aether_demo.wasm",

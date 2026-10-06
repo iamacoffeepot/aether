@@ -51,11 +51,9 @@ pub use utility::{Ping, Pong};
 // verification kinds stay below: `aether-mcp` and the substrate core
 // consume them, so moving them would close a dependency cycle.
 
-// `aether.kit.camera.*` control kinds (CameraCreate / CameraDestroy /
-// CameraSetActive / CameraSetMode / CameraOrbitSet / CameraTopdownSet)
-// live in `mod control_plane` below — they're structured because
-// every one carries a `String` name and `Option<...>` per-field
-// deltas, so they can't ride the cast-shaped path.
+// The `aether.kit.camera.*` kinds (`Pose`, `Frame`, `Glide`, `Where`,
+// `CameraRay` and the camera's config) live in `aether-kit::camera`, beside
+// the actor that handles them.
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
 // these kinds inline rather than dispatching to a component — the
 // namespace itself is the routing discriminator. ADR-0019 PR 5 turned
@@ -1480,15 +1478,11 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0066: camera control kinds (`aether.kit.camera.{create, destroy,
-    // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
-    // `TopdownParams` / `ModeInit`) live in the `aether-kit::camera`
-    // trunk module. The `aether.view_projection` view_proj sink contract stays
-    // in `aether-render` — it's a chassis primitive consumed by the desktop chassis's
-    // `aether.render` mailbox (the camera mailbox folded into
-    // render per ADR-0074 §Decision 7).
-    // The migrated kinds are still wire-compatible (kind names +
-    // schemas unchanged); only the source-side home moved.
+    // ADR-0066: the camera kinds (`aether.kit.camera.{pose, frame, glide,
+    // where, ray}` and the camera's config) live in the `aether-kit::camera`
+    // trunk module. The `aether.view_projection` view a camera publishes stays
+    // in `aether-render` — it's the renderer's kind, taken by the
+    // `aether.render` mailbox and by any other subscriber of a view source.
 
     // ADR-0066: `aether.kit.mesh.load` moved to the `aether-mesh-viewer`
     // trunk crate; that crate was later folded into `aether-kit`

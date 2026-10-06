@@ -2,7 +2,6 @@
 //! and the structured misses it reports.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_actor::__macro_internals::ProtocolCast;
 use aether_actor::{Protocol, ProtocolPath, ResolveError, Row, RowSet, Undeclared};
@@ -175,9 +174,7 @@ fn resolve_protocol_proves_live_routes_and_refuses_the_rest() {
     let reserved =
         registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
     owner.run_once();
-    starting_token(
-        &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
-    );
+    starting_token(&reserved.try_take().expect("reservation completes").expect("reserves"));
     let dropped = "test.resolve_protocol.dropped";
     let dropped_id = registry.try_register_inbox(&auth(), dropped, noop_handler()).expect("the route name is free");
     registry.drop_mailbox(&auth(), dropped_id).expect("the live route retires");
@@ -283,9 +280,7 @@ fn route_rows_answer_live_and_dropped_routes_under_the_path() {
     let reserved =
         registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
     owner.run_once();
-    starting_token(
-        &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
-    );
+    starting_token(&reserved.try_take().expect("reservation completes").expect("reserves"));
 
     let folded = "test.route_rows.folded";
     let impostor = registry
@@ -367,9 +362,7 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
     let reserved =
         registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
     owner.run_once();
-    starting_token(
-        &reserved.wait_timeout(Duration::from_millis(100)).expect("reservation completes").expect("reserves"),
-    );
+    starting_token(&reserved.try_take().expect("reservation completes").expect("reserves"));
     let starting = registry.stamped_sender(lineage_mailbox_id(starting)).expect("a Starting record stands there");
     let dropped = stand("test.cast.dropped", &[(Load::ID, ReplyContract::None)]);
     registry.drop_mailbox(&auth(), dropped.id()).expect("the live route retires");

@@ -69,20 +69,14 @@ fn list_mailbox_descriptors_ids_match_name_hashes() {
 fn inventory_wake_follows_coherent_publication_and_coalesces() {
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
     let subscription = registry.subscribe_inventory(target, mailer);
-    assert_eq!(
-        wakes.recv_timeout(Duration::from_millis(100)).expect("subscription emits an initial local wake"),
-        aether_actor::RegistryChanged::ID
-    );
+    assert_eq!(wakes.try_recv().expect("subscription emits an initial local wake"), aether_actor::RegistryChanged::ID);
     let initial = registry.inventory();
     subscription.acknowledge(initial.mailbox_generation, initial.kind_generation);
 
     registry.register_inbox(&auth(), "aether.input", noop_handler());
     registry.register_kind(&auth(), "aether.inventory.test");
 
-    assert_eq!(
-        wakes.recv_timeout(Duration::from_millis(100)).expect("published inventory emits one wake"),
-        aether_actor::RegistryChanged::ID
-    );
+    assert_eq!(wakes.try_recv().expect("published inventory emits one wake"), aether_actor::RegistryChanged::ID);
     let inventory = registry.inventory();
     assert_eq!(inventory.mailbox_generation, initial.mailbox_generation + 1);
     assert_eq!(inventory.kind_generation, initial.kind_generation + 1);
@@ -96,14 +90,14 @@ fn inventory_wake_follows_coherent_publication_and_coalesces() {
 fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
     let subscription = registry.subscribe_inventory(target, mailer);
-    wakes.recv_timeout(Duration::from_millis(100)).expect("initial wake");
+    wakes.try_recv().expect("initial wake");
     let observed = registry.inventory();
 
     registry.register_inbox(&auth(), "aether.input", noop_handler());
     let kind = registry.register_kind(&auth(), "aether.inventory.race");
     subscription.acknowledge(observed.mailbox_generation, observed.kind_generation);
 
-    wakes.recv_timeout(Duration::from_millis(100)).expect("stale pair re-arms a wake");
+    wakes.try_recv().expect("stale pair re-arms a wake");
     let latest = registry.inventory();
     assert_eq!(latest.mailbox_generation, observed.mailbox_generation + 1);
     assert_eq!(latest.kind_generation, observed.kind_generation + 1);

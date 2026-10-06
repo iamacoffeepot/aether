@@ -4,16 +4,20 @@
   "components": [
     {
       "package": "aether-kit",
-      "export": "aether.kit.camera"
+      "export": "aether.kit.camera",
+      "name": "main",
+      "config_json": "camera.json"
     },
     {
       "package": "aether-kit",
       "export": "aether.kit.camera-controller",
+      "name": "main",
       "config_json": "controller.json"
     },
     {
       "package": "aether-kit",
-      "export": "aether.kit.mesh"
+      "export": "aether.kit.mesh",
+      "config_json": "mesh.json"
     },
     {
       "package": "aether-demo",

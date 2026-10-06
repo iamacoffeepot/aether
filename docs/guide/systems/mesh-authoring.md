@@ -53,9 +53,12 @@ so a load that names no `export` is refused with the module's export list
 (ADR-0241 §9); the mesh actor must be selected as
 `aether_kit@aether.kit.mesh`. Export membership is in
 [`aether-kit/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit/src/lib.rs).
-The viewer declares `aether.kit.camera` as a dependency: load
-`aether_kit@aether.kit.camera` at its published name first. A viewer
-loaded alone is refused at load, naming `aether.kit.camera`.
+The viewer's config names the camera whose eye its outlines face
+(`{"camera": "aether.kit.camera:main"}`, which is also the default): load
+`aether_kit@aether.kit.camera` under that key first, and send
+`aether.render.view_from` naming it so the renderer draws through the same
+camera. A viewer loaded before its camera is refused at load, naming the
+path.
 
 ## DSL vocabulary
 
@@ -202,13 +205,11 @@ the shared reply type is in
 
 `MeshViewer` subscribes only to the `Render` lifecycle stage. It performs file
 I/O and atomically replaces the cache when a load reply arrives. On each render
-it sends cached faces immediately. A DSL cache with outline loops also sends
-`aether.kit.camera.eye` to the `CameraComponent` default-loaded as
-`aether.kit.camera`; the source-bound `aether.kit.camera.eye_result` reply lets
-the viewer rebuild and submit those loops in the same settled Render cascade.
-No loaded camera, or a reply with no active live camera, leaves the filled mesh
-visible and omits only the outlines. OBJ caches never request the eye because
-they contain no outline loops. A chassis without
+it sends cached faces immediately. At `wire` it subscribes to the view of the
+camera its config names (`aether.render.view_subscribe`) and keeps the eye of
+each `ViewProjection` the camera sends; a DSL cache with outline loops rebuilds
+and submits them for that eye on each render. A camera that has not published
+a view yet leaves the filled mesh visible and omits only the outlines. OBJ caches contain no outline loops. A chassis without
 `Render`, such as the production headless Tick-only graph, rejects the
 subscription; the actor can load but never submits geometry. The minimal hub
 does not host guest gameplay actors. Use desktop or the render-capable
