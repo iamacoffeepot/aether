@@ -37,6 +37,7 @@ aether-substrate = { path = "../aether-substrate" }
 # The `aether.substrate_harness` cap the chassis composes (issue #5706 gave it
 # its own crate so the shipped chassis binaries stop linking this one).
 aether-substrate-harness-cap = { path = "../aether-substrate-harness-cap" }
+aether-inventory = { path = "../aether-inventory" }
 aether-trace = { path = "../aether-trace" }
 aether-window = { path = "../aether-window", features = ["synthetic"] }
 anyhow = { workspace = true }

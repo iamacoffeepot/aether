@@ -28,7 +28,9 @@ It still uses the real:
 - offscreen render/capture path;
 - lifecycle driver plus synthetic window-event and tick stages;
 - deterministic synthetic windows and selector-aware window-event routing;
-- logging/tracing rings and typed replies.
+- logging/tracing rings and typed replies;
+- the inventory capability, so a scenario may mail `aether.inventory` or load a
+  component that depends on it with no extra composition.
 
 It is not a mock engine. The simplification is process/transport ownership.
 

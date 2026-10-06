@@ -86,6 +86,10 @@ with their own capability crate, not in a universal central kind catalog
 Four checked-in chassis profiles reuse the substrate but install different
 drivers and capabilities: desktop, headless, hub, and substrate harness.
 
+Every chassis, and the in-process `SubstrateHarness`, composes `aether.trace`
+and `aether.inventory` from the shared base, ahead of the capabilities each one
+chooses.
+
 Source presence does not imply every chassis has a working actor. A chassis
 composes only the capabilities it serves, so a surface it cannot serve has no
 actor there: a component that depends on it is refused at load, and a mail to

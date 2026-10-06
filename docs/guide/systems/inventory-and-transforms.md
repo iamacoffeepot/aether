@@ -3,7 +3,8 @@
 `aether.inventory` lets an out-of-process observer discover the selected
 engine's names and receive contracts. It exists because a static copy compiled
 into the MCP process would drift from a different chassis build or from kinds
-registered by newly loaded components.
+registered by newly loaded components. The capability is present on every
+chassis, so a component may declare it as a dependency anywhere.
 
 ## Four inventory questions
 
