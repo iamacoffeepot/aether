@@ -25,7 +25,7 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::local;
 use crate::actor::native::spawn::activation::{LegacyPreparedActivation, SpawnFinalizer};
 use crate::actor::native::{ExportedHandles, NativeActor, NativeInitCtx};
-use crate::chassis::inbox::{InboxFeed, inbox_channel};
+use crate::chassis::inbox::{InboxRelay, inbox_channel};
 use crate::mail::cost::{CostCell, CostCells};
 use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedSpawnCommit};
 use crate::mail::{KindId, Mail, MailboxId};
@@ -50,7 +50,7 @@ pub(in crate::actor::native::spawn) struct SpawnIdentity {
 /// than committing a storage representation to the builder API.
 pub(in crate::actor::native::spawn) struct StagedActor<A: NativeActor> {
     pub(in crate::actor::native::spawn) identity: SpawnIdentity,
-    pub(in crate::actor::native::spawn) feed: InboxFeed,
+    pub(in crate::actor::native::spawn) relay: Arc<InboxRelay>,
     pub(in crate::actor::native::spawn) transport: Arc<NativeBinding>,
     pub(in crate::actor::native::spawn) slots: Box<ActorSlots>,
     pub(in crate::actor::native::spawn) state: A::State,
@@ -184,9 +184,9 @@ impl Spawner {
         // up-front so init may publish its self-id (`NativeInitCtx::self_id`
         // reads the binding's `self_mailbox`, which is this folded `id`);
         // the spawn thread doesn't exist yet. The binding's inbox owns the
-        // channel's sender; the staged birth carries only the weak feed its
-        // registry handler will send through.
-        let (receiver, feed) = inbox_channel();
+        // channel's sender; the staged birth carries the relay its route
+        // will register, which holds that sender only weakly.
+        let (receiver, relay) = inbox_channel(&self.mailer);
 
         let transport = Arc::new(NativeBinding::new_with_parent(
             Arc::clone(&self.mailer),
@@ -245,7 +245,7 @@ impl Spawner {
 
         Ok(StagedActor {
             identity: SpawnIdentity { id, parent, carry, canonical_name, subname },
-            feed,
+            relay,
             transport,
             slots,
             state,
@@ -301,7 +301,7 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
-        let StagedActor { identity, feed, transport, slots, state, after_init } = staged;
+        let StagedActor { identity, relay, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name, .. } = identity;
         // The actor's own declared kinds are seeded on top of whatever its
         // `init` already staged, never instead of it (iamacoffeepot/aether#4269).
@@ -343,7 +343,8 @@ impl Spawner {
                 )
             })
             .collect();
-        let activation = LegacyPreparedActivation::<A>::new(Arc::clone(self), id, feed, transport, slots, state, chain);
+        let activation =
+            LegacyPreparedActivation::<A>::new(Arc::clone(self), id, relay, transport, slots, state, chain);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,

@@ -3,9 +3,10 @@
 //!
 //! An inbox channel is opened only by `inbox_channel`, which returns the
 //! two sealed halves: an `InboxReceiver`, which a [`SettlingInbox`] is
-//! built from and which owns the channel's only strong sender, and an
-//! `InboxFeed`, the weak handle a registry inbox handler sends through.
-//! Nothing outside this module can name the sender, so nothing can keep one
+//! built from and which owns the channel's only strong sender, and the
+//! `InboxRelay`, the one registry inbox handler that moves routed mail onto
+//! an actor's inbox. A relay cannot exist without the channel it feeds, and
+//! nothing outside this module can name the sender, so nothing can keep one
 //! alive past the inbox.
 //!
 //! A mailbox claimed via [`ChassisCtx::claim_mailbox`](crate::chassis::ctx::ChassisCtx::claim_mailbox)
@@ -32,14 +33,14 @@
 //! Teardown settles every envelope the channel ever accepted (#1716,
 //! #7460). An inbox stops accepting mail only by being dropped, and its
 //! field order does it in two steps: the strong sender is released first,
-//! so no later `InboxFeed::send` is accepted (it hands the envelope back
-//! and the relay settles it), and then the queue drains with a blocking
+//! so the relay accepts no later mail (it settles what it is handed
+//! instead), and then the queue drains with a blocking
 //! receive, which returns only once the queue is empty and no send is
 //! still in progress, because a send in progress holds the sender it
 //! upgraded. A send that began before the drop is therefore settled by the
 //! drain, and one that began after it is settled at the relay. The wait is
-//! bounded by one in-progress `send` call: a feed holds an upgraded sender
-//! for nothing else, and no other strong sender exists.
+//! bounded by one in-progress `send` call: the relay holds an upgraded
+//! sender for nothing else, and no other strong sender exists.
 //!
 //! There is no closed-but-alive inbox. Mail that reaches an actor between
 //! its close tail and the freeing of its slot is accepted, never
@@ -67,7 +68,9 @@ use std::time::Duration;
 use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
 
 use crate::actor::native::envelope::Envelope;
+use crate::chassis::ctx::MailboxWakeSlot;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::{InboxHandler, OwnedDispatch};
 
 /// Monotonic counter for the reply-lineage id space (ADR-0080 §5 / #1701).
 ///
@@ -107,79 +110,110 @@ impl ReplyLineage {
 
 /// Open an inbox channel and return its two sealed halves: the
 /// [`InboxReceiver`] a [`SettlingInbox`] is built from, and the
-/// [`InboxFeed`] a registry inbox handler sends through.
+/// [`InboxRelay`] that is registered as the mailbox's inbox handler.
 ///
-/// This is the only place an inbox channel is opened, so the strong sender
-/// inside the returned [`InboxReceiver`] is the only one that outlives a
-/// single [`InboxFeed::send`] call.
-pub(crate) fn inbox_channel() -> (InboxReceiver, InboxFeed) {
+/// This is the only place an inbox channel is opened and the only place a
+/// relay is built, so the strong sender inside the returned
+/// [`InboxReceiver`] is the only one that outlives a single
+/// [`InboxRelay::enqueue`] call. `mailer` is the mailer a refused envelope
+/// is settled through.
+pub(crate) fn inbox_channel(mailer: &Arc<Mailer>) -> (InboxReceiver, Arc<InboxRelay>) {
     let (sender, receiver) = mpsc::channel::<Envelope>();
     let sender = Arc::new(sender);
-    let feed = InboxFeed { sender: Arc::downgrade(&sender) };
-    (InboxReceiver { sender, receiver }, feed)
+    let relay = Arc::new(InboxRelay {
+        sender: Arc::downgrade(&sender),
+        wake: Arc::new(MailboxWakeSlot::default()),
+        mailer: Arc::downgrade(mailer),
+    });
+    (InboxReceiver { sender, receiver }, relay)
 }
 
 /// The receiving half of an inbox channel before it is bound to a mailbox:
 /// the receiver and the channel's only strong sender.
 ///
 /// It exists because a claim learns its [`MailboxId`] from the registration
-/// that needs the handler, which needs the [`InboxFeed`]; each claim binds
+/// that needs the handler, which is the [`InboxRelay`]; each claim binds
 /// it into a [`SettlingInbox`] before it returns. The fields are private
 /// and have no accessor, so the sender cannot leave this module. An
 /// `InboxReceiver` dropped unbound has no mailer to settle queued mail
-/// through, so every path that publishes the feed's handler goes on to
-/// bind it; one is dropped unbound only when its handler was never
+/// through, so every path that publishes the relay goes on to
+/// bind it; one is dropped unbound only when its relay was never
 /// published.
 pub(crate) struct InboxReceiver {
     sender: Arc<mpsc::Sender<Envelope>>,
     receiver: mpsc::Receiver<Envelope>,
 }
 
-/// The sending half of an inbox channel: a weak handle to the strong
-/// sender its [`SettlingInbox`] owns. Cloning yields a second handle to the
-/// same inbox.
-#[derive(Clone)]
-pub(crate) struct InboxFeed {
-    sender: Weak<mpsc::Sender<Envelope>>,
-}
-
-/// What [`InboxFeed::send`] did with an envelope. Each refusal hands the
-/// envelope back so the caller settles it.
+/// The registry inbox handler of every actor inbox: it moves a routed
+/// dispatch onto the inbox's queue and wakes the inbox's owner (ADR-0247
+/// rule 1). A root, a pre-seal instanced actor, a post-seal actor, and a
+/// claimed mailbox all register this one type, and [`inbox_channel`] is the
+/// only place one is built.
 ///
-/// An enum of its own rather than a `Result`: a refusal carries the whole
-/// envelope, and the delivered path moves nothing.
-#[must_use = "a refused envelope is still armed: the caller settles it"]
-pub(crate) enum FeedOutcome {
-    /// The envelope is on the inbox's queue.
-    Queued,
-    /// Refused: the inbox is gone (its drop released the strong sender).
-    Closed(Envelope),
-    /// Refused: the sender upgraded but the receiver was gone.
-    ReceiverGone(Envelope),
+/// `sender` is weak because the inbox owns the channel's only strong
+/// sender: the relay upgrades it for the length of one send. `mailer` is
+/// weak because the [`Mailer`] holds the registry that holds this relay; a
+/// strong one would be a cycle. It is upgraded only for a refused envelope,
+/// so delivery pays nothing for it.
+pub(crate) struct InboxRelay {
+    sender: Weak<mpsc::Sender<Envelope>>,
+    wake: Arc<MailboxWakeSlot>,
+    mailer: Weak<Mailer>,
 }
 
-impl FeedOutcome {
-    /// Whether the envelope was queued.
-    #[cfg(test)]
-    pub(crate) fn is_queued(&self) -> bool {
-        matches!(self, Self::Queued)
+impl InboxRelay {
+    /// The slot holding the hook this relay fires after each accepted
+    /// send. Unset until the inbox's owner installs one.
+    pub(crate) fn wake_slot(&self) -> &Arc<MailboxWakeSlot> {
+        &self.wake
+    }
+
+    /// Queue `env` on the inbox, or hand it back: the inbox is gone (its
+    /// drop released the strong sender), or the sender upgraded and the
+    /// receiver was gone. A handed-back envelope is still armed.
+    ///
+    /// The upgraded sender is released before this returns, so the wake
+    /// that follows runs with no sender held.
+    fn offer(&self, env: Envelope) -> Option<Envelope> {
+        let Some(sender) = self.sender.upgrade() else {
+            return Some(env);
+        };
+        sender.send(env).err().map(|mpsc::SendError(env)| env)
+    }
+
+    /// Settle an envelope the inbox refused: record its `Finished`
+    /// (ADR-0080 §2) so its root's `in_flight` count falls (#7116), then
+    /// discharge the ADR-0094 guard (#1564), and leave one record naming
+    /// the routed mailbox and the kind. A gone [`Mailer`] means its trace
+    /// table is gone too, so there is nothing to settle; `record_finished`
+    /// no-ops on an absent mail id, so lineage-less mail settles nothing.
+    fn settle_discarded(&self, env: &Envelope) {
+        if let Some(mailer) = self.mailer.upgrade() {
+            mailer.record_finished(env.mail_id, env.root);
+        }
+        env.discharge();
+        tracing::warn!(
+            target: "aether_substrate::inbox",
+            mailbox = %env.recipient,
+            kind = %env.kind,
+            "inbox gone — mail discarded"
+        );
     }
 }
 
-impl InboxFeed {
-    /// Queue `env` on the inbox, or hand it back.
-    ///
-    /// The upgraded sender is released before this returns, so a caller
-    /// that wakes the inbox's owner afterwards holds no sender while it
-    /// does: an owner whose last reference the wake path releases can drop
-    /// its inbox on this thread without waiting on this thread's own send.
-    pub(crate) fn send(&self, env: Envelope) -> FeedOutcome {
-        let Some(sender) = self.sender.upgrade() else {
-            return FeedOutcome::Closed(env);
-        };
-        match sender.send(env) {
-            Ok(()) => FeedOutcome::Queued,
-            Err(mpsc::SendError(env)) => FeedOutcome::ReceiverGone(env),
+impl InboxHandler for InboxRelay {
+    /// Send, release the sender, then wake. No sender is held across the
+    /// wake hook: an owner whose last reference the wake path releases can
+    /// drop its inbox on this thread, and that inbox's blocking drain does
+    /// not wait on this thread's own send. A refused envelope ends here
+    /// and is settled here.
+    fn enqueue(&self, dispatch: OwnedDispatch) {
+        if let Some(refused) = self.offer(dispatch) {
+            self.settle_discarded(&refused);
+            return;
+        }
+        if let Some(wake) = self.wake.get() {
+            wake();
         }
     }
 }
@@ -240,7 +274,7 @@ impl InboxQueue {
 impl Drop for InboxQueue {
     fn drop(&mut self) {
         // The inbox's strong sender is already gone (field order on
-        // `SettlingInbox`), so no later feed upgrade succeeds and the only
+        // `SettlingInbox`), so no later relay upgrade succeeds and the only
         // senders left are the ones sends already in progress hold. The
         // blocking receive returns `Err` only once those are released and
         // the queue is empty, so a send that raced this drop is settled
@@ -525,11 +559,10 @@ mod tests {
     use super::*;
     use crate::testing::boot_authority;
 
-    use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
     use crate::chassis::settlement::SettlementRegistry;
     use crate::mail::MailRef;
     use crate::mail::SourceAddr;
-    use crate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch, Registry};
+    use crate::mail::registry::{DispatchParts, Registry};
     use aether_kinds::LifecycleAdvanceComplete;
     use aether_kinds::descriptors;
 
@@ -557,10 +590,9 @@ mod tests {
         )
     }
 
-    /// Queue `env` on an open inbox through its feed, as a registry inbox
-    /// handler does.
-    fn queue(feed: &InboxFeed, env: Envelope) {
-        assert!(feed.send(env).is_queued(), "an open inbox accepts the mail");
+    /// Queue `env` on an open inbox through its relay.
+    fn queue(relay: &InboxRelay, env: Envelope) {
+        assert!(relay.offer(env).is_none(), "an open inbox accepts the mail");
     }
 
     /// Every consumer arm settles the inbound: a payload-reading consume,
@@ -573,12 +605,12 @@ mod tests {
 
         // (1) consume — read the payload, then drop.
         {
-            let (receiver, feed) = inbox_channel();
+            let (receiver, relay) = inbox_channel(&mailer);
             let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 1);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            queue(&feed, armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE));
+            queue(&relay, armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE));
             let mail = inbox.try_next().expect("one queued");
             let _ = mail.payload();
             drop(mail);
@@ -587,36 +619,36 @@ mod tests {
 
         // (2) unmatched drop — never touch the fields, just drop.
         {
-            let (receiver, feed) = inbox_channel();
+            let (receiver, relay) = inbox_channel(&mailer);
             let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 2);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            queue(&feed, armed_env(id, Some(MailId::new(id, 12)), Some(root), Source::NONE));
+            queue(&relay, armed_env(id, Some(MailId::new(id, 12)), Some(root), Source::NONE));
             drop(inbox.try_next().expect("one queued"));
             settle.recv().expect("unmatched-drop arm settles the root");
         }
 
         // (3) closure drain.
         {
-            let (receiver, feed) = inbox_channel();
+            let (receiver, relay) = inbox_channel(&mailer);
             let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 3);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            queue(&feed, armed_env(id, Some(MailId::new(id, 13)), Some(root), Source::NONE));
+            queue(&relay, armed_env(id, Some(MailId::new(id, 13)), Some(root), Source::NONE));
             inbox.drain(|_mail| {});
             settle.recv().expect("drain arm settles the root");
         }
 
         // (4) teardown — mail queued, SettlingInbox dropped.
         {
-            let (receiver, feed) = inbox_channel();
+            let (receiver, relay) = inbox_channel(&mailer);
             let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
             let root = MailId::new(id, 4);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            queue(&feed, armed_env(id, Some(MailId::new(id, 14)), Some(root), Source::NONE));
+            queue(&relay, armed_env(id, Some(MailId::new(id, 14)), Some(root), Source::NONE));
             drop(inbox);
             settle.recv().expect("teardown drain settles the queued root");
         }
@@ -634,9 +666,9 @@ mod tests {
         mailer.record_sent_inflight(guard_root);
         let guard_rx = settlement.subscribe_settlement(guard_root);
 
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
-        queue(&feed, armed_env(id, None, Some(guard_root), Source::NONE));
+        queue(&relay, armed_env(id, None, Some(guard_root), Source::NONE));
         // Drop without reading — an inbound with no mail id must not settle anything.
         drop(inbox.try_next().expect("one queued"));
         assert!(guard_rx.try_recv().is_err(), "an inbound with no mail id discharges no root");
@@ -666,10 +698,10 @@ mod tests {
         mailer.record_sent_inflight(root);
         let settle = settlement.subscribe_settlement(root);
 
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
-        queue(&feed, armed_env(id, Some(MailId::new(id, 21)), Some(root), sender));
+        queue(&relay, armed_env(id, Some(MailId::new(id, 21)), Some(root), sender));
 
         let mail = inbox.try_next().expect("one queued");
         assert!(
@@ -708,12 +740,12 @@ mod tests {
             .try_register_inbox_with_id(&boot_authority(), reply_target, "test.inbox.reply_id_target", handler)
             .expect("register reply target");
 
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 1);
         // A lineage-less inbound (no root) still mints a high-space
         // reply id — the id space is the drain's, not the inbound's.
-        queue(&feed, armed_env(id, None, None, sender));
+        queue(&relay, armed_env(id, None, None, sender));
 
         let mail = inbox.try_next().expect("one queued");
         mail.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
@@ -737,22 +769,22 @@ mod tests {
     fn a_send_in_progress_is_settled_by_the_closing_drain() {
         let (_registry, mailer, settlement) = test_env();
         let id = MailboxId(0x7460);
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
 
         let queued_root = MailId::new(id, 1);
         mailer.record_sent_inflight(queued_root);
         let queued_settled = settlement.subscribe_settlement(queued_root);
-        queue(&feed, armed_env(id, Some(MailId::new(id, 11)), Some(queued_root), Source::NONE));
+        queue(&relay, armed_env(id, Some(MailId::new(id, 11)), Some(queued_root), Source::NONE));
 
         let racing_root = MailId::new(id, 2);
         mailer.record_sent_inflight(racing_root);
         let racing_settled = settlement.subscribe_settlement(racing_root);
         let racing = armed_env(id, Some(MailId::new(id, 12)), Some(racing_root), Source::NONE);
 
-        // A send in progress: the upgraded sender `InboxFeed::send` holds
-        // between its upgrade and its return.
-        let held = feed.sender.upgrade().expect("an open inbox's sender upgrades");
+        // A send in progress: the upgraded sender the relay holds between
+        // its upgrade and the return of its send.
+        let held = relay.sender.upgrade().expect("an open inbox's sender upgrades");
 
         thread::scope(|scope| {
             let dropping = scope.spawn(move || drop(inbox));
@@ -774,8 +806,8 @@ mod tests {
         racing_settled.try_recv().expect("the closing drain settles the mail whose send was in progress");
     }
 
-    /// #7460: once the inbox is dropped, the feed refuses and the relay
-    /// settles the mail and reports its kind. Catches a feed that keeps the
+    /// #7460: once the inbox is dropped, the relay refuses the mail and
+    /// settles it. Catches a relay that keeps the
     /// channel alive past its inbox, which would queue mail nothing ever
     /// drains, and a relay that disarms a refused mail without recording
     /// its `Finished`, which leaves its root in flight forever (#7116).
@@ -783,7 +815,7 @@ mod tests {
     fn a_send_after_the_inbox_dropped_is_refused_and_settled() {
         let (_registry, mailer, settlement) = test_env();
         let id = MailboxId(0x7461);
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
 
         let root = MailId::new(id, 1);
@@ -792,12 +824,8 @@ mod tests {
         drop(inbox);
 
         let late = armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE);
-        let outcome = relay_or_transfer(late, &feed, &MailboxWakeSlot::default(), &Arc::downgrade(&mailer));
+        relay.enqueue(late);
 
-        let RelayOutcome::SenderGone { kind } = outcome else {
-            panic!("a dropped inbox refuses the mail: {outcome:?}");
-        };
-        assert_eq!(kind, KindId(7), "the discarded mail's kind id rides the outcome");
         settled.try_recv().expect("the relay settles the refused mail");
     }
 
@@ -810,21 +838,18 @@ mod tests {
     fn the_wake_hook_runs_with_no_sender_held() {
         let (_registry, mailer, _settlement) = test_env();
         let id = MailboxId(0x7462);
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
 
         let senders_at_wake = Arc::new(AtomicUsize::new(0));
-        let wake = MailboxWakeSlot::default();
-        wake.set(Arc::new({
-            let feed = feed.clone();
+        relay.wake_slot().set(Arc::new({
+            let sender = relay.sender.clone();
             let senders_at_wake = Arc::clone(&senders_at_wake);
-            move || senders_at_wake.store(feed.sender.strong_count(), Ordering::SeqCst)
+            move || senders_at_wake.store(sender.strong_count(), Ordering::SeqCst)
         }));
 
-        let mail = armed_env(id, Some(MailId::new(id, 11)), None, Source::NONE);
-        let outcome = relay_or_transfer(mail, &feed, &wake, &Arc::downgrade(&mailer));
+        relay.enqueue(armed_env(id, Some(MailId::new(id, 11)), None, Source::NONE));
 
-        assert!(matches!(outcome, RelayOutcome::Delivered), "an open inbox takes the mail: {outcome:?}");
         assert_eq!(senders_at_wake.load(Ordering::SeqCst), 1, "only the inbox's own sender is held during the wake");
         drop(inbox);
     }
