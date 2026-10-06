@@ -24,6 +24,8 @@ pub struct ClippyArgs;
 #[derive(Debug, Clone, Default, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "proof.test.args")]
 pub struct TestArgs {
+    /// What to build and run. Omit it, or leave both lists empty, for the
+    /// whole workspace.
     scope: TestScope,
 }
 
@@ -189,7 +191,11 @@ impl ScopeEntries {
 /// unit tests the scope saves run time only, never build narrowing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, aether_data::Storage)]
 pub struct TestScope {
+    /// Integration test targets to build and run, each the name of a file
+    /// under a crate's `tests/` without `.rs`. Empty selects every target.
     targets: ScopeEntries,
+    /// Test name filters: a test runs when its `module::test` path contains
+    /// any of them. Empty runs every test in the selected targets.
     filters: ScopeEntries,
 }
 
