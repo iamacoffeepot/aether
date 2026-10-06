@@ -272,18 +272,18 @@ impl Input {
         let turn = self.keys.turn() * config.key_turn_radians_per_sec.get() * elapsed_secs;
         let pan = self.keys.pan();
         let pan_distances = config.key_pan_distances_per_sec.get() * elapsed_secs;
-        let turned = turned(zoomed(pose, wheel_steps, config), turn);
+        let spun = turned(zoomed(pose, wheel_steps, config), turn);
 
         self.drag = mem::take(&mut self.drag).grabbing(pose, view);
         match &mut self.drag {
-            Drag::None => ground_panned(turned, pan, pan_distances),
+            Drag::None => ground_panned(spun, pan, pan_distances),
             Drag::Orbit { turned_to, cursor } => {
                 let travel = *cursor - mem::replace(turned_to, *cursor);
-                ground_panned(orbited(turned, travel, config.orbit_radians_per_pixel.get()), pan, pan_distances)
+                ground_panned(orbited(spun, travel, config.orbit_radians_per_pixel.get()), pan, pan_distances)
             }
-            Drag::Pressed { .. } => turned,
+            Drag::Pressed { .. } => spun,
             Drag::Pan { grab, cursor, .. } => {
-                Pose { target: grab.target_under(*cursor).unwrap_or(turned.target), ..turned }
+                Pose { target: grab.target_under(*cursor).unwrap_or(spun.target), ..spun }
             }
         }
     }

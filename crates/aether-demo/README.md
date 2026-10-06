@@ -49,8 +49,9 @@ and to one side. The mouse and the keys steer the camera:
 | W / A / S / D or the arrows | pan the target across the ground |
 | Q / E | turn around the target |
 
-Every speed scales with the camera's distance, and switching to another
-window releases whatever was held.
+The pans and the zoom scale with the camera's distance, so they feel the same
+close in and far out, and switching to another window releases whatever was
+held.
 
 The packaged window is titled `aether`; the developer run gets the chassis's
 own default title, because a boot manifest deliberately drops its chassis
