@@ -7,7 +7,9 @@
 //! reference and the monitor that reports the source's close, so the
 //! subscription is released on both ways a source stops being followed: a
 //! later `view_from` sends the old source [`ViewUnsubscribe`], and a source
-//! that closes clears the hold through its `MonitorNotice`.
+//! that closes clears the hold through its `MonitorNotice`. The renderer
+//! never follows a source whose close it cannot hear: a source it cannot
+//! monitor is refused before anything changes.
 
 use aether_actor::{ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, ReplyMode};
 use aether_substrate::MonitorError;
@@ -20,10 +22,9 @@ use crate::{ViewFromResult, ViewSource, ViewSubscribe, ViewUnsubscribe};
 /// The [`ViewSource`] the renderer is subscribed to.
 pub(super) struct FollowedView {
     source: ProtocolRef<ViewSource>,
-    /// Reports the source's close; dropping it deregisters. `None` for a
-    /// source the engine cannot monitor: a route with no actor slot of its
-    /// own, or a caller binding with no monitor index.
-    _monitor: Option<MonitorHandle>,
+    /// Reports the source's close; dropping it deregisters. Every followed
+    /// source has one, so every hold has a release.
+    _monitor: MonitorHandle,
 }
 
 impl FollowedView {
@@ -43,7 +44,9 @@ impl RenderCapabilityState {
     ///
     /// The path is proven live and its monitor registered before anything
     /// changes, so a refused request leaves the renderer following the source
-    /// it had. A request naming the source already followed keeps the hold
+    /// it had. A source whose monitor does not register is refused as not
+    /// live, since a subscription sent to it could never be released. A
+    /// request naming the source already followed keeps the hold
     /// and subscribes again, which a source answers with its current view;
     /// that is how a viewer rejoins a source that lost its subscribers.
     pub(super) fn follow_view<A, M: ReplyMode>(
@@ -58,21 +61,23 @@ impl RenderCapabilityState {
 
         if !self.follows_view_of(source.erase()) {
             let monitor = match ctx.monitor(source.erase()) {
-                Ok(monitor) => Some(monitor),
-                // The source closed between the proof and the monitor: a
-                // subscription sent now would reach nobody and never be
-                // released.
-                Err(MonitorError::TargetTombstoned) => {
-                    return PathRefused { path: path.as_erased().clone(), reason: PathRefusal::NotLive }.into();
+                Ok(monitor) => monitor,
+                // The source closed between the proof and the monitor
+                // (`TargetTombstoned`), or holds a route but no live actor
+                // slot yet (`TargetNotFound`): no live actor stands there
+                // whose close the renderer could hear.
+                Err(MonitorError::TargetTombstoned | MonitorError::TargetNotFound) => {
+                    return not_live(path);
                 }
-                Err(error @ (MonitorError::TargetNotFound | MonitorError::Unsupported)) => {
-                    tracing::warn!(
+                // A booted capability's binding always carries a monitor
+                // index, so this arm is unreachable in a running engine.
+                Err(MonitorError::Unsupported) => {
+                    tracing::error!(
                         target: "aether_render",
                         source = %path.as_erased(),
-                        ?error,
-                        "the followed view source is not monitorable; its close will not release the renderer's hold",
+                        "the renderer's binding has no monitor index; refusing to follow a view source it cannot monitor",
                     );
-                    None
+                    return not_live(path);
                 }
             };
             let previous = self.view_source.replace(FollowedView { source, _monitor: monitor });
@@ -93,6 +98,11 @@ impl RenderCapabilityState {
             self.view_source = None;
         }
     }
+}
+
+/// The refusal for a source no live, monitorable actor stands at.
+fn not_live(path: &ProtocolPath<ViewSource>) -> ViewFromResult {
+    PathRefused { path: path.as_erased().clone(), reason: PathRefusal::NotLive }.into()
 }
 
 #[cfg(test)]
