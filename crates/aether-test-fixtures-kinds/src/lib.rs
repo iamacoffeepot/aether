@@ -1084,8 +1084,8 @@ pub struct SenderGateGranted {
 pub struct SenderGateQuery;
 
 /// Issue 7532: the reply to [`SenderGateQuery`].
-#[aether_data::kind(name = "aether.test_fixtures.sender_gate.report", copy, eq)]
-pub struct SenderGateReport {
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.query_result", copy, eq)]
+pub struct SenderGateQueryResult {
     pub takes: u32,
     pub dials: u32,
 }
@@ -1104,8 +1104,8 @@ pub struct SenderGateHolderQuery;
 /// Issue 7532: the reply to [`SenderGateHolderQuery`]: the tag of each
 /// [`SenderGateGranted`] the holder received, in order, and each
 /// [`SenderGateDialed`] it was answered with.
-#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_report", eq)]
-pub struct SenderGateHolderReport {
+#[aether_data::kind(name = "aether.test_fixtures.sender_gate.holder_query_result", eq)]
+pub struct SenderGateHolderQueryResult {
     pub granted: Vec<u32>,
     pub dialed: Vec<SenderGateDialed>,
 }

@@ -15,7 +15,7 @@
 use aether_actor::{ActorInitError, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
     SenderGateDial, SenderGateDialed, SenderGateGranted, SenderGateGrantee, SenderGateHolderQuery,
-    SenderGateHolderReport, SenderGateQuery, SenderGateReport, SenderGateTake, SenderGateTrigger,
+    SenderGateHolderQueryResult, SenderGateQuery, SenderGateQueryResult, SenderGateTake, SenderGateTrigger,
 };
 
 #[derive(Default)]
@@ -52,8 +52,8 @@ impl WasmActor for SenderGate {
     }
 
     #[handler::request]
-    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: SenderGateQuery) -> SenderGateReport {
-        SenderGateReport { takes: self.takes, dials: self.dials }
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: SenderGateQuery) -> SenderGateQueryResult {
+        SenderGateQueryResult { takes: self.takes, dials: self.dials }
     }
 }
 
@@ -88,7 +88,7 @@ impl WasmActor for SenderGateHolder {
     }
 
     #[handler::request]
-    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: SenderGateHolderQuery) -> SenderGateHolderReport {
-        SenderGateHolderReport { granted: self.granted.clone(), dialed: self.dialed.clone() }
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: SenderGateHolderQuery) -> SenderGateHolderQueryResult {
+        SenderGateHolderQueryResult { granted: self.granted.clone(), dialed: self.dialed.clone() }
     }
 }

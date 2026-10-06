@@ -40,7 +40,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_test_fixtures_bundle::{SenderGate, SenderGateHolder};
 use aether_test_fixtures_kinds::{
     SenderGateDial, SenderGateDialed, SenderGateGranted, SenderGateGrantee, SenderGateHolderQuery,
-    SenderGateHolderReport, SenderGateQuery, SenderGateReport, SenderGateTake, SenderGateTrigger,
+    SenderGateHolderQueryResult, SenderGateQuery, SenderGateQueryResult, SenderGateTake, SenderGateTrigger,
 };
 
 /// The native gate: the bundle's `SenderGate`, handler for handler.
@@ -79,8 +79,8 @@ impl NativeActor for NativeGate {
     }
 
     #[handler::request]
-    fn on_query(&mut self, _ctx: &mut NativeCtx<'_>, _query: SenderGateQuery) -> SenderGateReport {
-        SenderGateReport { takes: self.takes, dials: self.dials }
+    fn on_query(&mut self, _ctx: &mut NativeCtx<'_>, _query: SenderGateQuery) -> SenderGateQueryResult {
+        SenderGateQueryResult { takes: self.takes, dials: self.dials }
     }
 }
 
@@ -118,8 +118,8 @@ impl NativeActor for NativeHolder {
     }
 
     #[handler::request]
-    fn on_query(&mut self, _ctx: &mut NativeCtx<'_>, _query: SenderGateHolderQuery) -> SenderGateHolderReport {
-        SenderGateHolderReport { granted: self.granted.clone(), dialed: self.dialed.clone() }
+    fn on_query(&mut self, _ctx: &mut NativeCtx<'_>, _query: SenderGateHolderQuery) -> SenderGateHolderQueryResult {
+        SenderGateHolderQueryResult { granted: self.granted.clone(), dialed: self.dialed.clone() }
     }
 }
 
@@ -252,7 +252,7 @@ where
     H: HandlesKind<SenderGateTrigger> + HandlesKind<SenderGateHolderQuery> + 'static,
 {
     /// How many times each of the gate's two handlers has run.
-    fn gate_report(&mut self) -> SenderGateReport {
+    fn gate_report(&mut self) -> SenderGateQueryResult {
         self.harness
             .execute(vec![("query", HarnessOp::send_and_await_reply(&self.gate, &SenderGateQuery))])
             .expect("the gate answers its query")
@@ -279,15 +279,15 @@ where
             .execute(vec![("trigger", HarnessOp::send_and_settle(&self.holder, &SenderGateTrigger { tag: 7 }))])
             .expect("the holder's sends settle");
 
-        let heard: SenderGateHolderReport = self
+        let heard: SenderGateHolderQueryResult = self
             .harness
             .execute(vec![("query", HarnessOp::send_and_await_reply(&self.holder, &SenderGateHolderQuery))])
             .expect("the holder answers its query")
             .reply("query")
             .expect("decode the holder's report");
         let dialed = vec![SenderGateDialed::Ok { tag: 7 }];
-        assert_eq!(heard, SenderGateHolderReport { granted: vec![7, 7], dialed });
-        assert_eq!(self.gate_report(), SenderGateReport { takes: 1, dials: 1 });
+        assert_eq!(heard, SenderGateHolderQueryResult { granted: vec![7, 7], dialed });
+        assert_eq!(self.gate_report(), SenderGateQueryResult { takes: 1, dials: 1 });
     }
 
     /// A tell relayed by an actor that does not cover the protocol never
@@ -302,7 +302,7 @@ where
             matches!(heard.as_slice(), [Heard::Refused(notice)] if notice.kind == <SenderGateTake as Kind>::ID),
             "one notice naming the take: {heard:?}",
         );
-        assert_eq!(self.gate_report(), SenderGateReport { takes: 0, dials: 0 });
+        assert_eq!(self.gate_report(), SenderGateQueryResult { takes: 0, dials: 0 });
     }
 
     /// A request relayed by an actor that does not cover the protocol never
@@ -320,7 +320,7 @@ where
             matches!(heard.as_slice(), [Heard::Answer(answer)] if *answer == refused),
             "one reply naming the relay and the row it lacks: {heard:?}",
         );
-        assert_eq!(self.gate_report(), SenderGateReport { takes: 0, dials: 0 });
+        assert_eq!(self.gate_report(), SenderGateQueryResult { takes: 0, dials: 0 });
     }
 
     /// Mail with no sender never runs either handler: the harness pushes a
@@ -334,7 +334,7 @@ where
             ])
             .expect("the pushed mail settles");
 
-        assert_eq!(self.gate_report(), SenderGateReport { takes: 0, dials: 0 });
+        assert_eq!(self.gate_report(), SenderGateQueryResult { takes: 0, dials: 0 });
     }
 }
 
