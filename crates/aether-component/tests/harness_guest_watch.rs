@@ -25,6 +25,9 @@
 //! [`FIRST_HANDED`], and what shows that it kept its predecessor's id is the
 //! tag, since the SDK stores a watch's context under the id and a departure
 //! whose id has no context runs no handler.
+//! A republish runs no `wire` on a candidate or on a rebuilt inline child
+//! (ADR-0114's amendment of 2026-07-08, ADR-0241 section 7), so a successor's
+//! `wired` list is empty.
 //!
 //! No scenario waits on a clock. A departure's notices are posted to the
 //! watchers in the order they registered, and every scenario registers the
@@ -756,7 +759,8 @@ fn spawn_clerk(
 /// Catches a child's watch registered under an alias with no route, whose
 /// notice is dropped, and one delivered to the parent. Then, across a
 /// republish of the desk: a child's context dropped from the composite
-/// bundle, and a notice the membrane hands to the parent or to no one.
+/// bundle, and a notice the membrane hands to the parent or to no one. Also a rebuilt child's
+/// `wire` run by the republish.
 #[test]
 fn a_clerk_that_watched_in_its_own_wire_reports_before_and_after_its_desks_republish() {
     let Some(family) = family() else {
@@ -776,6 +780,13 @@ fn a_clerk_that_watched_in_its_own_wire_reports_before_and_after_its_desks_repub
 
     let (second_clerk, _) = spawn_clerk(&mut harness, desk, "two", "c", 22);
     harness.publish(family.v2.clone()).unwrap_or_else(|error| panic!("v2 republishes v1: {error}"));
+
+    assert_eq!(
+        report(&mut harness, &second_clerk).wired,
+        Vec::<u32>::new(),
+        "a rebuilt clerk runs no wire, though its target is live",
+    );
+
     let path = harness.actor_path(&second_target);
     drop_guest(&mut harness, &path);
 
