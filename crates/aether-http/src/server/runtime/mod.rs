@@ -193,7 +193,6 @@ impl NativeActor for HttpServerCapability {
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
-            unmonitorable: HashSet::new(),
         })
     }
 

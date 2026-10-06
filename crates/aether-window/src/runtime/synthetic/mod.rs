@@ -97,9 +97,10 @@ impl SyntheticWindows {
         ctx.fanout(self.subscribers.recipients::<K>(window), event);
     }
 
-    /// Promote an authoritatively applied child into the live window set, or
-    /// retire it and report why it could not become live. Either way the
-    /// reservation's reply is sent exactly once.
+    /// Promote an authoritatively applied child into the live window set and
+    /// send the reservation's reply. A child that closed before this ran is
+    /// published all the same, and its notice, which arrives after this
+    /// handler returns, closes the window.
     fn publish_applied_window<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
@@ -108,23 +109,11 @@ impl SyntheticWindows {
         pending: PendingWindowCreate,
     ) {
         let PendingWindowCreate { spec, held } = pending;
-        let monitor = match ctx.monitor(child.erase()) {
-            Ok(monitor) => monitor,
-            Err(error) => {
-                ctx.send_to(child, &RetireWindow);
-                answer(
-                    ctx,
-                    held,
-                    &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
-                );
-                return;
-            }
-        };
         // The child's path needs no check against a prediction: the window
         // identities read the shared window namespace consts, so the child's
         // name is the canonical path `window_path` wrote.
         let window = Self::describe(spec, path.clone());
-        self.child_monitors.insert(child.erase(), (path.clone(), monitor));
+        self.child_monitors.insert(child.erase(), (path.clone(), ctx.monitor(child)));
         self.windows
             .insert(path.clone(), SyntheticWindow { info: window.clone(), commands: child.narrow::<WindowCommands>() });
         self.publish(ctx, &path, &WindowOpened { window: window.clone() });

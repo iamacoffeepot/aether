@@ -85,7 +85,7 @@ impl NativeActor for DepartureWatcher {
     #[handler::request]
     fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, watch: Watch) -> Watching {
         let proven = ctx.resolve_path(&watch.target).expect("the watched component is live");
-        self.watch = Some(ctx.monitor(proven).expect("the watched component is monitorable"));
+        self.watch = Some(ctx.monitor(proven));
         Watching { target: watch.target }
     }
 

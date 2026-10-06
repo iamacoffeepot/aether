@@ -310,8 +310,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// for a departing cluster.
     ///
     /// **The child's name is spent** (ADR-0241 §8): a despawned child closes
-    /// and its name tombstones, so a later monitor of it is refused and
-    /// spawning the same key beneath the same parent fails with
+    /// and its name tombstones, so a later monitor of it is answered with its
+    /// notice at once and spawning the same key beneath the same parent fails
+    /// with
     /// [`SpawnError::AliasAllocationFailed`].
     ///
     /// Later mail to a retired alias resolves as *dropped* rather than

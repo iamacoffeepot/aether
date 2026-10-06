@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use aether_actor::Addressable;
 use rustc_hash::FxHashMap;
 
+use crate::actor::registry::ActorRegistry;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
 use crate::mail::registry::address::{AddressIndex, AddressTable};
@@ -144,6 +145,12 @@ pub struct Registry {
     addresses: View<AddressTable>,
     subscribers: Mutex<Vec<Weak<ChangeSubscriber>>>,
     owner: OnceLock<RegistryOwnerHandle>,
+    /// The actor-lifecycle table: slots, tombstones, and the monitor
+    /// indices (ADR-0079). It lives here so that everything holding the
+    /// routes holds it too. A binding reaches it through its mailer, with
+    /// or without a spawner, so a binding built for a test registers its
+    /// monitors in the table the chassis beside it closes against.
+    lifecycle: Arc<ActorRegistry>,
 }
 
 struct Inner {
@@ -219,7 +226,15 @@ impl Registry {
             addresses,
             subscribers: Mutex::new(Vec::new()),
             owner: OnceLock::new(),
+            lifecycle: Arc::new(ActorRegistry::new()),
         }
+    }
+
+    /// The actor-lifecycle table this registry owns: the one table every
+    /// spawner, slot, and binding over these routes closes and monitors
+    /// against.
+    pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
+        &self.lifecycle
     }
 
     /// Number of registered mailbox entries (live + `Dropped`).

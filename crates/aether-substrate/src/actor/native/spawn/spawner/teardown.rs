@@ -56,7 +56,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
     use crate::mail::mailer::Mailer;
     use crate::mail::registry::Registry;
@@ -105,13 +104,11 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let actor_registry = Arc::new(ActorRegistry::new());
         // One worker is enough — the wedge comes from the close-done
         // signal never firing, not from anything the pool drains.
         let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, Arc::clone(&aborter));
         let spawner = Spawner::new(
             Arc::clone(&registry),
-            actor_registry,
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),

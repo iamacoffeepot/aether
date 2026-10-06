@@ -435,11 +435,10 @@ mod tests {
         mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let actor_registry = Arc::new(ActorRegistry::new());
+        let actor_registry = Arc::clone(registry.actor_registry());
         let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
         let spawner = Arc::new(crate::Spawner::new(
             Arc::clone(&registry),
-            Arc::clone(&actor_registry),
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),

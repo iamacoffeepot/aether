@@ -85,10 +85,10 @@ pub trait Published: ActorMail + Sized + 'static {
     fn set_mut(subscribers: &mut WindowSubscribers) -> &mut KindSubscribers<Self>;
 }
 
-/// One subscriber's monitor and the rows it holds in the typed sets.
-#[derive(Default)]
+/// One subscriber's monitor and the rows it holds in the typed sets. The
+/// monitor is taken when the holder is created, so no holder is unwatched.
 struct Holder {
-    monitor: Option<MonitorHandle>,
+    _monitor: MonitorHandle,
     rows: HashSet<Row>,
 }
 
@@ -258,8 +258,11 @@ impl WindowSubscribers {
         let row = Row::new(selector, K::ID);
 
         K::set_mut(self).insert(row.window.as_ref(), subscriber);
-        self.holders.entry(key).or_default().rows.insert(row);
-        self.watch(ctx, key);
+        self.holders
+            .entry(key)
+            .or_insert_with(|| Holder { _monitor: ctx.monitor(key), rows: HashSet::new() })
+            .rows
+            .insert(row);
     }
 
     /// Remove `key`'s row for `K` under `selector`.
@@ -310,13 +313,6 @@ impl WindowSubscribers {
             holder.rows.remove(&row);
         }
         self.remove_row(row, key);
-    }
-
-    fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
-        let holder = self.holders.entry(subscriber).or_default();
-        if holder.monitor.is_none() {
-            holder.monitor = ctx.monitor(subscriber).ok();
-        }
     }
 }
 

@@ -994,8 +994,9 @@ An inline child ends by closing, as any actor does
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8):
 `ctx.despawn_inline_child(child)` closes it, and so does its parent's close.
 Each watcher gets a `MonitorNotice` sent from the child, and the child's name
-tombstones. The name is spent: a later `monitor` of it is refused with
-`TargetTombstoned`, and spawning the same key beneath the same parent fails with
+tombstones. The name is spent: a later `monitor` of it returns its handle and
+the watcher is sent the child's `MonitorNotice` at once, as for any actor that
+has already closed, and spawning the same key beneath the same parent fails with
 `SpawnError::AliasAllocationFailed`. A parent that wants a fresh child after a
 despawn spawns it under a new key, such as `Subname::Counter`.
 

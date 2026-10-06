@@ -7,12 +7,10 @@
 //! reference and the monitor that reports the source's close, so the
 //! subscription is released on both ways a source stops being followed: a
 //! later `view_from` sends the old source [`ViewUnsubscribe`], and a source
-//! that closes clears the hold through its `MonitorNotice`. The renderer
-//! never follows a source whose close it cannot hear: a source it cannot
-//! monitor is refused before anything changes.
+//! that closes clears the hold through its `MonitorNotice`. Monitoring never
+//! fails, so the renderer never follows a source whose close it cannot hear.
 
-use aether_actor::{ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, ReplyMode};
-use aether_substrate::MonitorError;
+use aether_actor::{ErasedActorRef, PathRefused, ProtocolPath, ProtocolRef, ReplyMode};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
@@ -42,10 +40,11 @@ impl RenderCapabilityState {
     /// Follow the view source at `path`: unsubscribe from the source followed
     /// before, subscribe to this one, and monitor it.
     ///
-    /// The path is proven live and its monitor registered before anything
-    /// changes, so a refused request leaves the renderer following the source
-    /// it had. A source whose monitor does not register is refused as not
-    /// live, since a subscription sent to it could never be released. A
+    /// The path is proven live before anything changes, so a refused request
+    /// leaves the renderer following the source it had. A source that closed
+    /// between that proof and the monitor is followed like any other and
+    /// released by its notice, which arrives after this handler returns, the
+    /// same as a source that closes a moment later. A
     /// request naming the source already followed keeps the hold
     /// and subscribes again, which a source answers with its current view;
     /// that is how a viewer rejoins a source that lost its subscribers.
@@ -60,26 +59,7 @@ impl RenderCapabilityState {
         };
 
         if !self.follows_view_of(source.erase()) {
-            let monitor = match ctx.monitor(source.erase()) {
-                Ok(monitor) => monitor,
-                // The source closed between the proof and the monitor
-                // (`TargetTombstoned`), or holds a route but no live actor
-                // slot yet (`TargetNotFound`): no live actor stands there
-                // whose close the renderer could hear.
-                Err(MonitorError::TargetTombstoned | MonitorError::TargetNotFound) => {
-                    return not_live(path);
-                }
-                // A booted capability's binding always carries a monitor
-                // index, so this arm is unreachable in a running engine.
-                Err(MonitorError::Unsupported) => {
-                    tracing::error!(
-                        target: "aether_render",
-                        source = %path.as_erased(),
-                        "the renderer's binding has no monitor index; refusing to follow a view source it cannot monitor",
-                    );
-                    return not_live(path);
-                }
-            };
+            let monitor = ctx.monitor(source);
             let previous = self.view_source.replace(FollowedView { source, _monitor: monitor });
 
             if let Some(previous) = previous {
@@ -100,16 +80,11 @@ impl RenderCapabilityState {
     }
 }
 
-/// The refusal for a source no live, monitorable actor stands at.
-fn not_live(path: &ProtocolPath<ViewSource>) -> ViewFromResult {
-    PathRefused { path: path.as_erased().clone(), reason: PathRefusal::NotLive }.into()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
 
-    use aether_actor::{ActorPath, ActorRef, Subscriber};
+    use aether_actor::{ActorPath, ActorRef, PathRefusal, Subscriber};
     use aether_data::{LoadName, SessionToken, Uuid};
     use aether_kinds::Quit;
     use aether_math::{Mat4, Vec3};

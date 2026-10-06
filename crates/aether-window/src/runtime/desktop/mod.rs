@@ -449,7 +449,9 @@ impl DesktopWindows {
     /// Apply the authoritative result of a staged window child. Success
     /// installs the monitor, promotes the window to `Live`, replies, and
     /// publishes; every failure retires the applied child and rolls the create
-    /// back. Rollback effects go to the host-effect queue because this runs on
+    /// back. A child that closed before this ran is promoted all the same,
+    /// and its notice, which arrives after this handler returns, retires
+    /// the window. Rollback effects go to the host-effect queue because this runs on
     /// an ordinary mail turn rather than inside a native callback.
     pub(super) fn finish_window_child_spawn<A>(
         &mut self,
@@ -483,18 +485,10 @@ impl DesktopWindows {
                     format!("spawned window child {child:?} is not the window at {path}"),
                 )
             }
-            Ok(child) => match ctx.monitor(child.erase()) {
-                Ok(monitor) => self.promote_attached_window(ctx, path, *child, monitor, &mut pending),
-                Err(error) => {
-                    ctx.send_to(child, &RetireWindow);
-                    self.rollback_attached_create(
-                        ctx,
-                        path,
-                        &mut pending,
-                        format!("failed to monitor window child: {error:?}"),
-                    )
-                }
-            },
+            Ok(child) => {
+                let monitor = ctx.monitor(*child);
+                self.promote_attached_window(ctx, path, *child, monitor, &mut pending)
+            }
         };
         self.pending_host_effects.extend(effects);
     }
