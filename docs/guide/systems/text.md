@@ -150,6 +150,22 @@ multi-atlas spill. See
   renderer-side texture errors are observable through logs or missing output.
 - A failed atlas `create_texture` clears the in-flight flag but leaves no
   texture id. The next immediate-mode draw retries creation.
+- A `Screen` draw's `origin` is the pen, not the ink: layout starts the pen
+  at the origin and places the baseline one **ascent** below it (the face's
+  horizontal line ascent at the draw size, or the size itself for a face
+  without line metrics). A caller that wants a run centred in a row computes
+  the baseline it wants and subtracts the ascent `FontMetricsResult` reports,
+  scaled to the draw size;
+  treating the origin as the top of a `size_pixels`-tall box sinks the run.
+- A character the face lacks is not an error and is not skipped. Its cmap
+  lookup yields glyph index `0`, so the run draws and advances by the face's
+  `.notdef` glyph, and `FontMetrics::default_advance` is that same advance.
+  A caller that wants `⌘` in a label ships a face that has it.
+- Text reaches the renderer one hop behind shapes. A component mails its
+  shapes to `aether.render` directly, while a text draw goes to `aether.text`,
+  which mails the glyph quads on. An opaque plate sent after a text draw can
+  therefore reach the renderer before that draw's glyphs, so it cannot cover
+  them by send order alone.
 - Font ids and the atlas texture id are process/session state. They must never
   be persisted as durable asset identifiers.
 - The current id allocator uses saturating increment and has no explicit

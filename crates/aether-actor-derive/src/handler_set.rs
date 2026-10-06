@@ -76,9 +76,8 @@
 //! A wasm set's bridge is instead a plain `macro_rules!` re-exported
 //! crate-wide under the set trait's own name, so an adopter in any module
 //! reaches it through the set path it already names (see
-//! `build_wasm_marker_bridge`). Its rows are what let the widget panel narrow
-//! each spawned child to the lane protocols that list a set kind (ADR-0231
-//! §2, §3).
+//! `build_wasm_marker_bridge`). Its rows are what let a parent narrow a
+//! spawned adopter to a protocol that lists a set kind (ADR-0231 §2, §3).
 //!
 //! # Typed members
 //!
@@ -87,7 +86,7 @@
 //! trait method's own signature, so the default body type-checks against
 //! `WasmCtx<'_, Self>` / `NativeCtx<'_, Self>`. A default body that reaches
 //! another actor needs the adopter to declare it, so the set states that reach
-//! as a supertrait (`trait WidgetDefaults: DependsOn<TextCapability>`), and the
+//! as a supertrait (`trait Shared: DependsOn<TextCapability>`, say), and the
 //! expansion adds `Sized` to the supertraits, because the typed ctx needs a
 //! sized `Self` and every adopter is a concrete actor. A member that spells
 //! `Erased` keeps the erased view: its arm erases before the call. An override

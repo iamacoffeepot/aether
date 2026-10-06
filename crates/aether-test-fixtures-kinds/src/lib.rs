@@ -552,38 +552,33 @@ pub const MATRIX_CELL_CHILD_TO_SIBLING: u32 = 3;
 /// [`MatrixPing::cell`] marker — child a to self (in place).
 pub const MATRIX_CELL_CHILD_TO_SELF: u32 = 4;
 
-/// Typed config for an editor-region probe. The probe intentionally does not
-/// subscribe to input itself: an editor shell must address each observation
-/// directly to the probe's mailbox.
-#[aether_data::kind(name = "aether.test_fixtures.editor_region_probe.config", default, eq)]
-pub struct EditorRegionProbeConfig {
-    pub name: String,
+/// Handler-set fixture request the adopter leaves to its set (ADR-0169). The
+/// adopter has no arm of its own for it, so the dispatch miss must reach the
+/// set's default body.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_kept", default)]
+pub struct AskKept;
+
+/// Reply to [`AskKept`]; `answered_by` names the body that ran.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_kept_result", copy, eq)]
+pub struct AskKeptResult {
+    pub answered_by: u32,
 }
 
-/// One raw input observed by an editor-region probe.
-#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-pub enum ObservedEditorInput {
-    PointerPress { button: u32, x_pixels: f32, y_pixels: f32 },
-    PointerRelease { button: u32, x_pixels: f32, y_pixels: f32 },
-    PointerMotion { x_pixels: f32, y_pixels: f32 },
-    Wheel { delta_x_pixels: f32, delta_y_pixels: f32, x_pixels: f32, y_pixels: f32 },
-    KeyPress { code: u32 },
-    KeyRelease { code: u32 },
-    TextInput { text: String },
-    ImePreedit { text: String, cursor_begin: Option<u32>, cursor_end: Option<u32> },
-    Modifiers { shift: bool, ctrl: bool, alt: bool, meta: bool },
+/// Handler-set fixture request the adopter overrides, so the adopter's body
+/// must run in place of the set's default.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_replaced", default)]
+pub struct AskReplaced;
+
+/// Reply to [`AskReplaced`]; `answered_by` names the body that ran.
+#[aether_data::kind(name = "aether.test_fixtures.handler_set.ask_replaced_result", copy, eq)]
+pub struct AskReplacedResult {
+    pub answered_by: u32,
 }
 
-/// Query that drains an editor-region probe's observations.
-#[aether_data::kind(name = "aether.test_fixtures.drain_editor_inputs", default)]
-pub struct DrainEditorInputs;
-
-/// Reply containing every editor input observed since the previous drain.
-#[aether_data::kind(name = "aether.test_fixtures.drain_editor_inputs_result", partial_eq)]
-pub struct DrainEditorInputsResult {
-    pub region_name: String,
-    pub inputs: Vec<ObservedEditorInput>,
-}
+/// `answered_by` marker: the handler set's default body ran.
+pub const HANDLER_SET_DEFAULT_BODY: u32 = 1;
+/// `answered_by` marker: the adopter's override ran.
+pub const HANDLER_SET_OVERRIDE_BODY: u32 = 2;
 
 /// Stored kind id that makes the reactor fixture's shared fold refuse.
 pub const REACTOR_FOLD_FAIL_KIND: aether_data::KindId =

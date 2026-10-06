@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-09-05
 - **Amended:** 2026-09-09 — status: implemented on `main`; `aether.render.draw_shapes` with `crates/aether-substrate/src/render/shape.wgsl` (#5637), and the kit's chrome draws through `WidgetDrawItem::Shape` (#5638).
+- **Amended:** 2026-10-06 — the widget kit this text names as the consumer was removed with the `aether-widget` crate in #7521 (the code last lived at 13b87ff03216ed2776f331415f240d01e9a0f359). `aether.render.draw_shapes` remains.
 
 ## Context
 

@@ -162,7 +162,7 @@ The skeleton every tool follows:
    malformed id, so a bad id is rejected before any mail moves.
 2. **Build the typed request kind, then resolve the recipient before you
    address it.** An address the agent typed is often a rendered lineage —
-   `web` or `aether.widget:panel`, the form `load_component` hands back —
+   `web` or `aether.kit.camera:main`, the form `load_component` hands back —
    or an ADR-0166 short path.
    `mcp.resolve_engine_path(engine, address)` takes either form and asks the
    selected engine for the canonical `ErasedActorPath` through the inventory

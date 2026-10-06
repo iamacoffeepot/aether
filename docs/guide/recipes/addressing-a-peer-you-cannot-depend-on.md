@@ -8,9 +8,10 @@
 Two actors that mail each other in both directions cannot both address the
 other by type. This recipe shows the shape that works: one actor declares the
 other and announces itself, and the other keeps the envelope sender of that
-announcement as its reference. The engine's editor shell and its regions are
-the worked example throughout
-([ADR-0141](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0141-editor-shell-input-ownership.md)).
+announcement as its reference. No pair in the tree does both halves at once,
+so the forward direction is shown as a sketch of two actors, a `Mixer` and
+the `Channel`s that attach to it, and the reverse direction and the
+cross-crate dependency are shown from `aether-kit` and `aether-demo`.
 
 ## Why both directions cannot be declared
 
@@ -35,20 +36,19 @@ receiver was handed.
 ## Forward direction: a declared dependency
 
 Pick one actor to be the dependent. It declares the other, and sends to it on
-a ctx typed by itself. In the editor, the region declares the shell and
-announces itself from `wire`
-(`crates/aether-widget/src/editor_region.rs`):
+a ctx typed by itself. In the sketch, the channel declares the mixer and
+announces itself from `wire`:
 
 ```rust
-#[actor(instanced, root, depends(EditorShell))]
-impl WasmActor for EditorRegion {
-    type Config = PanelConfig;
-    const NAMESPACE: &'static str = "aether.widget.editor_region";
+#[actor(instanced, root, depends(Mixer))]
+impl WasmActor for Channel {
+    type Config = ChannelConfig;
+    const NAMESPACE: &'static str = "example.channel";
 
     // …
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
-        ctx.send::<EditorShell>(&RegionAttach { region: self.config.editor_region.clone() });
+        ctx.send::<Mixer>(&ChannelAttach { channel: self.config.channel.clone() });
 
         // …
         Ok(())
@@ -67,10 +67,10 @@ call, because the load already proved `R` live
 erased ctx, so spell the ctx's actor as `Self`.
 
 `R` must be a root singleton (`One`), a chassis capability or a loaded guest
-alike. The shell is a singleton guest named at the root by its published
+alike. The mixer is a singleton guest named at the root by its published
 namespace
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md)
-§5), which is what lets a region name it by bare type. Which resolver
+§5), which is what lets a channel name it by bare type. Which resolver
 an actor gets is
 [ADR-0119](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0119-actor-addressing-via-a-resolver-strategy.md);
 how the position follows the actor when it is re-parented is
@@ -78,17 +78,17 @@ how the position follows the actor when it is re-parented is
 
 ### Across a crate boundary
 
-In `aether-widget` both actors live in one crate, so the region names the
-shell with a plain `use`. When the dependent lives in another component crate,
-that crate depends on the receiver's crate with the receiver's `library`
-feature, as `crates/aether-test-fixtures-bundle/Cargo.toml` does:
+When both actors live in one crate, the dependent names the receiver with a
+plain `use`. When the dependent lives in another component crate, that crate
+depends on the receiver's crate with the receiver's `library` feature, as
+`crates/aether-demo/Cargo.toml` does:
 
 ```toml
-aether-widget = { path = "../aether-widget", features = ["library"] }
+aether-kit = { path = "../aether-kit", features = ["library"] }
 ```
 
 The receiver's crate declares the feature, non-default
-(`crates/aether-widget/Cargo.toml`):
+(`crates/aether-kit/Cargo.toml`):
 
 ```toml
 [features]
@@ -102,36 +102,35 @@ actor impls linkable (the `library` section of the `export!` docs in
 `crates/aether-actor/src/wasm/mod.rs`). The receiver's own wasm build never
 enables the feature and keeps its entries.
 
-The in-tree example is `EditorRegionProbe` in
-`crates/aether-test-fixtures-bundle/src/editor_region_probe.rs`: a test fixture
-in another crate that declares `depends(EditorShell)` and announces itself the
-same way. The receiver may take the dependent crate back only as a
-dev-dependency, which cargo allows because a dev-dependency edge is outside the
-normal build graph; `aether-widget` does this to load the fixture in its
-own tests, and the fixture manifest's comment says so.
+The in-tree example is `Demo` in `crates/aether-demo/src/lib.rs`: a component
+in another crate that declares `depends(MeshViewer, RenderCapability)` and
+mails the viewer from `wire` with `ctx.send::<MeshViewer>(..)`. The receiver
+may take the dependent crate back only as a dev-dependency, which cargo allows
+because a dev-dependency edge is outside the normal build graph.
 
 ## Reverse direction: the envelope sender
 
 The receiver never declares the dependent. The dependent's announcement is an
-ordinary kind the receiver handles (`RegionAttach`, which names only the
-region), and the receiver's handler casts the mail's sender to the protocol it
-will send and keeps the result (`crates/aether-widget/src/editor.rs`):
+ordinary kind the receiver handles, and the receiver's handler casts the mail's
+sender to the protocol it will send and keeps the result. The camera in
+`aether-kit` does this for whoever subscribes to its view: the announcement is
+`aether.render.view_subscribe`, which carries nothing, and the camera keeps
+its sender (`crates/aether-kit/src/camera/mod.rs`):
 
 ```rust
 #[handler::tell]
-fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
-    let Some(reference) = ctx.sender() else {
-        tracing::warn!(/* … */ "region attach arrived with no sender; ignoring");
+fn on_view_subscribe(&mut self, ctx: &mut WasmCtx<'_>, _subscribe: ViewSubscribe) {
+    let Some(sender) = ctx.sender() else {
+        tracing::warn!(target: "aether_kit", "view subscribe arrived with no sender; ignoring");
         return;
     };
-    let Some(reference) = ctx.cast::<EditorInput>(reference) else {
-        tracing::warn!(/* … */ "region attach sender does not cover the editor input protocol; ignoring");
+    let Some(viewer) = ctx.cast::<Subscriber<ViewProjection>>(sender) else {
+        tracing::warn!(target: "aether_kit", "view subscribe sender does not take a view projection; ignoring");
         return;
     };
 
-    if !self.routing.attach(&attach.region, reference) {
-        tracing::warn!(/* … */ "region attach names no unattached declared region; ignoring");
-    }
+    self.viewers.add(viewer);
+    // …
 }
 ```
 
@@ -140,25 +139,26 @@ the host stamped on the envelope, with no lookup. It is `None` for a sourceless
 dispatch (session, remote-engine, or broadcast mail), so the handler reports
 that and returns. An erased reference has no send verb
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
-§4), so the handler casts it once, at receipt, to `EditorInput`, the
-protocol of the nine silent input rows the shell forwards. The cast answers
-`None` when the sender's published rows do not cover the protocol, and the
-handler refuses that attach. `Routing::attach`
-(`crates/aether-widget/src/routing.rs`) stores the typed reference against
-the declared region name, and refuses an unknown name or a second
-announcement for a region already attached rather than re-pointing a live
-route.
+§4), so the handler casts it once, at receipt, to
+`Subscriber<ViewProjection>`, the protocol of an actor that takes
+`aether.view_projection` and answers nothing. The cast answers `None` when
+the sender's published rows do not cover the protocol, and the handler refuses
+that subscription. `Viewers::add` (`crates/aether-kit/src/camera/viewers.rs`)
+stores the typed reference keyed by its erased twin, so a second subscription
+from the same actor is held once.
 
-Later pushes go through the stored `ProtocolRef<EditorInput>` with
-`ctx.send_to(reference, &kind)`, as `EditorShell::forward` does for every
-input event it routes, and each send is kind-checked against the protocol's
-rows. `EditorRegion` covers every row, so it attaches.
+Later pushes go through the stored `ProtocolRef<Subscriber<ViewProjection>>`
+with `send_to(reference, &kind)`, as `Viewers::send` does for every view the
+camera publishes, and each send is kind-checked against the protocol's rows.
+The mixer in the sketch does the same with its own protocol: its
+`ChannelAttach` handler casts the sender to the protocol of the kinds it
+pushes to a channel and keeps the result against the channel's name.
 
 Under the design rules
 ([R-0044](../contributing/design-rules.md#r-0044),
 [R-0040](../contributing/design-rules.md#r-0040)), a receiver holds a
 `ProtocolRef<P>` of the protocol the dependent speaks, which it gets one of
-two ways: by casting the envelope sender at receipt, as the shell does, or by
+two ways: by casting the envelope sender at receipt, as the camera does, or by
 proving a typed path (an `ActorPath<R>` or a `ProtocolPath<P>`) that the
 announcement carries. A guest has all three: the cast, `WasmCtx::cast`, and
 `WasmCtx::resolve` over either typed path, since a guest decodes a
@@ -171,8 +171,8 @@ replies, as any handler does.
 
 The dependency is `Live` before the dependent's `init`, so the announcement
 from `wire` always has a live recipient. That fixes the load order: receiver
-first, dependent second. `EditorRegion`'s own `# Agent` doc says the same:
-load the shell first, and a region loaded before it is refused.
+first, dependent second. In the sketch the mixer is loaded first, and a
+channel loaded before it is refused.
 
 ### Talking back to the actor that loaded you
 
@@ -210,10 +210,10 @@ Keep proofs in actor state, never a `MailboxId`. For an actor the state will
 send to, the proof is typed: an `ActorRef<R>` or a `ProtocolRef<P>`
 ([R-0044](../contributing/design-rules.md#r-0044)). An `ErasedActorRef` is
 kept only where nothing is sent through it: comparing identity, keying a
-table, naming a path, or monitoring. The editor shell holds no address of its
-own: `Routing` stores the proof each region handed over, cast once to
-`EditorInput`, and gives that same value back as a route's target, so the
-shell has nothing to resolve.
+table, naming a path, or monitoring. The camera holds no address of its own:
+`Viewers` stores the proof each subscriber handed over, cast once to
+`Subscriber<ViewProjection>`, keyed by the erased reference a removal
+compares, so the camera has nothing to resolve.
 
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`
@@ -241,9 +241,7 @@ a `Live` route stands under the path's canonical name and returns a
 `ProtocolRef<P>` that sends only the kinds `P` lists (ADR-0231 §3). A guest
 proves an `ActorPath<R>` (ADR-0230 §2) the same way, with `WasmCtx::resolve`
 (#7205, ADR-0240 D8), the Bloomery bootstrap's own door onto its two peers.
-The native `ActorPath<R>` arm still waits for a caller: the editor shell's
-`RegionSpec.target` was the first site that would have needed one; issue
-#6306 dropped the field instead, and the region announces itself.
+The native `ActorPath<R>` arm still waits for a caller.
 
 ## What not to write
 
@@ -254,8 +252,8 @@ The native `ActorPath<R>` arm still waits for a caller: the editor shell's
 - `depends` in both directions: both loads refuse.
 - A normal dependency in both directions: cargo refuses the cycle.
 - A payload field carrying the sender's position, re-resolved at every send.
-  The kind names what the sender stands for (`RegionAttach` names the region);
-  the envelope carries who sent it.
+  The kind names what the sender stands for (`ChannelAttach` names the
+  channel); the envelope carries who sent it.
 - A stored `ErasedActorRef` meant to be sent through later: no send verb
   takes one. Store a typed proof, an `ActorRef<R>` or a `ProtocolRef<P>`
   ([R-0044](../contributing/design-rules.md#r-0044)).
@@ -293,5 +291,5 @@ authority that nothing checks against the real actor.
   — proven references and the doors that mint them.
 - [ADR-0232](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)
   — the flat ctx send verbs.
-- [ADR-0141](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0141-editor-shell-input-ownership.md)
-  — the editor shell and its regions.
+- [ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+  — protocol references, the sender cast, and typed paths.

@@ -60,9 +60,8 @@ For the media and product-tools overview, start with
 | [Audio](systems/audio.md) | realtime events, scheduling, instruments, tracks and effects |
 | [Input](systems/input.md) | key, pointer, text, IME and subscription streams |
 | [Window](systems/window.md) | window lifecycle, mode/title, menu and cursor chrome, unsupported replies |
-| [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
 
-Native capabilities own devices; guest actors (`aether-kit`'s camera and mesh viewer, the widget set) compose them into product behavior.
+Native capabilities own devices; guest actors (`aether-kit`'s camera and mesh viewer) compose them into product behavior.
 
 ## Fleet and operation
 
