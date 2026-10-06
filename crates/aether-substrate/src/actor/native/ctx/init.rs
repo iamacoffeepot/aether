@@ -17,6 +17,7 @@ use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::wasm::component::ComponentCtx;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
+use crate::memory::MemoryGauge;
 
 use super::ExportedHandles;
 
@@ -75,6 +76,18 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn actor_probe(&self) -> ActorProbe {
         self.binding.actor_probe()
+    }
+
+    /// A [`MemoryGauge`] listed in the engine's memory report under this
+    /// actor, with `label` saying what its bytes are. The actor keeps the
+    /// gauge for as long as it holds the memory: the row appears now, at
+    /// zero, and leaves when the gauge drops. The gauge names no position.
+    ///
+    /// Consumer: the render capability's `init`, which mints one gauge for
+    /// its staged textures and one for its staged geometry.
+    #[must_use]
+    pub fn memory_gauge(&self, label: &'static str) -> MemoryGauge {
+        self.binding.memory_gauge(label)
     }
 
     /// Issue 629 / Phase A: publish a sub-handle bundle for cross-

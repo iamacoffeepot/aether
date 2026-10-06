@@ -45,6 +45,8 @@ pub mod config;
 // Beside `atomic_write` / `pid_lock`, the two primitives it builds on.
 pub mod content_store;
 pub mod mail;
+// The engine's memory ledger: who holds how many bytes, read by one report.
+pub mod memory;
 pub mod net;
 pub mod pid_lock;
 #[cfg(feature = "render")]
@@ -105,4 +107,5 @@ pub use mail::registry::{
     InlineHandler, MailboxEntry, OwnedDispatch, Registry, ResolvedAddress,
 };
 pub use mail::{KindId, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
+pub use memory::{BlobStoreMemory, Charged, MemoryGauge, MemoryReport, OwnerMemory};
 pub use runtime::panic_hook::init_panic_hook;

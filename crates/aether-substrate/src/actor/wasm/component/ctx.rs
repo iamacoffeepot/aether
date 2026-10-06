@@ -22,6 +22,7 @@ use crate::scheduler::pending_depth;
 use crate::actor::wasm::asset_manifest::LoadWindow;
 
 use super::StateBundle;
+use super::meter::MemoryMeter;
 use super::outbox::{GuestAnswer, HeldMail, HeldOutbox};
 
 /// The next number in each of the two `MailId` correlation spaces a
@@ -218,6 +219,11 @@ pub struct ComponentCtx {
     /// `held_unanswered_p32` host fn. [`super::Component::deliver`] takes it
     /// once `receive` returns and moves it into the slot's [`HeldChain`].
     pending_unanswered: Option<(u32, ReplyMail)>,
+    /// This instance's linear memory on the engine's memory ledger, and the
+    /// store's resource limiter. `Component::instantiate` installs it on the
+    /// store and seeds it from the memory's size. One per instance, like
+    /// `blob_table`: the row leaves the report when the instance drops.
+    pub(super) memory_meter: MemoryMeter,
 }
 
 /// The declared type of one inline-child actor the resident module can
@@ -303,6 +309,7 @@ impl ComponentCtx {
             saved_state: None,
             save_state_error: None,
             init_failure: None,
+            memory_meter: MemoryMeter::new(&binding),
             binding,
             correlation_counter: Cell::new(1),
             reply_correlation: Cell::new(Source::NO_CORRELATION),

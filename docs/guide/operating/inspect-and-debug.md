@@ -17,6 +17,7 @@ application failure.
 | Which pure native transforms are linked? | `describe_transforms` | MCP build-static | not per-engine runtime state |
 | What did one actor say? | `actor_logs` | one mailbox | bounded ring; in-handler events only |
 | What does one handler cost? | `actor_cost` | one mailbox | EWMA instrumentation, not a profiler or scheduler control |
+| How much memory does the engine hold, and who holds it? | `send_mail` of `aether.inventory.memory` to `aether.inventory` | one engine | counts what each owner reports; the rows do not sum to the process |
 | Did mail settle and what replied? | `send_mail` | one or more independent items | fixed await bound; partial replies on timeout |
 | What causal chain ran? | `send_mail_traced` | one atomic batch/engine | trace rings are best-effort and bounded |
 | What is rendered now? | `capture_frame` | one engine | requires a render-capable chassis |
@@ -128,6 +129,15 @@ the host emitted nothing. See [Logging](../systems/logging.md).
 and mean absolute deviation in nanoseconds plus a sample count. It is
 measure-only: reading it does not change scheduling, and an EWMA is not a full
 distribution. A zero sample count is a seeded handler, not observed work.
+
+There is no memory tool: send `aether.inventory.memory` (empty params) to
+`aether.inventory` with `send_mail`. The `aether.inventory.memory_result` reply
+carries the process's resident set size, the blob store's three byte counts,
+and one `{ owner, label, bytes }` row per owner. A row names its owner by actor
+path, so a component's row can be matched to the address `actor_logs` and
+`actor_cost` take. See
+[Inventory, descriptors, and transforms](../systems/inventory-and-transforms.md#memory-by-owner)
+for what each number counts and what none of them counts.
 
 ## 5. Capture visual evidence
 

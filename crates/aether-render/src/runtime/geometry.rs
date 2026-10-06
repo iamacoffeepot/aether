@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use aether_data::Blob;
+use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
@@ -212,18 +213,32 @@ fn staged_buffer(
 ///
 /// The derived `Default` and [`Self::new`] agree because a default
 /// `SessionIds` spans the whole id space, which is the window `new`
-/// opens.
+/// opens, and a default gauge is a detached one.
 #[derive(Default)]
 pub struct GeometryRegistry {
     pub ids: SessionIds<u32>,
-    pub entries: HashMap<u32, StagedGeometry>,
-    holds: Holds<StagedGeometry>,
+    /// Each geometry counted at its staged vertex plus index bytes, resized
+    /// when an update replaces them. An entry moves whole into `holds` when
+    /// it is destroyed under a draw set, so its bytes stay counted until
+    /// the last release drops it.
+    pub entries: HashMap<u32, Charged<StagedGeometry>>,
+    holds: Holds<Charged<StagedGeometry>>,
+    /// What every staged geometry charges its bytes to.
+    memory: MemoryGauge,
 }
 
 impl GeometryRegistry {
+    /// A registry whose bytes are counted on a gauge no report lists: the
+    /// form a test builds.
     #[must_use]
     pub fn new() -> Self {
-        Self { ids: SessionIds::new(), entries: HashMap::new(), holds: Holds::default() }
+        Self::with_memory(MemoryGauge::detached())
+    }
+
+    /// A registry whose geometries charge their bytes to `memory`.
+    #[must_use]
+    pub fn with_memory(memory: MemoryGauge) -> Self {
+        Self { ids: SessionIds::new(), entries: HashMap::new(), holds: Holds::default(), memory }
     }
 
     /// One more draw set names `geometry_id`. The caller has checked
@@ -306,17 +321,16 @@ impl GeometryRegistry {
             };
         };
 
-        self.entries.insert(
-            geometry_id,
-            StagedGeometry {
-                layout: mail.layout,
-                vertices: mail.vertices,
-                indices: mail.indices,
-                realized: None,
-                dirty: false,
-                revision: 0,
-            },
-        );
+        let bytes = vertices.len() + indices.len();
+        let geometry = StagedGeometry {
+            layout: mail.layout,
+            vertices: mail.vertices,
+            indices: mail.indices,
+            realized: None,
+            dirty: false,
+            revision: 0,
+        };
+        self.entries.insert(geometry_id, self.memory.charged(bytes, geometry));
         CreateGeometryResult::Ok { geometry_id }
     }
 
@@ -375,6 +389,7 @@ impl GeometryRegistry {
             return;
         }
 
+        Charged::resize(entry, vertices.len() + indices.len());
         entry.vertices = mail.vertices;
         entry.indices = mail.indices;
         entry.dirty = true;
@@ -637,6 +652,34 @@ mod tests {
         registry.release(geometry_id);
         assert!(!registry.is_held(geometry_id));
         assert!(registry.holds.retired_mut(geometry_id).is_none(), "the last release drops the retired entry");
+    }
+
+    /// A geometry's bytes stay on the gauge for as long as the entry lives:
+    /// through an update that resizes them, through a destroy under a draw
+    /// set, and until the last set lets go. The bugs pinned: an update that
+    /// leaves the old size counted, a destroy that drops the bytes while a
+    /// set still draws them, and a retired entry whose bytes are never
+    /// subtracted.
+    #[test]
+    fn a_geometry_counts_its_bytes_until_its_entry_drops() {
+        let mut registry = GeometryRegistry::new();
+        let indices = indices_bytes(&[0, 1, 0]);
+        let CreateGeometryResult::Ok { geometry_id } =
+            registry.create(create(skinned_layout(), vec![7u8; 40], indices.clone()))
+        else {
+            panic!("create accepted");
+        };
+        assert_eq!(registry.memory.bytes(), 40 + 12);
+
+        registry.update(update(geometry_id, vec![9u8; 60], indices));
+        assert_eq!(registry.memory.bytes(), 60 + 12, "an update moves the count to the new size");
+
+        registry.hold(geometry_id);
+        registry.destroy(DestroyGeometry { geometry_id });
+        assert_eq!(registry.memory.bytes(), 60 + 12, "a geometry a draw set still holds is still counted");
+
+        registry.release(geometry_id);
+        assert_eq!(registry.memory.bytes(), 0, "the last release subtracts the retired entry's bytes");
     }
 
     #[test]

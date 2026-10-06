@@ -16,6 +16,7 @@ mod ctx;
 mod dispatch;
 mod instantiate;
 mod lifecycle;
+mod meter;
 mod outbox;
 mod sections;
 mod state;

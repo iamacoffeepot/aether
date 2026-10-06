@@ -132,10 +132,8 @@ impl TextureRegistry {
             };
         };
 
-        self.volumes.insert(
-            texture_id,
-            StagedTextureVolume { format, width, height, depth, pixels, realized: None, dirty: true },
-        );
+        let volume = StagedTextureVolume { format, width, height, depth, pixels, realized: None, dirty: true };
+        self.volumes.insert(texture_id, self.memory.charged(expected, volume));
         CreateTextureVolumeResult::Ok { texture_id }
     }
 }

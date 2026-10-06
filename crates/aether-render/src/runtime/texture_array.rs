@@ -158,11 +158,11 @@ impl TextureRegistry {
                 ),
             };
         }
-        if layer_bytes(mail.format, mail.side, mail.mips).is_none() {
+        let Some(bytes_per_layer) = layer_bytes(mail.format, mail.side, mail.mips) else {
             return CreateTextureArrayResult::Err {
                 error: format!("a {:?} layer of side {} overflows the addressable byte count", mail.format, mail.side),
             };
-        }
+        };
         let Some(texture_id) = self.ids.allocate() else {
             return CreateTextureArrayResult::Err {
                 error: "this session has run out of texture ids; destroy_texture does not recycle them".to_owned(),
@@ -170,18 +170,18 @@ impl TextureRegistry {
         };
 
         let layers = mail.layers as usize;
-        self.arrays.insert(
-            texture_id,
-            StagedTextureArray {
-                format: mail.format,
-                side: mail.side,
-                layers: mail.layers,
-                mips: mail.mips,
-                written: vec![None; layers],
-                dirty: vec![false; layers],
-                realized: None,
-            },
-        );
+        let array = StagedTextureArray {
+            format: mail.format,
+            side: mail.side,
+            layers: mail.layers,
+            mips: mail.mips,
+            written: vec![None; layers],
+            dirty: vec![false; layers],
+            realized: None,
+        };
+        // Every layer is counted, written or not: the realized array holds
+        // them all on the device.
+        self.arrays.insert(texture_id, self.memory.charged(bytes_per_layer.saturating_mul(layers), array));
         CreateTextureArrayResult::Ok { texture_id }
     }
 

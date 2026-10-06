@@ -964,7 +964,7 @@ impl NativeActor for RenderCapability {
     fn init(
         config: RenderTuningConfig,
         params: RenderParams,
-        _ctx: &mut NativeInitCtx<'_>,
+        ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -976,8 +976,8 @@ impl NativeActor for RenderCapability {
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
-            textures: TextureRegistry::new(),
-            geometries: GeometryRegistry::new(),
+            textures: TextureRegistry::with_memory(ctx.memory_gauge("textures")),
+            geometries: GeometryRegistry::with_memory(ctx.memory_gauge("geometry")),
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(config.pass_timings),
@@ -1599,6 +1599,7 @@ mod tests {
     use aether_math::Rgba;
     use aether_substrate::chassis::builder::ReplyTarget;
     use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::memory::{Charged, MemoryGauge};
     use aether_substrate::testing::{
         PumpedDriver, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
     };
@@ -1608,8 +1609,9 @@ mod tests {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
     }
 
-    fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
-        StagedTexture {
+    fn test_staged_texture(pixels: Vec<u8>) -> Charged<StagedTexture> {
+        let bytes = pixels.len();
+        let texture = StagedTexture {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
@@ -1618,7 +1620,9 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(pixels)),
             realized: None,
             dirty: true,
-        }
+        };
+
+        MemoryGauge::detached().charged(bytes, texture)
     }
 
     /// A minimal headless state for the state tests — no window, no GPU

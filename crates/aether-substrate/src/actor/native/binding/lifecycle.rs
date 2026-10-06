@@ -24,6 +24,7 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::RegistryBatch;
 use crate::mail::registry::{AddressResolutionError, RegistrySubscription, RouteContract};
 use crate::mail::{KindId, MailId, MailboxId};
+use crate::memory::{MemoryGauge, MemoryReport};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
@@ -287,6 +288,19 @@ impl NativeBinding {
     /// behind [`NativeCtx::kind_descriptors`](crate::actor::native::ctx::NativeCtx::kind_descriptors).
     pub(crate) fn kind_descriptors(&self) -> Vec<KindDescriptor> {
         self.mailer.kind_descriptors()
+    }
+
+    /// A memory gauge listed under this actor with `label`. The path behind
+    /// [`NativeInitCtx::memory_gauge`](crate::actor::native::NativeInitCtx::memory_gauge),
+    /// and what a hosted guest's ctx counts its linear memory on.
+    pub(crate) fn memory_gauge(&self, label: &'static str) -> MemoryGauge {
+        self.mailer.memory_ledger().gauge(self.self_mailbox(), label)
+    }
+
+    /// What the engine holds right now, by owner. The path behind
+    /// [`NativeCtx::memory_report`](crate::actor::native::ctx::NativeCtx::memory_report).
+    pub(crate) fn memory_report(&self) -> MemoryReport {
+        self.mailer.memory_report()
     }
 
     /// The origin name of one tagged id. The path behind
