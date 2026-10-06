@@ -172,7 +172,9 @@ video mode exactly and fails instead of silently choosing another one.
 The window actor is also the source and router for keyboard, pointer,
 resize, text, IME, focus, redraw, opened, and closed events. Every per-window
 kind carries its window's path in `window`. A subscriber chooses one window or
-all current and future windows:
+all current and future windows. `WindowFocus` (`aether.window.focus_changed`)
+carries the window's path and whether it now has focus, once per change; a
+component holding keys or buttons releases them when it reports `false`:
 
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block.

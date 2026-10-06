@@ -13,7 +13,7 @@ use aether_kinds::{
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
-use crate::{WindowClosed, WindowMenuActivated, WindowOpened, WindowSelector, WindowSubscription};
+use crate::{WindowClosed, WindowFocus, WindowMenuActivated, WindowOpened, WindowSelector, WindowSubscription};
 
 /// The subscribers of one published kind `K`, each held as the
 /// `ProtocolRef<Subscriber<K>>` its events are sent through (ADR-0231 §8) and
@@ -346,7 +346,7 @@ pub mod fixture {
     use crate::runtime::WindowBackend;
     #[cfg(feature = "desktop")]
     use crate::runtime::desktop::DesktopWindows;
-    use crate::{SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
+    use crate::{SubscribeWindow, SubscribeWindowResult, WindowFocus, WindowSelector, WindowSubscription};
 
     /// One published event a [`Watcher`] received: the watcher's key, the
     /// event, and the envelope's causal root and stamped sender.
@@ -414,6 +414,11 @@ pub mod fixture {
 
         #[handler::event]
         fn on_window_size(&mut self, ctx: &mut NativeCtx<'_>, mail: WindowSize) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::event]
+        fn on_window_focus(&mut self, ctx: &mut NativeCtx<'_>, mail: WindowFocus) {
             self.record(ctx, &mail);
         }
 
