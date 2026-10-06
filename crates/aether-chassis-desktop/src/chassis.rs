@@ -24,7 +24,6 @@ use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
-use aether_text::TextCapability;
 use winit::event_loop::EventLoop;
 
 use aether_chassis::{WindowConfig, apply_manifest_window_settings};
@@ -190,8 +189,7 @@ impl BootableChassis for DesktopChassis {
 
         // Boot order is declaration order — `with_full_stack_caps` runs the base
         // app caps first, render last so it claims its mailboxes after every
-        // other chassis cap. Text composes here, beside the render the driver
-        // reserves at the Claim stage, because only desktop serves render.
+        // other chassis cap.
         // `into_common_boot` reads the env-sourced `CommonBoot` fields off the
         // shared env in one place; the aborter and source stack are supplied
         // earlier by `composed` / `ChassisBase` (the base + autoload were lifted
@@ -203,7 +201,6 @@ impl BootableChassis for DesktopChassis {
         // in-flight frame before shutting down (see the driver's
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_full_stack_caps(builder, common)
-            .with_actor::<TextCapability>(())
             .with_actor::<AudioCapability>(())
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());

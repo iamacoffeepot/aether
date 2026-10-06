@@ -352,9 +352,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// proof points, under the running chain's root with the handled mail as
     /// its parent. [`Self::send_detached`] is the fresh-chain sibling.
     ///
-    /// Its consumers are `aether.text`'s render sends: the atlas texture's
-    /// creation, glyph uploads, atlas resyncs, and each draw's textured-quad
-    /// batch.
+    /// Its consumers are the autoload loader's publish and spawn sends to
+    /// the component host, and the fleet proxy's route registration.
     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
     where
         A: DependsOn<R>,
@@ -372,8 +371,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// handler's causal chain, and returns the minted [`MailId`].
     ///
     /// Its consumers are the `aether.fs` reads `aether.audio` forwards for a
-    /// track, an instrument's `.sfz` file and each of its samples, and the
-    /// font read `aether.text` forwards.
+    /// track, an instrument's `.sfz` file and each of its samples.
     #[must_use]
     pub fn send_with_context<R: Singleton + CallerAddressable>(
         &mut self,

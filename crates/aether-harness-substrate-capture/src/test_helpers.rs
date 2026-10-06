@@ -87,7 +87,7 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
 ///
 /// The three helpers below are the pixel-assertion vocabulary every visual
 /// scenario reaches for first, and had been carried as byte-identical copies
-/// in `aether-render` and `aether-text` (issue 4131). They live here rather
+/// in two capability crates' scenario suites (issue 4131). They live here rather
 /// than in the base harness because `Image` does: the capture crate is
 /// downstream of it.
 ///

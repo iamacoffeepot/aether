@@ -13,7 +13,7 @@ them into reusable camera and mesh behavior.
 | Keyboard, pointer, text and IME streams | [Input](input.md) |
 | Window lifecycle, mode/title, menu and cursor chrome | [Window](window.md) |
 
-Keep frame ownership explicit. Product actors may emit render/text/audio mail,
+Keep frame ownership explicit. Product actors may emit render and audio mail,
 but native callbacks and presentation remain chassis responsibilities. For
 visual changes, pair structural/SubstrateHarness checks with captured evidence; for
 realtime audio, keep allocation and blocking work off the callback.

@@ -1,5 +1,5 @@
 //! Pure, wasm-safe font-unit → pixel scaling for the ADR-0105 text
-//! surface. The `aether.text.font_metrics` grab replies with a
+//! surface. The `aether.render.font_metrics` grab replies with a
 //! [`FontMetrics`] table whose every measure is in
 //! font units; [`scale_units`] is the one primitive that turns a
 //! font-unit measure into pixels at a draw size, with no `fontdue`
@@ -8,7 +8,7 @@
 //! The operation order is load-bearing. fontdue computes a glyph's pixel
 //! advance as `(size_pixels / units_per_em) * advance_units` — the
 //! division first, then a single multiply. Reproducing that order here
-//! makes a guest's local measurement match the `aether.text` cap's
+//! makes a guest's local measurement match the renderer's text
 //! draw-path advance bit-for-bit (advances carry no kerning or shaping,
 //! so a run's extent is the plain left-to-right sum of per-glyph
 //! advances).

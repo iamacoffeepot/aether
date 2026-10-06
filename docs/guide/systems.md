@@ -55,7 +55,7 @@ For the media and product-tools overview, start with
 |---|---|
 | [Rendering and camera](systems/rendering.md) | GPU draw queues, textures, materials, capture and matrices |
 | [Render programs](systems/render-programs.md) | authored GPU programs, bindings, transients and passes |
-| [Text](systems/text.md) | font atlas, layout, batches and metrics |
+| [Text](systems/text.md) | the renderer's fonts, glyph atlas, layout and metrics |
 | [Mesh authoring](systems/mesh-authoring.md) | DSL, parser, tessellation and viewer load |
 | [Audio](systems/audio.md) | realtime events, scheduling, instruments, tracks and effects |
 | [Input](systems/input.md) | key, pointer, text, IME and subscription streams |

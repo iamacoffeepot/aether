@@ -4,8 +4,8 @@
 //!
 //! A chassis composes only the capabilities it serves (ADR-0232 §6). Headless
 //! has no GPU, window, audio device, or clipboard and drives its own timer, so
-//! it composes no `aether.render`, `aether.window`, `aether.text`,
-//! `aether.audio`, `aether.clipboard`, or `aether.substrate_harness` actor. A
+//! it composes no `aether.render`, `aether.window`, `aether.audio`,
+//! `aether.clipboard`, or `aether.substrate_harness` actor. A
 //! component that depends on one of them is refused at load, naming the
 //! dependency that is not live, rather than answered by a stub.
 

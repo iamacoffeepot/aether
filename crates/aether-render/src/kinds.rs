@@ -1,4 +1,4 @@
-//! The `aether.render` cap's drawing + texture mail kinds (ADR-0121).
+//! The `aether.render` cap's drawing, texture and text mail kinds (ADR-0121).
 //!
 //! These ride the always-on (marker-only `render`) region of the render
 //! module, so a wasm guest on the `render` feature sees the kind types
@@ -8,13 +8,13 @@
 //! `FrameCheck` verification family stay in `aether-kinds`: the former
 //! are consumed by `aether-mcp` and the latter by the substrate core, so
 //! moving them here would close a dependency cycle (ADR-0121). The
-//! `QuadSpace` / `QuadScale` projection types also stay central — the
-//! `aether.text.draw` kind in `aether-kinds` consumes them — so the quad
-//! draw kinds below import them from there.
+//! `QuadSpace` / `QuadScale` projection types and the `FontMetrics` table
+//! also stay central, so the quad and text kinds below import them from
+//! there.
 
 use aether_actor::{HeldReply, PathRefused, ProtocolPath};
 use aether_data::{Blob, ErasedActorPath, MailId};
-use aether_kinds::{ClipRect, QuadSpace};
+use aether_kinds::{ClipRect, FontMetrics, QuadSpace};
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -318,8 +318,8 @@ pub enum CreateTextureResult {
 }
 
 /// `aether.render.update_texture` — overwrite a sub-rectangle of a
-/// previously-created texture's pixels (atlas growth — e.g. the text
-/// cap rasterizing a new glyph into its atlas). `pixels` is exactly
+/// previously-created texture's pixels (a caller growing an atlas of its
+/// own, say). `pixels` is exactly
 /// `width * height * texture_format.bytes_per_pixel()` bytes covering
 /// the `(x, y, width, height)` sub-rect. Fire-and-forget; a bad
 /// `texture_id`, an out-of-bounds rect, or a `Writable` texture (a GPU
@@ -340,8 +340,8 @@ pub struct UpdateTexture {
 /// `aether.render.destroy_texture` — release a previously-created
 /// texture, texture array or volume texture from the render cap's
 /// session-scoped texture registry; the three share one id space, so this
-/// is the destroy path of each. Fire-and-forget; an unknown `texture_id` or the reserved
-/// internal white-texture id logs and drops. Dropping the registry entry
+/// is the destroy path of each. Fire-and-forget; an unknown `texture_id` or a reserved
+/// internal id (the white texture, the glyph atlas) logs and drops. Dropping the registry entry
 /// releases staged pixels and any realized GPU resources.
 #[aether_data::kind(name = "aether.render.destroy_texture")]
 pub struct DestroyTexture {
@@ -870,6 +870,91 @@ pub struct DrawTexturedQuads {
     /// program wrote.
     pub blend: QuadBlend,
     pub quads: Vec<TexturedQuad>,
+}
+
+/// `aether.render.create_font` — register a font from the bytes of a
+/// TrueType or OpenType file. `bytes` arrives as a `Blob` and is parsed as
+/// received, without a copy: the caller reads the file however it likes
+/// (an `aether.fs.read` reply, an asset from its load window, bytes it
+/// embeds) and hands the blob on. The parse runs off the renderer's turn,
+/// so the reply comes after the handler returns. A second create of the
+/// same bytes is a second font. Needs no render device. Reply:
+/// `CreateFontResult`.
+#[aether_data::kind(name = "aether.render.create_font")]
+pub struct CreateFont {
+    pub bytes: Blob,
+}
+
+/// Reply to `CreateFont`. `Ok` carries the assigned session-scoped
+/// `font_id` — thread it into `TextRun.font_id` and
+/// `FontMetricsRequest.font_id`. `Err` carries a human-readable reason:
+/// bytes that are not resident in this process, bytes that do not parse as
+/// a font, or a session that has run out of font ids.
+#[aether_data::kind(name = "aether.render.create_font_result")]
+pub enum CreateFontResult {
+    Ok { font_id: u32 },
+    Err { error: String },
+}
+
+impl HeldReply for CreateFontResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "render capability closed before the font request was answered".into() }
+    }
+}
+
+/// `aether.render.font_metrics` — the complete, size-independent
+/// `FontMetrics` table of the font `font_id` names, so a consumer measures
+/// text locally (fit-to-content sizing, caret placement, hit-testing)
+/// without a mail round trip per measurement. Answered inside the call and
+/// needs no render device. Reply: `FontMetricsResult`.
+#[aether_data::kind(name = "aether.render.font_metrics")]
+pub struct FontMetricsRequest {
+    pub font_id: u32,
+}
+
+/// Reply to `FontMetricsRequest`. `Ok` carries the font's `FontMetrics`
+/// table; `Err` names the `font_id` nothing is registered under.
+#[aether_data::kind(name = "aether.render.font_metrics_result")]
+pub enum FontMetricsResult {
+    Ok { metrics: FontMetrics },
+    Err { error: String },
+}
+
+/// One string in a `DrawText` batch: `text` laid out left to right in the
+/// font `font_id` names at `size_pixels`, with no kerning, shaping or line
+/// breaking. `color` is a linear RGBA multiplier over the glyph coverage;
+/// its alpha scales the blend. Under `QuadSpace::Screen`, `origin` is the
+/// pen's starting pixel: the string's left edge, with the baseline one
+/// ascent below it. Under `QuadSpace::World`, `origin` is ignored: the
+/// string is centred on the batch's anchor with its baseline through it.
+/// A character the font has no glyph for draws and advances by the font's
+/// `.notdef` glyph. Not a kind on its own — only addressable inside
+/// `DrawText.runs`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TextRun {
+    pub font_id: u32,
+    pub text: String,
+    pub size_pixels: f32,
+    pub color: Rgba,
+    pub origin: [f32; 2],
+}
+
+/// `aether.render.draw_text` — draw a batch of strings in the projection
+/// `space` selects. Accumulated per frame with the same immediate-mode
+/// contract as `aether.draw_triangle`: send it every frame the text should
+/// appear, or it vanishes next frame. The whole batch is one draw on the
+/// overlay pass, at the position its mail arrived in, so a shape the same
+/// actor sends after it lies over it and one sent before it lies under.
+/// The runs draw in the order listed. A run naming an unknown `font_id`,
+/// or a `size_pixels` that is not finite and positive, is dropped with a
+/// warning and the other runs still draw. Fire-and-forget; no reply.
+#[aether_data::kind(name = "aether.render.draw_text")]
+pub struct DrawText {
+    /// Optional framebuffer-pixel scissor applied to this batch. `None`
+    /// leaves the text unclipped.
+    pub clip: Option<ClipRect>,
+    pub space: QuadSpace,
+    pub runs: Vec<TextRun>,
 }
 
 /// The stroke a [`Shape`] draws just inside its edge: `width_pixels`

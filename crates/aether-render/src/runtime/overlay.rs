@@ -1,6 +1,7 @@
 //! Per-frame overlay accumulator state for the `aether.render` cap
-//! (ADR-0105). `on_draw_textured_quads` / `on_draw_screen_triangles` /
-//! `on_draw_shapes` push an [`OverlayBatch`] into the accumulator; the
+//! (ADR-0105). `on_draw_textured_quads` / `on_draw_text` /
+//! `on_draw_screen_triangles` / `on_draw_shapes` push an [`OverlayBatch`]
+//! into the accumulator; the
 //! driver's `record_overlay_batches` consumes them at record time.
 
 use aether_kinds::{ClipRect, QuadSpace};
@@ -8,7 +9,7 @@ use aether_kinds::{ClipRect, QuadSpace};
 use super::super::kinds::{
     DrawScreenTriangles, DrawShapes, DrawTexturedQuads, QuadBlend, ScreenTriangle, Shape, TexturedQuad,
 };
-use super::texture::TextureRegistry;
+use super::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry};
 
 /// One accumulated overlay batch (ADR-0105): what it draws, the projection
 /// `space` reads its coordinates in, and the scissor it draws inside. Every
@@ -49,6 +50,14 @@ impl OverlayBatch {
             blend: mail.blend,
             quads: mail.quads,
         }
+    }
+
+    /// The batch a `draw_text` submission accumulates to (ADR-0248 §10): its
+    /// laid-out glyph quads over the reserved glyph-atlas texture. A
+    /// rasterized glyph is an ordinary image, coverage in alpha beside a
+    /// colour never scaled by it, so the composite is straight.
+    pub fn glyphs(clip: Option<ClipRect>, space: QuadSpace, quads: Vec<TexturedQuad>) -> Self {
+        Self::Textured { texture_id: GLYPH_ATLAS_TEXTURE_ID, clip, space, blend: QuadBlend::Straight, quads }
     }
 
     /// The batch a `draw_screen_triangles` submission accumulates to

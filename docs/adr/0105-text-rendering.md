@@ -1,6 +1,6 @@
 # ADR-0105: Text Rendering
 
-- **Status:** Accepted (shipped — the aether.text capability)
+- **Status:** Superseded in part by ADR-0248 §10
 - **Date:** 2026-06-12
 
 ## Context
@@ -29,6 +29,14 @@ Text is built from two independent surfaces. The render capability gains a small
 The headless chassis absorbs all three kinds with empty-body handlers on `HeadlessRenderCapability`, except `create_texture`, which replies `Err` (fail-fast, matching `capture_frame`).
 
 ### Text capability (the `aether.text` mailbox, in `aether-capabilities`)
+
+> **Note (2026-10-06):** this section (text as a separate capability with
+> its own `aether.text` mailbox, composing the render surface by mail and
+> loading fonts through `aether.fs`) is superseded by ADR-0248 §10. The
+> renderer draws text itself: the kinds are `aether.render.create_font`,
+> `aether.render.font_metrics` and `aether.render.draw_text`, a font is
+> registered from bytes carried as a blob, and the glyph atlas is a
+> texture the renderer reserves. The render surface above stands.
 
 A native capability with no GPU access — it only sends mail.
 

@@ -45,7 +45,7 @@ use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
 
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
@@ -85,7 +85,7 @@ mod holds;
 mod instances;
 mod material;
 // The one accumulator every overlay verb pushes into (ADR-0105 / ADR-0213),
-// so painter order inside the overlay pass is receipt order across the three.
+// so painter order inside the overlay pass is receipt order across them all.
 mod overlay;
 mod pipeline;
 // The ADR-0170 authored-render-program registry + executor: register-time
@@ -100,6 +100,9 @@ mod surface;
 // unlike its siblings this one carries the feature gate.
 #[cfg(feature = "desktop")]
 mod target;
+// What the renderer holds to draw text (ADR-0248 §10): the font registry,
+// the glyph atlas's packer and cache, and layout into textured quads.
+mod text;
 mod texture;
 // Texture arrays in the texture registry (ADR-0246 decision 6): fixed
 // side and layer count, each layer written in place.
@@ -140,17 +143,19 @@ pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
 use self::program::{DispatchResources, ProgramRegistry};
-pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
+use self::text::{FontParse, FontParseOutput, TextState};
+pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
 use self::view_source::FollowedView;
 
 use super::{
-    CreateDrawSet, CreateDrawSetResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult,
-    CreateTexture, CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, CreateTextureVolume,
-    CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture,
-    DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle,
-    Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    ProgramTimings, ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry,
-    UpdateInstances, UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
+    CreateDrawSet, CreateDrawSetResult, CreateFont, CreateFontResult, CreateGeometry, CreateGeometryResult,
+    CreateInstances, CreateInstancesResult, CreateTexture, CreateTextureArray, CreateTextureArrayResult,
+    CreateTextureResult, CreateTextureVolume, CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet,
+    DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles,
+    DrawShapes, DrawText, DrawTexturedQuads, DrawTriangle, FontMetricsRequest, FontMetricsResult, Frame, Occluded,
+    PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances,
+    UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -177,6 +182,9 @@ pub struct RenderCapabilityState {
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
     textures: TextureRegistry,
+    /// The fonts and the glyph atlas's packer and cache (ADR-0248 §10).
+    /// The atlas pixels are the reserved glyph-atlas entry of `textures`.
+    text: TextState,
     /// ADR-0171 geometry resources: the session-scoped registry. Staged
     /// here at create/update; the draw-pass record path realizes and
     /// consumes the wgpu buffers.
@@ -977,6 +985,7 @@ impl NativeActor for RenderCapability {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::with_memory(ctx.memory_gauge("textures")),
+            text: TextState::new(),
             geometries: GeometryRegistry::with_memory(ctx.memory_gauge("geometry")),
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
@@ -1366,6 +1375,79 @@ impl NativeActor for RenderCapability {
         state.overlay_frame.push(OverlayBatch::shapes(mail));
     }
 
+    /// Register a font from the bytes of a TrueType or OpenType file.
+    ///
+    /// The reply is held and the parse staged to a blocking worker, so the
+    /// parse never runs on the driver thread; `on_font_parsed` answers. It
+    /// reads no device, so it is accepted while the device is lost.
+    ///
+    /// # Agent
+    /// Reply: `CreateFontResult`. `bytes` is the whole font file as a blob:
+    /// `{"$hex": ...}` from a session, or the blob a component got from
+    /// `aether.fs.read` or its load window. `Ok { font_id }` names the font
+    /// in `draw_text` and `font_metrics` for the rest of the session; `Err`
+    /// says why the bytes are not a font.
+    #[handler::request]
+    fn on_create_font(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: CreateFont,
+    ) -> Pending<CreateFontResult> {
+        let (pending, held) = ctx.hold::<CreateFontResult>();
+        text::stage_font_parse(ctx, held, mail.bytes);
+        pending
+    }
+
+    /// Font-parse completion (ADR-0243 §9): register the parsed font, or
+    /// build the error, and answer the `create_font` whose held reply the
+    /// task carried.
+    #[handler(task)]
+    fn on_font_parsed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<FontParseOutput>) {
+        let Some(FontParse { held }) = ctx.take_context() else {
+            return;
+        };
+        held.answer(ctx, &state.text.register(done.into_output()));
+    }
+
+    /// A registered font's size-independent metrics table, answered inside
+    /// the call. It reads no device.
+    ///
+    /// # Agent
+    /// Reply: `FontMetricsResult`. `Ok { metrics }` is every measure in
+    /// font units; scale one to a draw size with
+    /// `value * size_pixels / units_per_em` to measure a string exactly as
+    /// `draw_text` lays it out. An unknown `font_id` replies `Err`.
+    #[handler::request]
+    fn on_font_metrics(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: FontMetricsRequest,
+    ) -> FontMetricsResult {
+        state.text.metrics(mail.font_id)
+    }
+
+    /// `DrawText` (ADR-0248 §10), on the owned `overlay_frame`: lay the
+    /// runs out, write any glyph not yet in the reserved atlas texture, and
+    /// push one textured batch at the painter position the mail arrived in.
+    ///
+    /// # Agent
+    /// Fire-and-forget; send it every frame the text should show. The
+    /// batch is one overlay draw in your own send order: a `draw_shapes`
+    /// you send after it lies over it. A run with an unknown `font_id` or a
+    /// size that is not finite and positive is dropped with a warning and
+    /// the other runs draw. The first draw of a font shows.
+    #[handler::tell]
+    fn on_draw_text(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawText) {
+        if state.warn_drop_if_unusable("draw_text") {
+            return;
+        }
+        let quads = state.text.lay_out(&mut state.textures, &mail);
+        if quads.is_empty() {
+            return;
+        }
+        state.overlay_frame.push(OverlayBatch::glyphs(mail.clip, mail.space, quads));
+    }
+
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
     #[handler::tell]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
@@ -1639,6 +1721,7 @@ mod tests {
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
+            text: TextState::new(),
             geometries: GeometryRegistry::new(),
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
@@ -1669,8 +1752,8 @@ mod tests {
     /// boot one. Every mail reaches the cap through the chassis and runs
     /// through production dispatch when the slot drains; replies go to a
     /// session on the loopback egress.
-    struct RenderFixture {
-        cap: PumpedDriver<RenderCapability>,
+    pub(super) struct RenderFixture {
+        pub(super) cap: PumpedDriver<RenderCapability>,
         egress: Receiver<EgressEvent>,
     }
 
@@ -1688,7 +1771,7 @@ mod tests {
     }
 
     impl RenderFixture {
-        fn boot(params: RenderParams) -> Self {
+        pub(super) fn boot(params: RenderParams) -> Self {
             let (registry, mailer, egress) = fresh_substrate_and_rx();
             let chassis = boot_bare_test_chassis(&registry, &mailer);
             let tuning = RenderTuningConfig {
@@ -1720,7 +1803,7 @@ mod tests {
             self.cap.send_and_settle(self.cap.chassis().actor_ref::<RenderCapability>(), mail, reply);
         }
 
-        fn send<K: Kind>(&mut self, mail: &K)
+        pub(super) fn send<K: Kind>(&mut self, mail: &K)
         where
             RenderCapability: HandlesKind<K>,
         {
@@ -1738,7 +1821,7 @@ mod tests {
         }
 
         /// [`Self::ask`], with the reply decoded.
-        fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
+        pub(super) fn request<K: Kind, R: Kind>(&mut self, mail: &K) -> R
         where
             RenderCapability: HandlesKind<K>,
         {
@@ -1759,7 +1842,7 @@ mod tests {
                 .collect()
         }
 
-        fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
+        pub(super) fn read<T>(&self, read: impl FnOnce(&RenderCapabilityState) -> T) -> T {
             self.cap.read_state(read).expect("the slot is live")
         }
     }

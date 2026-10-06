@@ -50,7 +50,7 @@ compares this with native capabilities.
 | Crate | Owns |
 |---|---|
 | `aether-substrate` | registry, rings, dispatch, scheduler, native/wasm actor hosts, settlement, chassis traits |
-| `aether-render`, `aether-text`, `aether-audio` | draw queues and the wgpu pipeline, font layout and the glyph atlas, the synth and instrument banks |
+| `aether-render`, `aether-audio` | draw queues, the wgpu pipeline, font layout and the glyph atlas; the synth and instrument banks |
 | `aether-fs`, `aether-clipboard`, `aether-window` | namespaced file I/O, text clipboard, multi-window lifecycle/control, and selector-aware window-event subscriptions |
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
 | `aether-process` | deny-by-default, allowlisted one-shot subprocess execution and captured typed replies (Accepted ADR-0157) |

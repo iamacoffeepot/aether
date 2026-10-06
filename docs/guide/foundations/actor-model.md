@@ -663,8 +663,8 @@ dispatch arm, one manifest record. Re-declaring the same kind as a local
 A set member's ctx is typed by the adopting actor: `WasmCtx<'_>` in a set reads
 as `WasmCtx<'_, Self>`, where `Self` is whichever actor adopts the set. A
 default body that reaches another actor therefore states that reach on the
-trait, as a supertrait — `pub trait WidgetDefaults: DependsOn<TextCapability>`
-for a set whose theme handler measures fonts through the text capability — and
+trait, as a supertrait — `pub trait SoundDefaults: DependsOn<AudioCapability>`
+for a set whose handlers play notes through the audio capability — and
 every adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
 supertraits as well. An override is a plain trait-method impl that no macro
 rewrites, so it spells the typed signature itself: `WasmCtx<'_, Self>`.
