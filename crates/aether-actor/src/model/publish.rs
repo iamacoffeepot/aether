@@ -9,7 +9,8 @@ use core::marker::PhantomData;
 use aether_data::{ActorMail, Kind, KindId, ReplyContract};
 
 use super::protocol::{CastTarget, Row, cast_sealed};
-use super::{Addressable, Protocol, SendableTo, Silent};
+use super::{Addressable, Protocol, SendableTo, Silent, Watchable};
+use crate::reference::ProtocolRef;
 
 /// The one-row protocol of a subscriber to the published kind `K`: it
 /// handles `K` silently (ADR-0231 §8).
@@ -31,6 +32,13 @@ impl<K: ActorMail> Protocol for Subscriber<K> {
 }
 
 impl<K: ActorMail> cast_sealed::Sealed for Subscriber<K> {}
+
+/// A subscriber can be watched as one (ADR-0079 §8): a publisher that keeps
+/// rows for a `ProtocolRef<Subscriber<K>>` watches it and drops them when it
+/// departs.
+impl<K: ActorMail> Watchable for Subscriber<K> {
+    type Ref = ProtocolRef<Self>;
+}
 
 /// A route answers `Subscriber<K>` when it publishes a row for `K` that is
 /// silent or unchecked. A replying row is refused, since the publisher would

@@ -237,7 +237,7 @@ fn a_replacement_that_changed_a_held_reply_kind_is_refused() {
     match swap {
         PublishResult::Err { error } => assert!(
             error.contains(
-                "replacement does not declare its carried request context \
+                "replacement does not declare its carried context \
                  aether.test_fixtures.republish_held_relay_context"
             ),
             "the refusal must name the carried held relay context: {error}",

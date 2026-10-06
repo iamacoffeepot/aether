@@ -62,8 +62,8 @@ pub use model::{
     Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver, DependsOn, Gap,
     HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Protocol,
     Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex, RowReply, RowSet, SendableTo,
-    Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
-    validate_namespace_segment,
+    Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, WatchTarget, Watchable, Watches,
+    declared_dependencies, root_mailbox, validate_namespace_segment,
 };
 pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError, TypedPath};
 #[doc(hidden)]
@@ -86,8 +86,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, HasParent, Held, InlineChild, InlineParent, Pending, Rebuildable,
-    Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorInitError, ActorTypeTag, Departed, ErasedWasmActor, HasParent, Held, InlineChild, InlineParent, Pending,
+    Rebuildable, Sends, SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`
@@ -164,6 +164,9 @@ pub mod __macro_internals {
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, CrossesActors, Kind, KindId, ReplyContract, Schema};
+    // ADR-0079 §8: the notice a guest's departure handlers share one row and
+    // one dispatch arm for, which no author names.
+    pub use aether_kinds::MonitorNotice;
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.
@@ -203,7 +206,10 @@ pub use aether_actor_derive::{
     actor, capability, export_asset, fallback, handler, handler_set, local, protocol, runtime,
 };
 pub use aether_data::{Blob, BlobReader, MAX_READ_BYTES};
-pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema};
+pub use aether_data::{Kind, KindId as DataKindId, MailboxId, RequestId, Schema, WatchId};
+/// The engine's empty watch context: `ctx.watch(reference, NoContext)` for a
+/// departure handler that takes no context parameter (ADR-0079 §8).
+pub use aether_kinds::NoContext;
 // ADR-0119: the `#[derive(Singleton)]` / `#[derive(Instanced)]` /
 // `#[derive(Embeddable)]` proc-macros are retired. Cardinality is the
 // `Addressable::Resolver`, and the `Singleton` / `Instanced` marker traits

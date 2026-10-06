@@ -930,6 +930,105 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         }
     })?;
 
+    // HOST_FN_OK: ADR-0079 §8 — a guest watches an actor it holds a typed
+    // reference to inside a handler or `wire`, synchronously: the SDK stores
+    // the watch's context under the id this call returns, so the registration
+    // and its id have to exist before that handler returns. Mail to an engine
+    // actor would start the watch at an unknown time after the handler that
+    // needs it, and no actor owns the lifecycle table to receive it.
+    //
+    // The guest passes the target's position, its own dispatch identity as
+    // `from`, and `tag`, the tag of the type it watched the target through. The host
+    // returns the watch's id: the standing one when that watcher, target, and
+    // watched type are already watched, with nothing else changed, and
+    // otherwise a new id from the mailbox's send-correlation sequence. A
+    // pair's first watch registers through `MonitorHandle::register`, the
+    // registration `NativeCtx::monitor` makes, so a target that had already
+    // closed is noticed by the same mail; a later watch of the pair through
+    // another type adds a row and registers nothing.
+    //
+    // `from` is resolved the way a send's is (`resolve_dispatch_identity`): a
+    // claim outside this cluster watches as the component itself, so a guest
+    // cannot watch in another actor's name. A watcher that is a staged
+    // inline-child alias has no route yet, and its watch waits for one
+    // (ADR-0247 rule 6); so does every watch a held candidate makes
+    // (ADR-0241 §7).
+    //
+    // The call never fails for a reference the SDK can hold. `target` must be
+    // a position that holds a route record, the read `ctx.sender()` mints
+    // through, or one of this instance's own aliases, staged or published.
+    // Any other position is one no SDK reference names, so it traps, as
+    // `resolve_path_p32` does for input the SDK never passes.
+    linker.func_wrap(
+        "aether",
+        "watch_p32",
+        |mut caller: Caller<'_, ComponentCtx>, target: u64, from: u64, tag: u64| -> wasmtime::Result<u64> {
+            let ctx = caller.data_mut();
+            let target = MailboxId(target);
+            let routed = ctx.binding.stamped_sender(target).is_some();
+            let nameable = routed || is_own_cluster_alias(ctx, target);
+            if !nameable {
+                return Err(wasmtime::Error::msg(format!(
+                    "watch: {target} holds no route record and is no alias of this component"
+                )));
+            }
+
+            let watcher = resolve_dispatch_identity(ctx, MailboxId(from));
+            Ok(ctx.watch(watcher, target, tag))
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0079 §8 — the release half of `watch_p32` above, with
+    // the same reason: the SDK discards the watch's stored context on this
+    // call's answer, inside the handler that asked, so the answer has to be
+    // synchronous.
+    //
+    // Ends the watch `watch` names and answers `1`, dropping its pair's
+    // registration with the pair's last watch. A number that names no watch
+    // of this mailbox, a request id among them, changes nothing and answers
+    // `0`, so the SDK leaves the shared context table alone. A held
+    // candidate's release of a watch it carried is recorded and applied when
+    // it commits (ADR-0241 §7).
+    linker.func_wrap("aether", "unwatch_p32", |mut caller: Caller<'_, ComponentCtx>, watch: u64| -> u32 {
+        let ended = caller.data_mut().unwatch(watch);
+        if !ended {
+            tracing::debug!(
+                target: "aether_substrate::component",
+                watch,
+                component = %caller.data().actor_name(),
+                "unwatch: no such watch; nothing released",
+            );
+        }
+        u32::from(ended)
+    })?;
+
+    // HOST_FN_OK: ADR-0079 §8 — a guest's departure-notice arm has to learn
+    // which of its watches the notice ends inside the dispatch that delivers
+    // it, before it takes that watch's context and calls the handler. The
+    // notice carries no id (it is the mail a native watcher handles), and the
+    // host's table is the only place that has watcher, target, and watched
+    // type together, so no mail can answer this.
+    //
+    // The arm calls it once per watched type the actor has a handler for,
+    // with the notice's sender as `target` and its own dispatch identity as
+    // `watcher`. It ends the watch `watcher` holds on `target` through the
+    // watched type `tag` names and returns its id, or `0` when no such watch stands: the
+    // watch was released, a later notice already ended it, or the claimed
+    // watcher is not this component or one of its aliases.
+    linker.func_wrap(
+        "aether",
+        "watch_ended_p32",
+        |mut caller: Caller<'_, ComponentCtx>, target: u64, watcher: u64, tag: u64| -> u64 {
+            let ctx = caller.data_mut();
+            let watcher = MailboxId(watcher);
+            let own = watcher == ctx.sender || is_own_cluster_alias(ctx, watcher);
+            if !own {
+                return 0;
+            }
+            ctx.end_watch(watcher, MailboxId(target), tag).unwrap_or(0)
+        },
+    )?;
+
     Ok(())
 }
 

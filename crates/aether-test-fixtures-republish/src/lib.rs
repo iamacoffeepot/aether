@@ -9,16 +9,28 @@
 //! `v1`'s gate has no `GateProbe` row, and several scenarios assert that
 //! absence, so `v1` keeps its own gate in its example. `ProbeGate` lives here
 //! only so a test can name the successor's type (issue 7143).
+//!
+//! The watch family (issue 7496) is [`WatchLedger`], [`WatchPeer`], and
+//! [`WatchDesk`] with its inline [`WatchClerk`]: guests that watch other
+//! actors with `ctx.watch` (ADR-0079 §8). `republish_watch_v1` and
+//! `republish_watch_v2` export them; `v2` swaps the peer for one that traps in
+//! `on_rehydrate`. `republish_watch_reshaped` names nothing in this crate, so
+//! that [`WatchNote`], the ledger's context kind, is not a kind its module
+//! declares.
 
 use std::mem;
 
 use aether_actor::{
-    ActorInitError, Erased, Held, OutboundReply, Pending, PriorState, ReplyHandle, Unchecked, WasmActor, WasmCtx,
-    WasmDropCtx, WasmInitCtx, WireCtx, actor,
+    ActorInitError, ActorPath, Departed, Erased, Held, NoContext, OutboundReply, Pending, PriorState, ProtocolRef,
+    ReplyHandle, Subname, Unchecked, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WatchId, WireCtx, actor,
 };
+use aether_data::LoadName;
 use aether_test_fixtures_kinds::{
     CarriedRequest, CarriedRequestResult, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult,
-    HeldRequest, HeldRequestResult, ReleaseCarried, WireCountQuery,
+    HeldRequest, HeldRequestResult, ReleaseCarried, SubstrateHarnessObserver, WIRE_REFUSAL, WatchAdmit,
+    WatchAdmitResult, WatchAuditor, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig,
+    WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease,
+    WatchThrough, WireCountQuery, WireOutcome,
 };
 
 /// The reply handles `ReplyHolder` has parked, with their tags, carried
@@ -192,5 +204,271 @@ impl WasmActor for ProbeGate {
     #[handler::request]
     fn on_wired(&mut self, _ctx: &mut WasmCtx<'_>, _query: WireCountQuery) -> CountReport {
         CountReport { count: self.wired }
+    }
+}
+
+/// The context [`WatchLedger`] and [`WatchClerk`] store with each watch that
+/// has something to note: the tag the watch was made with.
+#[aether_data::kind(name = "aether.test_fixtures.republish_watch_note", no_serde)]
+pub struct WatchNote {
+    tag: u32,
+}
+
+/// Watches the providers that admit themselves (issue 7496, ADR-0079 §8).
+///
+/// - A [`WatchAdmit`] casts its sender to the protocol the admit names and
+///   watches it: through [`WatchProvider`] with a [`WatchNote`] carrying the
+///   admit's tag, or through [`WatchAuditor`] with [`NoContext`]. The answer
+///   is the id `watch` returned.
+/// - A [`WatchHold`] casts its sender and keeps the reference unwatched; a
+///   [`WatchHeld`] watches it later.
+/// - A [`WatchRelease`] ends a watch.
+/// - With a `target` in its config, `wire` resolves the path and watches the
+///   provider there, then succeeds, refuses, or traps as the config says.
+///
+/// Each departure handler mails the harness observer a [`WatchDeparture`]
+/// and keeps it for a [`WatchLedgerQuery`].
+///
+/// It has no saved state and neither republish hook: what a republish
+/// carries of its watches is the host's and the SDK's doing alone.
+pub struct WatchLedger {
+    config: WatchLedgerConfig,
+    /// The provider the last [`WatchHold`] came from.
+    held: Option<ProtocolRef<WatchProvider>>,
+    /// The id each run of `wire` got.
+    wired: Vec<WatchId>,
+    handled: Vec<WatchDeparture>,
+}
+
+#[actor(root, depends(SubstrateHarnessObserver))]
+impl WasmActor for WatchLedger {
+    type Config = WatchLedgerConfig;
+    const NAMESPACE: &'static str = "test.republish.watch.ledger";
+
+    fn init(config: WatchLedgerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(WatchLedger { config, held: None, wired: Vec::new(), handled: Vec::new() })
+    }
+
+    /// Watch the config's target, then succeed, refuse, or trap as
+    /// configured. A guest reinstated after an aborted republish runs this
+    /// again, and its watch finds the one already standing.
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+        if let Some(target) = &self.config.target {
+            let provider = ctx.resolve(target).map_err(|error| ActorInitError::new(error.to_string()))?;
+            let watch = ctx.watch(provider, WatchNote { tag: self.config.tag });
+            self.wired.push(watch);
+        }
+
+        match self.config.outcome {
+            WireOutcome::Succeeds => Ok(()),
+            WireOutcome::Refuses => Err(ActorInitError::new(WIRE_REFUSAL)),
+            WireOutcome::Traps => panic!("the fixture was told to trap in wire"),
+        }
+    }
+
+    #[handler::request]
+    fn on_admit(&mut self, ctx: &mut WasmCtx<'_>, admit: WatchAdmit) -> WatchAdmitResult {
+        let Some(sender) = ctx.sender() else {
+            return not_watched("the admit has no sender");
+        };
+        let watch = match admit.through {
+            WatchThrough::Provider => {
+                ctx.cast::<WatchProvider>(sender).map(|provider| ctx.watch(provider, WatchNote { tag: admit.tag }))
+            }
+            WatchThrough::Auditor => ctx.cast::<WatchAuditor>(sender).map(|auditor| ctx.watch(auditor, NoContext)),
+        };
+
+        watch.map_or_else(
+            || not_watched("the sender does not cover the protocol the admit names"),
+            |watch| WatchAdmitResult::Ok { watch },
+        )
+    }
+
+    #[handler::tell]
+    fn on_hold(&mut self, ctx: &mut WasmCtx<'_>, _hold: WatchHold) {
+        self.held = ctx.sender().and_then(|sender| ctx.cast::<WatchProvider>(sender));
+    }
+
+    #[handler::request]
+    fn on_held(&mut self, ctx: &mut WasmCtx<'_>, held: WatchHeld) -> WatchAdmitResult {
+        let Some(provider) = self.held else {
+            return not_watched("no reference is held");
+        };
+
+        WatchAdmitResult::Ok { watch: ctx.watch(provider, WatchNote { tag: held.tag }) }
+    }
+
+    #[handler::tell]
+    fn on_release(&mut self, ctx: &mut WasmCtx<'_>, release: WatchRelease) {
+        ctx.unwatch(release.watch);
+    }
+
+    #[handler::request]
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: WatchLedgerQuery) -> WatchLedgerReport {
+        WatchLedgerReport { wired: self.wired.clone(), handled: self.handled.clone() }
+    }
+
+    #[handler::event]
+    fn on_provider_gone(&mut self, ctx: &mut WasmCtx<'_>, event: Departed<WatchProvider>, note: WatchNote) {
+        let departure = WatchDeparture {
+            through: WatchThrough::Provider,
+            tag: Some(note.tag),
+            watch: event.watch,
+            actor_is_sender: ctx.sender() == Some(event.actor.erase()),
+        };
+
+        ctx.send::<SubstrateHarnessObserver>(&departure);
+        self.handled.push(departure);
+    }
+
+    #[handler::event]
+    fn on_auditor_gone(&mut self, ctx: &mut WasmCtx<'_>, event: Departed<WatchAuditor>) {
+        let departure = WatchDeparture {
+            through: WatchThrough::Auditor,
+            tag: None,
+            watch: event.watch,
+            actor_is_sender: ctx.sender() == Some(event.actor.erase()),
+        };
+
+        ctx.send::<SubstrateHarnessObserver>(&departure);
+        self.handled.push(departure);
+    }
+}
+
+fn not_watched(reason: &str) -> WatchAdmitResult {
+    WatchAdmitResult::Err { error: reason.to_owned() }
+}
+
+/// A guest provider: it covers [`WatchProvider`], and a [`WatchPeerAdmit`]
+/// makes it admit itself to the [`WatchLedger`]. With
+/// `WatchPeerConfig::trap_on_unwire` set its `unwire` traps, so its close
+/// goes on past a faulting hook.
+///
+/// It carries the number of admits it has sent across a republish, so its
+/// successor is handed saved state and runs `on_rehydrate`.
+/// `republish_watch_v2` exports its own peer at this namespace, which traps
+/// there when its config says so.
+pub struct WatchPeer {
+    trap_on_unwire: bool,
+    admits: u32,
+}
+
+#[actor(root, depends(WatchLedger))]
+impl WasmActor for WatchPeer {
+    type Config = WatchPeerConfig;
+    const NAMESPACE: &'static str = "test.republish.watch.peer";
+
+    type State = CountReport;
+
+    fn init(config: WatchPeerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(WatchPeer { trap_on_unwire: config.trap_on_unwire, admits: 0 })
+    }
+
+    fn dehydrate(&self) -> CountReport {
+        CountReport { count: self.admits }
+    }
+
+    fn rehydrate(&mut self, CountReport { count }: CountReport) {
+        self.admits = count;
+    }
+
+    fn unwire(&mut self, _ctx: &mut WasmCtx<'_>) {
+        assert!(!self.trap_on_unwire, "the fixture was told to trap in unwire");
+    }
+
+    #[handler::tell]
+    fn on_admit(&mut self, ctx: &mut WasmCtx<'_>, admit: WatchPeerAdmit) {
+        ctx.send::<WatchLedger>(&WatchAdmit { tag: admit.tag, through: WatchThrough::Provider });
+        self.admits += 1;
+    }
+
+    #[handler::response]
+    fn on_admitted(&mut self, _ctx: &mut WasmCtx<'_>, _result: WatchAdmitResult) {}
+
+    #[handler::tell]
+    fn on_nudge(&mut self, _ctx: &mut WasmCtx<'_>, _nudge: WatchNudge) {}
+}
+
+/// The config a [`WatchDesk`] hands each [`WatchClerk`] it spawns: the desk
+/// the clerk watches, and the tag its watch's context carries. A config must
+/// have a default, and a path has none, so the default names no desk.
+#[aether_data::kind(name = "aether.test_fixtures.watch.clerk.config", default, no_serde)]
+pub struct WatchClerkConfig {
+    target: Option<ActorPath<WatchDesk>>,
+    tag: u32,
+}
+
+/// Spawns a [`WatchClerk`] as an inline child for each [`WatchClerkSpawn`],
+/// and is itself what a clerk watches: a clerk's target is another desk,
+/// named by its key.
+pub struct WatchDesk;
+
+#[actor(instanced, root, spawns(WatchClerk))]
+impl WasmActor for WatchDesk {
+    const NAMESPACE: &'static str = "test.republish.watch.desk";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(WatchDesk)
+    }
+
+    /// Spawn the clerk. A key that is no valid name or a refused spawn is a
+    /// misuse of the fixture, and traps.
+    #[handler::tell]
+    fn on_spawn(&mut self, ctx: &mut WasmCtx<'_>, spawn: WatchClerkSpawn) {
+        let WatchClerkSpawn { key, target, tag } = spawn;
+        let target = LoadName::new(&target).expect("the fixture is told a valid desk key");
+        let config = WatchClerkConfig { target: Some(ActorPath::<WatchDesk>::instance(&target)), tag };
+
+        ctx.spawn_inline::<WatchClerk>(Subname::Named(&key), &config).map(drop).expect("the clerk spawns");
+    }
+}
+
+/// A [`WatchDesk`]'s inline child. Its own `wire` resolves the desk its
+/// config names and watches it with a [`WatchNote`] carrying the config's
+/// tag, while the clerk's alias has no route yet. Its departure handler
+/// mails the harness observer a [`WatchDeparture`] and keeps it for a
+/// [`WatchLedgerQuery`].
+pub struct WatchClerk {
+    config: WatchClerkConfig,
+    wired: Vec<WatchId>,
+    handled: Vec<WatchDeparture>,
+}
+
+#[actor(instanced, child_of(WatchDesk), depends(SubstrateHarnessObserver))]
+impl WasmActor for WatchClerk {
+    type Config = WatchClerkConfig;
+    const NAMESPACE: &'static str = "test.republish.watch.clerk";
+
+    fn init(config: WatchClerkConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(WatchClerk { config, wired: Vec::new(), handled: Vec::new() })
+    }
+
+    /// Watch the config's desk. A clerk rebuilt by a republish after that
+    /// desk closed finds no live actor there and has nothing to watch.
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+        let live = self.config.target.as_ref().and_then(|target| ctx.resolve(target).ok());
+        if let Some(desk) = live {
+            let watch = ctx.watch(desk, WatchNote { tag: self.config.tag });
+            self.wired.push(watch);
+        }
+        Ok(())
+    }
+
+    #[handler::request]
+    fn on_query(&mut self, _ctx: &mut WasmCtx<'_>, _query: WatchLedgerQuery) -> WatchLedgerReport {
+        WatchLedgerReport { wired: self.wired.clone(), handled: self.handled.clone() }
+    }
+
+    #[handler::event]
+    fn on_desk_gone(&mut self, ctx: &mut WasmCtx<'_>, event: Departed<WatchDesk>, note: WatchNote) {
+        let departure = WatchDeparture {
+            through: WatchThrough::Provider,
+            tag: Some(note.tag),
+            watch: event.watch,
+            actor_is_sender: ctx.sender() == Some(event.actor.erase()),
+        };
+
+        ctx.send::<SubstrateHarnessObserver>(&departure);
+        self.handled.push(departure);
     }
 }

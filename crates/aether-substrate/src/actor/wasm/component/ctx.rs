@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::kind_manifest::Dependency;
 use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyMail, ReplyOrigin, ReplyTable};
+use crate::actor::wasm::watch_table::{Opened, RowOrigin, WatchPair, WatchTable};
 use crate::mail::attachments::{Attachments, EncodedMail, ResolveError, plain_payload, resolve_on_send};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
@@ -47,6 +49,15 @@ pub struct CorrelationCursor {
 /// live component. Neither `Clone` nor `Copy`: two tables holding the same
 /// handle would answer one request twice.
 pub struct PendingReplies(ReplyTable);
+
+/// A mailbox's watches (ADR-0079 §8): the registrations the host holds for
+/// its guest and the watch ids that name them. Taken from a guest leaving its
+/// slot with [`super::Component::take_watches`] and installed on the slot's
+/// next occupant with [`super::Component::resume_watches`], so a watch stands
+/// across a republish with no registration made or released. Opaque: it has
+/// no public constructor, accessor or codec, so it can only come from a live
+/// component. Neither `Clone` nor `Copy`: a registration has one owner.
+pub struct Watches(WatchTable);
 
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, its binding (which reaches the shared mail
@@ -89,6 +100,13 @@ pub struct ComponentCtx {
     /// a replacement starts empty, and the table drops with its instance,
     /// releasing whatever is still held.
     pub(crate) blob_table: BlobTable,
+    /// ADR-0079 §8: the watches this mailbox's guest holds on other actors,
+    /// which the `watch_p32` / `unwatch_p32` / `watch_ended_p32` host fns
+    /// read and write. One table per mailbox slot, like `reply_table`: the
+    /// component trampoline carries it to the slot's next occupant as
+    /// [`Watches`], and it drops with the instance that holds it, releasing
+    /// every registration with no guest code run.
+    watches: WatchTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
@@ -253,6 +271,14 @@ pub(super) struct RoutedSend {
     identity: MailboxId,
 }
 
+/// Draw the next id from a mailbox's send-correlation sequence: a request's
+/// correlation, or a watch's id (ADR-0079 §8).
+fn next_correlation(counter: &Cell<u64>) -> u64 {
+    let id = counter.get();
+    counter.set(id + 1);
+    id
+}
+
 impl ComponentCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
@@ -273,6 +299,7 @@ impl ComponentCtx {
             outbound,
             reply_table: ReplyTable::new(),
             blob_table: BlobTable::default(),
+            watches: WatchTable::default(),
             saved_state: None,
             save_state_error: None,
             init_failure: None,
@@ -337,10 +364,16 @@ impl ComponentCtx {
     /// held one (ADR-0243 §6), else on the flushing turn's, then its slot is
     /// freed and the requester's settlement hold released. Read through
     /// [`super::Component::flush_held_outbox`].
+    ///
+    /// The watches the candidate made and released take effect here too
+    /// (ADR-0079 §8): its rows become the mailbox's own, the releases it
+    /// recorded are applied, and each group it opened registers.
     pub(super) fn flush_held(&mut self, parent: Option<MailId>, root: Option<MailId>) {
         let Some(mut held) = self.held.take() else {
             return;
         };
+        self.watches.commit_candidate();
+        self.register_waiting_watches();
         for mail in held.drain() {
             match mail {
                 HeldMail::Send(mut send) => {
@@ -365,10 +398,15 @@ impl ComponentCtx {
     /// reserved reply slot back exactly, chain included, so the old guest
     /// answers its requester. Read through
     /// [`super::Component::discard_held_outbox`].
+    ///
+    /// The watches the candidate made are dropped and the releases it
+    /// recorded forgotten (ADR-0079 §8), so the table that moves back to the
+    /// old guest is the one it left.
     pub(super) fn discard_held(&mut self) {
         let Some(mut held) = self.held.take() else {
             return;
         };
+        self.watches.discard_candidate();
         for mail in held.drain() {
             if let HeldMail::Reply { handle, entry, chain, .. } = mail {
                 self.reply_table.restore(handle, entry, chain);
@@ -520,13 +558,103 @@ impl ComponentCtx {
         self.reply_table = replies.0;
     }
 
+    /// Move this guest's watches out for the slot's next occupant. Read
+    /// through [`super::Component::take_watches`].
+    pub(super) fn take_watches(&mut self) -> Watches {
+        Watches(mem::take(&mut self.watches))
+    }
+
+    /// Install the watches a guest that left this slot carried, over this
+    /// instance's still-empty table. Read through
+    /// [`super::Component::resume_watches`].
+    pub(super) fn resume_watches(&mut self, watches: Watches) {
+        self.watches = watches.0;
+    }
+
+    /// Whether `watcher` can be mailed: this guest's own mailbox, or an
+    /// inline-child alias of it the registry owner has published. A staged
+    /// alias has no route yet, so a notice mailed to it would be dropped.
+    fn watcher_addressable(&self, watcher: MailboxId) -> bool {
+        watcher == self.sender || self.registry.is_alias_to(watcher, self.sender)
+    }
+
+    /// Watch `target` for `watcher` through the watched type whose tag is
+    /// `tag` (ADR-0079 §8) and return the watch's id. A standing watch of that
+    /// triple answers its own id. A new one draws its id from the mailbox's
+    /// send-correlation sequence, so it is never reused and never equals a
+    /// request id (ADR-0139 §3), and joins its pair's group.
+    ///
+    /// A pair's first watch registers through [`MonitorHandle::register`],
+    /// which posts the notice itself when `target` had already closed. It
+    /// waits instead while the outbox is held, since a candidate changes
+    /// nothing before commit (ADR-0241 §7), and while `watcher` is an alias
+    /// with no published route; [`Self::register_waiting_watches`] registers
+    /// it once either ends.
+    ///
+    /// The caller is the `watch_p32` host fn, which has checked `watcher`
+    /// and `target`.
+    pub(crate) fn watch(&mut self, watcher: MailboxId, target: MailboxId, tag: u64) -> u64 {
+        let held = self.outbox_held();
+        let origin = if held {
+            RowOrigin::Candidate
+        } else {
+            RowOrigin::Standing
+        };
+        let registers = !held && self.watcher_addressable(watcher);
+
+        let Self { watches, binding, correlation_counter, .. } = self;
+        watches.watch(
+            WatchPair { watcher, target },
+            tag,
+            origin,
+            || next_correlation(correlation_counter),
+            || {
+                if registers {
+                    Opened::Registered(MonitorHandle::register(binding, watcher, target))
+                } else {
+                    Opened::Waiting
+                }
+            },
+        )
+    }
+
+    /// End the watch `watch`, answering whether one was there. A held
+    /// candidate's release of a watch it carried is recorded and applied on
+    /// commit. The caller is the `unwatch_p32` host fn.
+    pub(crate) fn unwatch(&mut self, watch: u64) -> bool {
+        if self.outbox_held() {
+            return self.watches.record_release(watch);
+        }
+        self.watches.release(watch)
+    }
+
+    /// End the watch the departure notice being dispatched is for: the one
+    /// `watcher` holds on `target` through the watched type whose tag is
+    /// `tag`. The caller is the
+    /// `watch_ended_p32` host fn, which has checked `watcher`.
+    pub(crate) fn end_watch(&mut self, watcher: MailboxId, target: MailboxId, tag: u64) -> Option<u64> {
+        self.watches.end(WatchPair { watcher, target }, tag)
+    }
+
+    /// Register each waiting group whose watcher is now addressable, so a
+    /// target that closed while it waited is noticed at once. Read through
+    /// [`super::Component::register_published_watches`], and called when a
+    /// held outbox is flushed.
+    pub(super) fn register_waiting_watches(&mut self) {
+        let held = self.outbox_held();
+        let Self { watches, binding, registry, sender, .. } = self;
+        watches.register_waiting(
+            held,
+            |watcher| watcher == *sender || registry.is_alias_to(watcher, *sender),
+            |pair| MonitorHandle::register(binding, pair.watcher, pair.target),
+        );
+    }
+
     /// Mint the next correlation id and bump the counter. Private —
     /// callers that want a correlation use `ComponentCtx::send`,
     /// which mints internally and tags the outgoing mail.
     fn mint_correlation(&self) -> u64 {
-        let id = self.correlation_counter.get();
-        self.correlation_counter.set(id + 1);
-        id
+        next_correlation(&self.correlation_counter)
     }
 
     /// Issue iamacoffeepot/aether#1465: hand out the next lineage id for

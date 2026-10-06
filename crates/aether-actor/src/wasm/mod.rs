@@ -58,8 +58,8 @@ mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, HasParent, Held, InlineChild, InlineParent, NO_INBOUND_SOURCE, Pending, ResolvePathError, Sends,
-    SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
+    ActorTypeTag, Departed, HasParent, Held, InlineChild, InlineParent, NO_INBOUND_SOURCE, Pending, ResolvePathError,
+    Sends, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 /// Error returned by either birth hook, [`Lifecycle::init`](crate::Lifecycle::init) or

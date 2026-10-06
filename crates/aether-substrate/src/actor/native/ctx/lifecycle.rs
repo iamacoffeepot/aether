@@ -75,7 +75,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `wire` monitors before its own route is `Live` has a notice held
     /// until its birth promotes.
     pub fn monitor(&self, target: impl Into<ErasedActorRef>) -> MonitorHandle {
-        MonitorHandle::register(self.binding, target.into().id())
+        MonitorHandle::register(self.binding, self.binding.self_mailbox(), target.into().id())
     }
 
     /// ADR-0080 §6: subscribe the calling actor to one `K` notice when the

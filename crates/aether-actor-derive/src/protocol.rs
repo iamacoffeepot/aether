@@ -240,6 +240,12 @@ fn emit(item: &ItemTrait, rows: &[ProtocolRow]) -> TokenStream2 {
         }
 
         impl ::aether_actor::__macro_internals::ProtocolCast for #ident {}
+
+        // ADR-0079 §8: an actor is watched as this protocol through a
+        // `ProtocolRef` to it.
+        impl ::aether_actor::Watchable for #ident {
+            type Ref = ::aether_actor::ProtocolRef<Self>;
+        }
     }
 }
 

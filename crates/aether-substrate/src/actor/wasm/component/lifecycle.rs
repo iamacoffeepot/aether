@@ -4,7 +4,7 @@ use wasmtime::Store;
 use super::instantiate::Placement;
 use super::{
     Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, SMALL_REGION_BYTES,
-    StateBundle,
+    StateBundle, Watches,
 };
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::wasm::host_fns::{GuestReply, guest_answer};
@@ -158,13 +158,50 @@ impl Component {
         self.store.data_mut().resume_replies(replies);
     }
 
+    /// Move out the guest's watches (ADR-0079 §8) when the guest leaves its
+    /// slot: the registrations the host holds for its mailbox and their ids.
+    /// The consumer is the component trampoline's republish, which takes
+    /// them from the kept guest beside [`Self::take_pending_replies`] and
+    /// hands them to the candidate through [`Self::resume_watches`], and
+    /// takes them back from a candidate that lost, after
+    /// [`Self::discard_held_outbox`] dropped what it added.
+    #[must_use]
+    pub fn take_watches(&mut self) -> Watches {
+        self.store.data_mut().take_watches()
+    }
+
+    /// Install the watches a guest that left this slot carried, so each one
+    /// still stands for this guest under the id its maker was given, with no
+    /// registration made or released. The consumer is the component
+    /// trampoline; call it before `on_rehydrate` and the first delivery,
+    /// while this instance's own table is still empty, or on a guest
+    /// reinstated after its replacement lost, whose table was moved out.
+    pub fn resume_watches(&mut self, watches: Watches) {
+        self.store.data_mut().resume_watches(watches);
+    }
+
+    /// Register each watch that waited for its watcher's address
+    /// (ADR-0079 §8, ADR-0247 rule 6): an inline child that watched from its
+    /// own `wire`, before the registry owner published its alias. A target
+    /// that closed meanwhile is noticed at once. A watch a held candidate
+    /// made keeps waiting for its commit. A no-op, after one check, for a
+    /// guest with nothing waiting.
+    ///
+    /// The consumer is the component trampoline, which calls it on each
+    /// guest its slot holds when an inline-alias batch completes, and on a
+    /// guest it reinstates.
+    pub fn register_published_watches(&mut self) {
+        self.store.data_mut().register_waiting_watches();
+    }
+
     /// Send every mail this candidate held (#7067) in the order it sent it,
     /// on the chain of the turn `ctx` is dispatching, and stop holding. A
     /// send is stamped with that turn's inbound as its parent and root, so
     /// the turn's chain settles only after the mail does; a detached send
     /// opens its own chain. A reply goes out on its requester's chain when
     /// its slot held one (ADR-0243 §6), after which its slot is freed and
-    /// the requester's hold released. A no-op for an outbox never held.
+    /// the requester's hold released. The watches it made and released take
+    /// effect (ADR-0079 §8). A no-op for an outbox never held.
     ///
     /// The consumer is a republish committing its candidate.
     pub fn flush_held_outbox<A, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, M>) {
@@ -174,10 +211,12 @@ impl Component {
     /// Drop every mail this candidate held (#7067): its sends never recorded
     /// `Sent` and go nowhere, and each reply slot it reserved is put back
     /// exactly, chain included, so the old guest answers its requester once
-    /// it takes the reply table back. A no-op for an outbox never held.
+    /// it takes the reply table back. The watches it made are dropped and the
+    /// releases it recorded forgotten (ADR-0079 §8). A no-op for an outbox
+    /// never held.
     ///
     /// The consumer is a republish aborting its candidate, before it moves
-    /// the reply table back to the old guest.
+    /// the reply table and the watches back to the old guest.
     pub fn discard_held_outbox(&mut self) {
         self.store.data_mut().discard_held();
     }

@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
 
 use aether_data::wire::{Encoder, LedgerEncoder};
-use aether_data::{Blob, Kind, KindId, MailboxId, RequestId, Source};
+use aether_data::{Blob, Kind, KindId, MailboxId, RequestId, Source, WatchId};
 
 use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
@@ -243,6 +243,16 @@ pub(crate) fn send_through_host(
 /// [`WasmCtx::spawn_inline_child`] path passes the same `self.mailbox`.
 pub type SpawnByTagFn = fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
 
+/// What [`Registry::take_watch_context`] found under a watch's id.
+pub(crate) enum TakenWatchContext<C> {
+    /// The context, stored as the kind asked for.
+    Stored(C),
+    /// Nothing was stored, or the stored bytes did not decode.
+    Missing,
+    /// A context stored as this other kind, now discarded.
+    OtherKind(KindId),
+}
+
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
 /// one as a `static __AETHER_INLINE` per component (mirroring the parent's
@@ -282,7 +292,8 @@ pub struct Registry {
     /// not by nested dispatch.
     queue: UnsafeCell<VecDeque<QueuedMail>>,
     /// SDK-owned request contexts keyed by host reply correlation id
-    /// (ADR-0139). Lives beside the inline registry because every wasm ctx and
+    /// (ADR-0139), and the context of each watch keyed by its id, which is
+    /// drawn from the same sequence (ADR-0079 §8). Lives beside the inline registry because every wasm ctx and
     /// mailbox already carries this macro-emitted per-component static. The
     /// table never evicts: it grows past its preallocated room and warns at
     /// each new high-water mark. A `RefCell`, so a reentrant borrow panics
@@ -359,9 +370,37 @@ impl Registry {
         if let Some(live) = high_water {
             tracing::warn!(
                 live,
-                "request context table grew past its preallocated room; a reply that never arrives keeps its context"
+                "context table grew past its preallocated room; a reply or a departure notice that never arrives \
+                 keeps its context"
             );
         }
+    }
+
+    /// Store the context of the watch `watch` (ADR-0079 §8) in the request
+    /// context table, under the watch's id, replacing the context a standing
+    /// watch already stored. A watch id is drawn from the request-id
+    /// sequence, so it never names a request's entry.
+    pub(crate) fn store_watch_context<C: Kind>(&self, watch: WatchId, context: C) {
+        self.insert_request_context(RequestId(watch.0), context);
+    }
+
+    /// Take the context stored for the watch `watch` as a `C`, for the
+    /// handler its departure notice runs. A context stored as another kind is
+    /// discarded, since the watch has ended and no other handler takes it.
+    pub(crate) fn take_watch_context<C: Kind>(&self, watch: WatchId) -> TakenWatchContext<C> {
+        let request = RequestId(watch.0);
+        let mut table = self.request_contexts.borrow_mut();
+        let mut held = self.held.borrow_mut();
+        if let Some(context) = table.take_with::<C>(request, &mut ClaimLedger::new(&mut held)) {
+            return TakenWatchContext::Stored(context);
+        }
+        table.discard(request).map_or(TakenWatchContext::Missing, TakenWatchContext::OtherKind)
+    }
+
+    /// Drop the context stored for the watch `watch`, undecoded, because the
+    /// watch was released before its target departed.
+    pub(crate) fn discard_watch_context(&self, watch: WatchId) {
+        self.request_contexts.borrow_mut().discard(RequestId(watch.0));
     }
 
     /// Remove and decode the typed request context stored under `request`,

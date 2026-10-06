@@ -12,6 +12,7 @@
 //! 60 bits). `Display` renders the tagged string form, falling back
 //! to hex for reserved-tag values (e.g. the zero id).
 
+use alloc::vec::Vec;
 use core::fmt;
 
 use bytemuck::{Pod, Zeroable};
@@ -21,6 +22,7 @@ use crate::hash::{
     TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, mailbox_id_from_name_pair, thread_id_from_name,
 };
 use crate::tagged_id::{self, Tag};
+use crate::wire::{self, WireDecode, WireEncode};
 
 /// Shared `Display` body — render tagged-string form when the tag
 /// bits are valid, fall back to hex for reserved sentinels.
@@ -141,6 +143,33 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
+
+/// A watch a component holds on another actor: the id `WasmCtx::watch`
+/// returns, the departure event carries, and `WasmCtx::unwatch` takes
+/// (ADR-0079 §8).
+///
+/// Drawn from the watcher's own [`RequestId`] sequence (ADR-0139 §3), so
+/// within one mailbox it is unique, never reused, and never equal to a
+/// request id. It names a row in that mailbox's own watch table and is no
+/// door to another actor, so it is a plain number: it may sit in saved state
+/// and still names the watch after a republish.
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WatchId(pub u64);
+
+// Wire-identical to its `u64`, as the typed ids are (`wire::leaf`).
+impl WireEncode for WatchId {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
+        self.0.encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for WatchId {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, wire::Error> {
+        u64::decode(cursor).map(Self)
+    }
+}
 
 /// Routing token for any mailbox — component or substrate-owned sink.
 /// Carries the ADR-0029 deterministic name hash with ADR-0064 tag

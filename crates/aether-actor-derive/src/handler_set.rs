@@ -137,7 +137,7 @@ use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_context_by_value, attr_is_fallback, attr_is_handler,
     check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor, extract_handler_kind_type,
     extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, silent_call,
+    reject_departed_handler, reject_duplicate_handler_kinds, silent_call,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
@@ -351,7 +351,15 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // parameter reaches `check_intent_signature` below.
         let (class, intent) = parse_handler_class(&f.attrs[idx], &args)?;
         let kind_ty = match this_transport {
-            SetTransport::Wasm => extract_handler_kind_type(&f.sig, intent.is_some())?,
+            SetTransport::Wasm => {
+                let kind_ty = extract_handler_kind_type(&f.sig, intent.is_some())?;
+                reject_departed_handler(
+                    &kind_ty,
+                    "write the handler in the component's own `#[actor]` block, which declares the watch; a \
+                     handler set cannot",
+                )?;
+                kind_ty
+            }
             SetTransport::Native => {
                 let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, this_split, intent.is_some())?;
                 if is_slice {

@@ -30,7 +30,10 @@ pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
-pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
+pub(crate) use self::contract::WatchedRef;
+pub use self::contract::{
+    Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared, WatchTarget, Watchable, Watches,
+};
 pub use self::declared::{
     AllHandle, Declared, DependencyLink, DependencyList, Gap, Here, ListIndex, RowIndex, There, declared_dependencies,
 };

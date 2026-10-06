@@ -20,7 +20,7 @@ use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 use crate::reply_markers::{
     DeclaredLists, ReplyMarkerSite, RowSpec, RowsList, contract_element, contract_element_ty, contract_row_impl,
     contract_rows_expr, contracts_impl, declared_impl, native_reply_contract, owned_reason, position, refusal_answer,
-    reply_marker_impl, rows_list, static_reason,
+    reply_marker_impl, rows_list, static_reason, watchable_actor_impl,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1269,6 +1269,7 @@ fn emit_native_identity_markers(
     } else {
         quote! { ::aether_actor::One }
     };
+    let watchable = watchable_actor_impl(&quote! { #impl_generics }, &quote! { #self_ty }, &quote! { #where_clause });
     // The `NAMESPACE` const restated in the `Addressable` body — built here so
     // both call sites pass just the expr.
     let actor_impl = quote! {
@@ -1276,6 +1277,7 @@ fn emit_native_identity_markers(
             const NAMESPACE: &'static str = #namespace_expr;
             type Resolver = #resolver_ty;
         }
+        #watchable
     };
     let lineage_markers = emit_native_lineage_markers(self_ty, generics, opts);
 

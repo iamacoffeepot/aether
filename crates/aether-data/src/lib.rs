@@ -68,7 +68,8 @@ pub use hash::{
     fold_lineage, storage_kind_id_from_name, thread_id_from_name, validate_scope_path,
 };
 pub use ids::{
-    ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id, type_name_for_type_id,
+    ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, WatchId, tag_for_type_id,
+    type_name_for_type_id,
 };
 pub use mail::{MailId, Source, SourceAddr};
 #[cfg(not(target_arch = "wasm32"))]
@@ -419,7 +420,7 @@ mod schema_impls {
 
     use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
     use crate::schema_docs::{DocCell, DocNode};
-    use crate::{CrossesActors, CrossesWire, DagId, KindId, MailboxId, Schema, ThreadId, TransformId};
+    use crate::{CrossesActors, CrossesWire, DagId, KindId, MailboxId, Schema, ThreadId, TransformId, WatchId};
     use alloc::collections::BTreeMap;
 
     /// Both reach markers for a leaf of wire reach (ADR-0242).
@@ -596,6 +597,17 @@ mod schema_impls {
     }
 
     crosses_wire!(ThreadId);
+
+    // A watch id is a plain number (ADR-0079 §8): it names a row in its
+    // holder's own table and reaches no other actor, so it has a `u64`'s
+    // schema and reach.
+    impl Schema for WatchId {
+        const SCHEMA: SchemaType = SchemaType::Scalar(Primitive::U64);
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    crosses_wire!(WatchId);
 
     // Issue #232: `BTreeMap<K, V>` lands as `SchemaType::Map`. The
     // `Ord` bound is what proto3-style stringify-and-canonicalize

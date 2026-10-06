@@ -5,10 +5,11 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, allow_abi_receiver, allow_context_by_value,
-    attr_is_fallback, attr_is_handler, check_intent_signature, classify_handler_reply, ctx_names_actor,
-    extract_handler_kind_type, fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, require_wire_result, silent_call,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, WatchHandlerFn, allow_abi_receiver,
+    allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature, check_watch_signature,
+    classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type, fill_ctx_actor,
+    handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
+    reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result, silent_call,
     validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
@@ -16,8 +17,9 @@ use crate::manifest::{
 };
 use crate::opts::{ActorCardinality, ActorOpts};
 use crate::reply_markers::{
-    DeclaredLists, ReplyMarkerSite, RowSpec, contract_element, contract_row_impl, contract_rows_expr, contracts_impl,
-    declared_impl, position, refusal_answer, reply_marker_impl, rows_list,
+    DeclaredLists, ReplyMarkerSite, RowSpec, conjoined_cfg_predicate, contract_element, contract_row_impl,
+    contract_rows_expr, contracts_impl, declared_impl, position, refusal_answer, reply_marker_impl, rows_list,
+    watchable_actor_impl,
 };
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
@@ -47,6 +49,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
     let mut handlers: Vec<HandlerFn> = Vec::new();
+    // ADR-0079 §8: the departure handlers, which share one row, and the slot
+    // in `handlers` that row takes: where the first of them was declared.
+    let mut watch_handlers: Vec<WatchHandlerFn> = Vec::new();
+    let mut watch_slot: Option<usize> = None;
     let mut fallback: Option<FallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     // Issue 525 Phase 1B: pass-through trait consts (today just
@@ -129,6 +135,24 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     let kind_ty = extract_handler_kind_type(&f.sig, intent.is_some())?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     let reply = classify_handler_reply(&f.sig.output);
+                    // ADR-0079 §8: a handler over `Departed<W>` is a
+                    // departure handler, judged by its own signature rules
+                    // and kept apart from the mail handlers.
+                    if let Some(watched_ty) = departed_watched_type(&kind_ty).cloned() {
+                        let context_ty = check_watch_signature(&f.attrs[idx], intent, &reply, &f.sig)?;
+                        let cfgs = handler_cfgs(&f.attrs);
+                        f.attrs.remove(idx);
+                        // The arm hands the taken context over by value, as a
+                        // response arm does.
+                        if context_ty.is_some() {
+                            f.attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
+                        }
+                        fill_ctx_actor(&mut f.sig);
+                        allow_abi_receiver(&mut f);
+                        watch_slot.get_or_insert(handlers.len());
+                        watch_handlers.push(WatchHandlerFn { method: f, watched_ty, context_ty, cfgs });
+                        continue;
+                    }
                     let response_context =
                         intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.flatten();
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
@@ -203,6 +227,22 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
              (or, with `type Config = T`, `fn init(config: T, ctx: &mut WasmInitCtx<'_>) -> …`)",
         )
     })?;
+
+    // ADR-0079 §8: the departure handlers become one mail handler for the
+    // engine's notice, at the first one's slot, so every artifact a handler
+    // gets (its `HandlesKind`, contract row, manifest record, retention, and
+    // dispatch arm) is emitted once for the group by the code below.
+    reject_duplicate_watched_types(&watch_handlers)?;
+    if let Some(slot) = watch_slot {
+        if let Some(direct) = handlers.iter().find(|h| type_names_monitor_notice(&h.kind_ty)) {
+            return Err(syn::Error::new_spanned(
+                &direct.kind_ty,
+                "this component takes its departures as `Departed<W>`, so it cannot also take `MonitorNotice`: the \
+                 notice is the mail its `Departed<W>` handlers share one row for (ADR-0079 §8)",
+            ));
+        }
+        handlers.insert(slot, departure_handler(&watch_handlers)?);
+    }
 
     if handlers.is_empty() && fallback.is_none() {
         return Err(syn::Error::new_spanned(
@@ -338,6 +378,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref(), opts.handler_set.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
+    let watch_methods_tokens = watch_handlers.iter().map(|h| &h.method);
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
     let helper_methods_tokens = helpers.iter();
 
@@ -369,7 +410,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! { #set!(#self_ty, #base); }
     });
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
-    let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
+    // ADR-0079 §8: each departure handler's context kind is retained beside
+    // the handler kinds, so the host can judge a carried watch context at a
+    // republish (ADR-0139 §4).
+    let watch_context_kinds: Vec<(Type, Vec<syn::Attribute>)> =
+        watch_handlers.iter().map(|h| (watch_context_ty(h), h.cfgs.clone())).collect();
+    let kind_retention_statics =
+        build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty, &watch_context_kinds);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
     // on the `Addressable` super-trait, not `Component` / `WasmActor`. Route
@@ -396,6 +443,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     } else {
         quote! { ::aether_actor::One }
     };
+    let watchable = watchable_actor_impl(&quote! { #impl_generics }, &quote! { #self_ty }, &quote! { #where_clause });
     let actor_impl = if consts.is_empty() {
         quote! {}
     } else {
@@ -404,8 +452,22 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 #(#const_tokens)*
                 type Resolver = #resolver_ty;
             }
+            #watchable
         }
     };
+    // ADR-0079 §8: one `Watches<W>` per departure handler, naming the context
+    // kind its signature fixes, which `ctx.watch` is bounded by.
+    let watches_impls = watch_handlers.iter().map(|h| {
+        let watched_ty = &h.watched_ty;
+        let context_ty = watch_context_ty(h);
+        let cfgs = &h.cfgs;
+        quote! {
+            #(#cfgs)*
+            impl #impl_generics ::aether_actor::Watches<#watched_ty> for #self_ty #where_clause {
+                type Context = #context_ty;
+            }
+        }
+    });
     // ADR-0241 §5: a guest declared `root` is placed at the root under its
     // published name, as a native root is, so it carries the same permission.
     let root_impl = opts.root.then(|| {
@@ -752,6 +814,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #(#contract_rows)*
         #set_markers
         #contracts_list
+        #(#watches_impls)*
 
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
         // For an un-split component `State = Self`, so `init` returns `Self` and
@@ -815,6 +878,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #lineage_manifest_consts
 
             #(#handler_methods_tokens)*
+            #(#watch_methods_tokens)*
             #fallback_method_tokens
             #(#helper_methods_tokens)*
             #(#boot_hooks)*
@@ -904,6 +968,94 @@ fn erase_ctx_unless_named(sig: &syn::Signature) -> TokenStream2 {
     } else {
         quote!(__aether_ctx.erase())
     }
+}
+
+/// The context kind a departure handler's watches store (ADR-0079 §8): its
+/// fourth parameter's type, or the engine's `NoContext` when it has none.
+fn watch_context_ty(handler: &WatchHandlerFn) -> Type {
+    handler.context_ty.clone().unwrap_or_else(|| syn::parse_quote!(::aether_actor::NoContext))
+}
+
+/// Whether a handler's kind spells the engine's departure notice, any path
+/// whose last segment is `MonitorNotice`.
+fn type_names_monitor_notice(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "MonitorNotice"))
+}
+
+/// The one mail handler an actor's departure handlers share (ADR-0079 §8): a
+/// silent single handler for the engine's `MonitorNotice`, synthesized so the
+/// group gets one `HandlesKind`, one contract row, one manifest record, and
+/// one dispatch arm from the code that emits them for every handler.
+///
+/// Its body asks the host, once per departure handler in declaration order,
+/// for the watch through that handler's watched type the notice ends. Each
+/// answer takes the watch's stored context as the handler's kind and calls
+/// the handler, so one notice runs the handler of each type its sender was
+/// watched through once. A handler that spells `Erased` is handed the erased
+/// ctx, as a lifecycle hook is.
+///
+/// It is gated by the disjunction of its handlers' `#[cfg]`s, so it exists in
+/// exactly the configurations in which one of them does.
+fn departure_handler(watch_handlers: &[WatchHandlerFn]) -> syn::Result<HandlerFn> {
+    let calls = watch_handlers.iter().map(|h| {
+        let method = &h.method.sig.ident;
+        let method_name = method.to_string();
+        let watched_ty = &h.watched_ty;
+        let context_ty = watch_context_ty(h);
+        let ctx = erase_ctx_unless_named(&h.method.sig);
+        let cfgs = &h.cfgs;
+        let (context_pattern, context_arg) = if h.context_ty.is_some() {
+            (quote! { __aether_context }, quote! { , __aether_context })
+        } else {
+            (quote! { _ }, quote! {})
+        };
+        quote! {
+            #(#cfgs)*
+            {
+                let __aether_ended = __aether_ctx.__ended_watch::<#watched_ty>().and_then(|__aether_event| {
+                    __aether_ctx
+                        .__take_watch_context::<#context_ty>(__aether_event.watch, #method_name)
+                        .map(|__aether_context| (__aether_event, __aether_context))
+                });
+                if let ::core::option::Option::Some((__aether_event, #context_pattern)) = __aether_ended {
+                    self.#method(#ctx, __aether_event #context_arg);
+                }
+            }
+        }
+    });
+    let method: syn::ImplItemFn = syn::parse_quote! {
+        #[doc(hidden)]
+        fn __aether_on_departed(
+            &mut self,
+            __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
+            _notice: ::aether_actor::__macro_internals::MonitorNotice,
+        ) {
+            #(#calls)*
+        }
+    };
+
+    Ok(HandlerFn {
+        method,
+        kind_ty: syn::parse_quote!(::aether_actor::__macro_internals::MonitorNotice),
+        agent_doc: None,
+        cfgs: departure_cfgs(watch_handlers)?,
+        reply: HandlerReply::None,
+        class: HandlerClass::Single,
+        unchecked_reason: None,
+        response_context: None,
+    })
+}
+
+/// The `#[cfg]` of the shared departure handler: nothing when any departure
+/// handler is ungated, and otherwise the disjunction of each handler's
+/// conjoined predicates.
+fn departure_cfgs(watch_handlers: &[WatchHandlerFn]) -> syn::Result<Vec<syn::Attribute>> {
+    if watch_handlers.iter().any(|h| h.cfgs.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let predicates =
+        watch_handlers.iter().map(|h| conjoined_cfg_predicate(&h.cfgs)).collect::<syn::Result<Vec<_>>>()?;
+    Ok(vec![syn::parse_quote!(#[cfg(any(#(#predicates),*))])])
 }
 
 /// Issue 552 stage 1: expansion for `#[actor] impl NativeActor for X`

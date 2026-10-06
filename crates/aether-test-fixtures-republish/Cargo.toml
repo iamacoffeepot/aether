@@ -37,6 +37,14 @@ publish = false
 #   `test.republish.keep.keeper`, which moves a held reply and its count out of
 #   itself in `on_dehydrate`, and a root `test.republish.keep.refuser` that
 #   saves a bundle. v2's refuser traps in `on_rehydrate`.
+# - `republish_watch_v{1,2}` (issue 7496): the root `test.republish.watch.ledger`,
+#   which watches the providers that admit themselves and has no saved state,
+#   the root `test.republish.watch.peer`, a guest provider, and the instanced
+#   `test.republish.watch.desk` with its inline clerk, which watches from its
+#   own `wire`. v2's peer traps in `on_rehydrate` when its config says so.
+# - `republish_watch_reshaped` (issue 7496): the watch family's namespaces and
+#   rows with a field added to the ledger's watch context kind, republishing
+#   v1. It names no type of the lib, so the v1 context kind is not linked in.
 [lib]
 crate-type = ["rlib"]
 
@@ -126,6 +134,18 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_keep_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_watch_v1"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_watch_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "republish_watch_reshaped"
 crate-type = ["cdylib"]
 
 [lints]

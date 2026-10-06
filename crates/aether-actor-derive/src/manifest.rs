@@ -449,6 +449,7 @@ pub fn build_kinds_section_retention_statics(
     self_ty: &Type,
     handlers: &[HandlerFn],
     config_kind_ty: Option<&Type>,
+    watch_context_kinds: &[(Type, Vec<syn::Attribute>)],
 ) -> TokenStream2 {
     let self_ty_hint = type_hint(self_ty);
 
@@ -475,6 +476,15 @@ pub fn build_kinds_section_retention_statics(
         .enumerate()
         .map(|(idx, h)| (h.kind_ty.clone(), idx.to_string(), h.cfgs.clone()))
         .chain(config_kind_ty.map(|cfg| (cfg.clone(), "CONFIG".to_string(), Vec::new())))
+        // ADR-0079 §8: a departure handler's context kind is carried across a
+        // republish in the request-context table, and the host judges a
+        // carried context only by a kind the module declares (ADR-0139 §4).
+        .chain(
+            watch_context_kinds
+                .iter()
+                .enumerate()
+                .map(|(idx, (kind, cfgs))| (kind.clone(), format!("WATCH_CONTEXT_{idx}"), cfgs.clone())),
+        )
         .collect();
 
     let statics = retained_kinds.iter().map(|(k, idx, cfgs)| {

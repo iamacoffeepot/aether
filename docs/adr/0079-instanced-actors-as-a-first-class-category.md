@@ -10,6 +10,7 @@
 - **Amended:** 2026-10-05 — Section 6: every exit of an actor runs one close sequence ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 5, issue 7468). Substrate shutdown signals, wakes, and awaits every pooled actor, an idle one included, and a birth cancelled after `wire` or a boot rolled back after its wire pass closes the actor too, so `unwire` runs on every exit the engine takes. The sequence varies only by two facts the engine already records.
 - **Amended:** 2026-10-05 — Section 6: `wire` returns a result, and a failure fails the birth ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 3, issue 7463). The hook returns its transport's birth error, the same type `init` returns, and whoever asked for the actor is told. The actor that failed is closed by the one close, so its `unwire` runs; a guest that trapped is released first and runs no more code.
 - **Amended:** 2026-10-06 — Section 8: `monitor` never fails and `MonitorError` is removed ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md), issue 7488). It takes a proven reference ([ADR-0230](0230-proven-actor-references.md)) and returns the handle. A target that has already closed is noticed like one that closes later: the registration posts its `MonitorNotice` to the watcher, as mail handled after the monitoring handler returns. Registration reads the tombstone set only, so a root and an inline-child alias are watched like any instanced actor, and a registration that races a close is answered by exactly one notice.
+- **Amended:** 2026-10-06 — Section 8: a wasm component watches an actor it holds a typed reference to (issue 7496). `ctx.watch(reference, context)` makes the same registration `monitor` makes, owned by the host for the component's mailbox, and stores a context in the SDK under the returned `WatchId`. A watch is unique per watcher, target, and watched type; its event, `Departed<W>`, is typed by what was watched; it moves with the mailbox across a republish; and an inline child's watch waits for its alias to be published.
 - **Amended:** 2026-09-29 — Section 8's vacate amendment retires: `DropComponent`, its one production caller, becomes a close request under [ADR-0241](0241-code-is-published-not-loaded.md) §8, and a wasm component drop now closes and tombstones like any other actor (issue 7067).
 
 ## Context
@@ -238,6 +239,32 @@ On actor close: tombstone X, then drain `monitors_of[X]`, send `MonitorNotice` t
 Default unidirectional, like Erlang `monitor` (not `link`). Compose two unidirectionals if bidirectional is wanted. No `CloseReason` field on `MonitorNotice` for v1 (purely additive if needed). No monitoring of not-yet-existent targets — a target is named by a proven reference, which exists only for an actor that reached `Live`. No explicit `Demonitor` mail kind — registration via direct registry call, deregistration via `MonitorHandle::Drop`.
 
 Replace semantics mesh cleanly with this: replace is "actor continues with new code/state," not "actor dies." `MonitorNotice` does *not* fire on replace. The mailbox stays Live throughout the splice; `monitors_of` entries are unaffected.
+
+**A wasm component watches through the same registration (amended 2026-10-06, issue 7496).** A guest has no `MonitorHandle`: a handle lives in one instance's memory and could not cross a republish. It has one verb pair instead, and its watch is two things, as a pending request is a correlation and a context ([ADR-0139](0139-guest-reply-correlation-and-request-contexts.md)):
+
+```rust
+impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+    pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
+    where
+        A: Watches<T::Watched>;
+
+    pub fn unwatch(&mut self, watch: WatchId);
+}
+
+pub struct Departed<W: Watchable> { pub actor: W::Ref, pub watch: WatchId }   // what the handler takes
+
+#[handler::event]
+fn on_provider_gone(&mut self, ctx: &mut WasmCtx<'_>, event: Departed<Provider>, note: ProviderNote) { .. }
+```
+
+- **A registration the host owns for the mailbox.** The host keeps a table on the component's instance. A group in it is one watcher and target and holds the one `MonitorHandle` for that pair, registered through the function `monitor` registers through, so a target that had already closed is noticed by the same mail. The table drops with its instance, so a component that closes, fails or traps in `wire`, or is dropped as a republish candidate has every registration released with none of its own code run.
+- **A context the SDK stores.** `watch` stores `context` under the returned `WatchId`, and the handler is handed it, so a handler never looks the departed actor up in a table keyed by a reference. A context is passed on every watch: a handler with nothing to note leaves its context parameter out, and its watches pass the engine's `NoContext`.
+- **Typed by what was watched.** `watch` takes an `ActorRef<R>` or a `ProtocolRef<P>`, never an `ErasedActorRef`, which is cast to a protocol first. One `#[handler::event]` over `Departed<W>` serves each watched type `W`, and its signature fixes the one context kind every watch of that type stores. `#[actor]` emits `Watches<W>` from the handler, so a watch through a type no handler names, or with a context of another kind, does not compile. `event.actor` is the typed reference at the departed actor's position; like every reference it proves the actor reached `Live` as that type, never that it is live now.
+- **Unique per watcher, target, and watched type.** A second `watch` of a standing triple makes no registration, returns the same `WatchId`, and replaces the stored context. So the id is a stable, saveable name for a target, and a reinstated guest's second `wire` leaves one watch. One actor watched through two types is two watches under one registration: one departure posts one notice, and the component's notice arm ends each watched type's watch and runs its handler once. `unwatch` then `watch` is a new id, since ids are never reused.
+- **It moves with the mailbox across a republish.** A registration is keyed by the watcher's mailbox, which a republish does not change, so nothing is registered or released: the table moves from the kept guest to its candidate, and back on an abort. The contexts ride the saved bundle's request-context table whether or not the component overrides `on_dehydrate`. A candidate changes nothing before commit: a watch it makes or releases takes effect when it commits and is forgotten when it is discarded. A notice for a target that closes while the component is prepared waits at the inbox gate with the rest of its mail and is handled by the guest that wins.
+- **An inline child's watch waits for its alias.** The watcher is the calling actor's own address: the trampoline's mailbox, or an inline child's alias, to which the notice is then delivered. A child that watches from its own `wire` has an alias with no route yet, so its group is kept unregistered and registers when the alias is published (ADR-0247 rule 6); a target that closed meanwhile is noticed at once.
+
+A native actor keeps `monitor`, its `MonitorHandle`, and its `MonitorNotice` handler unchanged. The registry is unchanged too: a guest's table holds at most one registration per watcher and target.
 
 **Vacate (amended 2026-07-20).** Close is not the only way a watched mailbox's occupant departs. A wasm component drop is a wasm unload behind a trampoline that stays alive — the mailbox remains addressable and refillable, so the close fan-out never runs, yet every piece of sibling-cap state keyed by that `MailboxId` (input subscriptions, lifecycle stage entries, http routes) is stale the moment the occupant is gone. The primitive gains a second firing event:
 

@@ -374,3 +374,18 @@ pub struct DeclaredLists<'a> {
     pub spawns: &'a [syn::TypePath],
     pub parents: &'a [syn::TypePath],
 }
+
+/// Emit an actor type's `Watchable` impl (ADR-0079 §8), beside its
+/// `Addressable` impl on both transports: an actor is watched through an
+/// `ActorRef` to it.
+pub fn watchable_actor_impl(
+    impl_generics: &TokenStream2,
+    self_ty: &TokenStream2,
+    where_clause: &TokenStream2,
+) -> TokenStream2 {
+    quote! {
+        impl #impl_generics ::aether_actor::Watchable for #self_ty #where_clause {
+            type Ref = ::aether_actor::ActorRef<Self>;
+        }
+    }
+}

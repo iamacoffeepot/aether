@@ -19,7 +19,7 @@ pub mod wire_corpus;
 
 use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text, WatchId};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -875,3 +875,152 @@ pub struct PathEchoed {
 
 /// Issue 7501: the subname a `PathHolder` spawns its inline child under.
 pub const PATH_HOLDER_CHILD: &str = "child";
+
+/// Issue 7496: the protocol the republish watch family's ledger watches a
+/// provider through, one silent row over [`WatchNudge`]. Any actor that tells
+/// on `WatchNudge` covers it, a native fixture or a guest.
+#[aether_actor::protocol]
+pub trait WatchProvider {
+    fn nudge(mail: WatchNudge);
+}
+
+/// Issue 7496: a second protocol a provider may also answer, one silent row
+/// over [`WatchAudit`]. Its rows differ from [`WatchProvider`]'s, so it is a
+/// second watched type on the same actor.
+#[aether_actor::protocol]
+pub trait WatchAuditor {
+    fn audit(mail: WatchAudit);
+}
+
+/// Issue 7496: [`WatchProvider`]'s row. Nothing sends it; a handler for it is
+/// what makes an actor a provider.
+#[aether_data::kind(name = "aether.test_fixtures.watch.nudge", default)]
+pub struct WatchNudge;
+
+/// Issue 7496: [`WatchAuditor`]'s row. Nothing sends it.
+#[aether_data::kind(name = "aether.test_fixtures.watch.audit", default)]
+pub struct WatchAudit;
+
+/// Issue 7496: which protocol the watch ledger watched a provider through,
+/// and so which of its two departure handlers ran.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WatchThrough {
+    /// [`WatchProvider`], whose handler takes a context carrying a tag.
+    #[default]
+    Provider,
+    /// [`WatchAuditor`], whose handler takes no context.
+    Auditor,
+}
+
+/// Issue 7496: the config of the watch ledger. With `target` set, its `wire`
+/// resolves the path, watches the provider there with a context carrying
+/// `tag`, and then does what `outcome` says.
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger.config", default, no_serde)]
+pub struct WatchLedgerConfig {
+    pub target: Option<ProtocolPath<WatchProvider>>,
+    pub tag: u32,
+    pub outcome: WireOutcome,
+}
+
+/// Issue 7496: a provider admits itself to the watch ledger. The ledger casts
+/// the sender to the protocol `through` names, watches it, with a context
+/// carrying `tag` for [`WatchThrough::Provider`], and answers
+/// [`WatchAdmitResult`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.admit", copy)]
+pub struct WatchAdmit {
+    pub tag: u32,
+    pub through: WatchThrough,
+}
+
+/// Issue 7496: the watch ledger's answer to a [`WatchAdmit`] or a
+/// [`WatchHeld`]: the id its `watch` returned, or why it watched nothing.
+#[aether_data::kind(name = "aether.test_fixtures.watch.admit_result", eq)]
+pub enum WatchAdmitResult {
+    Ok { watch: WatchId },
+    Err { error: String },
+}
+
+impl aether_actor::HeldReply for WatchAdmitResult {
+    fn unanswered() -> Self {
+        Self::Err { error: String::from("the relay closed before the ledger answered") }
+    }
+}
+
+/// Issue 7496: a provider asks the watch ledger to cast it and keep the
+/// reference without watching it.
+#[aether_data::kind(name = "aether.test_fixtures.watch.hold", default)]
+pub struct WatchHold;
+
+/// Issue 7496: tells the watch ledger to watch the reference its last
+/// [`WatchHold`] kept, with a context carrying `tag`. It answers
+/// [`WatchAdmitResult`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.held", copy)]
+pub struct WatchHeld {
+    pub tag: u32,
+}
+
+/// Issue 7496: tells the watch ledger to `unwatch` `watch`.
+#[aether_data::kind(name = "aether.test_fixtures.watch.release", copy)]
+pub struct WatchRelease {
+    pub watch: WatchId,
+}
+
+/// Issue 7496: one departure a watch fixture's handler ran for, which it
+/// mails the harness observer and lists in its [`WatchLedgerReport`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.departure", copy, eq)]
+pub struct WatchDeparture {
+    /// The protocol whose handler ran. A clerk's is always
+    /// [`WatchThrough::Provider`]'s form: a handler with a context.
+    pub through: WatchThrough,
+    /// The tag the handler's context carried, or `None` from the handler
+    /// that takes no context.
+    pub tag: Option<u32>,
+    /// The event's `watch`.
+    pub watch: WatchId,
+    /// Whether the event's `actor`, erased, is the handler's `ctx.sender()`.
+    pub actor_is_sender: bool,
+}
+
+/// Issue 7496: asks a watch ledger or a clerk what it has watched and which
+/// departures it has handled. It replies a [`WatchLedgerReport`].
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query", default)]
+pub struct WatchLedgerQuery;
+
+/// Issue 7496: the answer to a [`WatchLedgerQuery`]. Both lists are the
+/// answering instance's own memory, which a republish does not carry: a
+/// successor lists only what it handled itself.
+#[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query_result", default, eq)]
+pub struct WatchLedgerReport {
+    /// The id each run of `wire` on this instance got from its `watch`, in
+    /// order.
+    pub wired: Vec<WatchId>,
+    /// Each departure this instance's handlers ran for, in order.
+    pub handled: Vec<WatchDeparture>,
+}
+
+/// Issue 7496: the config of the watch peer. With `trap_on_rehydrate` set,
+/// the second version's peer traps in `on_rehydrate`, so a republish of its
+/// module fails there. With `trap_on_unwire` set, its `unwire` traps.
+#[aether_data::kind(name = "aether.test_fixtures.watch.peer.config", copy, default, eq)]
+pub struct WatchPeerConfig {
+    pub trap_on_rehydrate: bool,
+    pub trap_on_unwire: bool,
+}
+
+/// Issue 7496: tells the watch peer to admit itself to the watch ledger with
+/// a [`WatchAdmit`] carrying `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.watch.peer_admit", copy)]
+pub struct WatchPeerAdmit {
+    pub tag: u32,
+}
+
+/// Issue 7496: tells a watch desk to spawn an inline clerk keyed `key`. The
+/// clerk's `wire` watches the desk keyed `target` with a context carrying
+/// `tag`. It is a tell, so the chain a sender settles on holds the clerk's
+/// alias publication, which a reply would arrive ahead of.
+#[aether_data::kind(name = "aether.test_fixtures.watch.clerk_spawn")]
+pub struct WatchClerkSpawn {
+    pub key: String,
+    pub target: String,
+    pub tag: u32,
+}

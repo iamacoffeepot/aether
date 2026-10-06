@@ -191,6 +191,28 @@ unsafe extern "C" {
     /// answered; one naming no `Live` route answers no rows.
     #[link_name = "published_rows_p32"]
     pub fn published_rows(position: u64) -> u64;
+    /// ADR-0079 §8: watch the actor at `target` for the calling actor `from`,
+    /// through the watched type whose tag is `tag`, and return the
+    /// watch's id. A standing watch of that watcher, target, and watched type
+    /// answers its own id and nothing else changes; otherwise the id is new,
+    /// drawn from this mailbox's send-correlation sequence, and never `0`.
+    /// `from` is checked host-side like a send's; a claim outside this
+    /// component's cluster watches as the component itself. The host traps on
+    /// a `target` that holds no route record and is no alias of this
+    /// component, which no SDK reference names.
+    #[link_name = "watch_p32"]
+    pub fn watch(target: u64, from: u64, tag: u64) -> u64;
+    /// ADR-0079 §8: end the watch `watch` names. Returns `1` when a watch was
+    /// there, and `0`, with nothing changed, for a number that names no watch
+    /// of this mailbox.
+    #[link_name = "unwatch_p32"]
+    pub fn unwatch(watch: u64) -> u32;
+    /// ADR-0079 §8: end the watch `watcher` holds on `target` through the
+    /// watched type whose tag is `tag`, because `target`'s departure
+    /// notice is being dispatched, and return its id. `0` when no such watch
+    /// stands, or `watcher` is not this component or one of its aliases.
+    #[link_name = "watch_ended_p32"]
+    pub fn watch_ended(target: u64, watcher: u64, tag: u64) -> u64;
     /// ADR-0238 decisions 2 and 9: take one hold on the blob whose 32-byte
     /// hash sits at `hash_ptr`, resolved only against this instance's blob
     /// table, and return its length. Negative, with no hold taken, when the
@@ -406,4 +428,49 @@ pub unsafe fn live_route(_path_ptr: u32, _path_len: u32) -> u64 {
 #[must_use]
 pub unsafe fn published_rows(_position: u64) -> u64 {
     panic!("aether-actor: published_rows called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::watch` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn watch(_target: u64, _from: u64, _tag: u64) -> u64 {
+    panic!("aether-actor: watch called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::unwatch` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn unwatch(_watch: u64) -> u32 {
+    panic!("aether-actor: unwatch called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::watch_ended` import (ADR-0079 §8).
+///
+/// # Safety
+/// The signature mirrors the FFI import so callers can stay
+/// target-agnostic; on the host there is no host fn to forward to.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn watch_ended(_target: u64, _watcher: u64, _tag: u64) -> u64 {
+    panic!("aether-actor: watch_ended called outside the FFI guest");
 }

@@ -24,6 +24,17 @@ use aether_data::KindId;
 #[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq, engine_only)]
 pub struct MonitorNotice;
 
+/// The engine's empty watch context (ADR-0079 §8): what a component passes
+/// to `ctx.watch` for a watched type whose departure handler takes no context
+/// parameter, as in `ctx.watch(camera, NoContext)`.
+///
+/// A watch always stores a context, so a handler with nothing to note leaves
+/// its fourth parameter out and its context kind is this one. No author
+/// declares a kind to say nothing.
+#[repr(C)]
+#[aether_data::kind(name = "aether.actor.no_context", pod, default, eq)]
+pub struct NoContext;
+
 /// Host-generated notice that a request's recipient refused its payload at
 /// decode. The refusing actor answers it to the request's reply target in
 /// place of the reply it could not produce, so it joins the request's chain
