@@ -51,18 +51,23 @@ and the settlement gating. The cap is a bridged singleton, so a wasm guest that
 declares `depends(LifecycleCapability)` names it by type:
 `ctx.subscribe::<LifecycleCapability, Tick>()`.
 
-**Stages are signals; `Tick` carries elapsed time.** `Tick` has one
-`delta_micros: u32` field supplied by the chassis cadence source. A subscriber
-integrates a rate in units per second with `tick.delta_seconds()`, so slowing or
-speeding the frame cadence does not slow or speed authored motion. Every other
-stage is a zero-sized signal. Application state still rides its own mail — the
+**Stages are signals; `Tick` carries time.** `Tick` is the one stage that
+carries time, in two fields. `delta_micros: u32` is the game time this frame adds,
+as the chassis driver states it, and `elapsed_micros: u64` is the game time since
+boot with this frame included, so the frame covers
+`(elapsed_micros - delta_micros, elapsed_micros]`. The lifecycle capability owns
+the total and adds each frame's delta to it exactly once, so `delta_micros` is
+always the growth of `elapsed_micros`. A subscriber integrates a rate in units per
+second with `tick.delta_seconds()`, so slowing or speeding the frame cadence does
+not slow or speed authored motion, and logic that counts in whole steps reads them
+from `tick.steps(length)` (below). Every other stage is a zero-sized signal. Application state still rides its own mail — the
 camera computes a view-projection matrix on `Tick` and publishes it to
 `aether.render`, rather than threading it through a stage. The stage-kind
 vocabulary:
 
 | Stage kind | Wire name | Role |
 |---|---|---|
-| `Tick` | `aether.lifecycle.tick` | per-frame step carrying elapsed microseconds |
+| `Tick` | `aether.lifecycle.tick` | per-frame step carrying the frame's microseconds and the total since boot |
 | `Render` | `aether.lifecycle.render` | submit geometry after the whole `Tick` chain settles |
 | `Present` | `aether.lifecycle.present` | post-render ordering point and the graceful-quit drain edge |
 | `Shutdown` | `aether.lifecycle.shutdown` | terminal; graceful cleanup with the mail surface still live |
@@ -72,7 +77,8 @@ vocabulary:
 
 Two more kinds are the cadence wire, not stage broadcasts: `LifecycleAdvance`
 (`aether.lifecycle.advance`) is what the chassis main loop sends to ask for the
-next step. Its `delta_micros` is copied into `Tick` and ignored for other stages.
+next step. Its `delta_micros` is copied into `Tick` and joins the total on the
+advance that broadcasts `Tick`; other stages ignore it.
 `LifecycleAdvanceComplete` (`aether.lifecycle.advance_complete`) is the reply the
 chassis waits on.
 
@@ -97,9 +103,25 @@ unregistered kind, a kind is registered twice, or the graph has no terminal — 
 a malformed lifecycle fails at chassis-build, not at runtime.
 
 **Settlement gates each advance.** The chassis main loop drives cadence by mailing
-`LifecycleAdvance` to the cap once per step. Desktop measures elapsed wall-clock
-time between frame ticks, headless uses its configured timer period, and the
-substrate harness supplies deterministic synthetic elapsed time. On each advance
+`LifecycleAdvance` to the cap once per step, stating the frame's elapsed time, and
+what a driver states is what game time means on its chassis:
+
+- **Desktop** measures wall time between frames. It is the one driver that
+  measures, so it is the one a stall can reach, and it holds each frame's share to
+  a limit before stating it: `AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS`
+  (`--desktop-max-frame-delta-micros`, `[desktop] max_frame_delta_micros`), default
+  250,000. On a limited frame game time slows, no step is skipped, every actor
+  sees the same slowed clock, and the driver warns of the microseconds it did not
+  count, at most once per cooldown. A limit of zero is refused at boot.
+- **Headless** states its timer period on every advance, so game time is the
+  number of `Tick`s broadcast times the period. A frame that overruns is not made
+  up, so headless game time runs slow against the wall clock then. A slow tick
+  rate is honoured whole: at two ticks a second each `Tick` adds 500,000
+  microseconds, with no limit.
+- **A harness** states the duration the test wrote, and game time is the sum of
+  those durations exactly.
+
+The cap adds the delta it is told and applies no limit of its own. On each advance
 the cap broadcasts the current stage to its subscribers, subscribes settlement on
 that broadcast's chain root, and waits: it advances the state pointer along the resolved edge and replies
 `LifecycleAdvanceComplete` only once that stage's whole chain has
@@ -206,6 +228,30 @@ Then handle each stage as its kind, like any other mail:
 #[handler::event]
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
+
+Logic that counts in whole steps takes them from the tick. The step length is the
+game's own constant, a `StepLength` that cannot be zero; the engine has no step
+length of its own:
+
+```rust
+const STEP: StepLength = StepLength::from_micros(20_000).expect("a nonzero step");
+
+#[handler::event]
+fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, tick: Tick) {
+    let steps = tick.steps(STEP);
+    for index in steps.indices() {
+        self.step(index);                 // each whole step, exactly once, numbered from 0 at boot
+    }
+    self.blend = steps.fraction();        // the part of the next step already elapsed, in [0, 1)
+}
+```
+
+`steps` is a pure function of the one mail and the length, so every actor that
+asks with the same length gets the same step indices, whenever it was loaded, and
+over any run of frames each step is handed out exactly once. A frame may hold
+zero steps or several. Each actor counts a frame's steps inside its own `Tick`
+handler: nothing settles between step N and step N+1, so actors that must mail
+each other inside one step are outside what `steps` provides.
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares

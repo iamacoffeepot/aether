@@ -151,7 +151,7 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   `section` its derive pins): `[http]`, `[http-server]`, `[process]`, `[rpc]`,
   `[lifecycle]`, `[actor]`, `[scheduler]`, `[settlement]`, `[registry]`,
   `[chassis]`, plus chassis-specific sections such as `[window]`, `[audio]`,
-  `[render]`, `[tick]`, and the hub's `[hub]`. Environment variables still
+  `[render]`, `[tick]`, the desktop driver's `[desktop]`, and the hub's `[hub]`. Environment variables still
   override file values.
 - **Per-spawn arguments** are how a spawned engine is configured. `spawn_substrate`
   forwards its `args` to the substrate as command-line arguments — the addressed

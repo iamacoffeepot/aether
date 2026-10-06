@@ -133,7 +133,9 @@ discipline:
 
 - `Advance` drives complete frames. `HarnessOp::advance(n)` represents
   16,667 µs per frame; use `HarnessOp::advance_by(n, duration)` when elapsed
-  time is part of the behavior under test;
+  time is part of the behavior under test. The total a `Tick` carries is the sum
+  of the stated frame durations, each added whole, so a test that states elapsed
+  time can assert exact steps;
 - `SendAndSettle` sends typed mail and waits for its whole causal chain to
   settle — the strongest barrier;
 - `SendAndAwaitReply` stores a typed reply for later decode, and waits for

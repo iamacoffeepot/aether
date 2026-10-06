@@ -39,7 +39,8 @@ pub use input::{
     WindowSize,
 };
 pub use lifecycle::{
-    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, Present, Quit, Render, Shutdown, Tick,
+    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, Present, Quit, Render, Shutdown, StepLength,
+    Steps, Tick,
 };
 pub use math::Mat4Apply;
 pub use utility::{Ping, Pong};
