@@ -822,7 +822,11 @@ mod control_plane {
     /// a namespace whose module is republishing waits until the republish
     /// answers (§7). A namespace native code implements is refused, since
     /// native types are composed by their chassis or parent and are not
-    /// spawned by mail yet. Reply: [`SpawnResult`].
+    /// spawned by mail yet. A spawn that brings its module's bytes in `code`
+    /// opens the new instance's load window over them, so the instance reads
+    /// its assets in `init` and `wire` (ADR-0163 §4); one that brings other
+    /// bytes is refused; one that brings none opens a window that serves no
+    /// payload. Reply: [`SpawnResult`].
     #[aether_data::kind(name = "aether.component.spawn")]
     pub struct Spawn {
         pub namespace: String,
@@ -833,6 +837,10 @@ mod control_plane {
         /// The init config a new instance is built with (ADR-0090).
         #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
+        /// The bytes of the module that publishes `namespace`, for the new
+        /// instance's load window; `None` opens a window that serves no
+        /// payload.
+        pub code: Option<aether_data::Blob>,
     }
 
     /// Reply to [`Spawn`]. `Spawned` and `Live` are sent by the instance

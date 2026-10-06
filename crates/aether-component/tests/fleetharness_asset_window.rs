@@ -10,18 +10,29 @@
 //! The same `wire` takes the asset as a blob through
 //! `AssetWindow::asset_blob` and keeps it; `AssetBlobProbe` is answered with
 //! that blob, which reaches the session as the asset's exact bytes.
+//!
+//! A spawn reads its module's assets only from the code it brings (issue
+//! #7461): a boot manifest's instances and a `Spawn` carrying `code` pull
+//! the exact bytes, a spawn bringing another module's bytes is refused, and
+//! one bringing none traps on a catalogued asset.
 
 mod tests {
-    use aether_data::{EngineId, Kind};
+    use std::env;
+    use std::fs;
+    use std::process;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use aether_data::{Blob, EngineId, Kind};
     use aether_kinds::{LoadComponent, LogTailResult, Spawn, SpawnResult};
     use aether_test_fixtures_kinds::{
         AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, EmptyAssetProbe, EmptyAssetProbeResult,
     };
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
+    use aether_harness_fleet::{FleetHarness, component_wasm_path, dist_component_available, read_component_wasm};
 
     const BUNDLE: &str = "aether_test_fixtures_bundle";
     const QUIET_PROBE: &str = "test.quiet_probe";
+    const ASSET_INSTANCE: &str = "test.asset_instance";
 
     /// The source asset the bundle embeds via
     /// `export_asset!("asset_fixture.txt")`, read at compile time so the
@@ -184,9 +195,9 @@ mod tests {
         assert_pulled_exact(&load_quiet_probe(&mut harness, engine));
     }
 
-    /// A spawn from a publication brings no bytes, so the guest's fetch of a
-    /// catalogued asset in `wire` traps naming `load_component` (ADR-0163
-    /// §4) instead of reading as a missing asset. The fixture's first fetch
+    /// A spawn that brings no bytes opens a window with no code, so the
+    /// guest's fetch of a catalogued asset in `wire` traps naming what the
+    /// spawn lacked (ADR-0163 §4) instead of reading as a missing asset. The fixture's first fetch
     /// is `asset_blob`, so that is the verb that traps here, under the
     /// window check it shares with `asset`. It catches a sourceless window
     /// answering a catalogued asset with a silent `None`, by either verb.
@@ -199,7 +210,8 @@ mod tests {
         let engine = harness.spawn_headless();
         harness.publish(engine, read_component_wasm(BUNDLE));
 
-        let spawn = Spawn { namespace: QUIET_PROBE.to_owned(), key: None, parent: None, config: Vec::new() };
+        let spawn =
+            Spawn { namespace: QUIET_PROBE.to_owned(), key: None, parent: None, config: Vec::new(), code: None };
         let SpawnResult::Spawned { path, .. } = harness.spawn(engine, &spawn) else {
             panic!("a fresh spawn of {QUIET_PROBE} stands the instance up");
         };
@@ -207,11 +219,106 @@ mod tests {
 
         assert!(!probe(&mut harness, engine, &addr).pulled, "a spawned instance reads no asset bytes");
         let LogTailResult::Ok { entries, .. } =
-            harness.log_tail(engine, &addr, None, Some("load_component".to_owned()))
+            harness.log_tail(engine, &addr, None, Some("spawned without its module's bytes".to_owned()))
         else {
             panic!("the spawned instance answers LogTail");
         };
         let trapped_on_blob = entries.iter().any(|entry| entry.message.contains("asset_blob"));
-        assert!(trapped_on_blob, "the guest's `wire` asset_blob trapped naming load_component, got {entries:?}");
+        assert!(trapped_on_blob, "the guest's `wire` asset_blob trapped naming the missing bytes, got {entries:?}");
+    }
+
+    /// Every instance a boot manifest stands up reads its module's assets in
+    /// `wire`: a singleton entry, and both instances of a `replicas: 2`
+    /// entry. The engine serves only after every boot entry answered, so
+    /// each probe is answered on the first call. It catches a boot instance
+    /// whose load window has no bytes (issue #7461), and a boot loader that
+    /// hands the code to the first key's spawn only.
+    #[test]
+    fn fleetharness_boot_manifest_instances_read_their_assets() {
+        if !dist_component_available(BUNDLE) {
+            return;
+        }
+        let wasm = component_wasm_path(BUNDLE);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
+        let manifest_path = env::temp_dir().join(format!("aether-asset-window-boot-{}-{nanos}.json", process::id()));
+        let manifest = serde_json::json!({
+            "components": [
+                { "wasm": wasm.to_string_lossy(), "export": QUIET_PROBE },
+                { "wasm": wasm.to_string_lossy(), "export": ASSET_INSTANCE, "replicas": 2 },
+            ],
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).expect("serialize the boot manifest"))
+            .expect("write the boot manifest");
+        let mut harness = FleetHarness::start();
+
+        let engine = harness.spawn_headless_with_boot_manifest(&manifest_path);
+
+        for addr in [QUIET_PROBE.to_owned(), format!("{ASSET_INSTANCE}:0"), format!("{ASSET_INSTANCE}:1")] {
+            assert_pulled_exact(&probe(&mut harness, engine, &addr));
+        }
+        let _ = fs::remove_file(&manifest_path);
+    }
+
+    /// A spawn that brings the published module's bytes reads its assets,
+    /// here with the bytes inline in the mail, the form a blob takes over
+    /// RPC. It catches the host dropping a spawn's code before the guest's
+    /// load window opens.
+    #[test]
+    fn fleetharness_a_spawn_bringing_its_code_reads_its_assets() {
+        if !dist_component_available(BUNDLE) {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        harness.publish(engine, read_component_wasm(BUNDLE));
+
+        let spawn = Spawn {
+            namespace: QUIET_PROBE.to_owned(),
+            key: None,
+            parent: None,
+            config: Vec::new(),
+            code: Some(Blob::from(read_component_wasm(BUNDLE))),
+        };
+        let SpawnResult::Spawned { path, .. } = harness.spawn(engine, &spawn) else {
+            panic!("a fresh spawn of {QUIET_PROBE} stands the instance up");
+        };
+
+        assert_pulled_exact(&probe(&mut harness, engine, &path.to_string()));
+    }
+
+    /// A spawn that brings a different module over the same code, the
+    /// bundle with one more asset section, is refused and stands nothing
+    /// up. It catches a load window opened over bytes whose asset ranges
+    /// belong to another module, which would serve the wrong bytes.
+    #[test]
+    fn fleetharness_a_spawn_bringing_other_code_is_refused() {
+        if !dist_component_available(BUNDLE) {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        harness.publish(engine, read_component_wasm(BUNDLE));
+
+        let spawn = Spawn {
+            namespace: QUIET_PROBE.to_owned(),
+            key: None,
+            parent: None,
+            config: Vec::new(),
+            code: Some(Blob::from(bundle_with_empty_asset())),
+        };
+        let replies = harness.send(engine, "aether.component", &spawn);
+
+        let [reply] = replies.as_slice() else {
+            panic!("the spawn expected exactly one reply event, got {}", replies.len());
+        };
+        let result = SpawnResult::decode_from_bytes(&reply.payload).expect("the reply payload decodes as SpawnResult");
+        let SpawnResult::Err { error } = result else {
+            panic!("a spawn bringing another module's bytes is refused, got {result:?}");
+        };
+        let names_namespace = error.contains(QUIET_PROBE);
+        let names_mismatch = error.contains("not the module that publishes it");
+        assert!(names_namespace && names_mismatch, "the refusal names the namespace and the mismatch, got: {error}");
+        let names = harness.list_components(engine);
+        assert!(!names.iter().any(|name| name == QUIET_PROBE), "the refused spawn stood nothing up: {names:?}");
     }
 }

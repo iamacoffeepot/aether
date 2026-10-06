@@ -6,8 +6,8 @@
 //! asserts the component's trampoline is live when `build` returns: a
 //! `BootManifest` of file paths → `boot_manifest_autoload` →
 //! `AutoloadComponent` → one `Publish` of its module and one `Spawn` per
-//! instance key, awaited to `Ok` → live trampoline (issue #6413, issue
-//! #7155). This is the reader a `spawn_substrate` carrying a component list
+//! instance key, each bringing the module's code, awaited to `Ok` → live
+//! trampoline (issue #6413, issue #7155). This is the reader a `spawn_substrate` carrying a component list
 //! drives through `AETHER_BOOT_MANIFEST`. A boot component that fails to
 //! load fails the build, and so does an entry naming no export of a module
 //! that exports several; a `replicas: N` entry spawns N counter-keyed

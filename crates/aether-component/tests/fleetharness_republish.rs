@@ -130,7 +130,8 @@ mod tests {
         let engine = harness.spawn_headless();
         harness.publish(engine, read_component_wasm("aether_test_fixtures_bundle"));
 
-        let request = Spawn { namespace: "test.quiet_probe".to_owned(), key: None, parent: None, config: Vec::new() };
+        let request =
+            Spawn { namespace: "test.quiet_probe".to_owned(), key: None, parent: None, config: Vec::new(), code: None };
 
         let first_path = match harness.spawn(engine, &request) {
             SpawnResult::Spawned { path, .. } => path,

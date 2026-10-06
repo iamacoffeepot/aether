@@ -25,16 +25,17 @@
 //! asset's bytes here: the catalog outlives them, and the one hash of an
 //! asset a reader needs is the blob handle [`LoadWindow::fetch_blob`] mints.
 //! Payload access is the [`LoadWindow`]: it holds the code blob its opener brought (the
-//! load's, or the republish's) and serves [`LoadWindow::fetch`] by
+//! load's, the spawn's, or the republish's) and serves [`LoadWindow::fetch`] by
 //! streaming the named asset's range out of it, or
 //! [`LoadWindow::fetch_blob`] by viewing that range in place as a blob of
 //! its own. [`LoadWindow::close`] lets go of the code blob when the load
 //! window ends (`init` + `wire`), so the guest's payload access ends with
 //! the window and nothing payload-sized outlives it but an asset blob the
 //! guest chose to keep, which holds the code resident until it drops
-//! (ADR-0163 §3/§4). An instance spawned from a
-//! publication has no code in hand: its window answers the catalog and
-//! refuses a catalogued asset, naming `load_component`.
+//! (ADR-0163 §3/§4). An instance spawned without
+//! its module's bytes has no code in hand: its window answers the catalog
+//! and refuses a catalogued asset, naming the two doors that bring the
+//! bytes, a spawn with its code and a load.
 //!
 //! This reads the custom sections only and never looks at linear memory.
 //! `export_asset!` keeps the payload out of linear memory on its own (it
@@ -130,9 +131,9 @@ pub struct LoadWindow {
     /// retained for the instance's life.
     index: Arc<AssetIndex>,
     /// The module's wasm bytes, held only while the window is open: the
-    /// code the load or republish that opened it checked the module in
-    /// from. `None` for an instance spawned from its publication, which
-    /// brought no bytes, and once [`close`](Self::close)d.
+    /// code the load, spawn, or republish that opened it brought, which is
+    /// the module's own bytes. `None` for an instance whose spawn brought
+    /// none, and once [`close`](Self::close)d.
     source: Option<Blob>,
     open: bool,
 }
@@ -161,8 +162,8 @@ impl LoadWindow {
     /// # Errors
     ///
     /// The asset is in the catalog but the window has no code to read it
-    /// from, because the instance was spawned from its publication rather
-    /// than loaded; or the code ends before the asset's recorded range.
+    /// from, because the instance was spawned without its module's bytes;
+    /// or the code ends before the asset's recorded range.
     pub fn fetch(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
         let Some((range, source)) = self.locate(name)? else {
             return Ok(None);
@@ -203,8 +204,7 @@ impl LoadWindow {
     /// # Errors
     ///
     /// The asset is in the catalog but the window has no code to read it
-    /// from, because the instance was spawned from its publication rather
-    /// than loaded.
+    /// from, because the instance was spawned without its module's bytes.
     fn locate(&self, name: &str) -> Result<Option<(Range<usize>, &Blob)>, String> {
         if !self.open {
             return Ok(None);
@@ -214,9 +214,9 @@ impl LoadWindow {
         };
         let Some(source) = self.source.as_ref() else {
             return Err(format!(
-                "`{name}` is in this module's asset catalog, but this instance was spawned from its \
-                 publication, which keeps no bytes; load it with load_component to read its assets \
-                 (ADR-0163 §4)"
+                "`{name}` is in this module's asset catalog, but this instance was spawned without its \
+                 module's bytes; spawn it with its code, or load it with load_component, to read its \
+                 assets (ADR-0163 §4)"
             ));
         };
         Ok(Some((section.range.clone(), source)))
@@ -279,6 +279,10 @@ mod tests {
     use super::*;
     use crate::actor::wasm::module::ModuleCache;
     use crate::store::BlobStore;
+
+    /// The phrase a sourceless window's refusal carries, which a reader of
+    /// an actor's log filters on.
+    const SOURCELESS: &str = "spawned without its module's bytes";
 
     /// Build a module carrying `sections` as `(name, bytes)` custom
     /// sections, via WAT `@custom` (the `kind_manifest` idiom).
@@ -432,9 +436,9 @@ mod tests {
         assert_eq!(second.fetch("slime").unwrap().as_deref(), Some(payload));
     }
 
-    /// An instance spawned from its publication brings no code, so its
-    /// window refuses a catalogued asset, naming the door that does bring
-    /// it, while a name outside the catalog is still plain not-found. It
+    /// An instance spawned without its module's bytes has a window that
+    /// refuses a catalogued asset, naming the doors that do bring them,
+    /// while a name outside the catalog is still plain not-found. It
     /// catches a sourceless window answering a catalogued asset as missing.
     #[test]
     fn a_window_without_its_module_bytes_refuses_a_catalogued_asset() {
@@ -444,7 +448,7 @@ mod tests {
         let window = LoadWindow::open(&module, None);
 
         let error = window.fetch("slime").unwrap_err();
-        assert!(error.contains("slime") && error.contains("load_component"), "error was: {error}");
+        assert!(error.contains("slime") && error.contains(SOURCELESS), "error was: {error}");
         assert_eq!(window.fetch("missing").unwrap(), None);
         assert_eq!(window.assets().len(), 1, "the catalog answers without the bytes");
     }
@@ -486,7 +490,7 @@ mod tests {
 
     /// The window's refusals are the byte verb's: a closed window and a name
     /// outside the catalog are plain not-found, and a sourceless window
-    /// refuses a catalogued asset naming `load_component`. It catches a blob
+    /// refuses a catalogued asset naming the doors that bring the bytes. It catches a blob
     /// served after `close`, and a sourceless window answering a catalogued
     /// asset as missing.
     #[test]
@@ -499,7 +503,7 @@ mod tests {
         let mut window = LoadWindow::open(&module, Some(code));
 
         let error = sourceless.fetch_blob(&blobs, "slime").unwrap_err();
-        assert!(error.contains("slime") && error.contains("load_component"), "error was: {error}");
+        assert!(error.contains("slime") && error.contains(SOURCELESS), "error was: {error}");
         assert!(sourceless.fetch_blob(&blobs, "missing").unwrap().is_none());
         assert!(window.fetch_blob(&blobs, "missing").unwrap().is_none());
 

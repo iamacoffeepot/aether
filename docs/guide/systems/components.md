@@ -131,7 +131,7 @@ mailbox:
 
 A bare `Publish { code, configs }` binds every namespace the module exports;
 identical bytes already bound are a no-op, and a first publish spawns the
-module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config }`
+module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config, code }`
 then stands up an instance of a published type: a live name answers
 `SpawnResult::Live` without re-init, an absent name answers `Spawned`, and a
 tombstoned name (§8, below) is refused. A `namespace` naming a native type —
@@ -189,9 +189,15 @@ bundle's tile is. A blob the actor keeps in its state past `wire`, or that its r
 keeps, holds the module's bytes resident until it drops; the window itself
 still lets go when `wire` returns, and neither verb is reachable from a
 handler.
-A `spawn` of a published type brings no bytes: its guest sees the catalog, and
-a fetch of a catalogued asset by either verb traps naming `load_component`,
-the door that brings them.
+A `Spawn` reads its module's assets only from the bytes it brings. One that
+brings the published module's bytes in `code` opens a window over them, and
+its guest reads its assets as a loaded one does; bytes of any other module are
+refused, since the asset ranges belong to the published module. A boot
+manifest entry spawns this way: every instance it stands up, each replica of a
+`replicas: N` entry included, brings the entry's module and reads its assets in
+`wire`. A `Spawn` with no `code` brings no bytes: its guest sees the catalog,
+and a fetch of a catalogued asset by either verb traps naming the two doors
+that bring them, a spawn with its code and `load_component`.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the

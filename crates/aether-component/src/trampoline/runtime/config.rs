@@ -27,9 +27,9 @@ pub struct WasmTrampolineConfig {
     /// The wasm bytes `module` was checked in from, which `init` opens the
     /// load window over (ADR-0163 §3): the window reads each asset's range
     /// out of them and lets go of them when `wire` returns, so the state
-    /// never keeps them. `None` for an instance spawned from its
-    /// publication, which brought no bytes: its window answers the catalog
-    /// and refuses a catalogued asset, naming `load_component`.
+    /// never keeps them. `None` for an instance whose spawn brought no
+    /// bytes: its window answers the catalog and refuses a catalogued asset,
+    /// naming the doors that bring them.
     pub code: Option<Blob>,
     /// The engine's one module cache, through which a republish's prepare
     /// checks its candidate module in (ADR-0241 §2).
