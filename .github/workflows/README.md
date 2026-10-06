@@ -76,7 +76,7 @@ pushing the tag; see
 | `issue-labels.yml` | Lints issue titles, auto-applies `type:*` / `crate:*` labels |
 
 **Contributor lifecycle:** the tables above are the complete hosted workflow
-inventory. Issue scoping, digest-bound approval, implementation, direct review,
+inventory. Issue scoping, digest-bound approval, implementation,
 conflict resolution, and landing are direct-drive repository skills, not
 Actions jobs. Their evidence lives in issue bodies, owned branches and
 worktrees, draft pull requests, and current-head checks/reviews/threads. A repository script is not hosted behavior unless a checked-in workflow

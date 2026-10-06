@@ -15,7 +15,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Do not implement directly in the primary `main` checkout. Issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Every agent surface keeps its worktrees under `.agents/worktrees/`; `.claude/worktrees/` holds only legacy symlinks.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
-- An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and priced surface overflow. Repair findings in the implementation loop; a new head must prove those facts again.
+- An implementation remains a draft PR while its current head accumulates green checks, no active native change request, resolved threads, and priced surface overflow. No review record is required. Repair red checks, change requests, and threads in the implementation loop; a new head must prove those facts again.
 - A content-conflicted draft uses `resolve`, which merges current `main` into the owned branch and proves the new head again without rebasing or force-pushing.
 - Landing is a separate explicitly authorized operation. Do not push to `main`, force-push reviewed branches, clear draft state, merge, or run destructive git commands without the workflow's required user approval.
 - Keep PRs focused: one concept per PR.
