@@ -5,11 +5,11 @@
 
 ## Context
 
-Two gaps met in one case: a debug overlay over a scene. The overlay must always be drawn over the scene, and a click on the overlay must not also reach the scene. Neither can be written today.
+Two gaps met in one case: a debug overlay over a scene. The overlay must always be drawn over the scene, a click on the overlay must not also reach the scene, and while its console is open the keys must go to the console and to nothing else. None of the three can be written today.
 
 **Screen-space draws from two actors have no order.** The three overlay verbs (`aether.render.draw_textured_quads`, `draw_shapes`, `draw_screen_triangles`) each push one batch onto a single vector, `overlay_frame` in `RenderCapabilityState` (`crates/aether-render/src/runtime/mod.rs`), in the order the render capability received the mail, and that vector is the painter order. A lifecycle stage is broadcast to its subscribers as one burst that the scheduler may spread over several workers, so two actors that draw in the same stage reach the renderer in an order that can differ from frame to frame.
 
-**Input goes to every subscriber.** Both window backends publish through one line, `ctx.fanout(self.subscribers.recipients::<K>(window), event)` (`crates/aether-window/src/runtime/desktop/mod.rs`, `crates/aether-window/src/runtime/synthetic/mod.rs`), and `recipients` is the whole subscriber set for that window. A wheel over a scrolling panel also zooms the scene behind it.
+**Input goes to every subscriber.** Both window backends publish through one line, `ctx.fanout(self.subscribers.recipients::<K>(window), event)` (`crates/aether-window/src/runtime/desktop/mod.rs`, `crates/aether-window/src/runtime/synthetic/mod.rs`), and `recipients` is the whole subscriber set for that window. With a camera controller live, typing into a console also moves the camera, and a wheel over a scrolling panel also zooms the scene behind it.
 
 **Text is filed under the wrong actor.** `aether.text` turns a text draw into glyph quads and sends them to the renderer itself (`emit_draw` in `crates/aether-text/src/runtime/layout.rs` calls `ctx.send::<RenderCapability>`), so every glyph batch arrives as mail from `aether.text`.
 
@@ -20,7 +20,7 @@ The aim that shapes the decision: the number of different ways to solve this pro
 Prior decisions this one meets:
 
 - **ADR-0117** made draw order inside one widget root structural and left order between roots unbuilt under "Ordering escape hatch (deferred)". It rejects an absolute key. This ADR builds the order between actors without one.
-- **ADR-0164 §4** states the publish rule: a window event is fanned out to `recipients(window, K::ID)`. This ADR changes that rule for pointer events.
+- **ADR-0164 §4** states the publish rule: a window event is fanned out to `recipients(window, K::ID)`. This ADR changes that rule for pointer, key and text events.
 - **ADR-0079 §7** retires an actor's name when it closes; nothing registers it again. Section 6 leans on it.
 - **ADR-0099** makes a mailbox id the fold of its path, segment by segment (`lineage_mailbox_id` in `crates/aether-substrate/src/mail/registry/names.rs`). Section 5 leans on it.
 
@@ -32,6 +32,7 @@ Issues #7513 (draw order) and #7514 (input) hold earlier code reading. Where the
 - **Position.** The opaque, comparable value a reader gets for one actor: where it stands in the whole tree.
 - **Layer.** An empty child created only to hold a place in its parent's sequence. Content is created beneath it.
 - **Member.** An actor that has stated a pointer region to the window (section 8).
+- **Key focus.** The one slot in the window that narrows who hears keys (section 9). It is separate from the sequence. Plain "focus" is not used for it: at this mailbox `aether.window.focus` (`FocusWindow`) and `aether.window.focus_changed` (`WindowFocus`) already name operating-system window focus.
 
 ## Decision
 
@@ -85,7 +86,7 @@ What a layer needs from the engine today, read from the code:
 Mail sent in an order is not processed in that order, so no rule here sequences deliveries.
 
 - **Drawing.** Every actor draws during the frame in any order. The renderer commits the frame when the engine-only `Frame` mail arrives (`on_frame` → `commit_scene`), and the driver sends `Frame` only after the frame's stages have settled (`run_frame_advance` then `send_render_and_drain` in `crates/aether-chassis-desktop/src/driver/mod.rs`). At that commit the renderer groups the batches by sender (`ctx.sender()`, stamped by the host) and sorts the groups by position.
-- **Input.** Each pointer event has one recipient, so there is nothing to order.
+- **Input.** Each pointer event has one recipient, and key events are routed by the key focus slot, so there is nothing to order.
 
 ```rust
 // main: one vector, receipt order
@@ -198,9 +199,72 @@ A pointer event goes to the frontmost member whose region holds the point, and t
 
 **A press owns its release.** The window remembers which member was sent each button press. The drag's moves, wheel and release go to that same member wherever the pointer is by then. A window that loses operating-system focus forgets its owners, because those releases never arrive. An owner that closes takes its entries with it.
 
-Events that are not pointer events keep the ADR-0164 §4 fan-out: `Modifiers`, `WindowSize`, `WindowFocus`, `WindowOpened`, `WindowClosed`, `WindowMenuActivated`. Key and text events also keep it until open question 1 is settled.
+The window never gives key focus on a press. The member that receives the press decides whether to take it.
 
-### 9. Text is filed with its owner's shapes
+Events that are neither pointer nor key events keep the ADR-0164 §4 fan-out: `Modifiers`, `WindowSize`, `WindowFocus`, `WindowOpened`, `WindowClosed`, `WindowMenuActivated`.
+
+### 9. Key focus
+
+Key focus is separate from the sequence. It is state the window holds: one slot, which is empty or holds one actor and a scope. There is no stack and no history.
+
+- **An actor takes key focus for itself only**, never for another actor, with one of two scopes: itself alone, or itself and everything beneath it.
+- **The latest take wins.** A descendant may take key focus while an ancestor holds it for the subtree; the slot then holds the descendant.
+- **Keys go to every key subscriber inside the holder's scope.** When the slot is empty, every key subscriber hears keys, which is today's behaviour. Key events are `Key`, `KeyRelease`, `TextInput` and `ImePreedit`.
+- **A release, or the holder's close, empties the slot.** Key focus is never handed back. A parent whose child gives it up takes it again itself if it needs it, and the child tells its parent by ordinary mail.
+- **Nothing takes key focus merely to receive keys.** Taking it means everyone outside the scope stops hearing them.
+- **The window tells an actor when it gains key focus and when it loses it.**
+- **The pointer is unaffected.** A press goes to the frontmost member under it by position, whoever holds key focus.
+
+| Moment | Slot | Hears keys |
+|---|---|---|
+| Playing | empty | every key subscriber: the camera controller |
+| The console opens and takes key focus, itself alone | console | the console |
+| The console closes or releases | empty | every key subscriber |
+
+The kinds, proposed. They follow the mailbox's existing shape (a sender-acting command, as `aether.window.subscribe_self` is, and published notices, as `aether.window.focus_changed` is) and carry "key" in the name to stay clear of `aether.window.focus`:
+
+```rust
+// plan (proposed)
+#[aether_data::kind(name = "aether.window.take_key_focus", copy, eq)]
+pub struct TakeKeyFocus {
+    pub scope: KeyFocusScope,
+}
+
+pub enum KeyFocusScope {
+    Actor,
+    Subtree,
+}
+
+#[aether_data::kind(name = "aether.window.release_key_focus", copy, eq)]
+pub struct ReleaseKeyFocus;
+
+#[aether_data::kind(name = "aether.window.key_focus_gained", copy, eq)]
+pub struct KeyFocusGained;
+
+#[aether_data::kind(name = "aether.window.key_focus_lost", copy, eq)]
+pub struct KeyFocusLost;
+```
+
+The taker is the mail's sender, so a take with no local sender is refused, as `subscribe_self` refuses one. A release from an actor that is not the holder changes nothing.
+
+How the window routes keys today, and what the slot needs, read from `crates/aether-window/src/runtime/subscribers.rs`:
+
+- Every published kind has its own `KindSubscribers<K>`: one map of subscribers to all windows and one per window, both keyed by the subscriber's `ErasedActorRef`. `recipients(window)` chains the two, and `publish` hands the whole iterator to `ctx.fanout`. There is no filter between the table and the send.
+- The table holds references, with no path beside them. The window can read a subscriber's canonical path with `NativeCtx::actor_path`, one probe of the route view.
+- A subscriber is inside a subtree scope when the holder's canonical path is a prefix of the subscriber's ending on a segment boundary. The same test on `Position` values is a prefix test.
+- The window already monitors every subscriber (`Holder` and its `MonitorHandle`) and drops its rows on the notice. The slot's holder is watched the same way, which is how the holder's close empties the slot.
+
+```rust
+// main: crates/aether-window/src/runtime/desktop/mod.rs
+ctx.fanout(self.subscribers.recipients::<K>(window), event);
+
+// plan: for the four key kinds only
+ctx.fanout(self.subscribers.recipients::<K>(window).filter(|subscriber| self.key_focus.admits(subscriber)), event);
+```
+
+Whether `admits` reads paths on every key event or keeps the admitted set, rebuilt on a take, a release and a subscribe, is an implementation choice; the set is the cheaper read.
+
+### 10. Text is filed with its owner's shapes
 
 `aether.text` sends its glyph quads with `NativeCtx::forward_to` (`crates/aether-substrate/src/actor/native/ctx/send.rs`), which keeps the inbound mail's sender as the forwarded mail's sender. The renderer then files each glyph batch under the actor that asked for the text. Atlas `CreateTexture` and `UpdateTexture` sends stay the text capability's own.
 
@@ -217,7 +281,8 @@ ctx.forward_to(render, &draw);
 - **A cross-actor overlay can be drawn.** It is created beneath a layer that was created after the scene's layer, and it is over the scene on every frame.
 - **Nobody declares an order.** Existing drawers (`aether-widget`'s `emit_layer`, the kit bundle tile, the fixtures) change nothing to be ordered. They change only if they must stand somewhere other than where creation put them, and then they move beneath a layer.
 - **ADR-0117 is completed in part.** Order between roots, and between an actor and a child that draws for itself, is built, with no key and no edges. A widget subtree still reaches the renderer through one sender.
-- **ADR-0164 §4 changes for pointer events**, and **ADR-0105** for the sender of glyph quads. The lines are written on those ADRs when this is implemented.
+- **Keys can be kept from the scene.** The console takes key focus while it is open and the camera controller stops hearing keys, with no change to the camera controller.
+- **ADR-0164 §4 changes for pointer, key and text events**, and **ADR-0105** for the sender of glyph quads. The lines are written on those ADRs when this is implemented.
 - **Guides.** `rendering.md`, `window.md`, `input.md`, `text.md`, `widgets.md` and `foundations/actor-model.md` change with the implementation.
 
 ### What is given up
@@ -227,6 +292,7 @@ ctx.forward_to(render, &draw);
 - **`depends(R)` forces `R` to be created first.** Where that conflicts with the wanted order, the two actors sit beneath layers that carry the order.
 - **Two roots loaded by mail at the same time land in the order the registry saw them.** That order can differ between runs.
 - **Lineage now does two jobs.** It already decides lifetime, and now it decides order, so actors grouped for order are grouped for lifetime.
+- **Key focus is not handed back.** A parent that forgets to take it again after its child releases leaves the slot empty, and keys then reach everything behind it. A stack of holders would not have that failure, and is the adjustment to make later if this one hurts.
 - **There is no explicit ordering.** It is left out on purpose. It could be added later without breaking anything built on creation order.
 
 ### Limits
@@ -238,7 +304,7 @@ ctx.forward_to(render, &draw);
 
 ## Open questions
 
-**1. Keyboard focus.** Not decided. A rule derived from the sequence alone, "the frontmost member that takes keys has them", fails for two text fields side by side beneath one parent: one is always in front, and nothing can be moved. The lean is the document model: focus is state the window holds, set by a press on a member and by code, and the sequence decides only which member receives the press. That needs a kind to take and give up focus, a rule for what happens when the holder closes, and a decision on `ImePreedit` and a composition in progress when focus moves. Until it is settled, key and text events keep the fan-out, so the overlay console still shares its keys with the camera controller.
+**1. A key held, or a composition in progress, when key focus changes.** A subscriber that heard a key go down and then falls outside the scope never hears it come up. Options: the window remembers who was sent each key-down and sends them the release, as it does for a button press; or a subscriber treats `KeyFocusLost`, and a take by another actor, as the release of everything it holds. The second does not reach a subscriber that never held key focus, such as the camera controller. Lean: the window remembers, so the rule for keys is the rule for buttons. What happens to an `ImePreedit` composition when the slot changes is not decided.
 
 **2. Session draws.** Section 7 puts MCP, capture and harness draws behind every component with no special case. The alternative is one stated place for them in front of everything, which is a special case in the renderer's sort. Lean: no special case.
 
@@ -246,9 +312,11 @@ ctx.forward_to(render, &draw);
 
 **4. A cancelled reservation retried under the same name.** It is stamped again and takes the later serial. The alternative is to remember the first serial across the cancel, which needs state the registry does not keep today. Lean: the later serial.
 
-**5. The pointer region and its kind.** A rectangle or the whole window; a drawn shape is not a rectangle. Lean: those two only, and a list of rectangles when a case needs it. The kind name is not settled, and it avoids "focus", which at this mailbox already names operating-system window focus (`aether.window.focus`, `WindowFocus`).
+**5. The pointer region and its kind.** A rectangle or the whole window; a drawn shape is not a rectangle. Lean: those two only, and a list of rectangles when a case needs it. The kind name is not settled.
 
 **6. A shared layer type.** Content must declare `child_of(..)` naming its layer's type (section 3). Whether the engine ships one layer type for content to name, and in which crate, is not decided.
+
+**7. One slot for the application or one per window.** Keys arrive for one window, and subscriptions are per window or for all. The decision says one slot. Lean: one for the application, held by the manager `aether.window`, matching the one sequence per application under Limits.
 
 ## Not verified
 
@@ -263,6 +331,9 @@ ctx.forward_to(render, &draw);
 
 ## Alternatives considered
 
+- **Key focus derived from the sequence** (the frontmost member that takes keys has them). It needs no state, and it fails for two text fields side by side beneath one parent: one is always in front and nothing can be moved.
+- **A stack of key focus holders.** It hands focus back when a holder leaves, and it is more state than one slot. Left as the later adjustment.
+- **The window gives key focus to whatever is pressed.** The window would decide what a press means for an actor that may not want keys at all.
 - **An explicit relation between actors, stated by mail or on the type.** A second way to order beside the tree, with cycles and unordered pairs to refuse. Layers say the same thing with structure that already exists.
 - **A reorder verb for siblings.** It makes the sequence state that any actor can change at any time, and every reader must then handle a change mid-frame. Changing order stays inside one actor.
 - **A number, band or enum on the draw kinds.** ADR-0117 already rejects an absolute key: every author must agree on one scale.
