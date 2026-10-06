@@ -331,6 +331,7 @@ dependencies = [
  "aether-text",
  "aether-window",
  "clap",
+ "confique",
  "crossbeam-channel",
  "ctrlc",
  "signal-hook",

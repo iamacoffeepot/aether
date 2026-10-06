@@ -1903,11 +1903,11 @@ mod tests {
             if relay.engine_only {
                 owed.reply_envelope(ctx, MonitorNotice::ID, &MonitorNotice.encode_into_bytes());
             } else {
-                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 1 }.encode_into_bytes());
-                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 2 }.encode_into_bytes());
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 1, elapsed_micros: 1 }.encode_into_bytes());
+                owed.reply_envelope(ctx, Tick::ID, &Tick { delta_micros: 2, elapsed_micros: 2 }.encode_into_bytes());
             }
             self.held_after_forwards = Some(self.counter.held_open(root));
-            owed.reply(ctx, &Tick { delta_micros: 3 });
+            owed.reply(ctx, &Tick { delta_micros: 3, elapsed_micros: 3 });
         }
     }
 
@@ -1933,7 +1933,7 @@ mod tests {
     }
 
     fn tick(delta_micros: u32) -> (String, Vec<u8>) {
-        (Tick::NAME.to_owned(), Tick { delta_micros }.encode_into_bytes())
+        (Tick::NAME.to_owned(), Tick { delta_micros, elapsed_micros: u64::from(delta_micros) }.encode_into_bytes())
     }
 
     /// `reply_envelope` forwards each already-encoded reply to the debt's

@@ -44,9 +44,15 @@ use winit::event_loop::EventLoop;
 use winit::window::Window;
 
 use super::chassis::UserEvent;
+use frame_time::STALL_WARN_COOLDOWN;
 use lifecycle::{LifecycleReplyOutcome, consume_lifecycle_reply};
 use shutdown::install_shutdown_handler;
 
+pub use config::{DEFAULT_MAX_FRAME_DELTA_MICROS, DesktopDriverConfig, DesktopDriverConfigLayer, DesktopDriverOverlay};
+pub use frame_time::{FrameDelta, FrameDeltaLimit};
+
+mod config;
+mod frame_time;
 mod lifecycle;
 mod shutdown;
 
@@ -115,6 +121,13 @@ pub struct DesktopRenderIntegration {
     /// Start instant of the previous Tick stage. The desktop cadence is
     /// frame-driven, so this is the source of Tick's elapsed-time payload.
     last_tick: Option<Instant>,
+    /// The most game time one frame adds. The interval measured from
+    /// [`Self::last_tick`] is held to it before the frame's advances state
+    /// it, so a stall slows game time and skips no step.
+    frame_delta_limit: FrameDeltaLimit,
+    /// Last time a frame's uncounted time was warned of, for the
+    /// [`STALL_WARN_COOLDOWN`] rate limit.
+    last_stall_warn: Option<Instant>,
     frame: u64,
     /// True once graceful lifecycle shutdown has been requested.
     quit_requested: bool,
@@ -221,6 +234,27 @@ impl DesktopRenderIntegration {
         }
     }
 
+    /// Warn that a frame ran `uncounted_micros` past the frame delta limit,
+    /// at most once per [`STALL_WARN_COOLDOWN`]. `now` is the instant the
+    /// frame already read.
+    fn warn_of_uncounted(&mut self, now: Instant, uncounted_micros: u64) {
+        if uncounted_micros == 0 {
+            return;
+        }
+        let cooling_down = self.last_stall_warn.is_some_and(|last| now.duration_since(last) < STALL_WARN_COOLDOWN);
+        if cooling_down {
+            return;
+        }
+
+        self.last_stall_warn = Some(now);
+        tracing::warn!(
+            target: "aether_substrate::frame_loop",
+            uncounted_micros,
+            "a frame ran past the frame delta limit; game time did not count the rest and no step was skipped \
+             (AETHER_DESKTOP_MAX_FRAME_DELTA_MICROS)"
+        );
+    }
+
     fn metrics(&self) -> (Option<Instant>, u64, u64) {
         (self.started, self.frame, self.render_slot.read_state(RenderCapabilityState::triangles_rendered).unwrap_or(0))
     }
@@ -254,11 +288,10 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
             return;
         }
         let now = Instant::now();
-        let delta_micros = self
-            .last_tick
-            .replace(now)
-            .map_or(0, |last_tick| u32::try_from(now.duration_since(last_tick).as_micros()).unwrap_or(u32::MAX));
-        self.terminal_reached = self.run_frame_advance(delta_micros);
+        let measured = self.last_tick.replace(now).map_or(Duration::ZERO, |last_tick| now.duration_since(last_tick));
+        let delta = self.frame_delta_limit.limit(measured);
+        self.warn_of_uncounted(now, delta.uncounted_micros);
+        self.terminal_reached = self.run_frame_advance(delta.counted_micros);
         self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows: windows.to_vec() });
         self.frame += 1;
     }
@@ -322,6 +355,10 @@ pub struct DesktopDriverCapability {
     /// actor's params so its `capture_frame` handler can read similarity
     /// reference images off the hot path (iamacoffeepot/aether#1780).
     pub assets_dir: PathBuf,
+    /// The most game time one frame adds, lowered from
+    /// [`DesktopDriverConfig`] in the desktop `Chassis::build` and handed to
+    /// the render integration, which measures the time between frames.
+    pub frame_delta_limit: FrameDeltaLimit,
 }
 
 pub struct DesktopDriverRunning {
@@ -367,9 +404,11 @@ impl DriverCapability for DesktopDriverCapability {
         // (`AETHER_RENDER_VERTEX_BUFFER_BYTES`): ADR-0161 R3 moved render off
         // the pooled `with_actor` compose on desktop, so the driver — which
         // now boots the render actor — declares its `Config` member for the
-        // manifest / `--print-config` / unknown-env sweep.
+        // manifest / `--print-config` / unknown-env sweep. The driver's own
+        // knob, the frame delta limit, is its third member.
         let mut members = <aether_chassis::WindowConfig as ConfigMember>::members();
         members.extend(<RenderTuningConfig as ConfigMember>::members());
+        members.extend(<DesktopDriverConfig as ConfigMember>::members());
         members
     }
 
@@ -377,7 +416,7 @@ impl DriverCapability for DesktopDriverCapability {
     // thread through a single flat sequence.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { event_loop, boot, window, render_config, assets_dir } = self;
+        let Self { event_loop, boot, window, render_config, assets_dir, frame_delta_limit } = self;
         let aether_chassis::WindowSettings { mode, size, title, app_name, wireframe } = window;
         let initial_window = WindowSpec {
             name: INITIAL_WINDOW_NAME.to_owned(),
@@ -458,6 +497,8 @@ impl DriverCapability for DesktopDriverCapability {
             render_pump_rx,
             started: None,
             last_tick: None,
+            frame_delta_limit,
+            last_stall_warn: None,
             frame: 0,
             quit_requested: false,
             terminal_reached: false,
