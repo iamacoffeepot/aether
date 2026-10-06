@@ -44,7 +44,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
 
-use aether_data::wire::{DecodeCtx, Encoder, LedgerEncoder};
+use aether_data::wire::{Encoder, LedgerEncoder};
 use aether_data::{Blob, Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::blob::guest::EncodedGuestMail;
@@ -53,6 +53,7 @@ use crate::request_context::{RequestContextTable, compose_state_envelope};
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
 use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
+use crate::wasm::decode::guest_ctx;
 
 mod bundle;
 pub mod compose;
@@ -443,11 +444,13 @@ impl Registry {
     }
 
     /// Decode saved-state bytes as `K`, claiming each held ticket in them
-    /// back to live in this instance (ADR-0243 §6).
+    /// back to live in this instance (ADR-0243 §6) and proving each
+    /// `ProtocolPath` in them against the engine's published routes
+    /// (ADR-0231 §3).
     pub(crate) fn decode_saved_state<K: Kind>(&self, payload: &[u8]) -> Option<K> {
         let mut held = self.held.borrow_mut();
         let mut ledger = ClaimLedger::new(&mut held);
-        K::decode_with(payload, &mut DecodeCtx::empty().held(&mut ledger))
+        K::decode_with(payload, &mut guest_ctx().held(&mut ledger))
             .inspect_err(|error| tracing::warn!(kind = K::NAME, %error, "prior state decode refused"))
             .ok()
     }

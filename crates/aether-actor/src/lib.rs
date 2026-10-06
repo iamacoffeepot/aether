@@ -65,15 +65,16 @@ pub use model::{
     Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared, declared_dependencies, root_mailbox,
     validate_namespace_segment,
 };
-pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError};
+pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError, TypedPath};
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref, __mint_protocol_ref};
 pub use reference::{ActorRef, Direct, ErasedActorRef, HandsOff, ProtocolRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
-// The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32`
-// answer (ADR-0231 §4), and the `live_route_p32` answer (ADR-0230 §3,
-// #7205): the substrate's host fns encode them, and `WasmCtx::resolve_path`,
-// `WasmCtx::cast`, and `WasmCtx::resolve` decode them.
+// The `resolve_path_p32` answer (ADR-0230 §3), the `published_rows_p32` and
+// `route_rows_p32` answer (ADR-0231 §4, §3), and the `live_route_p32` answer
+// (ADR-0230 §3, #7205): the substrate's host fns encode them, and
+// `WasmCtx::resolve_path`, `WasmCtx::cast`, a guest's `ProtocolPath` decode,
+// and `WasmCtx::resolve` decode them.
 #[doc(hidden)]
 pub use wasm::bridge::address::{__LiveRoute, __PublishedRows, __ResolvedPath};
 // Both transports send through flat verbs and hold no typed handle: wasm

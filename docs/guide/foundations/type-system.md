@@ -153,7 +153,8 @@ worth knowing beyond "it's a type tree":
   A resolved `Blob` is always a reference to its store entry, never a copy;
   tag 0 needs no context and decodes owned. Native dispatch builds the
   context from the inbound mail's attachments and the mail registry; a guest's
-  context carries its blob holds only. A field refuses what its context
+  context carries its blob holds and asks the host for the registry's rows,
+  one host call per `ProtocolPath<P>` field. A field refuses what its context
   cannot prove: a tag-1 `Blob` with no resolver refuses `DetachedBlob`, and a
   `ProtocolPath<P>` refuses `ProtocolPathUnchecked` with no registry,
   `ProtocolPathUnpublished` when no route has stood at its path or it is

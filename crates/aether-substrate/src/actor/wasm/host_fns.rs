@@ -804,6 +804,42 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0231 §3 (#7501) — a guest's decode proves a
+    // `ProtocolPath<P>` inside `init` (its config) or a handler (its mail),
+    // synchronously, before the decoded value exists, which no mail can
+    // serve. The host reads the rows of the route standing under exactly the
+    // path's canonical name through `NativeBinding::route_rows`, the
+    // `Registry::route_rows` read a native decode makes through
+    // `impl PublishedRoutes for Registry`, and the guest applies the one
+    // coverage rule, `DecodeCtx::prove_route_covers`, so the guest and native
+    // proofs cannot drift apart.
+    //
+    // The guest passes the path text (a slice in guest memory). The host
+    // encodes the answer as one `__PublishedRows` — the rows of a `Live` or
+    // `Dropped` route, and none for a `Starting` one, a never-registered
+    // path, or a fold collision — and delivers it as the packed
+    // `(ptr << 32) | len`, like `published_rows_p32`. A `Dropped` route
+    // answers, where `published_rows_p32` and `live_route_p32` do not: names
+    // are never reused, so a closed actor's path still proves its type, and
+    // the receiver's `resolve` answers "not live". The rows are what
+    // `describe_component` already exposes and the host mints nothing. An
+    // out-of-bounds pointer, text that is not UTF-8, or text outside the
+    // ADR-0166 grammar traps: the SDK passes only a typed path's text.
+    linker.func_wrap(
+        "aether",
+        "route_rows_p32",
+        |mut caller: Caller<'_, ComponentCtx>, path_ptr: u32, path_len: u32| -> wasmtime::Result<u64> {
+            let text = read_guest_utf8(&mut caller, path_ptr, path_len)?;
+            let path = ErasedActorPath::new(&text).map_err(|error| {
+                wasmtime::Error::msg(format!("route_rows: the text is not an ADR-0166 actor path: {error}"))
+            })?;
+            let answer = __PublishedRows { rows: caller.data().binding.route_rows(&path).map(|rows| rows.to_vec()) };
+            let bytes = wire::to_vec(&answer)
+                .map_err(|error| wasmtime::Error::msg(format!("route_rows: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
     // HOST_FN_OK: ADR-0238 decisions 2 and 9 — a guest's decode builds a
     // `Blob` over a tag-1 hash inside its handler, synchronously, and the
     // value's `GuestHold` must own a hold before the decode returns, which no

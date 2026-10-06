@@ -23,13 +23,14 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 
 use crate::mail::PriorState;
 use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, SpawnError, WasmDropCtx, WasmInitCtx, install_inline_child};
+use crate::wasm::decode::decode_config;
 use crate::wasm::inline::bundle::{self, ChildEntry};
 use crate::wasm::inline::{ChildRecord, Registry};
-use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
+use crate::wasm::{ErasedWasmActor, WasmActor, WasmCtx};
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
 /// composite migration bundle (ADR-0114 §5).
@@ -259,8 +260,12 @@ where
     // identity's `ErasedWasmActor` impl satisfies this.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    let Some(config) = <A::Config as Kind>::decode_from_bytes(to_reconstruct.config_bytes) else {
-        return false;
+    let config = match decode_config::<A::Config>(A::NAMESPACE, to_reconstruct.config_bytes) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "an inline child's config no longer decodes; the child is not rebuilt");
+            return false;
+        }
     };
     let mut init_ctx = WasmInitCtx::__new();
     // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
@@ -345,9 +350,8 @@ where
     // tag-selected spawn neither can nor needs to enforce.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    let Some(config) = <A::Config as Kind>::decode_from_bytes(config_bytes) else {
-        return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child_by_tag: Config decode failed")));
-    };
+    let config = decode_config::<A::Config>(A::NAMESPACE, config_bytes).map_err(SpawnError::InitFailed)?;
+
     install_inline_child::<A>(
         registry,
         alias,

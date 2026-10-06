@@ -10,6 +10,7 @@ use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{Addressable, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
+use crate::wasm::decode::decode_config;
 use crate::wasm::inline::{ChildRecord, Registry};
 use crate::wasm::{__validate_inline_child_alias, ActorInitError, ErasedWasmActor, Spawns, WasmActor};
 use alloc::boxed::Box;
@@ -213,11 +214,11 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
-        // it sidesteps a `Clone` bound the detached verb also lacks.
+        // it sidesteps a `Clone` bound the detached verb also lacks. The
+        // decode proves a `ProtocolPath` in the config against the engine's
+        // published routes, as the child's own load would (ADR-0231 §3).
         let bytes = config.encode_into_bytes();
-        let Some(owned) = <C::Config as Kind>::decode_from_bytes(&bytes) else {
-            return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child: Config round-trip failed")));
-        };
+        let owned = decode_config::<C::Config>(C::NAMESPACE, &bytes).map_err(SpawnError::InitFailed)?;
         // The executing actor is both the host fold seed and the logical
         // parent recorded for relative addressing and reconstruction.
         let record = ChildRecord { type_tag, full_subname, is_counter, parent: self.mailbox, config_bytes: bytes };

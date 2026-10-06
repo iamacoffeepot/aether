@@ -27,6 +27,7 @@ use aether_data::{
 
 #[cfg(target_arch = "wasm32")]
 use crate::blob::guest::GuestResolver;
+use crate::wasm::decode::guest_ctx;
 use crate::wasm::inline::Registry;
 
 /// Framework wake emitted after the registry publishes a new live-mailbox or
@@ -257,15 +258,16 @@ impl Mail<'_> {
     /// a cast-size mismatch, a structured decode error, or a field the
     /// context cannot resolve.
     ///
-    /// On wasm32 the decode is `K::decode_with` over a context carrying
-    /// the guest's blob resolver only (ADR-0238 decision 3): each tag-1
-    /// `Blob` field becomes a `Shared` value holding one hold on this
+    /// On wasm32 the decode is `K::decode_with` over the guest decode
+    /// context and the guest's blob resolver (ADR-0238 decision 3): each
+    /// tag-1 `Blob` field becomes a `Shared` value holding one hold on this
     /// instance's blob table, so decoding a mail twice holds twice and a
     /// field never decoded holds nothing. A tag-1 hash the table neither
     /// pins nor holds, such as one in bytes kept past their receive
-    /// call, fails the decode (`None`). The context carries no published
-    /// routes, so a `ProtocolPath` field refuses in a guest until
-    /// ADR-0241. A refusal is logged at warn, naming the kind.
+    /// call, fails the decode (`None`). A `ProtocolPath` field is proven
+    /// against the engine's published routes, one host call per path field
+    /// (ADR-0231 §3); a kind with no such field makes none. A refusal is
+    /// logged at warn, naming the kind.
     #[must_use]
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
         if self.kind != K::ID.0 || self.count != 1 {
@@ -285,8 +287,10 @@ impl Mail<'_> {
     /// why a decode refused (ADR-0231 §3): `Err(None)` on a kind mismatch or
     /// `count != 1`, `Err(Some(error))` when the decode itself refused, so
     /// the arm can answer a typed-path refusal with its reply. The guest
-    /// context carries no published routes, so every `ProtocolPath` refuses
-    /// `ProtocolPathUnchecked` until ADR-0241.
+    /// context proves a `ProtocolPath` against the engine's published
+    /// routes, so it refuses `ProtocolPathUnpublished` or
+    /// `UncoveredProtocolPath` as a native receiver does; the host build of
+    /// the SDK has no routes and refuses `ProtocolPathUnchecked`.
     ///
     /// # Errors
     ///
@@ -428,21 +432,23 @@ impl<'a> PriorState<'a> {
     }
 }
 
-/// [`Mail::decode_kind`]'s decode of a bounded payload: through the guest's
-/// blob resolver on wasm32, so tag-1 `Blob` fields become held `Shared`
-/// values (ADR-0238 decision 3). The context has no published routes, so a
-/// `ProtocolPath` refuses; a refusal is logged at warn.
+/// [`Mail::decode_kind`]'s decode of a bounded payload: through the guest
+/// decode context, which proves a `ProtocolPath` against the engine's
+/// published routes (ADR-0231 §3), and the guest's blob resolver, so tag-1
+/// `Blob` fields become held `Shared` values (ADR-0238 decision 3). A
+/// refusal is logged at warn.
 #[cfg(target_arch = "wasm32")]
 fn decode_payload<K: Kind>(bytes: &[u8]) -> Result<K, wire::Error> {
-    K::decode_with(bytes, &mut wire::DecodeCtx::empty().blobs(&mut GuestResolver))
+    K::decode_with(bytes, &mut guest_ctx().blobs(&mut GuestResolver))
         .inspect_err(|error| tracing::warn!(kind = K::NAME, %error, "decode refused"))
 }
 
 /// [`Mail::decode_kind`]'s decode of a bounded payload. The host build of the
-/// SDK holds no guest blob table, so a tag-1 field refuses.
+/// SDK holds no guest blob table and reaches no engine, so a tag-1 field and
+/// a `ProtocolPath` refuse.
 #[cfg(not(target_arch = "wasm32"))]
 fn decode_payload<K: Kind>(bytes: &[u8]) -> Result<K, wire::Error> {
-    K::decode_with(bytes, &mut wire::DecodeCtx::empty())
+    K::decode_with(bytes, &mut guest_ctx())
 }
 
 #[cfg(test)]

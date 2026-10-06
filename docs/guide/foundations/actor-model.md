@@ -467,9 +467,10 @@ prove is still answered: its reply kind implements `From<PathRefused>`, and the
 dispatch answers `O::from(refused)` naming the path and why, while a silent or
 unchecked row drops the refusal with a warn. A request kind carrying a path
 whose reply lacks `From<PathRefused>` does not compile. Native dispatch decodes
-with the registry; a guest's decode has none, so a guest refuses a
-`ProtocolPath<P>` as `Unchecked` until
-[ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md).
+with the registry, and a guest's decode asks it through one host call per path
+field (`route_rows_p32`), so a guest proves and refuses a `ProtocolPath<P>` as
+a native receiver does, in mail, in its config, and in saved state. A kind
+with no protocol path makes no host call.
 Neither path grants a send: a closed actor's path decodes, since names are
 never reused, and the route can leave after the decode, so its receiver's
 `resolve` proves that a live actor stands at the path and the handler answers
@@ -500,8 +501,12 @@ match ctx.resolve(&run.source) {
 }
 ```
 
-The guest arm is `WasmCtx::resolve` over an `ActorPath<R>` (#7205); the
-Bloomery bootstrap proves its journal and driver peers with it.
+The guest arm is `WasmCtx::resolve`, which takes either typed path and mints
+the reference its type names (#7205, #7501): the Bloomery bootstrap proves
+its journal and driver peers from `ActorPath<R>` fields with it, and a guest
+whose config names a peer by protocol resolves the `ProtocolPath<P>` in
+`wire`
+([Naming a peer by protocol](../systems/components.md#naming-a-peer-by-protocol)).
 
 A kind or config field naming an actor its receiver will later send to, such
 as a subscriber, a handler, a callback, or a source, is a typed path, never an

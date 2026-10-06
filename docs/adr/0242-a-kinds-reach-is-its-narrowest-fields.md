@@ -176,8 +176,8 @@ implementor vouching for its own answer, is closed with the existing lint:
 and a reason at the substrate's callers
 ([R-0010](../guide/contributing/design-rules.md#r-0010),
 [R-0005](../guide/contributing/design-rules.md#r-0005)). A guest refuses a
-reference leaf until its first guest carrier adds the arm, as it refuses a
-`ProtocolPath<P>` today
+reference leaf until its first guest carrier adds the arm, as it refused a
+`ProtocolPath<P>` until its first guest caller did (ADR-0231 §3)
 ([R-0009](../guide/contributing/design-rules.md#r-0009),
 [R-0032](../guide/contributing/design-rules.md#r-0032)).
 

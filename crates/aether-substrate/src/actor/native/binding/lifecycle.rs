@@ -328,6 +328,17 @@ impl NativeBinding {
         self.mailer.registry().published_rows_at(position)
     }
 
+    /// The rows of the `Live` or `Dropped` route standing under exactly
+    /// `path`'s canonical name, as `Registry::route_rows` answers them: the
+    /// read behind a wasm guest's decode of a `ProtocolPath<P>` (ADR-0231
+    /// §3), through the `route_rows_p32` host fn. The same read a native
+    /// decode makes through `impl PublishedRoutes for Registry`, so the two
+    /// proofs cannot drift apart.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn route_rows(&self, path: &ErasedActorPath) -> Option<Arc<[(KindId, ReplyContract)]>> {
+        self.mailer.registry().route_rows(path)
+    }
+
     /// The position of the `Live` route standing under exactly `path`'s
     /// canonical name, as `Registry::live_route` answers it: the read behind
     /// the wasm guest's `WasmCtx::resolve` over an `ActorPath<R>` (ADR-0230
