@@ -315,7 +315,9 @@ mod tests {
         let SpawnResult::Err { error } = result else {
             panic!("a spawn bringing another module's bytes is refused, got {result:?}");
         };
-        assert!(error.contains(QUIET_PROBE), "the refusal names the namespace, got: {error}");
+        let names_namespace = error.contains(QUIET_PROBE);
+        let names_mismatch = error.contains("not the module that publishes it");
+        assert!(names_namespace && names_mismatch, "the refusal names the namespace and the mismatch, got: {error}");
         let names = harness.list_components(engine);
         assert!(!names.iter().any(|name| name == QUIET_PROBE), "the refused spawn stood nothing up: {names:?}");
     }
