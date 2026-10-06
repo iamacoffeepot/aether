@@ -69,7 +69,6 @@ ownership before adding to the shared crate.
 |---|---|---|
 | `aether.kit.camera*` | camera/controller actors | [Rendering and camera](../systems/rendering.md) |
 | `aether.kit.mesh*` | DSL/OBJ loading and display | [Mesh authoring](../systems/mesh-authoring.md) |
-| `aether.widget*` | widgets, focus, scrolling, panel/editor composition | [Widgets](../systems/widgets.md) |
 
 These are hosted actor APIs. Their presence depends on which component export
 is built and loaded, not merely the native chassis.

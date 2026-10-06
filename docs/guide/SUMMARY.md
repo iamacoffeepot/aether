@@ -65,7 +65,6 @@
     - [Audio](systems/audio.md)
     - [Input streams](systems/input.md)
     - [Window](systems/window.md)
-    - [Widget set and focus model](systems/widgets.md)
 
 # Building with Aether
 

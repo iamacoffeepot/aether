@@ -20,16 +20,6 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
 retries = 1
 
-# A heavy binary iamacoffeepot/aether#3768 sized against the chassis
-# bundle's 180s cap: `widget_render_interaction` (aether-widget) cold-loads
-# the widget wasm plus a font and runs multi-capture verdicts. The default 60s
-# class cap would be a silent tightening under CI's software-rasterizer
-# contention; widen it to the same 300s backstop as `fleetharness_republish`
-# below.
-[[profile.ci.overrides]]
-filter = "package(=aether-widget) & binary(widget_render_interaction)"
-slow-timeout = { period = "300s", terminate-after = 1 }
-
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles
 # `aether_kit.wasm` and boots a wgpu `SubstrateHarness`, so they are one
 # slow class rather than a fixed allowlist: #2805 measured the camera scenario

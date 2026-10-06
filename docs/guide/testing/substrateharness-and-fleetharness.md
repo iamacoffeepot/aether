@@ -176,16 +176,16 @@ actor is the reply's stamped sender. When a test needs that reference — to ask
 through the harness directly instead of through an operation:
 
 ```rust,ignore
-let panel = harness.load::<WidgetPanel>(LoadComponent {
+let camera = harness.load::<CameraComponent>(LoadComponent {
     wasm,
-    name: Some("panel".to_owned()),
+    name: Some("main".to_owned()),
     config: Vec::new(),
     export: None,
 })?;
 ```
 
 `load::<R>` sets the export to `R::NAMESPACE` and returns `ActorRef<R>`;
-`harness.actor_path(&panel)` reads its canonical path for an assertion or a
+`harness.actor_path(&camera)` reads its canonical path for an assertion or a
 `CaptureWithMails` recipient. `load_any` sends the load as given and returns
 the erased reference and its path, for a fixture actor the test cannot name,
 which the test types with `SubstrateHarness::cast::<P>` before it sends.
@@ -323,7 +323,7 @@ let counter = harness.cast::<StatefulCounter>(harness.load_any(&load)?.0)?;
 HarnessOp::send_and_settle(&counter, &Bump);
 ```
 
-A child an actor spawned — a widget beneath a panel, a window beneath the
+A child an actor spawned — an inline child beneath its parent, a window beneath the
 window capability — is reached by type and key beneath a reference already
 held, with `SubstrateHarness::child`. Once a root `CreateWindow` operation has
 settled, send an id-less control to the child it opened:

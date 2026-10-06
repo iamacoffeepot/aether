@@ -6,8 +6,8 @@
 //! list, and that position is checked against the list, so a bridge that
 //! omitted a set row, placed one at the wrong position, or left the set's rows
 //! off the list's tail fails to compile here. The adopter sits in a module
-//! other than the set's, as the widget adopters do, so the bridge must be
-//! reachable through the set path the adopter names.
+//! other than the set's, so the bridge must be reachable through the set path
+//! the adopter names.
 
 use aether_actor::{Contracts, CoveredBy, Protocol, RowSet, protocol};
 

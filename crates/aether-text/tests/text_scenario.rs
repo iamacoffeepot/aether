@@ -15,8 +15,8 @@
 //! The font is the workspace's vendored Roboto Mono (SIL OFL 1.1) at
 //! `crates/aether-text/assets/fonts/RobotoMono.ttf` — the
 //! `assets` namespace root points straight at that in-repo home (the
-//! same file `aether-text`'s runtime unit tests and the bundle's widget
-//! scenarios read) rather than copying the binary next to this test.
+//! same file `aether-text`'s runtime unit tests read) rather than copying the
+//! binary next to this test.
 //!
 //! Skipped when no wgpu adapter is available (driverless Linux runners
 //! without `mesa-vulkan-drivers`); `AETHER_REQUIRE_RUNTIME=1` (CI sets
@@ -227,8 +227,8 @@ fn text_draws_a_screen_space_string() {
 /// reverted ordering the first-committed batch (the solid quad) is the one the
 /// mid-fill frame drops, so its region reads background — the stale-frame
 /// signature. Because the drop is racy (the two batches sometimes coincide on
-/// one drain), issue #3917 runs this in a ≥20-iteration loop alongside the two
-/// widget scenarios; the per-capture loop below also multiplies the chances.
+/// one drain), issue #3917 ran this in a ≥20-iteration loop; the per-capture
+/// loop below also multiplies the chances.
 ///
 /// Skips without wgpu like the sibling scenarios; `AETHER_REQUIRE_RUNTIME`
 /// (CI) makes the skip a hard failure.
@@ -299,8 +299,8 @@ fn capture_pins_current_tick_content_not_stale_frame() {
     // A distinct, previously-unseen glyph string each iteration forces the text
     // cap to rasterize fresh glyphs (not replay a cached batch), so its
     // draw_textured_quads emit reliably trails the direct solid quad by a
-    // drain — heavier work than a cached string, matching the widget panel's
-    // multi-batch fan-out that made the reverted race observable.
+    // drain — heavier work than a cached string, matching the multi-batch
+    // fan-out that made the reverted race observable.
     let strings = ["alpha", "bravo", "charlie", "delta"];
     let tolerance = 5u8;
 

@@ -94,9 +94,8 @@ impl<C: Addressable> InlineChild<C> {
     /// target: a parent that sends to the child sends through [`Self::send`]
     /// or a reference [`Self::narrow`] yields.
     ///
-    /// Consumed by `aether-widget`'s lane keys and by its composite node's
-    /// spawn. The *reference* erasure: unrelated to
-    /// the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
+    /// The *reference* erasure: unrelated to the ctx reply-mode `erase()` the
+    /// native `#[actor]` expansion emits.
     #[must_use]
     pub const fn erase(self) -> ErasedActorRef {
         ErasedActorRef::new(self.id)

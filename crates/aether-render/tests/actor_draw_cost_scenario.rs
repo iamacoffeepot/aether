@@ -26,7 +26,7 @@
 //! on stderr. Run it with:
 //!
 //! ```text
-//! cargo test -p aether-widget --release --test widget_actor_cost \
+//! cargo test -p aether-render --release --test actor_draw_cost_scenario \
 //!     -- --ignored --nocapture
 //! ```
 //!
