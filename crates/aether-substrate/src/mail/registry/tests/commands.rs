@@ -342,6 +342,66 @@ fn owner_step_wedge_fails_the_test_without_poisoning_the_apply_lock() {
     owner.apply_once_then_observe_within(Duration::from_millis(1), Duration::from_millis(20), || {});
 }
 
+/// The bug: an assert that fails inside the `observe` closure of an owner
+/// step panics with the apply lock held and poisons it, and the lease's
+/// `Drop`, which runs during that unwind and expects a clean lock, panics a
+/// second time and aborts the process. Every activation test asserts inside
+/// `observe`, so one real regression there would hide every other result.
+///
+/// The prefix is a deferred batch whose completion wake submits again from
+/// inside the apply, so the step finds its next command already queued and
+/// reaches `observe` with no second thread. The lease drops while the panic
+/// unwinds: with the guard released first the test panics once, on the
+/// message `observe` raised; with it held the test binary aborts.
+#[test]
+#[should_panic(expected = "observe probe 7491")]
+fn owner_step_observe_panic_fails_the_test_without_poisoning_the_apply_lock() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let registry_for_wake = Arc::clone(&registry);
+    let actor_mailbox = registry.register_inbox(
+        &auth(),
+        "test.registry.owner-step-observe-panic",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            drop(registry_for_wake.submit(EffectBatch::new(Vec::new())));
+        }),
+    );
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let completion = binding.dispatch_stage::<RegistryBatchResult>(None, RequestId(binding.mint_correlation()));
+    assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
+
+    owner.apply_once_then_observe_before_next_apply_for_test(|| panic!("observe probe 7491"));
+}
+
+/// The bug: an owner step driven with nothing queued fails its "one queued
+/// prefix" assert with both the apply lock and the queue lock held. Either
+/// poisoned lock makes the lease's `Drop` panic a second time during the
+/// unwind and abort the process, so a test that forgot to submit its batch
+/// took the whole binary down instead of failing with that message.
+#[test]
+#[should_panic(expected = "requires one queued prefix")]
+fn owner_step_without_a_prefix_fails_the_test_without_poisoning_a_lock() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+
+    owner.apply_once_then_observe_before_next_apply_for_test(|| {});
+}
+
 #[test]
 fn owner_admission_catches_up_after_transitional_direct_publication() {
     let registry = Arc::new(Registry::new());
