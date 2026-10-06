@@ -197,7 +197,8 @@ manifest entry spawns this way: every instance it stands up, each replica of a
 `replicas: N` entry included, brings the entry's module and reads its assets in
 `wire`. A `Spawn` with no `code` brings no bytes: its guest sees the catalog,
 and a fetch of a catalogued asset by either verb traps naming the two doors
-that bring them, a spawn with its code and `load_component`.
+that bring them, a spawn with its code and `load_component`. A trap in the
+load window fails the birth, so that spawn answers `Err` with the reason.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
