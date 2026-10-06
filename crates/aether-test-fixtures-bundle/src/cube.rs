@@ -46,11 +46,13 @@ use aether_render::{
 /// so the cube spans one world unit and is centered at the origin.
 const HALF: f32 = 0.5;
 
-/// Viewport the projection is built for. The cube scenario boots the
-/// harness at 128×96, so this 4:3 extent keeps the projected silhouette
-/// undistorted. A small mismatch with the real frame only scales the
-/// silhouette slightly; the capture asserts leave margin for it.
-const EXTENT: ViewportExtent = ViewportExtent { width: 128, height: 96 };
+/// Viewport the projection is built for, in physical pixels. The cube
+/// scenario boots the harness at 128×96, so this 4:3 viewport keeps the
+/// projected silhouette undistorted. A small mismatch with the real frame
+/// only scales the silhouette slightly; the capture asserts leave margin
+/// for it.
+const VIEWPORT_WIDTH: u16 = 128;
+const VIEWPORT_HEIGHT: u16 = 96;
 
 /// Vertical field of view in radians (45°). Combined with the eye
 /// distance below it sizes the cube to a healthy fraction of the frame
@@ -71,10 +73,9 @@ impl Cube {
     /// octant and looks back at the origin, so the +X, +Y, and +Z faces
     /// are all visible and no cube edge is parallel to a frame axis. The
     /// renderer applies `projection * view`.
-    #[allow(clippy::cast_precision_loss)]
     fn framing_view() -> ViewProjection {
         let eye = Vec3::new(1.8, 1.5, 2.2);
-        let aspect = EXTENT.width as f32 / EXTENT.height as f32;
+        let aspect = f32::from(VIEWPORT_WIDTH) / f32::from(VIEWPORT_HEIGHT);
 
         ViewProjection {
             view: Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
@@ -82,7 +83,7 @@ impl Cube {
             eye,
             near: Z_NEAR,
             far: Z_FAR,
-            extent: EXTENT,
+            extent: ViewportExtent { width: u32::from(VIEWPORT_WIDTH), height: u32::from(VIEWPORT_HEIGHT) },
         }
     }
 
