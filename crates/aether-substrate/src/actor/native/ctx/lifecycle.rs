@@ -68,12 +68,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// - **One notice per call.** Two monitors of one target are two
     ///   registrations and receive two notices.
     ///
+    /// `target` is any proven reference: an [`ErasedActorRef`], or an
+    /// `ActorRef<R>` or `ProtocolRef<P>` passed as it is.
     /// Any proven target can be watched: an instanced actor, a composed or
     /// pumped root, an inline-child alias (ADR-0114 §2). A caller whose
     /// `wire` monitors before its own route is `Live` has a notice held
     /// until its birth promotes.
-    pub fn monitor(&self, target: ErasedActorRef) -> MonitorHandle {
-        MonitorHandle::register(self.binding, target.id())
+    pub fn monitor(&self, target: impl Into<ErasedActorRef>) -> MonitorHandle {
+        MonitorHandle::register(self.binding, target.into().id())
     }
 
     /// ADR-0080 §6: subscribe the calling actor to one `K` notice when the

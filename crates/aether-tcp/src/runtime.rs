@@ -458,7 +458,7 @@ impl NativeActor for TcpCapability {
                 name: listener_name.clone(),
                 listener,
                 pending_unbind: None,
-                _monitor_handle: ctx.monitor(listener.erase()),
+                _monitor_handle: ctx.monitor(listener),
             },
         );
         held.answer(ctx, &BindListenerResult::Ok { listener_name, local_port });

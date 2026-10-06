@@ -113,7 +113,7 @@ impl SyntheticWindows {
         // identities read the shared window namespace consts, so the child's
         // name is the canonical path `window_path` wrote.
         let window = Self::describe(spec, path.clone());
-        self.child_monitors.insert(child.erase(), (path.clone(), ctx.monitor(child.erase())));
+        self.child_monitors.insert(child.erase(), (path.clone(), ctx.monitor(child)));
         self.windows
             .insert(path.clone(), SyntheticWindow { info: window.clone(), commands: child.narrow::<WindowCommands>() });
         self.publish(ctx, &path, &WindowOpened { window: window.clone() });

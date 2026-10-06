@@ -486,7 +486,7 @@ impl DesktopWindows {
                 )
             }
             Ok(child) => {
-                let monitor = ctx.monitor(child.erase());
+                let monitor = ctx.monitor(*child);
                 self.promote_attached_window(ctx, path, *child, monitor, &mut pending)
             }
         };

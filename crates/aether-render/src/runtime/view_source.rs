@@ -59,7 +59,7 @@ impl RenderCapabilityState {
         };
 
         if !self.follows_view_of(source.erase()) {
-            let monitor = ctx.monitor(source.erase());
+            let monitor = ctx.monitor(source);
             let previous = self.view_source.replace(FollowedView { source, _monitor: monitor });
 
             if let Some(previous) = previous {

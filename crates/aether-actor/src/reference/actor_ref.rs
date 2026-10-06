@@ -83,6 +83,14 @@ impl<R> ActorRef<R> {
     }
 }
 
+/// A typed reference is an erased one with its type forgotten, so a verb
+/// that takes any proven reference (`monitor`) accepts it as it is.
+impl<R> From<ActorRef<R>> for ErasedActorRef {
+    fn from(reference: ActorRef<R>) -> Self {
+        reference.erase()
+    }
+}
+
 impl<R> Clone for ActorRef<R> {
     fn clone(&self) -> Self {
         *self
