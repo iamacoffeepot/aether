@@ -18,6 +18,7 @@
 //! that [`WatchNote`], the ledger's context kind, is not a kind its module
 //! declares.
 
+use std::collections::BTreeMap;
 use std::mem;
 
 use aether_actor::{
@@ -214,15 +215,38 @@ pub struct WatchNote {
     tag: u32,
 }
 
+/// The distinct watch ids one fixture instance has been handed, by `watch`
+/// or by a departure event, in the order it first saw them.
+///
+/// A `WatchId` never leaves the actor that holds it, so a fixture reports an
+/// id as its ordinal here. Two ordinals from one instance are equal exactly
+/// when the ids are.
+#[derive(Default)]
+struct HandedWatches(Vec<WatchId>);
+
+impl HandedWatches {
+    /// The ordinal of `watch`: its index here, added at the end when this
+    /// instance has not been handed it before.
+    fn ordinal(&mut self, watch: WatchId) -> u32 {
+        let index = self.0.iter().position(|handed| *handed == watch).unwrap_or_else(|| {
+            self.0.push(watch);
+            self.0.len() - 1
+        });
+
+        u32::try_from(index).expect("a fixture is handed few watches")
+    }
+}
+
 /// Watches the providers that admit themselves (issue 7496, ADR-0079 §8).
 ///
 /// - A [`WatchAdmit`] casts its sender to the protocol the admit names and
 ///   watches it: through [`WatchProvider`] with a [`WatchNote`] carrying the
-///   admit's tag, or through [`WatchAuditor`] with [`NoContext`]. The answer
-///   is the id `watch` returned.
+///   admit's tag, or through [`WatchAuditor`] with [`NoContext`]. It keeps
+///   the id `watch` returned under the admit's tag and answers with the id's
+///   ordinal.
 /// - A [`WatchHold`] casts its sender and keeps the reference unwatched; a
 ///   [`WatchHeld`] watches it later.
-/// - A [`WatchRelease`] ends a watch.
+/// - A [`WatchRelease`] ends the watch kept under its tag.
 /// - With a `target` in its config, `wire` resolves the path and watches the
 ///   provider there, then succeeds, refuses, or traps as the config says.
 ///
@@ -230,14 +254,27 @@ pub struct WatchNote {
 /// and keeps it for a [`WatchLedgerQuery`].
 ///
 /// It has no saved state and neither republish hook: what a republish
-/// carries of its watches is the host's and the SDK's doing alone.
+/// carries of its watches is the host's and the SDK's doing alone. So its
+/// successor keeps no id under any tag and has been handed none.
 pub struct WatchLedger {
     config: WatchLedgerConfig,
     /// The provider the last [`WatchHold`] came from.
     held: Option<ProtocolRef<WatchProvider>>,
-    /// The id each run of `wire` got.
-    wired: Vec<WatchId>,
+    /// The id the watch made for each tag returned.
+    by_tag: BTreeMap<u32, WatchId>,
+    handed: HandedWatches,
+    /// The ordinal of the id each run of `wire` got.
+    wired: Vec<u32>,
     handled: Vec<WatchDeparture>,
+}
+
+impl WatchLedger {
+    /// Keep `watch` under `tag` and answer with its ordinal.
+    fn admitted(&mut self, tag: u32, watch: WatchId) -> WatchAdmitResult {
+        self.by_tag.insert(tag, watch);
+
+        WatchAdmitResult::Ok { watch: self.handed.ordinal(watch) }
+    }
 }
 
 #[actor(root, depends(SubstrateHarnessObserver))]
@@ -246,7 +283,14 @@ impl WasmActor for WatchLedger {
     const NAMESPACE: &'static str = "test.republish.watch.ledger";
 
     fn init(config: WatchLedgerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WatchLedger { config, held: None, wired: Vec::new(), handled: Vec::new() })
+        Ok(WatchLedger {
+            config,
+            held: None,
+            by_tag: BTreeMap::new(),
+            handed: HandedWatches::default(),
+            wired: Vec::new(),
+            handled: Vec::new(),
+        })
     }
 
     /// Watch the config's target, then succeed, refuse, or trap as
@@ -256,7 +300,7 @@ impl WasmActor for WatchLedger {
         if let Some(target) = &self.config.target {
             let provider = ctx.resolve(target).map_err(|error| ActorInitError::new(error.to_string()))?;
             let watch = ctx.watch(provider, WatchNote { tag: self.config.tag });
-            self.wired.push(watch);
+            self.wired.push(self.handed.ordinal(watch));
         }
 
         match self.config.outcome {
@@ -278,10 +322,11 @@ impl WasmActor for WatchLedger {
             WatchThrough::Auditor => ctx.cast::<WatchAuditor>(sender).map(|auditor| ctx.watch(auditor, NoContext)),
         };
 
-        watch.map_or_else(
-            || not_watched("the sender does not cover the protocol the admit names"),
-            |watch| WatchAdmitResult::Ok { watch },
-        )
+        let Some(watch) = watch else {
+            return not_watched("the sender does not cover the protocol the admit names");
+        };
+
+        self.admitted(admit.tag, watch)
     }
 
     #[handler::tell]
@@ -295,12 +340,16 @@ impl WasmActor for WatchLedger {
             return not_watched("no reference is held");
         };
 
-        WatchAdmitResult::Ok { watch: ctx.watch(provider, WatchNote { tag: held.tag }) }
+        let watch = ctx.watch(provider, WatchNote { tag: held.tag });
+
+        self.admitted(held.tag, watch)
     }
 
     #[handler::tell]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_>, release: WatchRelease) {
-        ctx.unwatch(release.watch);
+        if let Some(watch) = self.by_tag.remove(&release.tag) {
+            ctx.unwatch(watch);
+        }
     }
 
     #[handler::request]
@@ -313,7 +362,7 @@ impl WasmActor for WatchLedger {
         let departure = WatchDeparture {
             through: WatchThrough::Provider,
             tag: Some(note.tag),
-            watch: event.watch,
+            watch: self.handed.ordinal(event.watch),
             actor_is_sender: ctx.sender() == Some(event.actor.erase()),
         };
 
@@ -326,7 +375,7 @@ impl WasmActor for WatchLedger {
         let departure = WatchDeparture {
             through: WatchThrough::Auditor,
             tag: None,
-            watch: event.watch,
+            watch: self.handed.ordinal(event.watch),
             actor_is_sender: ctx.sender() == Some(event.actor.erase()),
         };
 
@@ -430,7 +479,9 @@ impl WasmActor for WatchDesk {
 /// [`WatchLedgerQuery`].
 pub struct WatchClerk {
     config: WatchClerkConfig,
-    wired: Vec<WatchId>,
+    handed: HandedWatches,
+    /// The ordinal of the id each run of `wire` got.
+    wired: Vec<u32>,
     handled: Vec<WatchDeparture>,
 }
 
@@ -440,7 +491,7 @@ impl WasmActor for WatchClerk {
     const NAMESPACE: &'static str = "test.republish.watch.clerk";
 
     fn init(config: WatchClerkConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WatchClerk { config, wired: Vec::new(), handled: Vec::new() })
+        Ok(WatchClerk { config, handed: HandedWatches::default(), wired: Vec::new(), handled: Vec::new() })
     }
 
     /// Watch the config's desk. A clerk rebuilt by a republish after that
@@ -449,7 +500,7 @@ impl WasmActor for WatchClerk {
         let live = self.config.target.as_ref().and_then(|target| ctx.resolve(target).ok());
         if let Some(desk) = live {
             let watch = ctx.watch(desk, WatchNote { tag: self.config.tag });
-            self.wired.push(watch);
+            self.wired.push(self.handed.ordinal(watch));
         }
         Ok(())
     }
@@ -464,7 +515,7 @@ impl WasmActor for WatchClerk {
         let departure = WatchDeparture {
             through: WatchThrough::Provider,
             tag: Some(note.tag),
-            watch: event.watch,
+            watch: self.handed.ordinal(event.watch),
             actor_is_sender: ctx.sender() == Some(event.actor.erase()),
         };
 

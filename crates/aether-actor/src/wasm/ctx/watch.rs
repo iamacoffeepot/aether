@@ -43,8 +43,9 @@ pub struct Departed<W: Watchable> {
     /// compiles and is the ordinary send to a closed actor.
     pub actor: W::Ref,
     /// The watch that ended: the id `ctx.watch` returned for this target.
-    /// It is the same identity as [`Self::actor`] in a form that can sit in
-    /// saved state.
+    /// It names a row in this actor's own watch table and means something
+    /// only to this actor. It has actor reach, so it is never mailed; it may
+    /// sit in this actor's saved state, where [`Self::actor`] may not.
     pub watch: WatchId,
 }
 
@@ -92,9 +93,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// - **A watch is unique per target and watched type.** A second call
     ///   for a target already watched through the same type makes no second
     ///   watch: it returns the same id and replaces the stored context with
-    ///   the one passed. So the id is a stable name for the target, and a
-    ///   component that watches a sender on every mail from it keys its own
-    ///   table by the id. One actor watched through two types, an
+    ///   the one passed. So the id is this actor's own stable name for the
+    ///   target, and a component that watches a sender on every mail from it
+    ///   keys its own table by the id. One actor watched through two types, an
     ///   `ActorRef<R>` and a `ProtocolRef<P>` or two protocols, is two
     ///   watches with two ids, and its departure runs each handler once.
     /// - **Every watch of one type shares one context kind**, the one its
@@ -110,8 +111,13 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// - **The host releases every watch** when this actor closes, traps, or
     ///   is dropped as a republish candidate, with no code of its own run.
     ///
-    /// The id may be kept in saved state. The reference in the event may
-    /// not: a reference has no codec.
+    /// The id names a row in this actor's own watch table and means
+    /// something only to this actor: the same number held by another actor
+    /// names one of that actor's watches. It has actor reach (ADR-0242), so
+    /// a kind holding one is never mail, and no component builds one from a
+    /// number. It may be kept in this actor's saved state and in a context
+    /// this actor stores with a request. The reference in the event may not:
+    /// a reference has no codec.
     pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
     where
         A: Watches<T::Watched>,
@@ -123,7 +129,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 
     /// End the watch `watch` before its target departs: the target's close
     /// then sends this actor nothing for it, and its stored context is
-    /// dropped. A number that is not a live watch of this actor does nothing.
+    /// dropped. An id that is no live watch of this actor does nothing. The
+    /// id is one this actor's own `watch` returned or its own departure event
+    /// carried: an id has actor reach, so none arrives in mail.
     ///
     /// A notice already posted when this runs still arrives, finds no watch,
     /// and runs no handler. Watching the same target again afterwards is a
@@ -170,7 +178,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
             TakenWatchContext::Missing => {
                 tracing::error!(
                     handler,
-                    watch = watch.0,
+                    %watch,
                     context = C::NAME,
                     "departure handler did not run: its watch has no stored context",
                 );
@@ -179,7 +187,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
             TakenWatchContext::OtherKind(stored) => {
                 tracing::error!(
                     handler,
-                    watch = watch.0,
+                    %watch,
                     context = C::NAME,
                     stored = stored.0,
                     "departure handler did not run: its watch's context was stored as another kind and is discarded",

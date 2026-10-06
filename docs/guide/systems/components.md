@@ -791,9 +791,17 @@ the component's own table by the returned `WatchId`, and remove by
 - **A watch is unique per target and watched type.** Watching a target that is
   already watched through the same type makes no second watch: it returns the
   same `WatchId` and replaces the stored context with the one passed. So the
-  id is a stable name for the target that may sit in saved state. One actor
+  id is the component's own stable name for the target. One actor
   watched through two types is two watches with two ids, and its departure
   runs each handler once.
+- **The id stays with the component that holds it.** A `WatchId` names a row
+  in its holder's own watch table and is meaningful only to that actor: the
+  same number in another actor's hands names one of that actor's own watches.
+  It has actor reach, so a kind with a `WatchId` field is never mail and does
+  not compile as a handler's kind or a send's argument, and no component
+  builds one from a number. It may sit in the component's saved state and in
+  a context it stores with a request. Two actors that must speak of one watch
+  use a name of their own, such as a key the watcher keeps beside the id.
 - **It never fails.** A target that had already closed is noticed the same
   way. The notice is mail, handled after the handler that watched returns, so
   what that handler keyed on the id is in place.

@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
 
 use aether_data::wire::{Encoder, LedgerEncoder};
-use aether_data::{Blob, Kind, KindId, MailboxId, RequestId, Source, WatchId};
+use aether_data::{__watch_id_number, Blob, Kind, KindId, MailboxId, RequestId, Source, WatchId};
 
 use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
@@ -381,14 +381,14 @@ impl Registry {
     /// watch already stored. A watch id is drawn from the request-id
     /// sequence, so it never names a request's entry.
     pub(crate) fn store_watch_context<C: Kind>(&self, watch: WatchId, context: C) {
-        self.insert_request_context(RequestId(watch.0), context);
+        self.insert_request_context(RequestId(__watch_id_number(watch)), context);
     }
 
     /// Take the context stored for the watch `watch` as a `C`, for the
     /// handler its departure notice runs. A context stored as another kind is
     /// discarded, since the watch has ended and no other handler takes it.
     pub(crate) fn take_watch_context<C: Kind>(&self, watch: WatchId) -> TakenWatchContext<C> {
-        let request = RequestId(watch.0);
+        let request = RequestId(__watch_id_number(watch));
         let mut table = self.request_contexts.borrow_mut();
         let mut held = self.held.borrow_mut();
         if let Some(context) = table.take_with::<C>(request, &mut ClaimLedger::new(&mut held)) {
@@ -400,7 +400,7 @@ impl Registry {
     /// Drop the context stored for the watch `watch`, undecoded, because the
     /// watch was released before its target departed.
     pub(crate) fn discard_watch_context(&self, watch: WatchId) {
-        self.request_contexts.borrow_mut().discard(RequestId(watch.0));
+        self.request_contexts.borrow_mut().discard(RequestId(__watch_id_number(watch)));
     }
 
     /// Remove and decode the typed request context stored under `request`,

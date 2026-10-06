@@ -439,6 +439,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_unlisted_inline_child",
     "rejects_watch_calls",
     "rejects_watch_handler_signatures",
+    "rejects_watch_id_as_mail",
     "rejects_wire_without_result",
     "single_handler_cannot_read_reply_target",
     "single_handler_cannot_reply",

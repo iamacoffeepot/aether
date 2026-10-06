@@ -150,15 +150,51 @@ pub struct RequestId(pub u64);
 ///
 /// Drawn from the watcher's own [`RequestId`] sequence (ADR-0139 §3), so
 /// within one mailbox it is unique, never reused, and never equal to a
-/// request id. It names a row in that mailbox's own watch table and is no
-/// door to another actor, so it is a plain number: it may sit in saved state
-/// and still names the watch after a republish.
+/// request id.
+///
+/// It names a row in its holder's own watch table and means something only
+/// to that actor: every mailbox numbers its watches from the same start, so
+/// the same number in another actor's hands names one of that actor's own
+/// watches. It therefore has actor reach (ADR-0242). It implements neither
+/// reach marker, so a kind holding one is never mail, and its number is
+/// private, so no component builds one or reads one out. It keeps its codec
+/// and its `Schema`: it may sit in its holder's saved state and in a context
+/// that actor stores with a request, and it still names the watch after a
+/// republish.
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct WatchId(pub u64);
+pub struct WatchId(u64);
 
-// Wire-identical to its `u64`, as the typed ids are (`wire::leaf`).
+impl fmt::Display for WatchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The [`WatchId`] for the number the host's watch table answered with.
+///
+/// Not part of the public API: the guest SDK's watch bridge is its one
+/// caller. A component gets a `WatchId` from `WasmCtx::watch` and from its
+/// departure event, never from a number.
+#[doc(hidden)]
+#[must_use]
+pub const fn __watch_id_from_host(number: u64) -> WatchId {
+    WatchId(number)
+}
+
+/// The number the host's watch table knows `watch` by.
+///
+/// Not part of the public API: the guest SDK's watch bridge and its context
+/// table are its callers.
+#[doc(hidden)]
+#[must_use]
+pub const fn __watch_id_number(watch: WatchId) -> u64 {
+    watch.0
+}
+
+// Saved state encodes it as its `u64`, as the typed ids are encoded
+// (`wire::leaf`).
 impl WireEncode for WatchId {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), wire::Error> {
         self.0.encode(out)

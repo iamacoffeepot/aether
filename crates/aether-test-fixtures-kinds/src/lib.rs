@@ -19,7 +19,7 @@ pub mod wire_corpus;
 
 use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text, WatchId};
+use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -924,8 +924,8 @@ pub struct WatchLedgerConfig {
 
 /// Issue 7496: a provider admits itself to the watch ledger. The ledger casts
 /// the sender to the protocol `through` names, watches it, with a context
-/// carrying `tag` for [`WatchThrough::Provider`], and answers
-/// [`WatchAdmitResult`].
+/// carrying `tag` for [`WatchThrough::Provider`], keeps the id its `watch`
+/// returned under `tag`, and answers [`WatchAdmitResult`].
 #[aether_data::kind(name = "aether.test_fixtures.watch.admit", copy)]
 pub struct WatchAdmit {
     pub tag: u32,
@@ -933,10 +933,18 @@ pub struct WatchAdmit {
 }
 
 /// Issue 7496: the watch ledger's answer to a [`WatchAdmit`] or a
-/// [`WatchHeld`]: the id its `watch` returned, or why it watched nothing.
+/// [`WatchHeld`]: which id its `watch` returned, or why it watched nothing.
+///
+/// A `WatchId` has actor reach and never leaves the actor that holds it
+/// (ADR-0079 §8), so no kind of this family carries one. A watch fixture
+/// names an id by its ordinal: the id's index among the distinct ids that
+/// instance has been handed, by `watch` or by a departure event, in the order
+/// it first saw them. Two ordinals from one instance are equal exactly when
+/// the ids are. An instance a republish installs has been handed none, so its
+/// ordinals start again at zero.
 #[aether_data::kind(name = "aether.test_fixtures.watch.admit_result", eq)]
 pub enum WatchAdmitResult {
-    Ok { watch: WatchId },
+    Ok { watch: u32 },
     Err { error: String },
 }
 
@@ -952,17 +960,19 @@ impl aether_actor::HeldReply for WatchAdmitResult {
 pub struct WatchHold;
 
 /// Issue 7496: tells the watch ledger to watch the reference its last
-/// [`WatchHold`] kept, with a context carrying `tag`. It answers
-/// [`WatchAdmitResult`].
+/// [`WatchHold`] kept, with a context carrying `tag`, and to keep the id
+/// under `tag`. It answers [`WatchAdmitResult`].
 #[aether_data::kind(name = "aether.test_fixtures.watch.held", copy)]
 pub struct WatchHeld {
     pub tag: u32,
 }
 
-/// Issue 7496: tells the watch ledger to `unwatch` `watch`.
+/// Issue 7496: tells the watch ledger to `unwatch` the id it keeps under
+/// `tag`, the tag of the [`WatchAdmit`] or [`WatchHeld`] that watched. A tag
+/// the ledger keeps no id under does nothing.
 #[aether_data::kind(name = "aether.test_fixtures.watch.release", copy)]
 pub struct WatchRelease {
-    pub watch: WatchId,
+    pub tag: u32,
 }
 
 /// Issue 7496: one departure a watch fixture's handler ran for, which it
@@ -975,8 +985,8 @@ pub struct WatchDeparture {
     /// The tag the handler's context carried, or `None` from the handler
     /// that takes no context.
     pub tag: Option<u32>,
-    /// The event's `watch`.
-    pub watch: WatchId,
+    /// The ordinal of the event's `watch` ([`WatchAdmitResult`]).
+    pub watch: u32,
     /// Whether the event's `actor`, erased, is the handler's `ctx.sender()`.
     pub actor_is_sender: bool,
 }
@@ -991,9 +1001,9 @@ pub struct WatchLedgerQuery;
 /// successor lists only what it handled itself.
 #[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query_result", default, eq)]
 pub struct WatchLedgerReport {
-    /// The id each run of `wire` on this instance got from its `watch`, in
-    /// order.
-    pub wired: Vec<WatchId>,
+    /// The ordinal ([`WatchAdmitResult`]) of the id each run of `wire` on
+    /// this instance got from its `watch`, in order.
+    pub wired: Vec<u32>,
     /// Each departure this instance's handlers ran for, in order.
     pub handled: Vec<WatchDeparture>,
 }

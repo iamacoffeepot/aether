@@ -10,7 +10,7 @@
 
 use core::num::NonZeroU64;
 
-use aether_data::WatchId;
+use aether_data::{__watch_id_from_host, __watch_id_number, WatchId};
 
 use crate::wasm::raw;
 
@@ -20,13 +20,13 @@ use crate::wasm::raw;
 pub fn watch(target: u64, from: u64, tag: u64) -> WatchId {
     // SAFETY: FFI import over plain integers; the host answers an id or
     // traps.
-    WatchId(unsafe { raw::watch(target, from, tag) })
+    __watch_id_from_host(unsafe { raw::watch(target, from, tag) })
 }
 
 /// End `watch`, answering whether the host held a watch under that id.
 pub fn unwatch(watch: WatchId) -> bool {
     // SAFETY: FFI import over a plain integer.
-    let ended = unsafe { raw::unwatch(watch.0) };
+    let ended = unsafe { raw::unwatch(__watch_id_number(watch)) };
     ended != 0
 }
 
@@ -36,5 +36,5 @@ pub fn unwatch(watch: WatchId) -> bool {
 pub fn watch_ended(target: u64, watcher: u64, tag: u64) -> Option<WatchId> {
     // SAFETY: FFI import over plain integers.
     let ended = unsafe { raw::watch_ended(target, watcher, tag) };
-    NonZeroU64::new(ended).map(|id| WatchId(id.get()))
+    NonZeroU64::new(ended).map(|id| __watch_id_from_host(id.get()))
 }

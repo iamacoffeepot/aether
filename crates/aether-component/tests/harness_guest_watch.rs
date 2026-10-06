@@ -3,8 +3,9 @@
 //!
 //! The fixtures are the republish watch family. `WatchLedger` watches each
 //! provider that admits itself, by casting the admit's sender to a protocol,
-//! and answers with the id `ctx.watch` returned; its departure handlers keep
-//! what they were handed and mail it to the harness observer. `WatchDesk`
+//! and keeps the id `ctx.watch` returned under the admit's tag; its departure
+//! handlers keep what they were handed and mail it to the harness observer.
+//! `WatchDesk`
 //! spawns an inline `WatchClerk` whose own `wire` watches another desk.
 //! `republish_watch_v2` republishes them with a peer that traps in
 //! `on_rehydrate` by config, and `republish_watch_reshaped` reshapes the
@@ -15,6 +16,15 @@
 //! ledger so the ledger sees it as the sender, and shuts itself down when
 //! told, so it closes whether or not the component host is being drained.
 //! [`Watcher`] monitors one actor the way a capability does.
+//!
+//! A `WatchId` never leaves the actor that holds it, so no scenario sees
+//! one. A fixture reports an id as its ordinal, the id's index among the
+//! distinct ids that instance has been handed, so two ordinals from one
+//! instance are equal exactly when the ids are. An instance a republish
+//! installs has been handed none: its first departure reports
+//! [`FIRST_HANDED`], and what shows that it kept its predecessor's id is the
+//! tag, since the SDK stores a watch's context under the id and a departure
+//! whose id has no context runs no handler.
 //!
 //! No scenario waits on a clock. A departure's notices are posted to the
 //! watchers in the order they registered, and every scenario registers the
@@ -41,7 +51,7 @@ use std::fs;
 use aether_actor::{ActorPath, ActorRef, HeldReply, ProtocolPath, actor};
 use aether_component::ComponentHostCapability;
 use aether_component::component::Prepared;
-use aether_data::{ErasedActorPath, Kind, LoadName, WatchId};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{
@@ -56,6 +66,9 @@ use aether_test_fixtures_kinds::{
     WatchThrough, WireOutcome,
 };
 use aether_test_fixtures_republish::{WatchClerk, WatchDesk, WatchLedger, WatchPeer};
+
+/// The ordinal of the first watch id an instance is handed.
+const FIRST_HANDED: u32 = 0;
 
 /// The refusal a republish reports when the v2 peer traps in `on_rehydrate`.
 const REHYDRATE_TRAP: &str = "on_rehydrate failed";
@@ -320,15 +333,15 @@ fn load_desk(harness: &mut SubstrateHarness, wasm: &[u8], name: &str) -> ActorRe
 }
 
 /// The provider admits itself to the ledger, and the ledger's answer comes
-/// back: the id its `watch` returned.
-fn admit(harness: &mut SubstrateHarness, tag: u32, through: WatchThrough) -> WatchId {
+/// back: the ordinal of the id its `watch` returned.
+fn admit(harness: &mut SubstrateHarness, tag: u32, through: WatchThrough) -> u32 {
     let provider = harness.actor_ref::<Provider>();
     let answer: WatchAdmitResult = call(harness, &provider, &Admit { tag, through });
 
     watched(answer)
 }
 
-fn watched(answer: WatchAdmitResult) -> WatchId {
+fn watched(answer: WatchAdmitResult) -> u32 {
     match answer {
         WatchAdmitResult::Ok { watch } => watch,
         WatchAdmitResult::Err { error } => panic!("the ledger watched nothing: {error}"),
@@ -378,8 +391,8 @@ fn report<I>(harness: &mut SubstrateHarness, actor: impl SendTarget<WatchLedgerQ
 }
 
 /// The departure the ledger's provider handler reports for a watch made
-/// with `tag`.
-fn provider_departure(tag: u32, watch: WatchId) -> WatchDeparture {
+/// with `tag`, whose id has the ordinal `watch`.
+fn provider_departure(tag: u32, watch: u32) -> WatchDeparture {
     WatchDeparture { through: WatchThrough::Provider, tag: Some(tag), watch, actor_is_sender: true }
 }
 
@@ -517,8 +530,8 @@ fn an_unwatched_provider_closes_unreported() {
     };
     let mut harness = pooled();
     let ledger = plain_ledger(&mut harness, &family.v1);
-    let watch = admit(&mut harness, 3, WatchThrough::Provider);
-    tell(&mut harness, &ledger, &WatchRelease { watch });
+    let _ = admit(&mut harness, 3, WatchThrough::Provider);
+    tell(&mut harness, &ledger, &WatchRelease { tag: 3 });
 
     close_provider(&mut harness);
 
@@ -536,7 +549,7 @@ fn a_watch_made_after_an_unwatch_takes_a_new_id() {
     let mut harness = pooled();
     let ledger = plain_ledger(&mut harness, &family.v1);
     let first = admit(&mut harness, 1, WatchThrough::Provider);
-    tell(&mut harness, &ledger, &WatchRelease { watch: first });
+    tell(&mut harness, &ledger, &WatchRelease { tag: 1 });
 
     let second = admit(&mut harness, 2, WatchThrough::Provider);
     assert_ne!(first, second, "a watch made after an unwatch is a new watch");
@@ -558,12 +571,12 @@ fn a_republished_ledger_reports_the_watch_its_predecessor_made() {
     };
     let mut harness = pooled();
     let ledger = plain_ledger(&mut harness, &family.v1);
-    let watch = admit(&mut harness, 11, WatchThrough::Provider);
+    let _ = admit(&mut harness, 11, WatchThrough::Provider);
 
     harness.publish(family.v2.clone()).unwrap_or_else(|error| panic!("v2 republishes v1: {error}"));
     close_provider(&mut harness);
 
-    assert_eq!(report(&mut harness, &ledger).handled, [provider_departure(11, watch)]);
+    assert_eq!(report(&mut harness, &ledger).handled, [provider_departure(11, FIRST_HANDED)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the successor's handler ran once");
 }
 
@@ -577,7 +590,7 @@ fn a_provider_that_closes_while_the_ledger_is_prepared_is_reported_by_the_succes
     };
     let mut harness = pumped();
     let ledger = plain_ledger(&mut harness, &family.v1);
-    let watch = admit(&mut harness, 12, WatchThrough::Provider);
+    let _ = admit(&mut harness, 12, WatchThrough::Provider);
     watch_natively(&mut harness, provider_path().as_erased());
 
     let host = harness.actor_ref::<ComponentHostCapability>();
@@ -594,7 +607,7 @@ fn a_provider_that_closes_while_the_ledger_is_prepared_is_reported_by_the_succes
     let republished = harness.await_deferred::<PublishResult>(republishing).expect("the republish answers");
 
     assert!(matches!(republished, PublishResult::Ok { .. }), "v2 republishes v1: {republished:?}");
-    assert_eq!(report(&mut harness, &ledger).handled, [provider_departure(12, watch)]);
+    assert_eq!(report(&mut harness, &ledger).handled, [provider_departure(12, FIRST_HANDED)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the successor's handler ran once");
 }
 
@@ -715,7 +728,8 @@ fn a_reshaped_watch_context_refuses_the_republish_and_the_kept_ledger_reports() 
 }
 
 /// Spawn a clerk keyed `name` beneath `desk` that watches the desk keyed
-/// `target` with `tag`, and return it with the id its `wire` got.
+/// `target` with `tag`, and return it with the ordinal of the id its `wire`
+/// got.
 ///
 /// The clerk's `wire` ran while its alias had no route, so its watch waited.
 /// The spawn's chain holds the alias publication and the turn of the desk's
@@ -727,7 +741,7 @@ fn spawn_clerk(
     name: &str,
     target: &str,
     tag: u32,
-) -> (ActorRef<WatchClerk>, WatchId) {
+) -> (ActorRef<WatchClerk>, u32) {
     tell(harness, &desk, &WatchClerkSpawn { key: name.to_owned(), target: target.to_owned(), tag });
     let clerk = harness
         .child::<WatchDesk, WatchClerk>(&desk, key(name))
@@ -760,11 +774,11 @@ fn a_clerk_that_watched_in_its_own_wire_reports_before_and_after_its_desks_repub
     assert_eq!(report(&mut harness, &first_clerk).handled, [provider_departure(21, first_watch)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the first clerk's handler ran once");
 
-    let (second_clerk, second_watch) = spawn_clerk(&mut harness, desk, "two", "c", 22);
+    let (second_clerk, _) = spawn_clerk(&mut harness, desk, "two", "c", 22);
     harness.publish(family.v2.clone()).unwrap_or_else(|error| panic!("v2 republishes v1: {error}"));
     let path = harness.actor_path(&second_target);
     drop_guest(&mut harness, &path);
 
-    assert_eq!(report(&mut harness, &second_clerk).handled, [provider_departure(22, second_watch)]);
+    assert_eq!(report(&mut harness, &second_clerk).handled, [provider_departure(22, FIRST_HANDED)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 2, "the rebuilt clerk's handler ran once");
 }

@@ -67,6 +67,8 @@ pub use hash::{
     THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, VARIANT_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed,
     fold_lineage, storage_kind_id_from_name, thread_id_from_name, validate_scope_path,
 };
+#[doc(hidden)]
+pub use ids::{__watch_id_from_host, __watch_id_number};
 pub use ids::{
     ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, WatchId, tag_for_type_id,
     type_name_for_type_id,
@@ -598,16 +600,16 @@ mod schema_impls {
 
     crosses_wire!(ThreadId);
 
-    // A watch id is a plain number (ADR-0079 §8): it names a row in its
-    // holder's own table and reaches no other actor, so it has a `u64`'s
-    // schema and reach.
+    // Actor reach (ADR-0242, ADR-0079 §8): a watch id names a row in its
+    // holder's own table and means something only to that actor, so it
+    // implements neither reach marker and a kind holding one is never mail.
+    // It has a `u64`'s schema so that such a kind can be its holder's saved
+    // state or a context that actor stores.
     impl Schema for WatchId {
         const SCHEMA: SchemaType = SchemaType::Scalar(Primitive::U64);
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
-
-    crosses_wire!(WatchId);
 
     // Issue #232: `BTreeMap<K, V>` lands as `SchemaType::Map`. The
     // `Ord` bound is what proto3-style stringify-and-canonicalize
