@@ -100,7 +100,7 @@ impl Engine {
     /// Ask the driver to run `call` and return its one outcome.
     ///
     /// # Errors
-    /// The transport failed or the call settled without an outcome.
+    /// The transport or the call failed, or the call settled with no outcome.
     pub fn call_program(&mut self, call: &Call) -> Result<CallOutcome> {
         ask(&mut self.connection, &self.driver, call)
     }
@@ -126,25 +126,128 @@ impl Reads for Engine {
     }
 }
 
-/// Send `request` to `to` and return its `Reply`, reading frames until the
-/// call's `ReplyEnd`.
+/// Send `request` to `to` and return its `Reply` when the matching
+/// `ReplyEvent` arrives, without waiting for the call to settle.
 fn ask<Request: Kind, Reply: Kind>(connection: &mut RpcConnection, to: &Recipient, request: &Request) -> Result<Reply> {
     let envelope = MailEnvelope { to: to.clone(), kind: Request::ID, payload: request.encode_into_bytes() };
     let cid = connection.client.call(envelope)?;
+    reply_of(cid, Request::NAME, to.path.as_str(), || {
+        connection.inbound.recv().context("the engine connection closed mid-call")
+    })
+}
 
-    let mut reply = None;
+/// Return the first matching `ReplyEvent` for `cid`, without waiting for its
+/// `ReplyEnd`.
+///
+/// Every request these verbs send has exactly one reply, so the first
+/// `ReplyEvent` whose `cid` matches and whose envelope kind is `Reply::ID`
+/// is the answer. A `ReplyEnd` for the call that arrives before any reply
+/// still ends the wait: with its error when it carries one, and otherwise
+/// with a settled-with-no-reply error.
+fn reply_of<Reply: Kind>(
+    cid: u64,
+    request: &str,
+    to: &str,
+    mut next: impl FnMut() -> Result<WireFrame>,
+) -> Result<Reply> {
     loop {
-        match connection.inbound.recv().context("the engine connection closed mid-call")? {
-            WireFrame::ReplyEvent { cid: seen, envelope } if seen == cid && envelope.kind == Reply::ID => {
-                let decoded = Reply::decode_from_bytes(&envelope.payload);
-                reply = Some(decoded.with_context(|| format!("decoding a {} reply", Reply::NAME))?);
+        match next()? {
+            WireFrame::ReplyEvent { cid: seen, envelope } => {
+                let for_this_call = seen == cid;
+                let is_reply = envelope.kind == Reply::ID;
+                let matches_call = for_this_call && is_reply;
+                if matches_call {
+                    return Reply::decode_from_bytes(&envelope.payload)
+                        .with_context(|| format!("decoding a {} reply", Reply::NAME));
+                }
             }
             WireFrame::ReplyEnd { cid: seen, result } if seen == cid => {
-                result.map_err(|error| anyhow!("{} to {}: {error:?}", Request::NAME, to.path))?;
-                return reply.with_context(|| format!("{} settled with no {} reply", Request::NAME, Reply::NAME));
+                result.map_err(|error| anyhow!("{request} to {to}: {error:?}"))?;
+                return Err(anyhow!("{request} settled with no {} reply", Reply::NAME));
             }
             WireFrame::Bye { reason } => bail!("the engine closed the connection: {reason}"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reply_of;
+    use aether_bloomery_kinds::ReadHeadResult;
+    use aether_data::Kind;
+    use aether_rpc::{ReplyEnvelope, RpcError, WireFrame};
+    use anyhow::{Context, Result};
+
+    const REQUEST: &str = "aether.bloomery.journal.read_head";
+    const TO: &str = "aether.bloomery.journal:primary";
+
+    struct Script<'a> {
+        frames: &'a [WireFrame],
+        reads: usize,
+    }
+
+    impl Script<'_> {
+        fn next(&mut self) -> Result<WireFrame> {
+            let frame = self.frames.get(self.reads).context("out of frames")?.clone();
+            self.reads += 1;
+            Ok(frame)
+        }
+    }
+
+    fn reply_event(cid: u64, reply: &ReadHeadResult) -> WireFrame {
+        WireFrame::ReplyEvent {
+            cid,
+            envelope: ReplyEnvelope { kind: ReadHeadResult::ID, payload: reply.encode_into_bytes() },
+        }
+    }
+
+    fn settled_end(cid: u64) -> WireFrame {
+        WireFrame::ReplyEnd { cid, result: Ok(()) }
+    }
+
+    fn failed_end(cid: u64, reason: &str) -> WireFrame {
+        WireFrame::ReplyEnd { cid, result: Err(RpcError::Other { reason: reason.to_owned() }) }
+    }
+
+    #[test]
+    fn returns_on_the_reply_without_waiting_for_settlement() -> Result<()> {
+        // Catches waiting for settlement: the frames after the reply are never read.
+        let frames = [
+            reply_event(7, &ReadHeadResult::Ok { head: 41 }),
+            settled_end(7),
+            WireFrame::Bye { reason: "closed".to_owned() },
+        ];
+        let mut script = Script { frames: &frames, reads: 0 };
+        let reply: ReadHeadResult = reply_of(7, REQUEST, TO, || script.next())?;
+        assert!(matches!(reply, ReadHeadResult::Ok { head: 41 }));
+        assert_eq!(script.reads, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_call_reports_its_error() {
+        // Catches a call that failed hanging or reporting no cause.
+        let frames = [failed_end(7, "boom")];
+        let mut script = Script { frames: &frames, reads: 0 };
+        let result: Result<ReadHeadResult> = reply_of(7, REQUEST, TO, || script.next());
+        let error = result.expect_err("a failed call is an error").to_string();
+        let keeps_cause = error.contains("boom");
+        assert!(keeps_cause, "the error keeps its cause: {error}");
+    }
+
+    #[test]
+    fn leftover_frames_from_an_earlier_call_are_skipped() -> Result<()> {
+        // Catches a left-over frame from an earlier call ending this one.
+        let frames = [
+            settled_end(3),
+            reply_event(3, &ReadHeadResult::Ok { head: 1 }),
+            reply_event(7, &ReadHeadResult::Ok { head: 9 }),
+        ];
+        let mut script = Script { frames: &frames, reads: 0 };
+        let reply: ReadHeadResult = reply_of(7, REQUEST, TO, || script.next())?;
+        assert!(matches!(reply, ReadHeadResult::Ok { head: 9 }));
+        assert_eq!(script.reads, 3);
+        Ok(())
     }
 }

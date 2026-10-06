@@ -162,7 +162,9 @@ The call key is derived from the open's input digest, so running the same
 opening a second one. A recorded fault is asked again under the next attempt's
 key, so rerunning after a fault outside the input makes a fresh call. The
 digest covers the instructions with the tree, brief, seeds, settings, and
-required proofs. Keep `session=` and `after=` for the next step.
+required proofs. `open` returns once the session's open is recorded and does
+not wait for the session's turns. Keep `session=` and `after=` for the next
+step.
 
 ## 4. Wait for it to rest
 

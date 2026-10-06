@@ -34,7 +34,7 @@ pub trait Stage {
     /// Deliver `publish` and wait for its [`PublishResult`].
     ///
     /// # Errors
-    /// The transport failed or the call settled without a result.
+    /// The transport or the call failed, or the call settled with no result.
     fn stage(&mut self, publish: &Publish) -> Result<PublishResult>;
 }
 
@@ -46,20 +46,20 @@ pub trait Reads {
     /// Deliver `request` and wait for its [`ReadEventsResult`].
     ///
     /// # Errors
-    /// The transport failed or the call settled without a result.
+    /// The transport or the call failed, or the call settled with no result.
     fn read_events(&mut self, request: ReadEvents) -> Result<ReadEventsResult>;
 
     /// Deliver `request` and wait for its [`WatchHeadResult`], which the
     /// journal sends once its head passes `request.after`.
     ///
     /// # Errors
-    /// The transport failed or the call settled without a result.
+    /// The transport or the call failed, or the call settled with no result.
     fn watch_head(&mut self, request: WatchHead) -> Result<WatchHeadResult>;
 
     /// Deliver `request` and wait for its [`ReadArtifactsResult`].
     ///
     /// # Errors
-    /// The transport failed or the call settled without a result.
+    /// The transport or the call failed, or the call settled with no result.
     fn read_artifacts(&mut self, request: &ReadArtifacts) -> Result<ReadArtifactsResult>;
 }
 
