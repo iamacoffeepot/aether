@@ -255,7 +255,9 @@ impl HandedWatches {
 ///
 /// It has no saved state and neither republish hook: what a republish
 /// carries of its watches is the host's and the SDK's doing alone. So its
-/// successor keeps no id under any tag and has been handed none.
+/// successor keeps no id under any tag and has been handed none. Nor does a
+/// republish run `wire` on the instance it installs (ADR-0114, amendment of
+/// 2026-07-08), so a successor's `wired` list stays empty.
 pub struct WatchLedger {
     config: WatchLedgerConfig,
     /// The provider the last [`WatchHold`] came from.
@@ -494,14 +496,17 @@ impl WasmActor for WatchClerk {
         Ok(WatchClerk { config, handed: HandedWatches::default(), wired: Vec::new(), handled: Vec::new() })
     }
 
-    /// Watch the config's desk. A clerk rebuilt by a republish after that
-    /// desk closed finds no live actor there and has nothing to watch.
+    /// Watch the config's desk, failing the spawn when it cannot be resolved.
+    /// A republish rebuilds a clerk through `init` and `on_rehydrate` and
+    /// never runs its `wire` (ADR-0114, amendment of 2026-07-08), so only a
+    /// fresh spawn reaches this hook.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
-        let live = self.config.target.as_ref().and_then(|target| ctx.resolve(target).ok());
-        if let Some(desk) = live {
+        if let Some(target) = &self.config.target {
+            let desk = ctx.resolve(target).map_err(|error| ActorInitError::new(error.to_string()))?;
             let watch = ctx.watch(desk, WatchNote { tag: self.config.tag });
             self.wired.push(self.handed.ordinal(watch));
         }
+
         Ok(())
     }
 

@@ -998,7 +998,9 @@ pub struct WatchLedgerQuery;
 
 /// Issue 7496: the answer to a [`WatchLedgerQuery`]. Both lists are the
 /// answering instance's own memory, which a republish does not carry: a
-/// successor lists only what it handled itself.
+/// successor lists only what it handled itself. A successor's `wired` list is
+/// empty because a republish runs no `wire` on the instance it installs, not
+/// only because the list is not carried.
 #[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query_result", default, eq)]
 pub struct WatchLedgerReport {
     /// The ordinal ([`WatchAdmitResult`]) of the id each run of `wire` on
