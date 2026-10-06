@@ -103,7 +103,7 @@ pub trait Publisher: Addressable {
             from `LifecycleCapability`: `ctx.subscribe::<LifecycleCapability, Tick>()`",
     note = "window device events (`Key`, `KeyRelease`, `MouseMove`, `MouseButton`, `MouseButtonRelease`, \
             `MouseWheel`, `WindowSize`, `TextInput`, `ImePreedit`, `Modifiers`) and window lifecycle \
-            (`WindowOpened`, `WindowClosed`, `WindowMenuActivated`) come from `WindowCapability`: \
+            (`WindowOpened`, `WindowClosed`, `WindowFocus`, `WindowMenuActivated`) come from `WindowCapability`: \
             `ctx.subscribe::<WindowCapability, Key>()`"
 )]
 pub trait Publishes<K: Kind>: Publisher {}

@@ -49,8 +49,8 @@ use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
     RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
-    WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMenuActivated, WindowOpened,
-    WindowSpec,
+    WindowCapability, WindowClosed, WindowCommand, WindowFocus, WindowInfo, WindowInstance, WindowMenuActivated,
+    WindowOpened, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -756,8 +756,11 @@ impl DesktopWindows {
                 }
             }
             WindowEvent::Focused(focused) => {
-                if let Some(state) = self.windows.get_mut(&path) {
+                if let Some(state) = self.windows.get_mut(&path)
+                    && state.focused != focused
+                {
                     state.focused = focused;
+                    self.publish(ctx, &path, &WindowFocus { window: path.clone(), focused });
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -1460,5 +1463,36 @@ mod tests {
             WindowSize { window, width: 1280, height: 960, scale_factor: 2.0 },
             "the size is the physical one winit reported and the factor rides beside it",
         );
+    }
+
+    /// Fails if the focus arm records the state without publishing it, or
+    /// publishes every platform notification instead of each change.
+    #[test]
+    fn a_subscriber_hears_each_focus_change_once() {
+        let mut rig = rig();
+        rig.watcher("focus");
+        let focus = watcher("focus");
+        for subscription in
+            [WindowSubscription::WindowFocus(focus.narrow()), WindowSubscription::WindowSize(focus.narrow())]
+        {
+            assert!(matches!(rig.subscribe(crate::WindowSelector::All, subscription), SubscribeWindowResult::Ok));
+        }
+
+        let window = rig
+            .desktop_turn(|state, ctx| {
+                let (window, winit_id) = insert_scaled_window(state, 1.0);
+                state.window_event(winit_id, WindowEvent::Focused(true), ctx);
+                state.window_event(winit_id, WindowEvent::Focused(false), ctx);
+                state.window_event(winit_id, WindowEvent::Focused(false), ctx);
+                state.window_event(winit_id, WindowEvent::Resized(PhysicalSize::new(800, 600)), ctx);
+                window
+            })
+            .expect("the desktop manager is live");
+
+        let recorded = rig.receipts(3);
+
+        assert_eq!(recorded[0].event::<WindowFocus>(), Some(WindowFocus { window: window.clone(), focused: true }));
+        assert_eq!(recorded[1].event::<WindowFocus>(), Some(WindowFocus { window, focused: false }));
+        assert!(recorded[2].event::<WindowSize>().is_some(), "the repeated loss published nothing before the resize");
     }
 }
