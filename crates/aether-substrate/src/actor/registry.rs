@@ -1,20 +1,40 @@
 //! Actor-lifecycle registry (ADR-0079, issue 607). Keyed by full-name
-//! `MailboxId`, tracks live actor entries plus tombstones (retired
-//! full names), and the bidirectional monitor indices (Phase 4b).
-//! Namespace ownership lives in the publication table (ADR-0241 §3).
+//! `MailboxId`, tracks actor slots, tombstones (retired full names), and
+//! the bidirectional monitor indices. Namespace ownership lives in the
+//! publication table (ADR-0241 §3).
 //!
-//! Phase 2 of issue 607 lands the storage shape; Phase 3 wires
-//! `NativeCtx::spawn_child` as the first writer (`Live` slot
-//! insertion); Phase 4a flips `Live` → `Dead` and inserts tombstones
-//! at close; Phase 4b adds the crate-internal `monitors_of` /
-//! `monitoring` indices plus the `register_monitor` /
-//! `deregister_monitor` / `close_actor` surface.
+//! Distinct from [`crate::mail::registry::Registry`], which owns
+//! mailbox-name → handler routing and kind descriptors, and which owns the
+//! one [`ActorRegistry`] built per engine: everything that holds the routes
+//! reaches this table through them.
 //!
-//! Distinct from [`crate::mail::registry::Registry`] — that one owns
-//! mailbox-name → handler routing and kind descriptors. This one owns
-//! actor-state lifecycle. Future PRs may collapse the two; today they
-//! sit side-by-side so the lifecycle work doesn't perturb the routing
-//! path.
+//! # Monitors and the close
+//!
+//! A monitor registration never refuses. `ActorRegistry::register_monitor`
+//! answers whether the target is being watched or had already closed, and
+//! in the second case its caller posts the target's
+//! [`MonitorNotice`](aether_kinds::MonitorNotice) itself. Every registration
+//! is therefore answered by exactly one notice if the target ever closes:
+//! from the close when the entry was in the index, from the registration
+//! when it was not.
+//!
+//! One table decides which: `tombstones`. A registration reads nothing
+//! else, so a target with no slot (a composed or pumped root, an
+//! inline-child alias) registers like any other. A close writes its
+//! tombstone first, releases that lock, and only then drains
+//! `monitors_of`; a registration holds the `monitors_of` write guard across
+//! its tombstone read and its insert. The two serialize on that one guard:
+//!
+//! ```text
+//! registration first, no tombstone yet   entry inserted; the drain takes it    notice from the close
+//! registration first, tombstone written  nothing inserted; drain finds nothing notice from the registration
+//! drain first                            tombstone was written before it       notice from the registration
+//! ```
+//!
+//! No order gives no notice and none gives two. The only nested
+//! acquisition is `monitors_of` then `tombstones`, in the registration; no
+//! path holds `tombstones` or `actors` while it waits for `monitors_of`, so
+//! the pair cannot deadlock.
 
 // Registry RwLock guards are intentionally held across the full
 // read-then-update or match-then-mutate sequence — releasing the
@@ -95,34 +115,6 @@ pub struct ActorRegistry {
 #[derive(Debug, Clone, Copy)]
 pub struct MonitorEntry {
     pub(crate) watcher: MailboxId,
-}
-
-/// Failure modes for the registry's internal `register_monitor` entry
-/// point (reached from [`crate::actor::native::ctx::NativeCtx::monitor`]).
-/// ADR-0079 v1: monitors must address an actor that is currently `Live`.
-/// Tombstoned targets (retired-and-closed full names) can't be monitored
-/// — the mail wouldn't fire anyway, since the close fan-out already
-/// ran when the slot flipped `Live` → `Dead`.
-/// Every variant stays reachable for a proven (ADR-0230) target: the proof
-/// reads the routing registry, this check reads the actor-slot map.
-#[derive(Debug, PartialEq, Eq)]
-pub enum MonitorError {
-    /// No `Live` entry at the target id. Either the actor never existed
-    /// or it was removed without going through the close path
-    /// (impossible in production today; future replacements may flow
-    /// through here instead of `mark_dead`).
-    TargetNotFound,
-    /// The target's full name is in `tombstones` — it lived and
-    /// closed, and `MonitorNotice` already fired (or would have, if any
-    /// monitor were registered). Registering now is meaningless.
-    TargetTombstoned,
-    /// The calling actor's transport carries no spawner / actor
-    /// registry (a `new_for_test` binding), so there is no monitor
-    /// index to register against. Production transports always carry
-    /// one; handlers that monitor their registrants treat this as
-    /// "not monitorable" and skip, which keeps them drivable under
-    /// test bindings.
-    Unsupported,
 }
 
 impl ActorRegistry {
@@ -254,92 +246,34 @@ impl ActorRegistry {
         tombstones.insert(id);
     }
 
-    /// Issue 607 Phase 4b (ADR-0079): register `watcher` as a monitor
-    /// of `target`. Caller is responsible for sending the resulting
-    /// [`MonitorEntry`] back through a [`crate::actor::monitor::MonitorHandle`]
-    /// so `Drop` deregisters the entry — bare callers (tests, internal
-    /// fixtures) own the cleanup themselves.
+    /// Register `watcher` as a monitor of `target` (ADR-0079 §8). Answers
+    /// `true` when the entry is in the index, so `target`'s close will
+    /// drain it and notify `watcher`; `false` when `target` had already
+    /// closed, with neither index written, so the caller owes `watcher` the
+    /// notice that close can no longer send. It never refuses: see the
+    /// [module docs](self) for why exactly one of the two notices is sent
+    /// under a concurrent close.
     ///
-    /// Uses the reverse `monitoring[watcher]` index to support the
-    /// watcher-died case: when the watcher closes, the close path
-    /// walks `monitoring[watcher]` and prunes `watcher` from each
-    /// target's `monitors_of` so dead watchers don't accumulate.
+    /// The `monitors_of` write guard is held across the tombstone read and
+    /// the forward insert, which is what serializes this against a close's
+    /// drain. The tombstone set is the only liveness authority read: a
+    /// target owns a slot in `actors` only if it was born instanced, so a
+    /// slot check would refuse every root and every inline-child alias.
     ///
-    /// Validation: target must be `Live` (a `Dead` slot or missing
-    /// returns `TargetNotFound`); a tombstoned id returns
-    /// `TargetTombstoned` (takes priority over `TargetNotFound` when
-    /// both apply, so a closed actor surfaces as tombstoned rather
-    /// than not-found).
-    pub(crate) fn register_monitor(&self, watcher: MailboxId, target: MailboxId) -> Result<(), MonitorError> {
-        // Cheap fast-path: refuse an already-tombstoned target before
-        // taking the insert lock. The load-bearing liveness check is the
-        // re-check under the `monitors_of` write guard below.
-        if self.is_tombstoned(target) {
-            return Err(MonitorError::TargetTombstoned);
-        }
-        let entry = MonitorEntry { watcher };
-        // Fold the liveness re-check into the forward-insert critical
-        // section: hold the `monitors_of` write guard across the re-check
-        // *and* the forward insert so a concurrent `close_actor` cannot
-        // split them. `close_actor` runs `mark_dead` before it drains
-        // `monitors_of`, and `mark_dead` releases `actors`/`tombstones`
-        // before that drain acquires `monitors_of`, so a close that races
-        // this registration serializes on this lock: if the insert lands
-        // first the drain removes it; if the drain lands first this
-        // re-check observes the tombstoned/`Dead` slot and refuses. The
-        // nested order `monitors_of → tombstones`/`actors` never inverts
-        // against the close (no thread holds `actors`/`tombstones` while
-        // waiting on `monitors_of`), so no deadlock is introduced. An early
-        // return here inserts *neither* index.
+    /// The caller pairs a `true` answer with a
+    /// [`MonitorHandle`](crate::actor::monitor::MonitorHandle), whose `Drop`
+    /// deregisters the entry; a bare caller (a test) owns that cleanup.
+    #[must_use]
+    pub(crate) fn register_monitor(&self, watcher: MailboxId, target: MailboxId) -> bool {
         {
             let mut forward = self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063");
             if self.is_tombstoned(target) {
-                return Err(MonitorError::TargetTombstoned);
+                return false;
             }
-            // Live check goes through the actors map so callers see a
-            // consistent "is the actor running" answer regardless of
-            // whether the target slot is `Live`, `Dead`, or never
-            // inserted. Singletons booted through the chassis builder land
-            // in this map alongside instanced actors (issue 607 Phase 4b
-            // lifts the boot path to insert `Live`); callers who reach for
-            // monitor before that lift see `TargetNotFound`, which matches
-            // the wire contract for "this id has no live actor."
-            let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
-            if !matches!(actors.get(&target), Some(ActorEntry::Live { .. })) {
-                return Err(MonitorError::TargetNotFound);
-            }
-            drop(actors);
-            forward.entry(target).or_default().push(entry);
+            forward.entry(target).or_default().push(MonitorEntry { watcher });
         }
         self.link_watcher(watcher, target);
-        Ok(())
-    }
-
-    /// ADR-0114 §2: register `watcher` against an inline child's **alias**.
-    /// An alias has no actor slot of its own — it is a first-class address
-    /// served by its target parent's slot — so its liveness is the routing
-    /// [`Registry`](crate::Registry)'s to answer, and the caller
-    /// ([`crate::actor::native::ctx::NativeCtx::monitor`]) has established it
-    /// before calling. Nothing here re-checks the actors map, which would
-    /// only ever refuse.
-    ///
-    /// The one refusal is [`MonitorError::TargetTombstoned`]: an inline child
-    /// ends by closing and its alias tombstones (ADR-0241 §8,
-    /// [`Self::close_alias`]), so a despawned or parent-closed alias is never
-    /// watched again. The tombstone is re-checked under the `monitors_of`
-    /// write guard, as [`Self::register_monitor`] re-checks it, so a
-    /// registration that races `close_alias` either lands before its drain
-    /// and drains with it, or observes the tombstone and refuses.
-    pub(crate) fn register_alias_monitor(&self, watcher: MailboxId, alias: MailboxId) -> Result<(), MonitorError> {
-        {
-            let mut forward = self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063");
-            if self.is_tombstoned(alias) {
-                return Err(MonitorError::TargetTombstoned);
-            }
-            forward.entry(alias).or_default().push(MonitorEntry { watcher });
-        }
-        self.link_watcher(watcher, alias);
-        Ok(())
+        true
     }
 
     /// Insert the reverse `monitoring[watcher]` edge, only ever after the
@@ -381,12 +315,12 @@ impl ActorRegistry {
     /// [`aether_kinds::MonitorNotice`] mail) and walks `monitoring[id]` to
     /// prune `id` from each watched target's forward index.
     ///
-    /// `mark_dead` runs *first* so the dead/tombstone signal is observable
-    /// before the forward index is drained: a concurrent `register_monitor`
-    /// that serializes after the drain on the `monitors_of` write lock then
-    /// re-checks liveness and sees the `Dead` slot, refusing to re-insert an
-    /// edge past the close (the ordering closes the TOCTOU that leaving
-    /// `mark_dead` last would open).
+    /// `mark_dead` runs *first* so the tombstone is written before the
+    /// forward index is drained: a concurrent `register_monitor` that takes
+    /// the `monitors_of` write guard after the drain then reads the
+    /// tombstone, inserts nothing, and answers that the target had closed.
+    /// Draining first would let that registration insert an entry no close
+    /// will ever take.
     ///
     /// One method (rather than three separate calls) so the dispatcher
     /// trampoline can't accidentally skip a step on close — the
@@ -395,11 +329,8 @@ impl ActorRegistry {
     /// already-`Dead` slot returns an empty watcher list and does no
     /// further work.
     pub(crate) fn close_actor(&self, id: MailboxId) -> Vec<MailboxId> {
-        // Tombstone first so the dead signal is observable before the
-        // forward index is drained. A `register_monitor` that serializes
-        // after the drain below on the `monitors_of` write lock re-checks
-        // liveness and observes this `mark_dead`, so no send can leak a
-        // registration past the close.
+        // Tombstone first: a `register_monitor` that takes the `monitors_of`
+        // guard after the drain below reads it and inserts nothing.
         self.mark_dead(id);
         self.drain_closed(id)
     }
@@ -411,9 +342,9 @@ impl ActorRegistry {
     /// parent's slot and owns none (ADR-0114 §2).
     ///
     /// The tombstone is the synchronous authority the inline spawn host fn and
-    /// [`Self::register_alias_monitor`] read, so a despawned key is refused
-    /// before an id reaches the guest and a despawned alias is never watched
-    /// again. Idempotent, like `close_actor`.
+    /// [`Self::register_monitor`] read, so a despawned key is refused before
+    /// an id reaches the guest, and a watch on a despawned alias is answered
+    /// with its notice at once. Idempotent, like `close_actor`.
     pub(crate) fn close_alias(&self, alias: MailboxId) -> Vec<MailboxId> {
         self.tombstones.write().expect("tombstones lock poisoned; fail-fast per ADR-0063").insert(alias);
         self.drain_closed(alias)
@@ -422,7 +353,7 @@ impl ActorRegistry {
     /// The drain half of a close: take `monitors_of[id]` whole as the watcher
     /// list to fan out, then prune `id` from each target it was watching.
     /// Runs only after `id` is tombstoned, so a registration serialized after
-    /// the forward drain re-checks and refuses.
+    /// the forward drain reads the tombstone and inserts nothing.
     fn drain_closed(&self, id: MailboxId) -> Vec<MailboxId> {
         // Forward index: take the watcher list whole.
         let watchers: Vec<MailboxId> = self
@@ -474,7 +405,6 @@ impl ActorRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -488,32 +418,96 @@ mod tests {
         assert_eq!(r.monitoring_count(MailboxId(1)), 0);
     }
 
-    /// Helper: insert a `Live` slot at `id` so `register_monitor`'s
-    /// liveness check passes. Uses a stub type so the test doesn't drag
-    /// in `NativeActor`.
+    /// Helper: insert a `Live` slot at `id`, as an instanced birth does.
+    /// Uses a stub type so the test doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         struct Stub;
         r.insert_live(id, TypeId::of::<Stub>()).expect("fresh slot");
     }
 
+    /// A target that owns no slot registers: a composed or pumped root and
+    /// an inline-child alias are never written to `actors`. A slot check
+    /// coming back into the registration would answer `false` here and
+    /// leave every watcher of a root unnoticed.
     #[test]
-    fn register_monitor_rejects_unknown_target() {
+    fn register_monitor_watches_a_target_with_no_slot() {
         let r = ActorRegistry::new();
         let watcher = MailboxId(1);
         let target = MailboxId(2);
-        assert_eq!(r.register_monitor(watcher, target), Err(MonitorError::TargetNotFound),);
+
+        assert!(r.register_monitor(watcher, target), "a target with no slot is watched");
+        assert_eq!(r.close_actor(target), vec![watcher], "its close drains the watcher");
     }
 
+    /// A target that had already closed writes neither index. An entry
+    /// written here would sit in `monitors_of` for good, since the drain
+    /// that takes entries has already run.
     #[test]
-    fn register_monitor_rejects_tombstoned_target() {
+    fn register_monitor_on_a_closed_target_writes_neither_index() {
         let r = ActorRegistry::new();
         let watcher = MailboxId(1);
         let target = MailboxId(2);
         insert_live_stub(&r, target);
-        // close_actor flips the slot Dead and tombstones the id.
         let _ = r.close_actor(target);
-        assert!(r.is_tombstoned(target));
-        assert_eq!(r.register_monitor(watcher, target), Err(MonitorError::TargetTombstoned),);
+
+        assert!(!r.register_monitor(watcher, target), "the closed target is reported, not watched");
+        assert_eq!(r.monitor_count(target), 0);
+        assert_eq!(r.monitoring_count(watcher), 0);
+    }
+
+    /// The three orders a registration and a close can serialize in, each
+    /// forced by calling the close's two halves around the registration.
+    /// Every order must produce exactly one notice: the drained list holds
+    /// the watcher, or the registration answers `false` and its caller
+    /// posts. Zero is a watcher never told; two is a notice handled twice.
+    #[test]
+    fn every_order_of_registration_and_close_owes_one_notice() {
+        let watcher = MailboxId(1);
+        let target = MailboxId(2);
+
+        // Registration, then the whole close: the drain takes the entry.
+        let r = ActorRegistry::new();
+        let watching = r.register_monitor(watcher, target);
+        r.mark_dead(target);
+        let drained = r.drain_closed(target);
+        assert!(watching);
+        assert_eq!(drained, vec![watcher], "the close owes the notice");
+
+        // Tombstone, then registration, then the drain: the close has
+        // marked the target dead and is waiting for the `monitors_of`
+        // guard the registration holds.
+        let r = ActorRegistry::new();
+        r.mark_dead(target);
+        let watching = r.register_monitor(watcher, target);
+        let drained = r.drain_closed(target);
+        assert!(!watching, "the registration owes the notice");
+        assert!(drained.is_empty(), "the drain finds no entry to notify a second time");
+
+        // The whole close, then registration.
+        let r = ActorRegistry::new();
+        r.mark_dead(target);
+        let drained = r.drain_closed(target);
+        let watching = r.register_monitor(watcher, target);
+        assert!(drained.is_empty());
+        assert!(!watching, "the registration owes the notice");
+        assert_eq!(r.monitor_count(target), 0, "no entry outlives the close");
+    }
+
+    /// An inline-child alias closes through `close_alias`, which writes no
+    /// slot. The same three orders hold for it through the one
+    /// registration: a regression that tombstoned the alias after draining
+    /// it would let the last registration insert an entry nothing takes.
+    #[test]
+    fn a_closed_alias_is_reported_and_holds_no_entry() {
+        let r = ActorRegistry::new();
+        let early = MailboxId(1);
+        let late = MailboxId(3);
+        let alias = MailboxId(2);
+
+        assert!(r.register_monitor(early, alias));
+        assert_eq!(r.close_alias(alias), vec![early]);
+        assert!(!r.register_monitor(late, alias));
+        assert_eq!(r.monitor_count(alias), 0);
     }
 
     #[test]
@@ -522,7 +516,7 @@ mod tests {
         let watcher = MailboxId(1);
         let target = MailboxId(2);
         insert_live_stub(&r, target);
-        r.register_monitor(watcher, target).expect("live target");
+        assert!(r.register_monitor(watcher, target));
         assert_eq!(r.monitor_count(target), 1);
         assert_eq!(r.monitoring_count(watcher), 1);
     }
@@ -533,7 +527,7 @@ mod tests {
         let watcher = MailboxId(1);
         let target = MailboxId(2);
         insert_live_stub(&r, target);
-        r.register_monitor(watcher, target).unwrap();
+        assert!(r.register_monitor(watcher, target));
         r.deregister_monitor(watcher, target);
         assert_eq!(r.monitor_count(target), 0);
         assert_eq!(r.monitoring_count(watcher), 0);
@@ -554,8 +548,8 @@ mod tests {
         let watcher_a = MailboxId(10);
         let watcher_b = MailboxId(11);
         insert_live_stub(&r, target);
-        r.register_monitor(watcher_a, target).unwrap();
-        r.register_monitor(watcher_b, target).unwrap();
+        assert!(r.register_monitor(watcher_a, target));
+        assert!(r.register_monitor(watcher_b, target));
         let watchers = r.close_actor(target);
         assert_eq!(watchers.len(), 2);
         assert!(watchers.contains(&watcher_a));
@@ -573,7 +567,7 @@ mod tests {
         let b = MailboxId(20);
         insert_live_stub(&r, a);
         insert_live_stub(&r, b);
-        r.register_monitor(a, b).unwrap();
+        assert!(r.register_monitor(a, b));
         assert_eq!(r.monitor_count(b), 1);
         let _ = r.close_actor(a);
         assert_eq!(r.monitor_count(b), 0, "dead watcher should be pruned from b's monitors_of");
@@ -605,21 +599,25 @@ mod tests {
         assert!(!r.is_live_at(target), "the closed slot stays dead");
     }
 
-    /// Tripwire: a register that races a close never leaves a `monitors_of`
-    /// edge on a dead target. Over many iterations a `register_monitor` and
-    /// a `close_actor` on the same target run concurrently from a shared
-    /// registry, released together by a barrier to maximise interleaving.
-    /// After both join the target is always tombstoned (`close_actor` always
-    /// marks dead), so the forward index must always be empty: the drain
-    /// removed the edge, or the re-check under the insert lock refused it.
+    /// Iterations of the registration-against-close race. Each is two
+    /// thread spawns, so the whole loop stays well under a second.
+    const RACE_ITERATIONS: u64 = 5_000;
+
+    /// A registration that races a close is answered by exactly one notice.
+    /// Each iteration runs one `register_monitor` and one `close_actor` on
+    /// the same target from two threads released together by a barrier,
+    /// then counts the notices owed: one if the close's drained list holds
+    /// the watcher, one if the registration answered `false`. The count
+    /// must be one, and the forward index must be empty.
     ///
-    /// Deterministic-pass under the fixed code — with `mark_dead` ordered
-    /// before the drain and the liveness re-check folded into the
-    /// forward-insert critical section there is no surviving-edge failure
-    /// mode, so no flake. Regresses (a surviving forward edge on a dead
-    /// target) if either edit is reverted: leaving `mark_dead` last lets a
-    /// re-check still see `Live` right after the drain and re-insert, and
-    /// splitting the re-check from the insert reopens the original window.
+    /// The count is zero within the first few iterations if the close
+    /// drains before it tombstones, and two if the registration reports a
+    /// closed target after inserting. With the read and the insert under
+    /// one guard no interleaving fails, so the loop cannot flake. It does
+    /// not reach a tombstone read hoisted out of the guard, whose window is
+    /// a few instructions wide;
+    /// `a_close_cannot_pass_between_the_tombstone_read_and_the_insert` holds
+    /// that.
     ///
     /// The reverse `monitoring` index is watcher-keyed and cleaned on the
     /// *watcher*'s own close (or `deregister_monitor`), not the target's, so
@@ -632,11 +630,11 @@ mod tests {
                   close_actor on two real OS threads to exercise their interleaving, not \
                   actor work under the settlement umbrella"
     )]
-    fn register_racing_close_never_leaves_forward_edge_on_dead_target() {
+    fn register_racing_close_owes_exactly_one_notice() {
         use std::sync::Barrier;
         use std::thread;
 
-        for i in 0..500u64 {
+        for i in 0..RACE_ITERATIONS {
             let r = Arc::new(ActorRegistry::new());
             let target = MailboxId(0x0001_0000 + i);
             let watcher = MailboxId(0x0002_0000 + i);
@@ -647,21 +645,79 @@ mod tests {
             let (r_close, g_close) = (Arc::clone(&r), Arc::clone(&gate));
             let t_reg = thread::spawn(move || {
                 g_reg.wait();
-                let _ = r_reg.register_monitor(watcher, target);
+                r_reg.register_monitor(watcher, target)
             });
             let t_close = thread::spawn(move || {
                 g_close.wait();
-                let _ = r_close.close_actor(target);
+                r_close.close_actor(target)
             });
-            t_reg.join().expect("register thread joins");
-            t_close.join().expect("close thread joins");
+            let watching = t_reg.join().expect("register thread joins");
+            let drained = t_close.join().expect("close thread joins");
 
-            assert!(r.is_tombstoned(target), "close_actor always tombstones the target");
+            let from_close = usize::from(drained.contains(&watcher));
+            let from_registration = usize::from(!watching);
             assert_eq!(
-                r.monitor_count(target),
-                0,
-                "a register that raced the close left a forward edge on a dead target",
+                from_close + from_registration,
+                1,
+                "iteration {i}: the close owed {from_close} notice(s) and the registration {from_registration}",
             );
+            assert_eq!(r.monitor_count(target), 0, "iteration {i}: an entry outlived the close");
+        }
+    }
+
+    /// Iterations of the parked-registration tripwire below.
+    const PARKED_ITERATIONS: u64 = 200;
+
+    /// Tripwire: the tombstone read and the insert are one critical section,
+    /// so no close can pass between them.
+    ///
+    /// The test holds the `monitors_of` write guard, which parks a
+    /// registration started meanwhile, and runs a whole close under that
+    /// hold: the tombstone, then the drain's take, through the guard it
+    /// holds. A registration that reads the tombstone under the guard reads
+    /// it after the close and answers `false`. One that read it before
+    /// taking the guard has already read "open": it inserts an entry the
+    /// drain has passed and answers `true`, and its watcher is never told.
+    ///
+    /// A correct registration passes whatever the scheduling. A hoisted read
+    /// is caught on every iteration where the registration thread reached
+    /// the guard before the close began. The yields after its start signal
+    /// make that the usual case, and the loop repeats it so that no one
+    /// scheduling decides the result.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "raw thread spawn is the point: the registration has to be parked on a lock \
+                  this thread holds, which no actor under the settlement umbrella can be"
+    )]
+    fn a_close_cannot_pass_between_the_tombstone_read_and_the_insert() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        for i in 0..PARKED_ITERATIONS {
+            let r = Arc::new(ActorRegistry::new());
+            let target = MailboxId(0x0003_0000 + i);
+            let watcher = MailboxId(0x0004_0000 + i);
+            let (started_tx, started) = mpsc::channel();
+
+            let mut forward = r.monitors_of.write().expect("monitors_of lock is free");
+            let parked = Arc::clone(&r);
+            let registration = thread::spawn(move || {
+                let _ = started_tx.send(());
+                parked.register_monitor(watcher, target)
+            });
+            started.recv().expect("the registration thread starts");
+            for _ in 0..64 {
+                thread::yield_now();
+            }
+            r.mark_dead(target);
+            let drained = forward.remove(&target);
+            drop(forward);
+            let watching = registration.join().expect("registration thread joins");
+
+            assert!(drained.is_none(), "iteration {i}: the registration inserted without the guard");
+            assert!(!watching, "iteration {i}: the registration read the tombstone before it took the guard");
+            assert_eq!(r.monitor_count(target), 0, "iteration {i}: an entry outlived the close");
         }
     }
 }

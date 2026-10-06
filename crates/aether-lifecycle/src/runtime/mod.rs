@@ -46,6 +46,7 @@ use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 pub use std::time::{Duration, Instant};
 
 /// `aether.lifecycle` runtime state (ADR-0082). Owns the lifecycle data
@@ -108,17 +109,14 @@ pub struct LifecycleCapabilityState {
 /// broadcasts rather than peeking at these.
 impl LifecycleCapabilityState {
     /// Monitor `subscriber` on its first stage subscription so the cap
-    /// purges its rows itself when the subscriber closes (ADR-0079 §8
-    /// amended).
-    /// An `Err` (an actor outside the registry, or a spawner-less test
-    /// binding) means "not monitorable": the rows then live until
-    /// substrate teardown, exactly as they would for a mailbox that
-    /// never goes away.
+    /// purges its rows itself when the subscriber closes (ADR-0079 §8).
+    /// The monitor never fails: a subscriber that closed before its
+    /// subscription was handled is noticed at once, and the notice, which
+    /// arrives after the subscribing handler returns, purges the rows that
+    /// handler wrote.
     pub fn watch<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
-        if !self.monitors.contains_key(&subscriber)
-            && let Ok(handle) = ctx.monitor(subscriber)
-        {
-            self.monitors.insert(subscriber, handle);
+        if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
+            slot.insert(ctx.monitor(subscriber));
         }
     }
 
@@ -826,6 +824,34 @@ mod tests {
         });
 
         assert_eq!(booted.subscribers_of(Render::ID), [survivor.erase()], "the co-subscriber survives");
+    }
+
+    /// A subscriber that closes while its subscription is being handled
+    /// leaves no rows behind. The subscribing handler writes the row while
+    /// the subscriber's route is live and then monitors it, and the
+    /// subscriber can close between the two: in a running engine the window
+    /// is from its close's tombstone to its route drop. The two host turns
+    /// here are that handler's two steps with the close forced between them.
+    /// Monitoring the closed subscriber posts its notice, which purges the
+    /// row. A monitor that failed instead, as it did before issue 7488,
+    /// kept the row, and every broadcast of the stage went to a closed
+    /// actor until the engine exited.
+    #[test]
+    fn a_subscriber_that_closed_before_it_was_watched_is_purged_by_its_notice() {
+        let mut booted = boot_lifecycle(render_present_graph());
+        let (heard, _) = mpsc::channel();
+        let subscriber = booted.spawn_listener("early", heard);
+        let key = subscriber.erase();
+
+        let held = booted.driver.host_turn(|state, ctx| state.subscribers.subscribe_sender(ctx, Render::ID, key));
+        booted.close(subscriber);
+        booted.driver.host_turn(|state, ctx| state.watch(ctx, key));
+        assert_eq!(held, Some(true), "the row was written while the subscriber was live");
+        assert_eq!(booted.subscribers_of(Render::ID), [key], "the notice is mail, handled after the watching turn");
+
+        booted.driver.pump_until("the closed subscriber's purge", |state| {
+            state.subscribers.subscribers_of(Render::ID).is_empty() && state.monitors.is_empty()
+        });
     }
 
     /// The broadcast is a typed send of each stage: `Tick` carries the

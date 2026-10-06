@@ -250,7 +250,6 @@ pub(super) fn boot_passives(
     // recovers them.
     let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
     let references = ComposedReferences::default();
-    let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
     // The pool's wake sink is cloned into the Spawner (for instanced
     // actors) and into the ChassisCtx (for singleton caps). Every actor
@@ -335,7 +334,6 @@ pub(super) fn boot_passives(
     mailer.trace_handle().set_chassis_host_ring_capacity(ring_capacities.trace, ring_capacities.trace_max);
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
-        Arc::clone(&actor_registry),
         Arc::clone(mailer),
         Arc::clone(aborter),
         pool.wake_sink(),

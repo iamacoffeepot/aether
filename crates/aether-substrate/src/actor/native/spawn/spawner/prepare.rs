@@ -161,7 +161,7 @@ impl Spawner {
     {
         let identity = self.prepare_identity::<A>(subname, parent)?;
         self.registry.hold_native::<A>().map_err(SpawnError::NativeHold)?;
-        if self.actor_registry.is_tombstoned(identity.id) {
+        if self.actor_registry().is_tombstoned(identity.id) {
             return Err(SpawnError::SubnameRetired { full_name: identity.canonical_name.to_string() });
         }
         Ok(identity)

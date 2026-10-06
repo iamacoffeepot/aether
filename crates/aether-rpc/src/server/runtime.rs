@@ -163,10 +163,8 @@ pub struct RouteOwner {
     /// Correlations of the forwarded calls still in flight at this
     /// registrant, so its departure closes exactly those calls.
     pub calls: HashSet<u64>,
-    /// Keeps the registrant monitored; `Drop` deregisters. `None` for a
-    /// registrant that could not be monitored, whose route then lasts
-    /// until this server stops.
-    _monitor: Option<MonitorHandle>,
+    /// Keeps the registrant monitored; `Drop` deregisters.
+    _monitor: MonitorHandle,
 }
 
 /// `aether.rpc.server` runtime state (ADR-0122 split). Owns one TCP
@@ -330,20 +328,8 @@ impl RpcServerState {
             };
         };
 
-        let monitor = match ctx.monitor(sender) {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_substrate::rpc",
-                    engine = %engine.0,
-                    ?error,
-                    "engine route registrant is not monitorable; its route cannot be retired when it departs",
-                );
-                None
-            }
-        };
         self.engine_routes.insert(engine, route);
-        self.route_owners.insert(sender, RouteOwner { engine, calls: HashSet::new(), _monitor: monitor });
+        self.route_owners.insert(sender, RouteOwner { engine, calls: HashSet::new(), _monitor: ctx.monitor(sender) });
         RegisterEngineRouteResult::Ok
     }
 

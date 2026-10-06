@@ -11,6 +11,7 @@ use std::sync::Arc;
 use aether_actor::local::ActorSlots;
 use aether_actor::{ActorRef, Addressable};
 
+use crate::actor::monitor::post_notices;
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::ComposedReferences;
 use crate::chassis::error::BootError;
@@ -393,18 +394,26 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Undo a previous `claim_*_mailbox` call whose claim some actor may
-    /// already have observed. Retires the sink's route to `Dropped` and
-    /// removes the id from `claimed_actor_mailboxes`. Idempotent: calling
-    /// on an id that wasn't claimed, or was already unclaimed, is a no-op.
+    /// already have observed: close the id as an actor's close does, less
+    /// the actor. The id is tombstoned and its watchers drained, its route
+    /// retires to `Dropped`, and each drained watcher is posted its
+    /// [`MonitorNotice`](aether_kinds::MonitorNotice), in the close tail's
+    /// order. The id leaves `claimed_actor_mailboxes`.
     ///
     /// Used by a pumped boot whose `init` fails while the passives are
-    /// dispatching and may hold a `depends` reference to the claim. The
-    /// route keeps its proven name, so such a reference still names its
-    /// path (ADR-0230), and the name is never registered again (ADR-0079
-    /// §7). A boot that fails after an actor's `wire` ran closes the actor
-    /// instead, and the close retires its route the same way.
+    /// dispatching and may hold a `depends` reference to the claim, and may
+    /// be watching it. The route keeps its proven name, so such a reference
+    /// still names its path (ADR-0230), and the name is never registered
+    /// again (ADR-0079 §7). Without the tombstone a later monitor of that
+    /// reference would register an entry no close will ever drain. A boot
+    /// that fails after an actor's `wire` ran closes the actor first, and
+    /// this then finds the id already closed: the tombstone is rewritten,
+    /// nothing is drained, and the route is already `Dropped`.
     pub(crate) fn retire_claim(&mut self, id: MailboxId) {
+        let watchers = self.registry.actor_registry().close_actor(id);
         let _ = self.registry.drop_mailbox(&self.authority, id);
+        post_notices(self.mailer, id, watchers);
+
         self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 
@@ -484,7 +493,6 @@ mod tests {
 
     use aether_data::ErasedActorPath;
 
-    use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
     use crate::mail::registry::{DispatchParts, InboxHandler, MailboxEntry, OwnedDispatch};
     use crate::mail::{KindId, MailId, MailRef};
@@ -586,6 +594,33 @@ mod tests {
         });
     }
 
+    /// A retired claim closes in the lifecycle table as well as in the
+    /// routes: its id is tombstoned and its watcher is posted one notice
+    /// stamped with it. A route that went `Dropped` with a watcher still
+    /// registered would leave that watcher holding state for an actor that
+    /// will never close, and with no tombstone a later monitor of the same
+    /// reference would register an entry nothing drains.
+    #[test]
+    fn retire_claim_tombstones_and_notifies_its_watcher() {
+        use aether_data::{Kind, Source, SourceAddr};
+
+        let (registry, mailer, spawner, aborter, _pool) = test_infra();
+
+        with_test_ctx(&registry, &mailer, &spawner, &aborter, |ctx| {
+            let watcher = ctx.claim_mailbox_with_override("test.unclaim.watcher").expect("the watcher claims");
+            let claim = ctx.claim_mailbox_with_override("test.unclaim.watched").expect("the watched claim succeeds");
+            assert!(registry.actor_registry().register_monitor(watcher.id, claim.id));
+            ctx.retire_claim(claim.id);
+
+            let notice = watcher.inbox.try_next().expect("the watcher is posted the retired claim's notice");
+            assert_eq!(notice.kind(), aether_kinds::MonitorNotice::ID);
+            assert_eq!(notice.sender(), Source::to(SourceAddr::Component(claim.id)));
+            assert!(watcher.inbox.try_next().is_none(), "one notice per registration");
+            assert!(registry.actor_registry().is_tombstoned(claim.id), "the retired id is closed");
+            assert!(!registry.actor_registry().register_monitor(watcher.id, claim.id), "a later watch is reported");
+        });
+    }
+
     /// Run `body` against a fresh `ChassisCtx` over the test infra.
     fn with_test_ctx(
         registry: &Arc<Registry>,
@@ -623,11 +658,9 @@ mod tests {
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let actor_registry = Arc::new(ActorRegistry::new());
         let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
         let spawner = Arc::new(crate::Spawner::new(
             Arc::clone(&registry),
-            actor_registry,
             Arc::clone(&mailer),
             Arc::clone(&aborter),
             pool.wake_sink(),

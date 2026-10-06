@@ -49,10 +49,8 @@ pub(super) fn claim_only(
     // construction). A detached wake sink lets us build that `Spawner`
     // without `Pool::start` spawning any worker thread — the Claim stage
     // never schedules a dispatcher slot, so the sink is never drained.
-    let actor_registry = Arc::new(crate::ActorRegistry::new());
     let spawner = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
-        actor_registry,
         Arc::clone(mailer),
         Arc::clone(aborter),
         WakeSink::detached(),

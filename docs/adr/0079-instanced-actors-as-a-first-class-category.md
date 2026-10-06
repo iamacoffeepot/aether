@@ -9,6 +9,7 @@
 - **Amended:** 2026-09-24 — Section 5's `NativeInitCtx::self_id()` is removed (issue 6350): `init` sends nothing (issue 703), and no actor reads its own position ([ADR-0230](0230-proven-actor-references.md)).
 - **Amended:** 2026-10-05 — Section 6: every exit of an actor runs one close sequence ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 5, issue 7468). Substrate shutdown signals, wakes, and awaits every pooled actor, an idle one included, and a birth cancelled after `wire` or a boot rolled back after its wire pass closes the actor too, so `unwire` runs on every exit the engine takes. The sequence varies only by two facts the engine already records.
 - **Amended:** 2026-10-05 — Section 6: `wire` returns a result, and a failure fails the birth ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md) rule 3, issue 7463). The hook returns its transport's birth error, the same type `init` returns, and whoever asked for the actor is told. The actor that failed is closed by the one close, so its `unwire` runs; a guest that trapped is released first and runs no more code.
+- **Amended:** 2026-10-06 — Section 8: `monitor` never fails and `MonitorError` is removed ([ADR-0247](0247-six-invariants-where-actors-meet-the-engine.md), issue 7488). It takes a proven reference ([ADR-0230](0230-proven-actor-references.md)) and returns the handle. A target that has already closed is noticed like one that closes later: the registration posts its `MonitorNotice` to the watcher, as mail handled after the monitoring handler returns. Registration reads the tombstone set only, so a root and an inline-child alias are watched like any instanced actor, and a registration that races a close is answered by exactly one notice.
 - **Amended:** 2026-09-29 — Section 8's vacate amendment retires: `DropComponent`, its one production caller, becomes a close request under [ADR-0241](0241-code-is-published-not-loaded.md) §8, and a wasm component drop now closes and tombstones like any other actor (issue 7067).
 
 ## Context
@@ -211,27 +212,30 @@ Two distinct concerns:
 **Close = framework-managed monitor primitive.** Per-cap convention here has four classes of subtle bug: forgotten demonitor, bidirectional ambiguity, accumulation of dead monitors, fan-out-failure semantics. The framework gets these right once:
 
 ```rust
-fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError>;   // on NativeCtx
+fn monitor(&self, target: ErasedActorRef) -> MonitorHandle;   // on NativeCtx; never fails
+                                                              // (amended 2026-10-06)
 
-pub struct MonitorHandle { /* registry ref + target + entry id */ }
+pub struct MonitorHandle { /* registry ref + watcher + target */ }
 impl Drop for MonitorHandle { /* demonitor via registry */ }
 
 pub struct MonitorNotice;                  // framework kind (amended 2026-09-22: the
                                            // departed actor is the envelope sender)
-
-pub enum MonitorError { TargetNotFound, TargetTombstoned, Unsupported }
-// Unsupported (amended 2026-07-20): the transport carries no actor registry
-// (a test binding) — handlers treat it as "not monitorable" and skip.
 ```
+
+**Monitoring never fails (amended 2026-10-06).** `monitor` takes a proven reference and returns the handle; there is no `MonitorError`. A reference proves its actor reached `Live`, never that it is `Live` now, so the target may already have closed. That case is reported the way a later close is: the registration posts one `MonitorNotice`, stamped with the target, to the watcher. It is ordinary mail, so the watcher handles it after the handler that called `monitor` returns, and the state that handler keyed on the target is in place when it arrives. A caller therefore has one path for "the target is gone", its notice handler, and no branch for a monitor it could not get.
+
+The handle's `Drop` stops the watch and cannot take back mail already posted, so a notice posted before the drop still arrives; a notice handler does nothing when it holds no state under its sender. A notice is per call: two monitors of one target receive two.
 
 Registry gains two indices (forward + reverse) for bidirectional bookkeeping:
 
 - `monitors_of[X]`: who watches X.
 - `monitoring[X]`: what X watches.
 
-On actor close: drain `monitors_of[X]`, send `MonitorNotice` to each live monitor; iterate `monitoring[X]`, remove X from `monitors_of[t]` for each target. Both directions clean each other up — no accumulation of dead monitors.
+On actor close: tombstone X, then drain `monitors_of[X]`, send `MonitorNotice` to each live monitor; iterate `monitoring[X]`, remove X from `monitors_of[t]` for each target. Both directions clean each other up — no accumulation of dead monitors.
 
-Default unidirectional, like Erlang `monitor` (not `link`). Compose two unidirectionals if bidirectional is wanted. No `CloseReason` field on `MonitorNotice` for v1 (purely additive if needed). No monitoring of not-yet-existent targets — `monitor()` errors if target isn't Live at call time. No explicit `Demonitor` mail kind — registration via direct registry call, deregistration via `MonitorHandle::Drop`.
+**Exactly one notice under a concurrent close (amended 2026-10-06).** The tombstone set is the one table a registration reads. A close writes its tombstone, releases that lock, and then drains `monitors_of[X]`; a registration holds the `monitors_of` write guard across its tombstone read and its insert. The two serialize on that guard. If the registration goes first and reads no tombstone, its entry is in the index and the drain takes it: the close sends the notice. If it reads the tombstone, whether the drain has run or is still waiting for the guard, it inserts nothing and posts the notice itself, and the drain finds no entry. No order sends none and none sends two. The actor-slot map is not consulted: only an instanced birth writes a slot, so a slot check would refuse every composed or pumped root and every inline-child alias.
+
+Default unidirectional, like Erlang `monitor` (not `link`). Compose two unidirectionals if bidirectional is wanted. No `CloseReason` field on `MonitorNotice` for v1 (purely additive if needed). No monitoring of not-yet-existent targets — a target is named by a proven reference, which exists only for an actor that reached `Live`. No explicit `Demonitor` mail kind — registration via direct registry call, deregistration via `MonitorHandle::Drop`.
 
 Replace semantics mesh cleanly with this: replace is "actor continues with new code/state," not "actor dies." `MonitorNotice` does *not* fire on replace. The mailbox stays Live throughout the splice; `monitors_of` entries are unaffected.
 

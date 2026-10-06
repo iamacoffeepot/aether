@@ -100,8 +100,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `Dropped` instead. So this is a broken invariant, not an answer
     /// (ADR-0063).
     ///
-    /// Consumers: the http server's unmonitorable route-holder warning, the
-    /// component host's replacement-boot warnings and its parented-spawn parent,
+    /// Consumers: the component host's replacement-boot warnings and its parented-spawn parent,
     /// whose proven path names the child's lineage, the lifecycle cap's
     /// stuck-advance warning, which names each subscriber still owed, and the
     /// RPC server's decode refusal, which names the refusing actor.

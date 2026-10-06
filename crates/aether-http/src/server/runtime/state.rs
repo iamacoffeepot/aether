@@ -7,7 +7,6 @@ use super::*;
 use crate::server::shard::HttpDispatchShard;
 use aether_actor::{ErasedActorRef, HandlesKind, Single};
 use aether_substrate::Subname;
-use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 /// One socket retained by the supervisor while its dispatch shards are
@@ -128,10 +127,6 @@ pub struct HttpSupervisorState {
     /// `Drop` deregisters, so the map is both the dedup guard and the
     /// RAII anchor.
     pub monitors: HashMap<ErasedActorRef, MonitorHandle>,
-    /// Mailboxes whose monitor attempt failed — remembered so the
-    /// `route holder is not monitorable` warn fires once per mailbox,
-    /// not once per route.
-    pub unmonitorable: HashSet<ErasedActorRef>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -241,7 +236,6 @@ impl HttpSupervisorState {
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
-            unmonitorable: HashSet::new(),
         }
     }
 
@@ -540,44 +534,16 @@ impl HttpSupervisorState {
 
     /// Monitor the proven route holder `subscriber` on its first route claim
     /// so the cap purges its routes itself when the holder closes (ADR-0079
-    /// §8 amended).
+    /// §8).
     ///
-    /// An `Err` (an actor outside the registry, or a spawner-less test
-    /// binding) means "not monitorable", and the claim still stands: the
-    /// route lives until substrate teardown. That is harmless for a mailbox
-    /// that never goes away, and *not* harmless for a wasm trampoline, which
-    /// closes on `DropComponent` — an unmonitored route then keeps
-    /// dispatching at a mailbox that drops every request, so the cap answers
-    /// `502` to that prefix for the rest of the process. Nothing recovers it, because the notice that would have
-    /// purged the route is the one that never arrives.
-    ///
-    /// So the failure is logged rather than discarded (issue 4195): the
-    /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
-    /// and without this line neither branch leaves any trace to tell them
-    /// apart.
+    /// The monitor never fails. A holder that closed before its claim was
+    /// handled is noticed at once: the notice arrives after the claiming
+    /// handler returns, by which time the route is in the table, and purges
+    /// it. Without that a closed holder's prefix would answer `502` for the
+    /// rest of the process.
     pub fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
-        // A monitor that already failed for this mailbox will fail again — the
-        // condition is a property of the target, not of the attempt — so the
-        // second route it registers must not re-report it.
-        if self.unmonitorable.contains(&subscriber) {
-            return;
-        }
-        let Entry::Vacant(slot) = self.monitors.entry(subscriber) else {
-            return;
-        };
-        match ctx.monitor(subscriber) {
-            Ok(handle) => {
-                slot.insert(handle);
-            }
-            Err(error) => {
-                self.unmonitorable.insert(subscriber);
-                tracing::warn!(
-                    target: "aether_http::server",
-                    holder = %ctx.actor_path(subscriber),
-                    ?error,
-                    "route holder is not monitorable; its routes cannot be purged when it departs",
-                );
-            }
+        if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
+            slot.insert(ctx.monitor(subscriber));
         }
     }
 

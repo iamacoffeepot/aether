@@ -14,7 +14,6 @@ use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnOutcome, Spawner, Subname};
 use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskDone};
-use crate::actor::registry::ActorRegistry;
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
@@ -127,7 +126,6 @@ pub(super) fn activation_fixture() -> (Arc<Spawner>, Arc<Registry>, Arc<Mailer>,
     let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, Arc::clone(&aborter));
     let spawner = Arc::new(Spawner::new(
         Arc::clone(&registry),
-        Arc::new(ActorRegistry::new()),
         Arc::clone(&mailer),
         aborter,
         pool.wake_sink(),

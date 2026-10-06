@@ -77,7 +77,7 @@ pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use actor::native::slot::pumped::PumpedSlot;
 pub use actor::native::{Dispatch, NativeActor};
 pub use actor::native::{HandlerSpawnBuilder, SpawnOutcome, SpawnReceipt};
-pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
+pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::{Addressable, root_mailbox};

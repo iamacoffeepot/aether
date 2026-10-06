@@ -11,8 +11,7 @@ use aether_actor::ErasedActorRef;
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::outbound::EgressEvent;
-use aether_substrate::mail::registry::{Registry, noop_handler};
-use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx, registered_ref};
+use aether_substrate::testing::{TestChassis, boot_bare_test_chassis, fresh_substrate_and_rx};
 use std::sync::mpsc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -25,7 +24,6 @@ struct Supervisor {
     /// pumped root it hosts, which closes when its slot drops.
     chassis: PassiveChassis<TestChassis>,
     slot: PumpedSlot<HttpServerCapability>,
-    registry: Arc<Registry>,
     egress: mpsc::Receiver<EgressEvent>,
 }
 
@@ -38,12 +36,7 @@ fn boot_supervisor(config: HttpServerConfig) -> Supervisor {
     let (slot, _wake) =
         chassis.boot_pumped_actor::<HttpServerCapability>(config, ()).expect("the http supervisor boots pumped");
 
-    Supervisor { chassis, slot, registry, egress }
-}
-
-/// Register a named test-local mailbox and return its proven reference.
-fn proven(registry: &Registry, name: &str) -> ErasedActorRef {
-    registered_ref(registry, name, noop_handler())
+    Supervisor { chassis, slot, egress }
 }
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
@@ -850,40 +843,5 @@ mod wake_coalescing {
         // wake, or the event would sit undelivered.
         assert!(counted.sink.post(probe_event()));
         assert_eq!(counted.drained_wakes(), 2);
-    }
-}
-
-mod monitor_collapse {
-    use super::super::HttpServerConfig;
-    use super::{boot_supervisor, proven};
-
-    /// The `route holder is not monitorable` warn must fire once per
-    /// mailbox, not once per route. A mailbox that fails to monitor
-    /// leaves its slot remembered in `unmonitorable`, so a second
-    /// `watch` for the same mailbox is a no-op. The targets are closure
-    /// routes, which hold no actor slot, so the supervisor's real monitor
-    /// index answers `TargetNotFound` for them.
-    #[test]
-    fn watch_remembers_unmonitorable_mailbox() {
-        let mut supervisor = boot_supervisor(HttpServerConfig::default());
-        let target = proven(&supervisor.registry, "test.http.watch.target");
-        let other = proven(&supervisor.registry, "test.http.watch.other");
-
-        supervisor.slot.host_turn(|state, ctx| {
-            assert!(!state.monitors.contains_key(&target));
-            assert!(!state.unmonitorable.contains(&target));
-
-            state.watch(ctx, target);
-            assert!(state.unmonitorable.contains(&target), "first failed monitor inserts into unmonitorable");
-            assert!(!state.monitors.contains_key(&target));
-            let after_first = state.unmonitorable.len();
-
-            state.watch(ctx, target);
-            assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
-
-            state.watch(ctx, other);
-            assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
-            assert_eq!(state.unmonitorable.len(), after_first + 1);
-        });
     }
 }

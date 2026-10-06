@@ -427,6 +427,9 @@ impl NativeActor for TcpCapability {
 
     /// Settle one staged listener birth: monitor the activated listener,
     /// commit its supervisor entry, and only then answer the bind it serves.
+    /// A listener that closed before this ran is entered and answered all
+    /// the same, and its notice, which arrives after this handler returns,
+    /// removes the entry.
     #[handler(task)]
     fn on_listener_spawn_done(
         state: &mut Self::State,
@@ -446,14 +449,6 @@ impl NativeActor for TcpCapability {
                 return;
             }
         };
-        let monitor_handle = match ctx.monitor(listener.erase()) {
-            Ok(handle) => handle,
-            Err(monitor_error) => {
-                ctx.send_to(listener, &Close::default());
-                held.answer(ctx, &BindListenerResult::failed(addr, format!("monitor failed: {monitor_error:?}")));
-                return;
-            }
-        };
 
         state.listeners.insert(
             listener.erase(),
@@ -463,7 +458,7 @@ impl NativeActor for TcpCapability {
                 name: listener_name.clone(),
                 listener,
                 pending_unbind: None,
-                _monitor_handle: monitor_handle,
+                _monitor_handle: ctx.monitor(listener.erase()),
             },
         );
         held.answer(ctx, &BindListenerResult::Ok { listener_name, local_port });
