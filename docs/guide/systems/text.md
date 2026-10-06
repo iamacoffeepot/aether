@@ -182,8 +182,7 @@ at load there
 ([ADR-0232 §6](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)).
 
 The current composition is defined in
-[`aether-chassis-desktop/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-desktop/src/chassis.rs),
-[`aether-chassis-harness/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-harness/src/chassis.rs),
+[`aether-chassis-desktop/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-desktop/src/chassis.rs)
 and
 [`aether-harness-substrate/src/chassis.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-substrate/src/chassis.rs).
 

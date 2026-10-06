@@ -24,11 +24,6 @@ const ACTOR_DEP: &str = "aether-actor";
 /// both the `--bin` selector and the output filename. `cargo xtask bins`
 /// publishes this list (issue 5707) so a workflow or script consumes it
 /// instead of re-spelling the names and rotting on the next rename.
-///
-/// `aether-chassis-harness`'s `aether-substrate-harness` bin is deliberately
-/// absent: it is a test-evidence driver, not a shipped or forked artifact —
-/// nothing resolves it through `dist/manifest.json`, and `desktop-nightly.yml`
-/// names that crate in a `cargo test -p` list, which needs no `dist/bin/` entry.
 pub const CHASSIS_BINS: &[(&str, &str)] = &[
     ("aether-chassis-desktop", "aether-desktop"),
     ("aether-chassis-headless", "aether-headless"),

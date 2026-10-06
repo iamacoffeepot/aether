@@ -51,9 +51,8 @@ pub const WORKERS: usize = 2;
 /// records each reported kind in `SubstrateHarnessEnv::observed_kinds`.
 /// No capability reports its dispatches here: a test asserts what a
 /// capability's work produced, not that a kind reached it.
-/// Only registered when `observed_kinds` is `Some` (binaries pass
-/// `None` for zero overhead — mail to this mailbox warn-drops in
-/// that mode).
+/// Only registered when `observed_kinds` is `Some` (mail to this mailbox
+/// warn-drops otherwise).
 ///
 /// Pre-iamacoffeepot/aether#838 this rode a full `NativeActor`
 /// (`SubstrateHarnessObserverCapability`) specifically because synchronous
@@ -71,9 +70,9 @@ pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harn
 /// ADR-0071 marker type for the substrate-harness chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<SubstrateHarnessChassis>`]
 /// returned by [`Self::build_passive`]. Test-harness is the embedder-
-/// driven (no-driver) chassis: the binary's `main()` and the
-/// in-process [`super::SubstrateHarness`] both build through this and drive
-/// their own event loops on top.
+/// driven (no-driver) chassis: the in-process
+/// [`super::SubstrateHarness`] builds through this and drives its own event
+/// loop on top.
 pub struct SubstrateHarnessChassis;
 
 impl Chassis for SubstrateHarnessChassis {
@@ -94,7 +93,7 @@ impl Chassis for SubstrateHarnessChassis {
     fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
         Err(BootError::Other(Box::new(io::Error::other(
             "SubstrateHarnessChassis has no driver; use SubstrateHarnessChassis::build_passive(env) instead \
-             (the binary main() loops on events_rx; the in-process SubstrateHarness dispatches per-call)",
+             (the in-process SubstrateHarness dispatches per-call)",
         ))))
     }
 }
@@ -213,9 +212,8 @@ pub struct RenderHookWiring {
 }
 
 /// Bag of resolved configs the substrate-harness chassis takes at build
-/// time. Constructed by the embedder — the binary's `main()` reads
-/// env vars; the in-process [`super::SubstrateHarness`] takes builder
-/// args. `events_tx` is captured into the substrate-harness cap's config;
+/// time. Constructed by the embedder — the in-process
+/// [`super::SubstrateHarness`] takes builder args. `events_tx` is captured into the substrate-harness cap's config;
 /// the matching `events_rx` rides on [`SubstrateHarnessBuild`] for the
 /// embedder to drive.
 pub struct SubstrateHarnessEnv {
@@ -242,7 +240,7 @@ pub struct SubstrateHarnessEnv {
     /// Optional observation log: when `Some`, the chassis registers the
     /// observer inbox whose inline handler records the kind id of every
     /// report a fixture mails it. In-process API uses this to assert what
-    /// the fixtures reported; binary passes `None` for zero overhead.
+    /// the fixtures reported.
     pub observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
     /// Sender side of the chassis event channel. Cloned into the
     /// `SubstrateHarnessCapability` config; the matching receiver rides on
@@ -405,9 +403,8 @@ impl SubstrateHarnessChassis {
         // emitted kinds register a synchronous catch-all observer
         // closure under `aether.substrate_harness.observer`. The closure
         // body records each inbound mail's kind name into the shared
-        // `observed_kinds` vec; the binary (`bin/substrate-harness.rs`)
-        // passes `observed_kinds: None` and skips registration —
-        // mail to the observer mailbox warn-drops in that mode.
+        // `observed_kinds` vec; a `None` skips registration — mail to the
+        // observer mailbox warn-drops in that mode.
         //
         // Registered via `register_inline` (issue 840 + iamacoffeepot/aether#841
         // follow-up): the closure runs inline on the pushing thread

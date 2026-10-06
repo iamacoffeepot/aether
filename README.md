@@ -162,7 +162,7 @@ the several thousand hits a grep finds are test assertions. Errors cross
 boundaries as typed enums. A trap inside the native runtime aborts the process
 on purpose (ADR-0063) rather than continuing on corrupted state.
 
-Working today: the desktop, headless, hub, and substrate-harness chassis; the
+Working today: the desktop, headless, and hub chassis and the in-process substrate harness; the
 mail scheduler and settlement tracking; wasm component load, drop,
 and in-place replace with state carried across the swap; rendering (world
 triangles, textured quads, GPU shapes, text) with a depth-tested camera; audio

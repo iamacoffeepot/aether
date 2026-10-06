@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    # A cold run compiles the four chassis packages plus the `cargo xtask
+    # A cold run compiles the three chassis packages plus the `cargo xtask
     # dist` artifact tree below, so the cap sits well above the observed
     # wall-clock rather than near it — the point is to stop a runner stall
     # eating the default 6h quota, not to police build time.
@@ -54,12 +54,12 @@ jobs:
       # also resolves the desktop bin through `chassis_bin_path`.
       - name: Pre-build the chassis bins + dist manifest
         run: cargo xtask dist
-      # --no-fail-fast: `aether-chassis-hub` sorts last of the four
+      # --no-fail-fast: `aether-chassis-hub` sorts last of the three
       # packages and owned the only failing target, so one
       # environment-dependent failure masked every target ordered after
       # it. A nightly wants the complete per-OS signal, not the
       # first-failure one.
-      - run: cargo test -p aether-chassis-desktop -p aether-chassis-headless -p aether-chassis-hub -p aether-chassis-harness --all-targets --no-fail-fast
+      - run: cargo test -p aether-chassis-desktop -p aether-chassis-headless -p aether-chassis-hub --all-targets --no-fail-fast
 
       # File one triage issue per OS and comment subsequent failures on it
       # rather than filing duplicates — mirrors fuzz-nightly.yml's idiom.

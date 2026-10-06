@@ -89,7 +89,7 @@ impl NativeActor for SubstrateHarnessCapability {
             delta_micros: mail.delta_micros,
         };
         // The handler sends only `Advance`, so a refused send hands back that
-        // variant; `RenderMail` cannot come back and needs no arm.
+        // variant and the pattern needs no other arm.
         if let Err(mpsc::SendError(ChassisEvent::Advance { reply, .. })) = state.events.send(event) {
             reply.reply(&AdvanceResult::Err {
                 error: "substrate-harness chassis shutting down — advance aborted".to_owned(),
