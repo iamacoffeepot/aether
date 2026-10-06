@@ -23,7 +23,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use aether_data::{Blob, EngineId, Kind};
-    use aether_kinds::{LoadComponent, LogTailResult, Spawn, SpawnResult};
+    use aether_kinds::{LoadComponent, Spawn, SpawnResult};
     use aether_test_fixtures_kinds::{
         AssetBlobProbe, AssetBlobProbeResult, AssetProbe, AssetProbeResult, EmptyAssetProbe, EmptyAssetProbeResult,
     };
@@ -197,10 +197,15 @@ mod tests {
 
     /// A spawn that brings no bytes opens a window with no code, so the
     /// guest's fetch of a catalogued asset in `wire` traps naming what the
-    /// spawn lacked (ADR-0163 §4) instead of reading as a missing asset. The fixture's first fetch
-    /// is `asset_blob`, so that is the verb that traps here, under the
-    /// window check it shares with `asset`. It catches a sourceless window
-    /// answering a catalogued asset with a silent `None`, by either verb.
+    /// spawn lacked (ADR-0163 §4) instead of reading as a missing asset. The
+    /// trap fails the birth (ADR-0247 rule 3), so the spawn answers `Err`
+    /// with that reason and stands nothing up, and the name is free for a
+    /// spawn that brings the bytes. The fixture's first fetch is
+    /// `asset_blob`, so that is the verb that traps here, under the window
+    /// check it shares with `asset`. It catches a sourceless window answering
+    /// a catalogued asset with a silent `None`, by either verb, and a trap
+    /// in the load window that leaves the instance live and answers the
+    /// spawn `Spawned`.
     #[test]
     fn fleetharness_a_spawned_instance_cannot_read_assets_without_its_bytes() {
         if !dist_component_available(BUNDLE) {
@@ -210,21 +215,28 @@ mod tests {
         let engine = harness.spawn_headless();
         harness.publish(engine, read_component_wasm(BUNDLE));
 
-        let spawn =
+        let sourceless =
             Spawn { namespace: QUIET_PROBE.to_owned(), key: None, parent: None, config: Vec::new(), code: None };
-        let SpawnResult::Spawned { path, .. } = harness.spawn(engine, &spawn) else {
-            panic!("a fresh spawn of {QUIET_PROBE} stands the instance up");
-        };
-        let addr = path.to_string();
+        let replies = harness.send(engine, "aether.component", &sourceless);
 
-        assert!(!probe(&mut harness, engine, &addr).pulled, "a spawned instance reads no asset bytes");
-        let LogTailResult::Ok { entries, .. } =
-            harness.log_tail(engine, &addr, None, Some("spawned without its module's bytes".to_owned()))
-        else {
-            panic!("the spawned instance answers LogTail");
+        let [reply] = replies.as_slice() else {
+            panic!("the spawn expected exactly one reply event, got {}", replies.len());
         };
-        let trapped_on_blob = entries.iter().any(|entry| entry.message.contains("asset_blob"));
-        assert!(trapped_on_blob, "the guest's `wire` asset_blob trapped naming the missing bytes, got {entries:?}");
+        let result = SpawnResult::decode_from_bytes(&reply.payload).expect("the reply payload decodes as SpawnResult");
+        let SpawnResult::Err { error } = result else {
+            panic!("a spawn whose guest traps in wire is refused, got {result:?}");
+        };
+        let names_verb = error.contains("asset_blob");
+        let names_cause = error.contains("spawned without its module's bytes");
+        assert!(names_verb && names_cause, "the refusal names the fetch that trapped and why, got: {error}");
+        let names = harness.list_components(engine);
+        assert!(!names.iter().any(|name| name == QUIET_PROBE), "the failed spawn stood nothing up: {names:?}");
+
+        let sourced = Spawn { code: Some(Blob::from(read_component_wasm(BUNDLE))), ..sourceless };
+        let SpawnResult::Spawned { path, .. } = harness.spawn(engine, &sourced) else {
+            panic!("the name is free, so a spawn bringing its code stands the instance up");
+        };
+        assert_pulled_exact(&probe(&mut harness, engine, &path.to_string()));
     }
 
     /// Every instance a boot manifest stands up reads its module's assets in

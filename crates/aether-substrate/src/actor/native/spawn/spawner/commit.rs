@@ -18,6 +18,7 @@ use aether_data::ErasedActorPath;
 use crossbeam_channel::Receiver;
 
 use crate::actor::native::local;
+use crate::actor::native::slot::close::close;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::{NativeActor, NativeCtx};
@@ -275,11 +276,19 @@ impl Spawner {
         // Its `wire` runs under the boot's wire root (ADR-0244), which the
         // seal releases, so this birth's `wire` mail settles with boot's.
         transport.hold_outbound_for_activation();
-        local::with_stamped(&slots, || {
+        let wired = local::with_stamped(&slots, || {
             let mut wire_ctx =
                 NativeCtx::for_wire(&transport, EffectChain::Uncaused(Uncaused::ChassisBoot), self.boot_wire_root());
-            A::wire(actor.as_mut(), &mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx)
         });
+        // ADR-0247 rule 3: a `wire` that failed fails the birth. The hook was
+        // entered, so the actor closes: the one close runs its `unwire`,
+        // discards what both hooks sent behind the hold, and ends the name
+        // this commit published above, which is therefore spent.
+        if let Err(error) = wired {
+            close::<A>(actor, &transport, &slots, &self.actor_registry, || transport.try_recv());
+            return Err(SpawnError::WireFailed(error));
+        }
         if let Err(error) = self.registry.publish_contract(authority, id, transport.route_contract::<A>()) {
             tracing::warn!(
                 target: "aether_substrate::spawn",

@@ -149,8 +149,9 @@ impl WasmActor for ButtonWidget {
     }
 
     /// Kick off the font-metrics request for the initial theme font.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
+        Ok(())
     }
 
     /// Relabel / restyle in place from a re-sent config, and request metrics

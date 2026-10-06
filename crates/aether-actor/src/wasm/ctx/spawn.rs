@@ -84,6 +84,11 @@ pub enum SpawnError {
     /// [`WasmCtx::spawn_inline_child`], so the boot failure comes back
     /// through this `Result`.
     InitFailed(ActorInitError),
+    /// An inline child's `wire` returned `Err` (ADR-0247 rule 3). The child
+    /// ran its `unwire`, its slot is gone and its alias is retired, as a
+    /// despawn leaves it, so its name is spent (ADR-0241 §8). The wrapped
+    /// [`ActorInitError`] carries the child's own failure message.
+    WireFailed(ActorInitError),
     /// Issue 2692: [`WasmCtx::spawn_inline_child_by_tag`] was handed an
     /// [`ActorTypeTag`] that matched none of the module's `export!`ed actor
     /// types (a stale spec, a script, a tag for a type dropped from the
@@ -414,6 +419,11 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// `replace_component` reconstruct path (`reconstruct_one_child`) has its
 /// own insert and runs `init` + `on_rehydrate`, not `wire`, so a reload
 /// never fires `wire`.
+///
+/// A `wire` that returns `Err` fails the spawn (ADR-0247 rule 3). The hook
+/// was entered, so the child runs its `unwire`; then its slot is removed and
+/// its alias retired, the three things [`WasmCtx::despawn_inline_child`]
+/// does, and the error comes back as [`SpawnError::WireFailed`].
 pub fn install_inline_child<A>(
     registry: &Registry,
     alias: MailboxId,
@@ -441,7 +451,14 @@ where
     // defensive no-op rather than an `expect`.
     if let Some(mut fresh) = registry.take(alias) {
         let mut wire_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
-        fresh.erased_wire(&mut wire_ctx);
+        if let Err(error) = fresh.erased_wire(&mut wire_ctx) {
+            fresh.erased_unwire(&mut wire_ctx);
+            drop(fresh);
+            registry.remove(alias);
+            #[cfg(target_family = "wasm")]
+            mail::despawn_inline_child(alias.0);
+            return Err(SpawnError::WireFailed(error));
+        }
         registry.reinsert(alias, fresh);
     }
     Ok(alias)

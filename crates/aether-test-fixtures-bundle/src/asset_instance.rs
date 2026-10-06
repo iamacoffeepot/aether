@@ -26,11 +26,12 @@ impl WasmActor for AssetInstance {
     /// Pull the bundle's asset through the load window, which is open
     /// during `wire`, and keep the fingerprint `QuietProbe` computes: the
     /// length and a wrapping-sum checksum of the bytes.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) -> Result<(), ActorInitError> {
         if let Some(bytes) = ctx.asset("asset_fixture.txt") {
             let checksum = bytes.iter().fold(0u64, |sum, &byte| sum.wrapping_add(u64::from(byte)));
             self.asset = AssetProbeResult { pulled: true, len: bytes.len() as u64, checksum };
         }
+        Ok(())
     }
 
     /// Reply with the fingerprint of the asset this instance pulled from

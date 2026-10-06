@@ -252,14 +252,17 @@ where
         // so `Local<T>` and `tracing::*` route into this actor's
         // `ActorLogRing` identically. Its sends inherit the boot's wire root
         // (ADR-0244), so they settle together once boot seals.
-        local::with_stamped(&resources.slots, || {
+        let wired = local::with_stamped(&resources.slots, || {
             let mut wire_ctx =
                 NativeCtx::for_wire(&resources.transport, EffectChain::Uncaused(Uncaused::ChassisBoot), wire_root);
-            A::wire(actor.as_mut(), &mut wire_ctx);
+            A::wire(actor.as_mut(), &mut wire_ctx)
         });
 
+        // ADR-0247 rule 3: a `wire` that failed fails the build. The hook was
+        // entered, so the state is `Wired` either way and the rollback that
+        // follows an `Err` closes this actor with its wired siblings.
         self.state = BootState::Wired { resources, actor };
-        Ok(())
+        wired
     }
 
     fn spawn(self: Box<Self>, ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {

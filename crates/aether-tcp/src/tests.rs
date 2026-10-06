@@ -163,13 +163,14 @@ impl NativeActor for ConsumerHost {
         Ok(Self { captures: Some(captures), born, staged: None })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         let captures = self.captures.take().expect("wire runs once");
         let receipt = ctx
             .spawn_child::<SessionConsumer>(Subname::Named(NESTED_CONSUMER_KEY), captures, ())
             .stage()
             .expect("the nested consumer stages");
         self.staged = Some(receipt.canonical_name);
+        Ok(())
     }
 
     #[handler(task)]
@@ -203,8 +204,9 @@ impl NativeActor for DataOnlyConsumer {
         Ok(Self { replies, data_frames: 0 })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<TcpCapability>(&BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) });
+        Ok(())
     }
 
     #[handler::tell]

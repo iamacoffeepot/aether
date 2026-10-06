@@ -281,10 +281,11 @@ impl NativeActor for FleetProxy {
     /// accompanying wake is dropped as unresolved. `wire` runs after
     /// publication; the self-wake ensures the dispatcher drains any frame
     /// stranded in that gap.
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         state.route_hold = ctx.acquire_settlement_hold();
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: state.engine_id });
         ctx.self_wake::<RpcInboundReady>().wake(&RpcInboundReady::default());
+        Ok(())
     }
 
     /// The hub RPC server's answer to this proxy's route registration.

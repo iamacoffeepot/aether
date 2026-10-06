@@ -9,7 +9,8 @@
 //! instance key, each bringing the module's code, awaited to `Ok` → live
 //! trampoline (issue #6413, issue #7155). This is the reader a `spawn_substrate` carrying a component list
 //! drives through `AETHER_BOOT_MANIFEST`. A boot component that fails to
-//! load fails the build, and so does an entry naming no export of a module
+//! load fails the build, as does one whose `wire` returns an error, and so
+//! does an entry naming no export of a module
 //! that exports several; a `replicas: N` entry spawns N counter-keyed
 //! instances behind the one publish.
 //!
@@ -196,6 +197,43 @@ mod tests {
         for export in ["test.probe", "test.quiet_probe"] {
             assert!(error.contains(export), "the build error must name the export {export}: {error}");
         }
+    }
+
+    #[test]
+    fn boot_component_whose_wire_fails_fails_the_build() {
+        // A boot entry whose guest returns an error from `wire` must fail
+        // the build with the guest's message (ADR-0247 rule 3); the bug this
+        // catches is the loader counting it loaded, with the instance live
+        // and unwired.
+        let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+        let Some(wasm_path) = locate_component_wasm("aether_test_fixtures_bundle") else {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but probe.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing it",
+            );
+            eprintln!(
+                "skipping: probe.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-test-fixtures-bundle`",
+            );
+            return;
+        };
+
+        // The sandbox is shared per process, so this test's manifest carries
+        // its own name.
+        let sandbox = init_save_sandbox("headless-runtime-manifest");
+        let manifest_path = sandbox.join("wire-refuser-boot-manifest.json");
+        let manifest_json = serde_json::json!({
+            "components": [{ "wasm": wasm_path, "export": "test.wire_refuser" }],
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
+            .expect("write boot manifest");
+
+        let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
+        let error = HeadlessChassis::build(headless_env(sandbox, autoload))
+            .expect_err("a boot component whose wire fails must fail the build")
+            .to_string();
+        assert!(error.contains("wire refused"), "the build error must carry the guest's message: {error}");
     }
 
     #[test]

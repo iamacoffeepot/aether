@@ -435,6 +435,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_unchecked_task_handler_native",
     "rejects_undeclared_inline_child",
     "rejects_unlisted_inline_child",
+    "rejects_wire_without_result",
     "single_handler_cannot_read_reply_target",
     "single_handler_cannot_reply",
 ];

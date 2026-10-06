@@ -82,8 +82,9 @@ impl aether_actor::Lifecycle<Self> for TickSource {
     /// Subscribe this source to the `Tick` stage as itself (ADR-0082 §7): the
     /// cap reads the subscriber off the host-stamped sender, so no position
     /// crosses the wire.
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) -> Result<(), BootError> {
         ctx.send_to(state.lifecycle, &LifecycleCapability::subscribe_request::<Tick>());
+        Ok(())
     }
 }
 impl aether_actor::Declared for TickSource {

@@ -471,8 +471,9 @@ pub trait Lifecycle<S> {
     /// composer input pays nothing.
     type Params: Send + 'static;
 
-    /// The error [`Self::init`] returns when the actor cannot start. Pinned
-    /// to the concrete boot error on each transport subtrait.
+    /// The error either birth hook, [`Self::init`] or [`Self::wire`], returns
+    /// when the actor cannot start. Pinned to the concrete boot error on each
+    /// transport subtrait. Whoever asked for the birth is told it.
     type InitError;
 
     /// The per-target init ctx (`WasmInitCtx<'a>` / `NativeInitCtx<'a>`),
@@ -493,13 +494,25 @@ pub trait Lifecycle<S> {
 
     /// Post-init, mail-allowed hook (ADR-0079). Runs after `init` returned
     /// `Ok` and the mailbox is published, before the first envelope.
-    /// Default no-op; override to register subscriptions or announce.
-    fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
+    /// Defaults to `Ok(())`; override to register subscriptions or announce.
+    ///
+    /// An `Err` fails the birth as an `Err` from [`Self::init`] does
+    /// (ADR-0247 rule 3): whoever asked for the actor is answered with the
+    /// error and the actor never goes live. The hook was entered, so
+    /// [`Self::unwire`] still runs before the actor drops, and no mail the
+    /// hook sent leaves a birth that holds its outbound mail.
+    ///
+    /// # Errors
+    /// Whatever the actor could not set up, as its transport's
+    /// [`InitError`](Self::InitError).
+    fn wire(state: &mut S, ctx: &mut Self::Ctx<'_>) -> Result<(), Self::InitError> {
         let _ = (state, ctx);
+        Ok(())
     }
 
     /// Pre-shutdown, mail-allowed hook (ADR-0079). Runs after the inbox
-    /// drain, before the actor value drops. Default no-op.
+    /// drain, before the actor value drops. Default no-op. It returns
+    /// nothing: a close has no asker to tell and runs to its end.
     fn unwire(state: &mut S, ctx: &mut Self::Ctx<'_>) {
         let _ = (state, ctx);
     }

@@ -93,11 +93,12 @@ impl NativeActor for ActivationProbe {
         Ok(Self { events: config.events, lifecycle_target: config.lifecycle_target })
     }
 
-    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         if let Some(target) = state.lifecycle_target {
             ctx.send_detached_to(target, &ActivationPoke);
         }
         let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
+        Ok(())
     }
 
     #[handler::tell]

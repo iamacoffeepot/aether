@@ -67,19 +67,20 @@ impl WasmActor for EnvironmentBootstrap {
 
     /// Prove both peers, then import the base. A refused path is logged and
     /// nothing is sent.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         let Some(journal) = prove(ctx, &self.config.journal) else {
             self.run = Run::Stopped;
-            return;
+            return Ok(());
         };
         let Some(driver) = prove(ctx, &self.config.driver) else {
             self.run = Run::Stopped;
-            return;
+            return Ok(());
         };
 
         tracing::info!(image = self.config.base.as_str(), "importing the base image");
         ctx.send::<WorkspaceCapability>(&import(&self.config.base, &self.config.journal));
         self.run = Run::Live { peers: Peers { journal, driver }, phase: Phase::ImportingBase };
+        Ok(())
     }
 
     /// An import's answer: after the base, import the toolchain; after the

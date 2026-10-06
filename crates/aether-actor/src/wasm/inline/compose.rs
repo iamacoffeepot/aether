@@ -384,7 +384,9 @@ mod tests {
         fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _mail: Mail<'_>) -> u32 {
             0
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) {}
         fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
             ctx.save_state(9, &self.tag.to_le_bytes());
@@ -763,7 +765,9 @@ mod tests {
         fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _mail: Mail<'_>) -> u32 {
             self.observed
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _prior: PriorState<'_>) {}

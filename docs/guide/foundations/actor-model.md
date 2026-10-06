@@ -55,7 +55,7 @@ contract: it's exactly what you're permitted to do at that point.
 | stage | when | ctx allows | use it for |
 |---|---|---|---|
 | **`init`** | once, at boot | resolve only — **no mail** | build and return the initial state |
-| **`wire`** | after `init`, mailbox now published | full send + resolve | subscribe to input, announce yourself, kick off a self-poll |
+| **`wire`** | after `init`, mailbox now published | full send + resolve | subscribe to input, announce yourself, kick off a self-poll; return `Err` to fail the birth |
 | handlers | steady state, one call per inbound kind | full send + resolve + reply | the actor's actual behavior |
 | **`unwire`** | on every exit, after the inbox drains and before drop | full send + resolve | final broadcast, signal monitors, flush state |
 
@@ -76,6 +76,18 @@ subscribing to the tick or input streams, announcing yourself to a peer, startin
 poll loop by mailing yourself. An actor that needs to subscribe at startup would have
 nowhere safe to do it if `init` were the only hook.
 
+`wire` returns the same result type `init` does, `Result<(), ActorInitError>` for a
+component and `Result<(), BootError>` for a native actor, and a hook that fails fails
+the birth ([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
+rule 3). Whoever asked for the actor is told: a load or spawn answers `Err` with the
+hook's message, a boot manifest entry fails the build, a parent's staged spawn
+completes with `SpawnError::WireFailed`, and a composed capability fails the chassis
+build. The actor never goes live. Because the hook was entered, `unwire` still runs
+before the actor drops, and mail the hook sent from a birth that holds its outbound
+mail is discarded with it. A guest that traps in `wire` fails its birth the same way,
+except that no more of its code runs, `unwire` included. Every hook is written with
+the return type and ends in `Ok(())`; `#[actor]` refuses one without it.
+
 `unwire` is the mirror at the other end, and it exists for the same reason in
 reverse — teardown often needs to send, whether that's a closing broadcast, a signal
 to monitors, or a final flush to a peer, and Rust's `Drop` can't reach cleanly into
@@ -93,8 +105,8 @@ Only a process that is killed or aborts skips it. At teardown the engine settles
 closing actor's held replies without answering them, since every requester is
 closing too.
 
-Both `wire` and `unwire` default to no-ops; override them only when you have
-mail-driven setup or teardown to do.
+Both hooks are optional: `wire` defaults to `Ok(())` and `unwire` to a no-op.
+Override them only when you have mail-driven setup or teardown to do.
 
 ## The context
 
@@ -142,8 +154,9 @@ impl WasmActor for Hello {
         Ok(Hello)
     }
 
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<LifecycleCapability, Tick>();
+        Ok(())
     }
 
     #[handler::event]

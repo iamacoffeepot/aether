@@ -1,3 +1,5 @@
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
 use aether_actor::wasm::NO_INBOUND_SOURCE;
@@ -26,6 +28,40 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// the native dispatcher still discharges settlement.
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
+/// Why a guest's `wire` hook did not succeed (ADR-0247 rule 3). The two
+/// differ in whether the guest can run again, which decides whether its
+/// `unwire` may be called.
+#[derive(Debug)]
+pub enum WireFault {
+    /// The hook returned an error. The guest is intact: it ran part of its
+    /// `wire`, and its `unwire` is the only code that knows what to release.
+    /// Carries the message the guest staged.
+    Returned(String),
+    /// The hook trapped. The guest's store is left wherever the trap found
+    /// it, so no more of its code runs, as for a guest whose `init` trapped.
+    Trapped(wasmtime::Error),
+}
+
+impl WireFault {
+    /// Whether the guest trapped, so it must be released without running
+    /// any more of its code.
+    #[must_use]
+    pub const fn is_trap(&self) -> bool {
+        matches!(self, Self::Trapped(_))
+    }
+}
+
+impl fmt::Display for WireFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Returned(message) => write!(f, "guest wire failed: {message}"),
+            Self::Trapped(trap) => write!(f, "guest wire trapped: {trap:#}"),
+        }
+    }
+}
+
+impl Error for WireFault {}
+
 impl Component {
     /// Run the guest's `wire` hook, if it exports one. The trampoline runs it
     /// at birth and again on a guest it reinstates after a republish aborts
@@ -36,7 +72,12 @@ impl Component {
     /// `None` for a reinstatement, whose guest sends mint their own roots.
     /// It is published on the in-flight cells for the call and cleared
     /// after, as [`Self::deliver`] does with an inbound's lineage.
-    pub fn wire(&mut self, root: Option<MailId>) -> wasmtime::Result<()> {
+    ///
+    /// # Errors
+    /// [`WireFault::Returned`] when the hook returned a non-zero code, with
+    /// the message it staged through `init_failed_p32`, and
+    /// [`WireFault::Trapped`] when it trapped.
+    pub fn wire(&mut self, root: Option<MailId>) -> Result<(), WireFault> {
         let Some(wire_fn) = self.wire.clone() else {
             return Ok(());
         };
@@ -44,11 +85,17 @@ impl Component {
         self.store.data().set_in_flight(None, root);
         let result = wire_fn.call(&mut self.store, mailbox_id);
         self.store.data().clear_in_flight();
-        let rc = result?;
-        if rc != 0 {
-            return Err(wasmtime::Error::msg(format!("guest wire returned non-zero rc {rc}")));
+        let code = result.map_err(WireFault::Trapped)?;
+        if code == 0 {
+            return Ok(());
         }
-        Ok(())
+        let message = self
+            .store
+            .data_mut()
+            .init_failure
+            .take()
+            .unwrap_or_else(|| format!("guest wire returned {code} without staging an error"));
+        Err(WireFault::Returned(message))
     }
 
     /// ADR-0163 §3: close the asset load window on this component's store

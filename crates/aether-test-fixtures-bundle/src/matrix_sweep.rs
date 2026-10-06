@@ -197,9 +197,10 @@ impl WasmActor for MatrixParent {
 
     /// Co-locate two inline children under the `Named` subnames `a` and `b`,
     /// the cluster's leaf nodes.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.a = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("a"), &()).ok();
         let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("b"), &());
+        Ok(())
     }
 
     /// Drive the sweep: record the proven observer reference, query the

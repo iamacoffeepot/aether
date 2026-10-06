@@ -872,10 +872,26 @@ fn synthesized_wire_ctx_type(base: Type) -> Type {
     base
 }
 
+/// The birth error a router-synthesized `wire` returns: each transport pins
+/// its own (`Lifecycle::InitError`), read off the route's ctx as
+/// [`synthesized_wire_ctx_type`] reads it.
+fn wire_error_type(base: &Type) -> Type {
+    if is_wasm_ctx(base) {
+        return parse_quote!(::aether_actor::ActorInitError);
+    }
+    parse_quote!(::aether_substrate::BootError)
+}
+
 /// Inject the per-group `RegisterRouteSelf` registrations into `wire` —
-/// appended to an author-written `wire` body, or synthesized as a new
-/// `wire` when the impl has none. Receiver and ctx shapes are copied
-/// from the first routed method, so one rewrite serves both transports.
+/// run after an author-written `wire` body that returned `Ok`, or
+/// synthesized as a new `wire` when the impl has none. Receiver and ctx
+/// shapes are copied from the first routed method, so one rewrite serves
+/// both transports.
+///
+/// `wire` returns the birth's result (ADR-0247 rule 3). An author-written
+/// body is bound whole, under the return type its signature declares, so its
+/// tail and its early returns keep their meaning; an `Err` from it leaves
+/// before any route is registered.
 /// `shared` is the impl-level `#[http::router(shared)]` flag (ADR-0136),
 /// applied uniformly to every group registration this impl emits.
 fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed, shared: bool) -> syn::Result<()> {
@@ -886,10 +902,19 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed
 
     if let Some(wire) = existing {
         let ctx = wire_ctx_ident(wire)?;
-        for group in groups {
-            let send = registration_send(group, &ctx, shared);
-            wire.block.stmts.push(parse_quote!(#send));
-        }
+        // A `wire` that declares no return type is refused by `#[actor]`
+        // with the signature to write, so it is left as written for that.
+        let ReturnType::Type(_, output) = wire.sig.output.clone() else {
+            return Ok(());
+        };
+        let sends = groups.iter().map(|group| registration_send(group, &ctx, shared));
+        let body = &wire.block;
+        wire.block = parse_quote!({
+            let __aether_wired: #output = #body;
+            __aether_wired?;
+            #(#sends)*
+            ::core::result::Result::Ok(())
+        });
         return Ok(());
     }
 
@@ -899,12 +924,15 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], first: &Routed
     // strip the type args (`NativeCtx<'_, Self>` → `NativeCtx<'_>`).
     // `#[actor]` then types the base ctx by the router's actor.
     let first_arg = &first.first_arg;
-    let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&first.ctx_c));
+    let base = base_ctx_type(&first.ctx_c);
+    let error = wire_error_type(&base);
+    let ctx_c = synthesized_wire_ctx_type(base);
     let ctx = format_ident!("__aether_ctx");
     let sends = groups.iter().map(|group| registration_send(group, &ctx, shared)).collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {
-        fn wire(#first_arg, #ctx: &mut #ctx_c) {
+        fn wire(#first_arg, #ctx: &mut #ctx_c) -> ::core::result::Result<(), #error> {
             #(#sends)*
+            ::core::result::Result::Ok(())
         }
     };
     item.items.push(ImplItem::Fn(wire));

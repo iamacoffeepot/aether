@@ -402,8 +402,9 @@ impl WasmActor for TextAreaWidget {
         Ok(area)
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         self.pump_font_metrics(ctx);
+        Ok(())
     }
 
     /// Re-cap, resize, and restyle in place from a re-sent config. `initial`

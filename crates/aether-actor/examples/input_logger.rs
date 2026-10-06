@@ -26,10 +26,11 @@ impl WasmActor for InputLogger {
         Ok(InputLogger)
     }
 
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, MouseMove>();
         ctx.subscribe::<WindowCapability, MouseButton>();
+        Ok(())
     }
 
     #[handler::event]

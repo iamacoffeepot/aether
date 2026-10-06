@@ -42,8 +42,9 @@ impl WasmActor for Demo {
 
     /// Ask the viewer to load the subject. The viewer replies to this send's
     /// sender, so the result arrives at [`Self::on_mesh_load_result`].
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<MeshViewer>(&self.subject);
+        Ok(())
     }
 
     /// The viewer's answer to the load: parsed and drawing, or why not.

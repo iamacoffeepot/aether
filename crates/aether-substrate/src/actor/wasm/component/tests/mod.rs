@@ -395,8 +395,24 @@ const WAT_WIRE_UNWIRE: &str = r#"
                 i32.const 0))
     "#;
 
-/// WAT whose `wire` traps. Tests that `Component::instantiate`
-/// surfaces the trap as a wasmtime error rather than swallowing.
+/// WAT whose `wire` stages the 12-byte message at offset 16 through
+/// `init_failed_p32` and returns 1, as the `export!` shim does for a hook
+/// that returned an error.
+const WAT_WIRE_REFUSES: &str = r#"
+        (module
+            (import "aether" "init_failed_p32" (func $init_failed (param i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 16) "wire refused")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "wire") (param i64) (result i32)
+                i32.const 16
+                i32.const 12
+                call $init_failed
+                i32.const 1))
+    "#;
+
+/// WAT whose `wire` traps.
 const WAT_WIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -803,19 +819,24 @@ fn unwire_invokes_export_and_writes_marker() {
     assert_eq!(component.read_u32(104), 0x88);
 }
 
-/// Issue 584 Phase 2b / Issue 640 Phase 2: a wire trap is
-/// fatal — `Component::wire` returns the wasmtime error so the
-/// trampoline can log it. Pre-issue-640 the wire call lived
-/// inside `Component::instantiate`, so a wire trap aborted load
-/// directly; post-issue-640 it lives on the trampoline's
-/// `NativeActor::wire` lifecycle hook, so the trap surfaces
-/// after instantiation succeeds and the trampoline logs +
-/// continues (matching `unwire`'s contained-trap policy).
+/// Catches a trap and a returned error merged into one fault (ADR-0247 rule
+/// 3). The two decide what the trampoline may do next: a guest that returned
+/// an error is intact and its `unwire` runs, and a guest that trapped runs no
+/// more code. A returned error must also carry the message the guest staged,
+/// which is what the birth's asker reads.
 #[test]
-fn wire_trap_propagates_via_component_wire() {
-    let mut component = instantiate(WAT_WIRE_TRAPS);
-    let result = component.wire(None);
-    assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error");
+fn wire_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let refused = instantiate(WAT_WIRE_REFUSES).wire(None);
+    let Err(WireFault::Returned(message)) = refused else {
+        panic!("a wire that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "wire refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(WAT_WIRE_TRAPS).wire(None);
+    let Err(fault @ WireFault::Trapped(_)) = trapped else {
+        panic!("a wire that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
 }
 
 /// Issue 584 Phase 2b: `unwire` traps are contained the same way

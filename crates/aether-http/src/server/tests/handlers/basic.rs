@@ -32,8 +32,9 @@ impl NativeActor for EchoHttpHandler {
         Ok(EchoHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -68,8 +69,9 @@ impl NativeActor for FixedBodyHttpHandler {
         Ok(FixedBodyHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -103,8 +105,9 @@ impl NativeActor for ClosingHttpHandler {
         Ok(ClosingHttpHandlerState { parked: None })
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]
@@ -173,8 +176,9 @@ impl NativeActor for HeldForwardHttpHandler {
         Ok(HeldForwardHttpHandlerState)
     }
 
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         bind_catch_all(ctx);
+        Ok(())
     }
 
     #[handler::request]

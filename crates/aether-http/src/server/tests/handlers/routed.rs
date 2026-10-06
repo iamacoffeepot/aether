@@ -119,12 +119,13 @@ impl NativeActor for TmpRouteHandler {
         Ok(TmpRouteHandlerState)
     }
 
-    fn wire(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/tmp".to_string(),
             method: None,
             shared: false,
         });
+        Ok(())
     }
 
     /// Hold the reply and release `/tmp`; the release's confirmation answers.
@@ -181,12 +182,13 @@ impl NativeActor for WiredRouteHandler {
         Ok(WiredRouteHandlerState)
     }
 
-    fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/wired-extra".to_string(),
             method: None,
             shared: false,
         });
+        Ok(())
     }
 
     /// The macro route whose registration is appended to `wire`.

@@ -47,8 +47,9 @@ impl WasmActor for Counter {
     }
 
     /// Report each run of the hook, so a test can count it.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
     }
 
     /// Increment the in-memory counter.

@@ -310,9 +310,10 @@ hook:
 
 ```rust
 // In an `#[actor(depends(LifecycleCapability, RenderCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.subscribe::<LifecycleCapability, Tick>();
     ctx.subscribe::<LifecycleCapability, Render>();
+    Ok(())
 }
 
 #[handler::event]

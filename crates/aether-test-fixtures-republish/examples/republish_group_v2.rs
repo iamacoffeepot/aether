@@ -34,8 +34,9 @@ impl WasmActor for Peer {
     }
 
     /// Report each run of the hook, so a test can count it.
-    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
+        Ok(())
     }
 
     /// Hand-written, where v1 generates it from `type State`, because the

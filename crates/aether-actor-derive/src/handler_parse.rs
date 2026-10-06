@@ -888,6 +888,28 @@ pub fn allow_abi_receiver(m: &mut syn::ImplItemFn) {
     m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
 }
 
+/// Require a hand-written `wire` hook to declare its return type (ADR-0247
+/// rule 3): `wire` returns the birth's result, as `init` does, and a hook
+/// written without one is refused here with the signature to write rather
+/// than left to fail as a type mismatch inside the generated forwarder.
+/// `error` is the transport's birth error, named in the diagnostic. Called
+/// before [`rename_lifecycle_hooks`], while the hook still has its name.
+pub fn require_wire_result(methods: &[syn::ImplItemFn], error: &str) -> syn::Result<()> {
+    let Some(wire) = methods.iter().find(|m| m.sig.ident == "wire") else {
+        return Ok(());
+    };
+    if matches!(wire.sig.output, ReturnType::Type(..)) {
+        return Ok(());
+    }
+    Err(syn::Error::new(
+        wire.sig.ident.span(),
+        format!(
+            "`wire` returns the birth's result: write `fn wire(..) -> Result<(), {error}>` and end it with `Ok(())`; \
+             an `Err` fails the birth and whoever asked for the actor is told"
+        ),
+    ))
+}
+
 /// Rename `wire` → `__aether_wire`, `unwire` → `__aether_unwire` and
 /// `on_rehydrate` → `__aether_on_rehydrate` in the given method slice, pushing
 /// `#[allow(clippy::unused_self)]` (via [`allow_abi_receiver`]) onto each
@@ -908,6 +930,12 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, b
         if m.sig.ident == "wire" {
             has_wire = true;
             m.sig.ident = syn::Ident::new("__aether_wire", m.sig.ident.span());
+            // `wire` returns the birth's result whether or not this actor's
+            // can fail (ADR-0247 rule 3), which is the `Lifecycle::wire`
+            // signature the forwarder returns through. A hook that only
+            // ever returns `Ok(())` trips `clippy::unnecessary_wraps` on the
+            // now-inherent copy, as the trait-impl method never would.
+            m.attrs.push(syn::parse_quote!(#[allow(clippy::unnecessary_wraps)]));
         } else if m.sig.ident == "unwire" {
             has_unwire = true;
             m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());

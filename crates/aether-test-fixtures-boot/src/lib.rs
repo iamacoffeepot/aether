@@ -48,8 +48,9 @@ impl WasmActor for Boot {
     /// Broadcast [`BootObserved`] once, so a scenario counting it can assert the
     /// boot singleton was instantiated exactly once no matter how many selector
     /// loads of the module happened.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&BootObserved { marker: 0 });
+        Ok(())
     }
 
     /// Broadcast [`BootTornDown`] once when the boot closes. `unwire` runs in

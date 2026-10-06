@@ -66,7 +66,7 @@ use aether_window::{
 };
 
 // In an `#[actor(depends(WindowCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.send::<WindowCapability>(&ListWindows);
     ctx.send::<WindowCapability>(&CreateWindow {
         spec: WindowSpec {
@@ -80,6 +80,7 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 
     ctx.send::<WindowCapability>(&SetWindowTitle { title: "Aether".to_owned() });
     ctx.send::<WindowCapability>(&RequestWindowRedraw);
+    Ok(())
 }
 ```
 
@@ -178,13 +179,14 @@ component holding keys or buttons releases them when it reports `false`:
 
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block.
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
+fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.subscribe::<WindowCapability, WindowOpened>();
     ctx.subscribe::<WindowCapability, WindowSize>();
     ctx.send::<WindowCapability>(&SubscribeWindowSelf {
         selector: WindowSelector::One(self.viewport),
         kind: MouseMove::ID,
     });
+    Ok(())
 }
 ```
 

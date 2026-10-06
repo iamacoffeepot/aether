@@ -111,8 +111,9 @@ impl NativeActor for AddressRouteSink {
         })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
+        Ok(())
     }
 
     #[handler::response]
@@ -186,8 +187,9 @@ impl NativeActor for ScriptedRouteSink {
         Ok(Self { engine: params.engine, inventory: params.inventory, calls: params.calls, replies: params.replies })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
+        Ok(())
     }
 
     #[handler::response]
@@ -241,8 +243,9 @@ impl NativeActor for RouteInventorySink {
         Ok(Self { engine: params.engine, reply: params.reply, calls: params.calls })
     }
 
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
+        Ok(())
     }
 
     #[handler::response]

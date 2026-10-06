@@ -265,8 +265,9 @@ impl NativeActor for Announcer {
         Ok(Self)
     }
 
-    fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) {
+    fn wire(_state: &mut Self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<Witness>(&Announce { seq: 1 });
+        Ok(())
     }
 
     #[handler::tell]

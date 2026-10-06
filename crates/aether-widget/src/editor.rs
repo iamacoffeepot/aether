@@ -72,7 +72,7 @@ impl WasmActor for EditorShell {
 
     /// Subscribe to raw interactive input from every window. The shell has no
     /// lifecycle, render, or window-size role.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, MouseButton>();
         ctx.subscribe::<WindowCapability, MouseButtonRelease>();
         ctx.subscribe::<WindowCapability, MouseMove>();
@@ -82,6 +82,7 @@ impl WasmActor for EditorShell {
         ctx.subscribe::<WindowCapability, TextInput>();
         ctx.subscribe::<WindowCapability, ImePreedit>();
         ctx.subscribe::<WindowCapability, Modifiers>();
+        Ok(())
     }
 
     /// A region announcing that it is the actor behind one of the declared
