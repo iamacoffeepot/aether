@@ -6,17 +6,19 @@
 //! files it needs — the crate is guest code all the way down, so there is
 //! no data/runtime split, just one module per actor:
 //!
-//! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
-//!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
-//!   driver kinds live in [`camera`].
-//! - [`camera::controller::CameraController`] — a keyboard driver that steers a
-//!   peer [`camera::CameraComponent`] (WASD / arrows / zoom), selected by the
-//!   `aether_kit@aether.kit.camera-controller` export. Its
+//! - [`camera::CameraComponent`] — one camera per instance, at
+//!   `aether.kit.camera:<key>`, selected by the `aether_kit@aether.kit.camera`
+//!   export (ADR-0096). It publishes its view to whoever subscribed, the
+//!   renderer included; its `aether.kit.camera.*` kinds live in [`camera`].
+//! - [`camera::controller::CameraController`] — a keyboard driver that steers
+//!   one [`camera::CameraComponent`] instance (WASD / arrows / zoom), selected
+//!   by the `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
-//!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
+//!   export. Its `aether.kit.mesh.load` kind and its config, which names the
+//!   camera whose eye its outlines face, live in [`mesh`].
 //! - [`bundle::BundleComponent`] — the reference asset bundle (ADR-0163 §4):
 //!   carries a tile in a wasm custom section, makes it an engine resident in
 //!   the load window, draws it every frame, and destroys it symmetrically on

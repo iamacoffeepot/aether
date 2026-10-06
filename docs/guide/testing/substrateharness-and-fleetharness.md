@@ -300,7 +300,7 @@ against it or a `CaptureWithMails` bundle recipient:
 
 ```rust,ignore
 let camera = harness.load::<CameraComponent>(load)?;
-HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() });
+HarnessOp::send_and_settle(&camera, &Frame { bounds });
 ```
 
 A wasm-only fixture's erased reference is cast with `SubstrateHarness::cast::<P>`

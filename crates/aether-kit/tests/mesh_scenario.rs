@@ -4,7 +4,8 @@
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
 //! substrate's `save://` namespace, and drives the component through
 //! `aether.kit.mesh.load` to verify the load → parse → render pipeline
-//! end-to-end.
+//! end-to-end. The viewer's config names a camera instance; each test spawns
+//! `aether.kit.camera:main` first and tells the renderer to follow it.
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -21,17 +22,19 @@
 //! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_actor::{ActorRef, Addressable};
-use aether_data::ErasedActorPath;
+use aether_actor::ActorRef;
+use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{
     envelope, init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
 use aether_harness_substrate_capture::visual::{Image, decode_png, differs_from_background};
-use aether_kinds::{LoadComponent, MeshLoadResult, Render, WindowSize};
-use aether_kit::camera::{CameraComponent, CameraOrbitSet, OrbitParams};
-use aether_kit::mesh::{LoadMesh, MeshViewer};
+use aether_kinds::{LoadComponent, MeshLoadResult, Render};
+use aether_kit::camera::{CameraComponent, CameraConfig, Distance, Lens, Pitch, Pixels, Pose, Viewport, Yaw};
+use aether_kit::mesh::{LoadMesh, MeshViewer, MeshViewerConfig};
+use aether_math::Vec3;
+use aether_render::{RenderCapability, ViewFrom, ViewSource};
 use core::f32::consts::FRAC_PI_2;
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
@@ -44,12 +47,8 @@ use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
-/// User-facing component name passed to `LoadComponent`.
 const OUTLINE_WINDOW_WIDTH: u32 = 768;
 const OUTLINE_WINDOW_HEIGHT: u32 = 576;
-fn test_window() -> ErasedActorPath {
-    aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
-}
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
 const QUAD_OBJ: &[u8] = b"\
@@ -62,38 +61,72 @@ f 1 2 3 4
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 const OUTLINED_PLATE_DSL: &[u8] = b"(box 2 2 0.002 :color 6)\n";
 
-/// Load the kit export `R` under its own namespace, returning its reference and the
-/// lineage path it registered at — the path a capture bundle's `NamedMail`
-/// carries.
-fn load_kit_export<R: Addressable>(harness: &mut SubstrateHarness, wasm: &[u8]) -> (ActorRef<R>, ErasedActorPath) {
-    let name = R::NAMESPACE;
-    let actor = harness
-        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None })
-        .unwrap_or_else(|error| panic!("load {name}: {error}"));
-    let path = harness.actor_path(&actor);
-    assert_eq!(path.to_string(), name, "singleton export {name} should register at its own namespace");
-    (actor, path)
+/// A level pose looking at the origin from `distance` back, turned `yaw`
+/// about it.
+fn level(distance: f32, yaw: f32) -> Pose {
+    Pose {
+        target: Vec3::ZERO,
+        yaw: Yaw::new(yaw).expect("a finite yaw"),
+        pitch: Pitch::new(0.0).expect("a level pitch"),
+        distance: Distance::new(distance).expect("a positive distance"),
+    }
 }
 
-/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
-/// `mesh_viewer` export (ADR-0096; the kit has no unselected entry (ADR-0241 §9), so
-/// the export selector is required), and await `LoadResult`. The viewer
-/// declares `aether.kit.camera` as a dependency, so the camera export loads
-/// first at its default name. Panics on load failure so the calling test
+/// Spawn the camera `aether.kit.camera:main` over a fixed `width` by `height`
+/// viewport, spawn the viewer with a config naming it, and tell the renderer
+/// to follow the camera. The camera loads first: the viewer proves the
+/// camera's path when it wires. Panics on a load failure so the calling test
 /// surfaces the error message rather than wedging on a missing subscription.
+fn load_scene(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    width: u32,
+    height: u32,
+) -> (ActorRef<CameraComponent>, ActorRef<MeshViewer>) {
+    let viewport = Viewport::Fixed {
+        width: Pixels::new(width).expect("a width that is not zero"),
+        height: Pixels::new(height).expect("a height that is not zero"),
+    };
+    let camera_config = CameraConfig { lens: Lens::BOOT, viewport, pose: None };
+    let camera = harness
+        .load::<CameraComponent>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some(CameraComponent::MAIN_KEY.to_owned()),
+            config: camera_config.encode_into_bytes(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("load the camera: {error}"));
+
+    let viewer_config = MeshViewerConfig { camera: CameraComponent::main_path() };
+    let viewer = harness
+        .load::<MeshViewer>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: None,
+            config: viewer_config.encode_into_bytes(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("load the viewer: {error}"));
+
+    let follow = ViewFrom { source: CameraComponent::main_path().narrow::<ViewSource>() };
+    harness
+        .execute(vec![("follow", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &follow))])
+        .expect("the renderer follows the camera");
+
+    (camera, viewer)
+}
+
+/// [`load_scene`] over the 64 by 48 frame the load tests capture, returning
+/// the viewer.
 fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<MeshViewer> {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    load_kit_export::<CameraComponent>(harness, &wasm);
-    load_kit_export::<MeshViewer>(harness, &wasm).0
+
+    load_scene(harness, &wasm, 64, 48).1
 }
 
-fn capture_outlined_mesh(
-    harness: &mut SubstrateHarness,
-    camera: &ErasedActorPath,
-    viewer: &ErasedActorPath,
-    label: &'static str,
-) -> Vec<u8> {
-    let mails = vec![envelope(&camera.to_string(), &Render), envelope(&viewer.to_string(), &Render)];
+/// Capture one frame with the viewer's `Render` staged: it draws from the
+/// eye of the last view the camera sent it.
+fn capture_outlined_mesh(harness: &mut SubstrateHarness, viewer: &ErasedActorPath, label: &'static str) -> Vec<u8> {
+    let mails = vec![envelope(&viewer.to_string(), &Render)];
     let captured = harness
         .execute(vec![(label, HarnessOp::capture_with_mails(mails, Vec::new()))])
         .expect("capture outlined mesh");
@@ -159,53 +192,33 @@ fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
         .build()
         .expect("boot");
 
-    let (camera, camera_path) = load_kit_export::<CameraComponent>(&mut harness, &wasm);
-    let (viewer, viewer_path) = load_kit_export::<MeshViewer>(&mut harness, &wasm);
+    let (camera, viewer) = load_scene(&mut harness, &wasm, OUTLINE_WINDOW_WIDTH, OUTLINE_WINDOW_HEIGHT);
+    let viewer_path = harness.actor_path(&viewer);
     let loaded = harness
-        .execute(vec![
-            (
-                "aspect",
-                HarnessOp::send_and_settle(
-                    &camera,
-                    &WindowSize {
-                        window: test_window(),
-                        width: OUTLINE_WINDOW_WIDTH,
-                        height: OUTLINE_WINDOW_HEIGHT,
-                        scale_factor: 1.0,
-                    },
-                ),
-            ),
-            ("load_mesh", HarnessOp::send_and_await_reply(&viewer, &LoadMesh { namespace: "save".to_owned(), path })),
-        ])
-        .expect("set aspect + load edge-on fixture");
+        .execute(vec![(
+            "load_mesh",
+            HarnessOp::send_and_await_reply(&viewer, &LoadMesh { namespace: "save".to_owned(), path }),
+        )])
+        .expect("load edge-on fixture");
     let reply = loaded.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
     assert!(reply.ok, "edge-on DSL should load: {:?}", reply.error);
 
-    let orbit = |distance, yaw| CameraOrbitSet {
-        name: "main".to_owned(),
-        params: OrbitParams {
-            distance: Some(distance),
-            pitch: Some(0.0),
-            yaw: Some(yaw),
-            speed: Some(0.0),
-            fov_y_rad: None,
-            target: Some([0.0, 0.0, 0.0]),
-        },
-    };
+    // Each pose reaches the viewer and the renderer on the send's own chain:
+    // the camera publishes to both when its pose changes.
     harness
-        .execute(vec![("edge_on", HarnessOp::send_and_settle(&camera, &orbit(4.0, FRAC_PI_2)))])
-        .expect("set edge-on orbit");
-    let edge_on = capture_outlined_mesh(&mut harness, &camera_path, &viewer_path, "edge_on_capture");
+        .execute(vec![("edge_on", HarnessOp::send_and_settle(&camera, &level(4.0, FRAC_PI_2)))])
+        .expect("set edge-on pose");
+    let edge_on = capture_outlined_mesh(&mut harness, &viewer_path, "edge_on_capture");
 
     harness
-        .execute(vec![("near", HarnessOp::send_and_settle(&camera, &orbit(2.5, 0.0)))])
-        .expect("set near face-on orbit");
-    let near = capture_outlined_mesh(&mut harness, &camera_path, &viewer_path, "near_capture");
+        .execute(vec![("near", HarnessOp::send_and_settle(&camera, &level(2.5, 0.0)))])
+        .expect("set near face-on pose");
+    let near = capture_outlined_mesh(&mut harness, &viewer_path, "near_capture");
 
     harness
-        .execute(vec![("far", HarnessOp::send_and_settle(&camera, &orbit(8.0, 0.0)))])
-        .expect("set far face-on orbit");
-    let far = capture_outlined_mesh(&mut harness, &camera_path, &viewer_path, "far_capture");
+        .execute(vec![("far", HarnessOp::send_and_settle(&camera, &level(8.0, 0.0)))])
+        .expect("set far face-on pose");
+    let far = capture_outlined_mesh(&mut harness, &viewer_path, "far_capture");
 
     let edge_on_image = decode_png(&edge_on).expect("decode edge-on capture");
     let near_image = decode_png(&near).expect("decode near capture");

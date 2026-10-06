@@ -78,10 +78,9 @@ aether-harness-substrate = { path = "../aether-harness-substrate", features = ["
 # wire `Call` frames, which needs the rpc wire vocabulary in test scope.
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 aether-rpc = { path = "../aether-rpc" }
-# `fleetharness_replace` swaps the probe for the kit camera export,
-# drives it with `CameraCreate`, and cold-loads `aether_kit.wasm`, so
-# the dep is both a real import and the #3766 source→consumer coupling
-# that keeps determinator and the dist pre-build honest.
+# The #3766 source→consumer coupling with `aether_kit.wasm`, which keeps
+# determinator and the dist pre-build honest. No test here names the kit's
+# kinds.
 aether-kit = { path = "../aether-kit" }
 # `fleetharness_component_store` assembles a boot-manifest JSON file for
 # the spawn-with-manifest path (called fully-qualified, no `use`).

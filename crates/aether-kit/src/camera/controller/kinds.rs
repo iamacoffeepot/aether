@@ -1,126 +1,64 @@
 //! Camera-controller wire kinds: the [`ControllerConfig`] init-config
-//! shape (loaded once at instantiation, ADR-0090) and the
-//! [`ControllerMode`] it selects. The controller *drives* the camera
-//! component through its existing `aether.kit.camera.*` kinds
+//! (loaded once at instantiation, ADR-0090). The controller drives a camera
+//! through the camera's own `aether.kit.camera.*` kinds
 //! ([`crate::camera`]); this module holds only the controller's own
 //! configuration vocabulary.
 //!
-//! [`ControllerConfig`] is a non-unit typed config. A bare load with no
-//! `config_path` boots the compiled [`Default`] control scheme; callers can
-//! still encode and pass a config to override that baseline.
+//! A load with no config boots the compiled [`Default`] control scheme
+//! driving `aether.kit.camera:main`.
 
-use alloc::string::String;
-
-use serde::{Deserialize, Serialize};
-
-/// Which projection the controller drives on its target camera. The
-/// controller emits `aether.kit.camera.orbit.set` in [`Orbit`](Self::Orbit)
-/// and `aether.kit.camera.topdown.set` in [`Topdown`](Self::Topdown); the
-/// target camera must already be in the matching mode (the camera
-/// component warn-drops a mode-mismatched delta), so this pairs with
-/// the camera's own mode rather than switching it.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ControllerMode {
-    /// Drive the orbit camera: WASD pans the orbit `target` across the
-    /// ground plane, ←/→ yaw, ↑/↓ pitch, Z/X dolly the eye distance.
-    #[default]
-    Orbit,
-    /// Drive the top-down camera: WASD pans the ortho `center`, Z/X
-    /// scale the ortho `extent` (zoom).
-    Topdown,
-}
-
-/// An initial orbit pose for the controller's shadow, in place of the compiled
-/// baseline. Carried by [`ControllerConfig::seed`]; the fields mirror the
-/// orbit camera's own (`aether.kit.camera.orbit.set`, see
-/// [`OrbitParams`](crate::camera::OrbitParams)).
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-pub struct OrbitSeed {
-    /// World-space point the eye orbits and looks at.
-    pub target: [f32; 3],
-    /// Orbit yaw, radians.
-    pub yaw: f32,
-    /// Orbit pitch, radians. Negative places the eye above the target
-    /// looking down.
-    pub pitch: f32,
-    /// Eye distance from `target`, world units.
-    pub distance: f32,
-}
+use crate::camera::{CameraComponent, Distance, Pitch};
+use aether_actor::ActorPath;
 
 /// Init-config for [`CameraController`](crate::camera::controller::CameraController):
-/// which camera to drive, in which mode, and the per-tick rates and
-/// clamps the keymap integrates. Every rate is expressed per tick, so
-/// the control feel is tick-rate-relative like the rest of the kit.
+/// which camera to drive and the per-tick rates and clamps the keymap
+/// integrates. Every rate is expressed per tick, so the control feel is
+/// tick-rate-relative like the rest of the kit.
 ///
 /// # Agent
-/// Encode one of these to the controller's `Config` shape and pass it
-/// as the `config` bytes of the `aether.component.load` that
-/// instantiates the controller (or `load_component`'s `config_path`).
-/// Omitting config bytes boots [`ControllerConfig::default()`].
-#[aether_data::kind(name = "aether.kit.camera-controller.config")]
+/// Pass as `config` to `load_component` / `spawn` with `namespace:
+/// "aether.kit.camera-controller"` and a `key`, for example `{"camera":
+/// "aether.kit.camera:main", "pan_speed": 0.15, "yaw_speed": 0.02,
+/// "pitch_speed": 0.015, "zoom_rate": 0.985, "pitch_limit": 1.5,
+/// "distance_floor": 1.0}`. The camera must be live first.
+#[aether_data::kind(name = "aether.kit.camera-controller.config", partial_eq, no_serde)]
 pub struct ControllerConfig {
-    /// Name of the camera *within* the target camera component to
-    /// drive — the `name` field of every emitted `aether.kit.camera.*`
-    /// delta. Defaults to `"main"`, the camera component's boot camera.
-    /// This is not the component's load name (the controller resolves
-    /// the component instance separately); it selects which of that
-    /// component's named cameras the keys steer.
-    pub camera: String,
-    /// Which projection to drive. Must match the target camera's actual
-    /// mode; the controller does not switch modes.
-    pub mode: ControllerMode,
-    /// Ground-plane pan rate, world units per tick, for the WASD keys
-    /// (orbit `target` / topdown `center`). Diagonals are
-    /// velocity-normalized, so a diagonal covers the same ground per
-    /// tick as a cardinal.
+    /// The camera to drive, `aether.kit.camera:<key>`. It is sent to, so it
+    /// is typed: a path whose leaf is not a kit camera does not decode.
+    pub camera: ActorPath<CameraComponent>,
+    /// Ground-plane pan rate, world units per tick, for the WASD keys.
+    /// Diagonals are velocity-normalized, so a diagonal covers the same
+    /// ground per tick as a cardinal.
     pub pan_speed: f32,
-    /// Orbit yaw rate, radians per tick, for the ←/→ keys. Unused in
-    /// topdown mode.
+    /// Yaw rate, radians per tick, for the ←/→ keys.
     pub yaw_speed: f32,
-    /// Orbit pitch rate, radians per tick, for the ↑/↓ keys. Unused in
-    /// topdown mode.
+    /// Pitch rate, radians per tick, for the ↑/↓ keys.
     pub pitch_speed: f32,
     /// Per-tick multiplicative zoom rate for the Z/X keys: Z scales the
-    /// controlled dimension (orbit `distance` / topdown `extent`) down
-    /// by this factor, X scales it up. `1.0` disables zoom.
+    /// camera's distance down by this factor, X scales it up. `1.0`
+    /// disables zoom.
     pub zoom_rate: f32,
-    /// Absolute clamp on the orbit pitch magnitude, radians. Keeps the
-    /// eye out of the degenerate `±π/2` poles. Unused in topdown mode.
-    pub pitch_limit: f32,
-    /// Lower clamp on the controlled zoom dimension (orbit `distance` /
-    /// topdown `extent`), world units, so a zoom-in never collapses the
-    /// camera onto its target.
-    pub distance_floor: f32,
-    /// Initial orbit pose. `None` seeds the compiled baseline, a
-    /// three-quarter overhead look at the origin from 12 units back.
-    /// `Some` replaces it: the controller seeds its shadow, and through
-    /// it the target camera at `wire`, with this pose, so the first held
-    /// key moves from here rather than snapping back to the baseline.
-    /// Orbit mode only; topdown always seeds its compiled pose. The
-    /// orbit auto-advance stays pinned off (`speed: 0`) either way.
-    pub seed: Option<OrbitSeed>,
+    /// How far the keys may pitch the camera either way from level.
+    pub pitch_limit: Pitch,
+    /// The closest a zoom-in may bring the eye to the target.
+    pub distance_floor: Distance,
 }
 
 impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
-            camera: String::from("main"),
-            mode: ControllerMode::Orbit,
+            camera: CameraComponent::main_path(),
             // ~0.15 m/tick ≈ 9 m/s at 60 Hz — a brisk but controllable
             // scene-navigation pan.
             pan_speed: 0.15,
-            // Gentle look rates, in the same ballpark as the mover's
-            // arrow-key orbit (radians/tick).
+            // Gentle look rates (radians/tick).
             yaw_speed: 0.02,
             pitch_speed: 0.015,
             // 1.5% dolly per held tick — smooth zoom, ~60 ticks to halve
             // or ~1.6× the distance.
             zoom_rate: 0.985,
-            // Just inside the ±π/2 pole so `look_at` never degenerates.
-            pitch_limit: 1.5,
-            // Never dolly closer than 1 world unit to the target.
-            distance_floor: 1.0,
-            seed: None,
+            pitch_limit: Pitch::new(1.5).expect("1.5 radians is within a quarter turn"),
+            distance_floor: Distance::new(1.0).expect("one unit is a positive distance"),
         }
     }
 }
