@@ -187,7 +187,7 @@ impl InboxRelay {
     /// the routed mailbox and the kind. A gone [`Mailer`] means its trace
     /// table is gone too, so there is nothing to settle; `record_finished`
     /// no-ops on an absent mail id, so lineage-less mail settles nothing.
-    fn settle_refused(&self, env: &Envelope) {
+    fn settle_discarded(&self, env: &Envelope) {
         if let Some(mailer) = self.mailer.upgrade() {
             mailer.record_finished(env.mail_id, env.root);
         }
@@ -209,7 +209,7 @@ impl InboxHandler for InboxRelay {
     /// and is settled here.
     fn enqueue(&self, dispatch: OwnedDispatch) {
         if let Some(refused) = self.offer(dispatch) {
-            self.settle_refused(&refused);
+            self.settle_discarded(&refused);
             return;
         }
         if let Some(wake) = self.wake.get() {
