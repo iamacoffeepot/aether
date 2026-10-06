@@ -325,14 +325,16 @@ fn pumped_actor_with_missing_dependency_fails_boot() {
 fn passive_dependent_boots_on_a_reserved_pumped_slot() {
     let (registry, mailer) = bare_substrate();
 
-    let (passive, (mut slot, _wake)) = Builder::<TestChassis>::new(registry, mailer)
+    let (passive, (slot, _wake)) = Builder::<TestChassis>::new(registry, mailer)
         .with_actor::<OrderedDependent>(())
         .reserve_pumped::<AudioDep>()
         .build_passive_with_start(|passive| passive.boot_pumped_actor::<AudioDep>((), ()))
         .expect("a passive depending on a reserved pumped slot builds once the start boots the slot");
 
     let _audio = passive.actor_ref::<AudioDep>();
-    slot.shutdown();
+    // The chassis goes before the pumped root its passive depends on.
+    drop(passive);
+    drop(slot);
 }
 
 /// A pumped slot reserved at the Claim stage and never booted fails the

@@ -1,23 +1,31 @@
 //! The driver build path: passives boot, the driver runs and tears them down,
-//! the claim-only terminal stops before Init, and a Claim-stage mailbox
-//! reservation is recovered at Start or fails the build.
+//! the claim-only terminal stops before Init, a Claim-stage mailbox
+//! reservation is recovered at Start or fails the build, and the pumped roots
+//! a driver hands back close after the passives.
 
 use super::support::{DrivenTestChassis, RanDriver, StubLog};
-use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
-use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, RunError};
+use crate::actor::native::slot::pumped::PumpedSlot;
+use crate::actor::native::spawn::Subname;
+use crate::actor::native::{Dispatch, Held, Pending};
+use crate::chassis::builder::{
+    Builder, DriverCapability, DriverCtx, DriverRunning, PumpedRoots, ReplyTarget, RunError,
+};
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry;
+use crate::testing::await_signal;
 use crate::testing::bare_substrate;
 use crate::testing::boot_authority;
 use crate::{BootError, NativeActor, NativeInitCtx};
-use aether_actor::Addressable;
+use aether_actor::{Addressable, HeldReply};
+use crossbeam_channel::Sender;
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
 /// Driver build path: passives boot, driver runs, passives tear
@@ -61,8 +69,8 @@ impl DriverCapability for ClaimingDriver {
 }
 
 impl DriverRunning for ClaimingDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
-        Ok(())
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
+        (Ok(()), PumpedRoots::none())
     }
 }
 
@@ -187,8 +195,8 @@ impl DriverCapability for ReserveRecoverDriver {
 }
 
 impl DriverRunning for ReserveRecoverDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
-        Ok(())
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
+        (Ok(()), PumpedRoots::none())
     }
 }
 
@@ -254,5 +262,142 @@ fn driver_reservation_never_recovered_fails_the_build() {
     assert_eq!(
         err.to_string(),
         "capability boot failed: pumped slot \"test.reserve_unrecovered.window\" was reserved at the Claim stage but never booted",
+    );
+}
+
+/// The answer the pumped sink below receives from an actor that closes
+/// before it.
+#[aether_data::kind(name = "test.teardown_order.farewell", copy, partial_eq)]
+struct Farewell {
+    tag: u32,
+}
+
+impl HeldReply for Farewell {
+    fn unanswered() -> Self {
+        Self { tag: 0 }
+    }
+}
+
+/// Asks [`Leaver`] for a [`Farewell`] it holds until it closes.
+#[aether_data::kind(name = "test.teardown_order.ask", copy, partial_eq)]
+struct Ask {
+    tag: u32,
+}
+
+/// A pumped root that records the [`Farewell`] it is sent.
+struct PumpedSink {
+    farewell: Arc<AtomicU32>,
+}
+
+#[aether_actor::actor(root)]
+impl NativeActor for PumpedSink {
+    const NAMESPACE: &'static str = "test.teardown_order.sink";
+    type Config = ();
+    type Params = Arc<AtomicU32>;
+
+    fn init((): (), params: Arc<AtomicU32>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { farewell: params })
+    }
+
+    #[handler::tell]
+    fn on_farewell(&mut self, _ctx: &mut NativeCtx<'_>, farewell: Farewell) {
+        self.farewell.store(farewell.tag, Ordering::SeqCst);
+    }
+}
+
+/// An instanced actor that holds the reply to an [`Ask`] and answers it from
+/// `unwire`, with the tag it was asked with.
+struct Leaver {
+    held: Option<(u32, Held<Farewell>)>,
+    holding: Sender<()>,
+}
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for Leaver {
+    const NAMESPACE: &'static str = "test.teardown_order.leaver";
+    type Config = ();
+    type Params = Sender<()>;
+
+    fn init((): (), params: Sender<()>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { held: None, holding: params })
+    }
+
+    #[handler::request]
+    fn on_ask(&mut self, ctx: &mut NativeCtx<'_>, ask: Ask) -> Pending<Farewell> {
+        let (pending, held) = ctx.hold::<Farewell>();
+        self.held = Some((ask.tag, held));
+        let _ = self.holding.send(());
+        pending
+    }
+
+    fn unwire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
+        if let Some((tag, held)) = state.held.take() {
+            held.answer(ctx, &Farewell { tag });
+        }
+    }
+}
+
+/// Boots [`PumpedSink`] from its Claim-stage reservation, drives nothing, and
+/// hands the slot back from `run` for the chassis to close.
+struct SinkDriver {
+    farewell: Arc<AtomicU32>,
+}
+struct SinkDriverRunning {
+    slot: PumpedSlot<PumpedSink>,
+}
+
+impl DriverCapability for SinkDriver {
+    type Running = SinkDriverRunning;
+
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_driver_mailbox(PumpedSink::NAMESPACE)
+    }
+
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        let (slot, _wake) = ctx.boot_pumped_actor::<PumpedSink>((), self.farewell)?;
+        Ok(SinkDriverRunning { slot })
+    }
+}
+
+impl DriverRunning for SinkDriverRunning {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
+        (Ok(()), PumpedRoots::of(self.slot))
+    }
+}
+
+/// Catches a teardown that closes the pumped roots before the actors that
+/// still have mail for them (ADR-0160 §3): an instanced actor that mails a
+/// pumped root from its `unwire` at teardown has that mail dispatched by the
+/// root's own close. Closed in the old order, the root is gone before the
+/// actor's `unwire` runs, and the mail is discarded.
+///
+/// The mail is an answer the actor still owes the root. An answer is
+/// deposited on its recipient's inbox as it is sent, so the root's close
+/// finds it there whatever the pool is doing.
+#[test]
+fn a_pumped_root_closes_after_the_actors_that_mail_it_from_unwire() {
+    const TAG: u32 = 0x7468;
+
+    let (registry, mailer) = bare_substrate();
+    let farewell = Arc::new(AtomicU32::new(0));
+    let (holding_tx, holding) = crossbeam_channel::unbounded();
+    let chassis = Builder::<DrivenTestChassis<SinkDriver>>::new(registry, mailer)
+        .driver(SinkDriver { farewell: Arc::clone(&farewell) })
+        .build()
+        .expect("the driver boots its pumped root");
+    let sink = chassis.actor_ref::<PumpedSink>();
+    let leaver =
+        chassis.spawn_actor::<Leaver>(Subname::Named("leaver"), (), holding_tx).finish().expect("the leaver spawns");
+
+    chassis.send_for_reply(leaver, &Ask { tag: TAG }, ReplyTarget::Actor { to: sink.erase(), correlation: 1 });
+    await_signal(&holding, "test.teardown_order.holding");
+    assert_eq!(farewell.load(Ordering::SeqCst), 0, "the leaver holds its answer while it is open");
+
+    chassis.run().expect("the driver runs and the chassis tears down");
+
+    assert_eq!(
+        farewell.load(Ordering::SeqCst),
+        TAG,
+        "the pumped root dispatched the answer the leaver sent from unwire, so it closed after the leaver",
     );
 }

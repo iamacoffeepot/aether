@@ -37,15 +37,18 @@ use crate::config::SettlementConfig;
 ///
 /// The slot is not exposed: every drain happens inside [`Self::settle`] or
 /// [`Self::pump_until`], on a mail wake, so a test cannot fall back to
-/// draining in a timed loop. Dropping the driver shuts the slot down before
-/// the chassis drops.
+/// draining in a timed loop. Dropping the driver tears the chassis down and
+/// then closes the pumped actor, the order a pumped chassis driver's
+/// teardown takes (ADR-0160 §3).
 pub struct PumpedDriver<A: Root + NativeActor> {
+    /// Declared before `slot` so it drops first: the chassis's actors close
+    /// while the pumped root they may depend on is still open.
+    chassis: PassiveChassis<TestChassis>,
     slot: PumpedSlot<A>,
     /// Cloned into each awaited root's settlement callback; the slot's
     /// mailbox wake holds another clone.
     wake_tx: Sender<PumpWake>,
     wake_rx: Receiver<PumpWake>,
-    chassis: PassiveChassis<TestChassis>,
 }
 
 impl<A: Root + NativeActor> PumpedDriver<A> {
@@ -61,7 +64,7 @@ impl<A: Root + NativeActor> PumpedDriver<A> {
         install_pump_wake(&wake_slot, wake_tx.clone());
         slot.drain_available();
 
-        Self { slot, wake_tx, wake_rx, chassis }
+        Self { chassis, slot, wake_tx, wake_rx }
     }
 
     /// The chassis the actor lives on, for its references and for mail to
@@ -164,12 +167,6 @@ impl<A: Root + NativeActor> PumpedDriver<A> {
     /// Run one host turn against the actor's state without draining.
     pub fn host_turn<T>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> T) -> Option<T> {
         self.slot.host_turn(turn)
-    }
-}
-
-impl<A: Root + NativeActor> Drop for PumpedDriver<A> {
-    fn drop(&mut self) {
-        self.slot.shutdown();
     }
 }
 

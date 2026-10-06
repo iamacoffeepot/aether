@@ -397,13 +397,12 @@ impl<'a> ChassisCtx<'a> {
     /// removes the id from `claimed_actor_mailboxes`. Idempotent: calling
     /// on an id that wasn't claimed, or was already unclaimed, is a no-op.
     ///
-    /// Used by a capability boot that fails after its `wire` ran, whose
-    /// `wire` mail stamped with the id may already sit in a draining
-    /// peer's inbox, and by a pumped boot that fails while the passives
-    /// are dispatching and may hold a `depends` reference to the claim.
-    /// The route keeps its proven name, so such a reference still names
-    /// its path (ADR-0230), and the name is never registered again
-    /// (ADR-0079 §7).
+    /// Used by a pumped boot whose `init` fails while the passives are
+    /// dispatching and may hold a `depends` reference to the claim. The
+    /// route keeps its proven name, so such a reference still names its
+    /// path (ADR-0230), and the name is never registered again (ADR-0079
+    /// §7). A boot that fails after an actor's `wire` ran closes the actor
+    /// instead, and the close retires its route the same way.
     pub(crate) fn retire_claim(&mut self, id: MailboxId) {
         let _ = self.registry.drop_mailbox(&self.authority, id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);

@@ -301,14 +301,7 @@ impl Spawner {
         // chassis worker pool. No per-actor thread. The wake hook on the
         // closure pushes the slot to the ready queue when an envelope
         // lands.
-        let slot = DispatcherSlot::<A>::new(
-            actor,
-            Arc::clone(&transport),
-            slots,
-            Arc::clone(&self.actor_registry),
-            Arc::clone(&self.mailer),
-            id,
-        );
+        let slot = DispatcherSlot::<A>::new(actor, Arc::clone(&transport), slots, Arc::clone(&self.actor_registry), id);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this

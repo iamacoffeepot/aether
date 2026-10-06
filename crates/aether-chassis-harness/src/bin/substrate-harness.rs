@@ -102,12 +102,12 @@ fn main() -> anyhow::Result<()> {
 
     driver.run(&events_rx);
 
-    // Drop ordering: run the pumped render actor's Closed-path teardown
-    // (`unwire` logs the triangle count) BEFORE dropping `passive` (the composed
-    // caps shut down) → `boot` (scheduler join).
-    driver.shutdown();
-    drop(driver);
+    // Teardown order (ADR-0160 §3): `passive` first, so the composed caps
+    // close while the pumped render actor they draw through is still open;
+    // then `driver`, whose pumped slot closes in its drop (`unwire` logs the
+    // triangle count); then `boot`.
     drop(passive);
+    drop(driver);
     drop(boot);
     Ok(())
 }

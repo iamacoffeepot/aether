@@ -16,7 +16,7 @@ impl Spawner {
     /// the test-support wait behind `PassiveChassis::await_closed`.
     ///
     /// Two existing signals compose the proof. The slot's close-done
-    /// sender fires after `finalize_registry` has queued the
+    /// sender fires after the close's registry tail has queued the
     /// `DropMailbox` on the owner (an already-closed slot fires it at
     /// once through `set_close_done_tx`'s fast path). [`Self::await_registry_applied`]
     /// submitted after that lands behind the drop in the owner's one

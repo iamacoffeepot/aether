@@ -32,14 +32,16 @@ mod root_pusher;
 mod route_probe;
 mod state;
 mod target;
+mod teardown;
 
 pub use built::{BuiltChassis, PassiveChassis, ReplyTarget};
-pub use driver::{DriverCapability, DriverCtx, DriverRunning, NeverDriver, NeverDriverRunning, RunError};
+pub use driver::{DriverCapability, DriverCtx, DriverRunning, NeverDriver, NeverDriverRunning, PumpedRoots, RunError};
 pub(in crate::chassis) use references::ComposedReferences;
 pub use root_pusher::RootPusher;
 pub use route_probe::RouteReadProbe;
 pub use state::{Builder, BuilderState, HasDriver, NoDriver};
 pub use target::ChassisTarget;
+pub(crate) use teardown::{ClosingSlot, TeardownGate};
 
 #[cfg(test)]
 // Chassis-level integration tests stage many caps, sender threads,

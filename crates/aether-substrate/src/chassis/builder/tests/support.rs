@@ -4,7 +4,7 @@
 
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
-use crate::chassis::builder::{BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
+use crate::chassis::builder::{BuiltChassis, DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RunError};
 use crate::mail::KindId;
 use crate::{BootError, Chassis, NativeActor, NativeInitCtx};
 use aether_actor::Addressable;
@@ -230,8 +230,8 @@ impl DriverCapability for RanDriver {
 }
 
 impl DriverRunning for RanDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         self.ran.store(true, Ordering::SeqCst);
-        Ok(())
+        (Ok(()), PumpedRoots::none())
     }
 }

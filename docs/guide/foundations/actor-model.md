@@ -57,7 +57,7 @@ contract: it's exactly what you're permitted to do at that point.
 | **`init`** | once, at boot | resolve only — **no mail** | build and return the initial state |
 | **`wire`** | after `init`, mailbox now published | full send + resolve | subscribe to input, announce yourself, kick off a self-poll |
 | handlers | steady state, one call per inbound kind | full send + resolve + reply | the actor's actual behavior |
-| **`unwire`** | after the inbox drains, before drop | full send + resolve | final broadcast, signal monitors, flush state |
+| **`unwire`** | on every exit, after the inbox drains and before drop | full send + resolve | final broadcast, signal monitors, flush state |
 
 The three stages exist because constructing an actor and letting it participate in
 the mail system are different moments, and only the second is safe to send from.
@@ -82,6 +82,16 @@ to monitors, or a final flush to a peer, and Rust's `Drop` can't reach cleanly i
 the mail system. It runs after the inbox has drained but before the actor drops, so
 its sends still land in live peers (mail to one that's already gone warn-drops). It
 absorbs what used to be a separate `on_drop` hook.
+
+What an actor wired, it unwires: `unwire` runs on every exit the engine takes
+([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
+rule 5). That is the actor asking to close (`ctx.shutdown()`, or a component's
+`aether.component.drop`), a birth cancelled after `wire` ran, a boot that rolled
+back, and engine teardown, where an actor sitting idle is woken to run it. So
+whatever `wire` acquired can be released in `unwire` and relied on to be released.
+Only a process that is killed or aborts skips it. At teardown the engine settles a
+closing actor's held replies without answering them, since every requester is
+closing too.
 
 Both `wire` and `unwire` default to no-ops; override them only when you have
 mail-driven setup or teardown to do.

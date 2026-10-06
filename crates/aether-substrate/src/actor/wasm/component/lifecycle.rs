@@ -31,10 +31,14 @@ impl Component {
     }
 
     /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
-    /// hook. Invoked by the trampoline before `on_dehydrate` on the
-    /// dying instance, or before the `Component` value drops on a
-    /// `DropComponent`. Same trap containment as the other hooks —
-    /// a guest panic doesn't stall teardown.
+    /// hook. It has two callers, both in the component trampoline: a
+    /// republish's prepare, which runs it before `on_dehydrate` on the guest
+    /// it may replace, and the trampoline's close, which runs it on the live
+    /// guest before the `Component` value drops, whichever exit closed the
+    /// trampoline (a `DropComponent`, an engine teardown, a birth cancelled
+    /// after `wire`). Same trap containment as the other hooks: a guest
+    /// trap is logged here and the caller goes on, so it never stalls a
+    /// close.
     pub fn unwire(&mut self) {
         if let Some(f) = self.unwire.clone()
             && let Err(e) = f.call(&mut self.store, self.self_mailbox_id)
@@ -107,8 +111,8 @@ impl Component {
     /// skipped; the trampoline discards its candidate's held outbox first,
     /// which restores it.
     ///
-    /// The consumers are the component trampoline's guest release and its
-    /// close.
+    /// The consumer is the component trampoline's close, which releases the
+    /// guest.
     pub fn answer_held_at_close(&mut self) {
         let ctx = self.store.data_mut();
         let held = ctx.reply_table.drain_held();

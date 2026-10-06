@@ -21,18 +21,12 @@ use std::time::{Duration, UNIX_EPOCH};
 /// runs in its own handler turns runs here in a real host turn, under the
 /// actor's own binding and the chassis spawner.
 struct Supervisor {
-    slot: PumpedSlot<HttpServerCapability>,
+    /// Declared before `slot` so it drops first: a chassis goes before the
+    /// pumped root it hosts, which closes when its slot drops.
     chassis: PassiveChassis<TestChassis>,
+    slot: PumpedSlot<HttpServerCapability>,
     registry: Arc<Registry>,
     egress: mpsc::Receiver<EgressEvent>,
-}
-
-impl Drop for Supervisor {
-    /// The chassis never learns about a post-seal pumped actor, so its close
-    /// is the fixture's, before the chassis drops.
-    fn drop(&mut self) {
-        self.slot.shutdown();
-    }
 }
 
 /// Boot the supervisor under `config`. Every caller composes it disabled, so
@@ -44,7 +38,7 @@ fn boot_supervisor(config: HttpServerConfig) -> Supervisor {
     let (slot, _wake) =
         chassis.boot_pumped_actor::<HttpServerCapability>(config, ()).expect("the http supervisor boots pumped");
 
-    Supervisor { slot, chassis, registry, egress }
+    Supervisor { chassis, slot, registry, egress }
 }
 
 /// Register a named test-local mailbox and return its proven reference.
@@ -71,7 +65,7 @@ fn disabled_http_server_err_replies_to_register_route() {
     use aether_substrate::testing::decode_session_reply;
 
     let mut supervisor = boot_supervisor(HttpServerConfig::default());
-    let (mut holder, _wake) =
+    let (_holder, _wake) =
         supervisor.chassis.boot_pumped_actor::<EchoHttpHandler>((), ()).expect("the route holder boots pumped");
     let register = RegisterRoute {
         prefix: "/".to_string(),
@@ -89,7 +83,6 @@ fn disabled_http_server_err_replies_to_register_route() {
         matches!(&result, RegisterRouteResult::Err(RegisterRouteError::Rejected { error }) if error.contains("disabled")),
         "a disabled http server must fail fast on register_route, got {result:?}",
     );
-    holder.shutdown();
 }
 
 /// Tripwire: keep-alive defaulting is branch logic over the HTTP version
@@ -792,16 +785,12 @@ mod wake_coalescing {
     /// The counter booted pumped, and a sink whose wake it minted in a host
     /// turn, as `init` mints the supervisor's.
     struct Counted {
-        slot: PumpedSlot<WakeCounter>,
+        /// Declared before `slot` so it drops first: a chassis goes before
+        /// the pumped root it hosts.
         _chassis: PassiveChassis<TestChassis>,
+        slot: PumpedSlot<WakeCounter>,
         sink: WakeSink,
         inbound_rx: mpsc::Receiver<InboundEvent>,
-    }
-
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            self.slot.shutdown();
-        }
     }
 
     impl Counted {
@@ -821,7 +810,7 @@ mod wake_coalescing {
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let sink = WakeSink { inbound_tx, wake, dirty: Arc::new(AtomicBool::new(false)) };
 
-        Counted { slot, _chassis: chassis, sink, inbound_rx }
+        Counted { _chassis: chassis, slot, sink, inbound_rx }
     }
 
     fn probe_event() -> InboundEvent {

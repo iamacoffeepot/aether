@@ -44,14 +44,9 @@ impl DesktopWindowSlot {
         self.slot.drain_available();
     }
 
-    /// Run the manager's closed path.
-    pub(super) fn shutdown(&mut self) {
-        self.slot.shutdown();
-    }
-
-    /// Run `turn` against the desktop backend on a host turn, or answer
-    /// `None` once the manager is no longer live. A slot only a desktop boot
-    /// mints holds no other backend, so the projection never misses.
+    /// Run `turn` against the desktop backend on a host turn. A slot only a
+    /// desktop boot mints holds no other backend, so the projection never
+    /// misses.
     pub(super) fn host_turn<R>(
         &mut self,
         turn: impl FnOnce(&mut DesktopWindows, &mut NativeCtx<'_, WindowCapability, Single>) -> R,

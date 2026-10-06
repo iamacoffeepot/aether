@@ -7,11 +7,13 @@
 //! callbacks and native-window state; [`DesktopRenderIntegration`] supplies
 //! only render, lifecycle-settlement, and graceful-shutdown semantics.
 //!
-//! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`, runs
-//! each pumped slot's `shutdown` teardown on exit, and emits the shutdown
-//! telemetry. Returning means the user closed the window or the event loop
-//! exited cleanly; the `chassis_builder` then tears down every passive in
-//! reverse boot order via `BootedPassives::Drop`.
+//! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`, emits
+//! the shutdown telemetry on exit, and hands the application, which owns both
+//! pumped slots, back to the chassis. Returning means the user closed the
+//! window or the event loop exited cleanly; the `chassis_builder` then tears
+//! down every passive in reverse boot order via `BootedPassives::Drop`, and
+//! only then drops the application, which closes the render slot and then the
+//! window slot (ADR-0160 §3).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +25,9 @@ use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
 use aether_substrate::actor::native::PumpedSlot;
-use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
+use aether_substrate::chassis::builder::{
+    DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RootPusher, RunError,
+};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{
     PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
@@ -220,10 +224,6 @@ impl DesktopRenderIntegration {
     fn metrics(&self) -> (Option<Instant>, u64, u64) {
         (self.started, self.frame, self.render_slot.read_state(RenderCapabilityState::triangles_rendered).unwrap_or(0))
     }
-
-    fn shutdown(&mut self) {
-        self.render_slot.shutdown();
-    }
 }
 
 impl DesktopWindowIntegration for DesktopRenderIntegration {
@@ -329,9 +329,9 @@ pub struct DesktopDriverRunning {
     event_loop: EventLoop<UserEvent>,
     /// `SubstrateBoot` drops at the end of `run()`. The `chassis_builder`
     /// `BootedPassives` (holding audio/io/http/log runnings) drops just
-    /// after, tearing down each passive in reverse boot order via
-    /// `RunningCapability::shutdown`. Render is no longer a passive — the
-    /// pumped render slot lives on `app` and is torn down in `run()`.
+    /// after, closing each passive in reverse boot order. Render is no
+    /// longer a passive: the pumped render slot lives on `app`, which
+    /// `run()` hands back for the chassis to drop after the passives.
     _boot: SubstrateBoot,
 }
 
@@ -467,40 +467,35 @@ impl DriverCapability for DesktopDriverCapability {
         Ok(DesktopDriverRunning {
             app,
             event_loop,
-            // `boot` stays alive on the running so its scheduler joins
-            // workers on drop. Drop ordering on
-            // `DesktopDriverRunning::run` exit: app → event_loop → _boot,
-            // which means capabilities (held by `app`, including the pumped
-            // render + window slots) tear down before the scheduler joins.
+            // `boot` stays alive on the running until `run` returns. `app`
+            // outlives it: `run` hands it back, and the chassis drops it,
+            // closing the pumped render and window slots, after its
+            // passives.
             _boot: boot,
         })
     }
 }
 
 impl DriverRunning for DesktopDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         let Self {
             mut app,
             event_loop,
-            // Held to the end of `run()` so the scheduler joins workers on
-            // drop; the `_` prefix keeps the binding alive without a use.
+            // Held to the end of `run()`; the `_` prefix keeps the binding
+            // alive without a use.
             _boot,
         } = *self;
 
-        event_loop.run_app(&mut app).map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
+        // ADR-0160 §3: the application owns both pumped slots and goes back
+        // to the chassis either way. The chassis drops it after its passives,
+        // which closes the render slot and then the window slot, each through
+        // the one close sequence: the render slot's `unwire` logs the
+        // triangle count, and the window slot's runs the window teardown.
+        if let Err(error) = event_loop.run_app(&mut app) {
+            return (Err(RunError::Other(format!("event loop: {error}").into())), PumpedRoots::of(app));
+        }
 
         let (started, frame, total) = app.integration().metrics();
-
-        // ADR-0160 §Decision 3 / ADR-0161: run each pumped actor's Closed-path
-        // teardown (residual drain, `unwire`, cost-row drop, registry finalize +
-        // monitor fan-out) — the `unwire` the bespoke driver drain never had.
-        // The render slot's `unwire` logs the triangle count; the window slot's
-        // runs the window teardown. The driver boots last, so both land before
-        // the chassis tears down each passive in reverse boot order (`_boot`
-        // drops at the end of this fn).
-        app.integration_mut().shutdown();
-        app.shutdown();
-
         let elapsed = started.map(|started| started.elapsed()).unwrap_or_default();
         // Frame count cast to f64 for FPS report — runs at shutdown,
         // bounded well below 2^53.
@@ -514,6 +509,6 @@ impl DriverRunning for DesktopDriverRunning {
             triangles = total,
             "frame loop exited",
         );
-        Ok(())
+        (Ok(()), PumpedRoots::of(app))
     }
 }

@@ -389,6 +389,107 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     drop(chassis);
 }
 
+/// Catches a boot rollback that drops a wired root: when a later passive
+/// fails after the wire pass, the earlier root, whose `wire` ran, is closed,
+/// so its `unwire` runs exactly once (ADR-0247 rule 5).
+///
+/// No composed actor can fail after the wire pass today, so the failure is a
+/// stand-in passive whose own `wire` refuses, driven through the real
+/// `boot_passives` beside a real root boot.
+#[test]
+fn a_boot_that_fails_after_the_wire_pass_closes_the_roots_that_wired() {
+    use super::super::boot_passives::{BootTuning, boot_passives};
+    use super::super::native_actor_boot::NativeActorBoot;
+    use super::super::passive_boot::{DynShutdown, PassiveBoot};
+    use crate::chassis::ctx::ChassisCtx;
+    use crate::config::{ConfigSources, RegistryQueueCapacities, RingCapacities, SchedulerTuning};
+    use crate::mail::MailId;
+    use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+    use std::io;
+    use std::time::Duration;
+
+    struct WiredRoot {
+        wired: Arc<AtomicU32>,
+        unwired: Arc<AtomicU32>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for WiredRoot {
+        const NAMESPACE: &'static str = "test.rollback.wired_root";
+        type Config = ();
+        type Params = (Arc<AtomicU32>, Arc<AtomicU32>);
+
+        fn init(
+            (): (),
+            params: (Arc<AtomicU32>, Arc<AtomicU32>),
+            _ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            let (wired, unwired) = params;
+            Ok(Self { wired, unwired })
+        }
+
+        fn wire(&mut self, _ctx: &mut NativeCtx<'_, Self>) {
+            self.wired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+            state.unwired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        #[fallback]
+        fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+            let _ = self;
+        }
+    }
+
+    struct RefusesAtWire;
+
+    impl PassiveBoot for RefusesAtWire {
+        fn claim(&mut self, _ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+            Ok(())
+        }
+
+        fn wire(&mut self, _wire_root: Option<MailId>) -> Result<(), BootError> {
+            Err(BootError::Other(Box::new(io::Error::other("this passive's wire refused"))))
+        }
+
+        fn spawn(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
+            unreachable!("a passive whose wire refused is never spawned")
+        }
+
+        fn cleanup_after_failure(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) {}
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let wired = Arc::new(AtomicU32::new(0));
+    let unwired = Arc::new(AtomicU32::new(0));
+    let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
+    let passives: Vec<Box<dyn PassiveBoot>> = vec![
+        Box::new(NativeActorBoot::<WiredRoot>::new((Arc::clone(&wired), Arc::clone(&unwired)))),
+        Box::new(RefusesAtWire),
+    ];
+
+    let booted = boot_passives(
+        &registry,
+        &mailer,
+        &aborter,
+        BootTuning {
+            workers: Some(2),
+            ring_capacities: RingCapacities::default(),
+            scheduler_tuning: SchedulerTuning::default(),
+            registry_queues: RegistryQueueCapacities::default(),
+            teardown_budget: Duration::from_mins(1),
+        },
+        &mut ConfigSources::default(),
+        passives,
+        |_ctx| Ok(()),
+    );
+
+    assert!(booted.is_err(), "the boot fails on the passive whose wire refused");
+    assert_eq!(wired.load(AtomicOrdering::SeqCst), 1, "the root wired before the later passive failed");
+    assert_eq!(unwired.load(AtomicOrdering::SeqCst), 1, "the rollback closed the wired root, so its unwire ran");
+}
+
 fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     struct Pinger {
         wire_ran: Arc<AtomicU32>,

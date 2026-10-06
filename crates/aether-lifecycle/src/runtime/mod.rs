@@ -919,13 +919,13 @@ mod tests {
         assert!(error.contains("test.lifecycle.closure_caller"), "the refusal names the sender: {error}");
         assert!(booted.subscribers_of(Tick::ID).is_empty(), "the refused sender subscribes nothing");
 
-        let (mut caller_slot, _wake) =
+        let (caller_slot, _wake) =
             booted.driver.chassis().boot_pumped_actor::<Caller>((), ()).expect("the caller boots");
         let caller = booted.driver.chassis().actor_ref::<Caller>().erase();
         booted
             .driver
             .pump_until("the caller's wire subscribe", |state| !state.subscribers.subscribers_of(Tick::ID).is_empty());
-        caller_slot.shutdown();
+        drop(caller_slot);
 
         assert_eq!(booted.subscribers_of(Tick::ID), [caller], "the caller lands in the Tick set");
     }

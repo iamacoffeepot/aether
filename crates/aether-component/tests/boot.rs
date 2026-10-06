@@ -194,9 +194,10 @@ fn boot_actor_is_not_selectable_by_export() {
     }
 }
 
-/// Drop the module boot, waiting for the drop's whole chain to settle: the
-/// host forwards the drop on the caller's chain, so the boot's `unwire`
-/// marker has been observed once this returns.
+/// Drop the module boot, waiting for the drop's whole chain to settle. The
+/// boot's close answers the drop once it has released the guest, and the
+/// guest's `unwire` runs in that release, so its marker has been observed
+/// once this returns.
 fn drop_boot(harness: &mut SubstrateHarness) {
     let boot = ErasedActorPath::new(BOOT_NAMESPACE).expect("the boot namespace is an actor path");
     harness

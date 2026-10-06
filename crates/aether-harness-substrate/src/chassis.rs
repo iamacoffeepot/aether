@@ -189,9 +189,6 @@ pub trait FrameHook {
     /// the hook booted the slot and supplied by the hook so the core stays
     /// render-free.
     fn render(&self) -> ProtocolRef<FrameCapture>;
-    /// Run the pumped slot's Closed-path teardown (`unwire`, cost-row drop,
-    /// registry close + monitor fan-out). Called once on harness drop.
-    fn shutdown(&mut self);
     /// Downcast surface for capture-crate extension methods (overlay
     /// snapshots) that need the hook's concrete type.
     fn as_any(&self) -> &dyn Any;

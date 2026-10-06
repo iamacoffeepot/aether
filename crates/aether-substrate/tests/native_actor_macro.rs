@@ -22,6 +22,7 @@
 // `Builder::new` rather than the `composed` boot seam.
 #![allow(clippy::disallowed_methods)]
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
@@ -369,7 +370,10 @@ fn macro_pending_worker_panic_fails_fast() {
     assert!(reason.contains("worker probe panic 4217"), "the abort reason carries the panic payload: {reason}");
     assert_eq!(obs.echo_calls.load(AtomicOrdering::SeqCst), 0, "no completion ran for the panicked worker");
 
-    drop(chassis);
+    // A chassis that fatally aborted reports the abort at teardown rather
+    // than waiting on its actors' closes.
+    let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));
+    assert!(teardown.is_err(), "teardown of an aborted chassis reports the abort");
 }
 
 /// Type-level assertion that the macro emits the universal

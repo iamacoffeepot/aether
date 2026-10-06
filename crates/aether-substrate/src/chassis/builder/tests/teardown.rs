@@ -4,6 +4,7 @@
 
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::testing::{TestChassis, await_signal, bare_substrate};
@@ -158,6 +159,54 @@ fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
     // referent (the actor_registry's Live entry) drops with the
     // chassis above.
     let _ = id;
+}
+
+/// Catches a teardown that goes back to flagging a composed root and
+/// releasing its slot with nothing to wake it: a root that received no mail
+/// of its own still runs `unwire`, and its name is tombstoned, when its
+/// chassis drops (ADR-0247 rule 5).
+#[test]
+fn chassis_teardown_closes_an_idle_root() {
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    struct IdleRoot {
+        unwired: Arc<AtomicU32>,
+    }
+
+    #[aether_actor::actor(root)]
+    impl NativeActor for IdleRoot {
+        const NAMESPACE: &'static str = "test.teardown.idle_root";
+        type Config = ();
+        type Params = Arc<AtomicU32>;
+
+        fn init((): (), params: Arc<AtomicU32>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { unwired: params })
+        }
+
+        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+            state.unwired.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
+        #[fallback]
+        fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+            let _ = self;
+        }
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let unwired = Arc::new(AtomicU32::new(0));
+    let chassis = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<IdleRoot>(Arc::clone(&unwired))
+        .build_passive()
+        .expect("a chassis with one root boots");
+    let root = chassis.actor_ref::<IdleRoot>();
+    let actor_registry = Arc::clone(chassis.actor_registry());
+    assert_eq!(unwired.load(AtomicOrdering::SeqCst), 0, "a live root has not run unwire");
+
+    drop(chassis);
+
+    assert_eq!(unwired.load(AtomicOrdering::SeqCst), 1, "teardown runs an idle root's unwire exactly once");
+    assert!(actor_registry.is_tombstoned(root.id()), "the root's close ran the registry tail");
 }
 
 /// Issue 714: stress version of the chassis-teardown contract.

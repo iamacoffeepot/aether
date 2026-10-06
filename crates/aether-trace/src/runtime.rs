@@ -103,6 +103,8 @@ mod tests {
     /// whose context drop flushes the forwarded children.
     struct PumpedTrace {
         rx: Receiver<EgressEvent>,
+        /// Declared before `cap` so it drops first: a chassis goes before
+        /// the pumped root it hosts, which closes when its slot drops.
         chassis: PassiveChassis<TestChassis>,
         cap: PumpedSlot<TraceDispatchCapability>,
     }
@@ -132,12 +134,6 @@ mod tests {
             self.cap.drain_available();
 
             (root, decode_session_reply(&self.rx))
-        }
-    }
-
-    impl Drop for PumpedTrace {
-        fn drop(&mut self) {
-            self.cap.shutdown();
         }
     }
 
