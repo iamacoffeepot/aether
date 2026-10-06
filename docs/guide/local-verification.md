@@ -114,16 +114,12 @@ remain in the job log.
 `main` is protected by the `Protect main` ruleset, which requires a pull request
 but no review and no status checks. `CI pass` and `Lint title` are the checks to
 wait on; the ruleset does not enforce them. `CI pass` proves
-the applicable tree checks; it does not prove direct inspection or lifecycle
-readiness. Those are separate direct-drive facts: the implementer directly
-inspects and repairs the exact current-head diff and appends a hidden
-`aether-direct-review:v2` record to the closing issue body. That canonical line
-binds the issue, pull request, current head, current Plan digest, and verdict;
-its trust comes from effective owner/member/collaborator body-editor provenance.
-A push or managed-Plan change makes it stale. Pull-request reviews and comments
-remain ordinary human prose and never carry a machine JSON/HTML review marker.
-Native change requests and review threads stay independent blockers. Landing
-independently re-reads those facts before clearing draft state.
+the applicable tree checks; it does not prove lifecycle readiness. No review
+record exists or is required. Native change requests and unresolved review
+threads are the independent blockers, and pull-request reviews and comments
+remain ordinary human prose that never carries a machine JSON/HTML review
+marker. Landing independently re-reads those facts before clearing draft
+state.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.

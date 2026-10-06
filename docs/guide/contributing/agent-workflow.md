@@ -32,7 +32,7 @@ Use the source that owns the question:
 | What arguments does a live tool accept? | The active tool schema, not a prose copy |
 | What does this running engine contain? | Live introspection such as `describe_kinds` and `describe_component` |
 | What work is approved? | For a scoped issue: its managed sections plus a trusted matching hidden approval record. Otherwise: the user's own request |
-| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, hidden direct-review record, native reviews, threads, priced surface overflow, and merge state |
+| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, native reviews, threads, priced surface overflow, and merge state |
 | What does hosted automation do? | Checked-in workflow YAML plus current repository protection and check state |
 
 The guide is the digested, navigable explanation. When it disagrees with a
@@ -59,15 +59,14 @@ idea or rough issue
   → trusted hidden approval bound to Plan digest + exact base
   → owned issue worktree + branch
   → draft pull request closing the issue
-  → current-head checks + hidden direct review + native reviews + threads + priced surface overflow
+  → current-head checks + native reviews + threads + priced surface overflow
   → explicitly authorized landing
   → merged pull request + closed issue + safe local cleanup
 ```
 
 These artifacts are independent facts. A branch does not prove approval. Green
-CI does not prove that the current diff was inspected. Direct inspection does
-not clear a native change request or unresolved thread. A closed issue does not
-prove that a named pull request merged.
+CI does not clear a native change request or an unresolved thread. A closed
+issue does not prove that a named pull request merged.
 
 Issue labels are taxonomy only. They can identify the conventional-commit type,
 affected Cargo scopes, or other searchable classifications, but they do not
@@ -179,38 +178,49 @@ lands, but the ruleset does not enforce them.
 The checked-in [workflow README](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/README.md)
 owns the exact hosted inventory.
 
-## Review and findings are head-bound
+## Native review blockers are head-bound
 
-After CI is green, the implementer directly inspects and repairs the complete
-current-head diff against the Plan. The implementer is the reviewer for this
-loop; it does not dispatch a separate formal review pass. Its durable semantic
-verdict is a canonical hidden `aether-direct-review:v2` record in the closing
-issue body's unmanaged evidence history, immediately before the first managed
-heading. The record binds the issue, pull request, exact head, current Plan
-digest, and `APPROVE` or `REQUEST_CHANGES` verdict. Trust comes from the issue
-body's effective owner/member/collaborator editor provenance, not from a
-payload claim. A later head or managed-Plan change leaves the old line as stale
-history and requires fresh inspection.
+The workflow has no review step of its own and no review record: the
+implementer does not review its own draft, and landing requires no verdict.
+Review happens by direction, when the owner or a contributor reads a draft and
+says what to change. Two native GitHub facts carry that into the workflow, and
+each blocks a draft independently of its checks:
 
-PR reviews, comments, finding handoffs, and thread replies contain ordinary
-human prose when they are useful; they never carry machine JSON/HTML review
-markers. Landing reads the hidden issue-body record for the semantic verdict
-and reads paginated PR reviews separately for native GitHub decisions.
+1. no reviewer's latest active native decision is changes requested; and
+2. every review thread is resolved.
 
-Review acceptance has three separate gates:
+PR reviews, comments, and thread replies contain ordinary human prose; they
+never carry machine JSON/HTML review markers.
 
-1. the newest trusted hidden direct-review record for the exact issue, pull
-   request, head, and Plan digest says `APPROVE`;
-2. no reviewer's latest active native decision is changes requested; and
-3. every review thread is resolved.
+A native change request or an unresolved thread enters the implementation's
+repair loop. Verify each item, fix it at any path; overflow is priced, or give
+a concrete justification, push an ordinary commit, rerun local checks, reply to
+its anchored thread, and resolve the thread only after the disposition is
+visible. The changed head then needs green checks again. A root-level or
+out-of-scope problem returns to the appropriate managed scope artifact instead
+of being silently waived.
 
-Actionable findings enter the implementation's integrated repair loop. Verify
-each item, fix it at any path; overflow is priced, or give a concrete
-justification, push an ordinary commit, rerun local checks and CI, reply to its
-anchored thread, and resolve the thread only after the disposition is visible.
-The changed head then needs fresh direct inspection and a new hidden record. A
-root-level or out-of-scope problem returns to the appropriate managed scope
-artifact instead of being silently waived.
+## An agent ends at a wait
+
+In Claude Code a subagent's prompt cache lasts five minutes, while the main
+session's lasts an hour. A subagent that waits longer than five minutes, blocked
+on CI, parked on its own background task, or resumed later by a message,
+re-reads its whole context on its next call. The wait buys nothing, because the
+workflow already resumes from observable facts.
+
+So the Claude Code `implement` and `resolve` skills end when the head is
+pushed: they hand back the pull request number and head SHA. The session that
+dispatched the work waits on the checks with one background
+`scripts/wave-status.sh --wait <PR>` and, on a red head, invokes
+`/implement <issue> --resume`, which makes one fix and one push and ends again.
+That dispatching session owns the retry count.
+
+Hooks refuse the waits in a subagent rather than rely on the instruction; they
+are listed under [Hooks are defense in depth](worktrees-and-safety.md#hooks-are-defense-in-depth).
+The `implementer` agent type (`.claude/agents/implementer.md`) has a one-hour
+cache, so a build whose result the worker needs mid-work does not expire it.
+The Codex skills keep their own check loop: the cache behavior and the hooks
+are Claude Code's.
 
 ## Conflicts preserve both intents
 
@@ -218,8 +228,8 @@ Landing predicts the merge against current `main`. A content conflict is not
 permission to choose a resolution inside the landing step. Landing hands the
 draft to `resolve` (`$resolve <PR>` in Codex, `/resolve <PR>` in Claude Code),
 which merges current `main` into the same branch, resolves every hunk in
-three-way context at any path, with overflow priced at landing, and drives the
-resulting head through checks, review, and repair again. It does not rebase,
+three-way context at any path, with overflow priced at landing, and pushes the
+resulting head, which must pass its checks again. It does not rebase,
 force-push, open a second PR, or merge. A genuinely incompatible product intent
 returns to scope rather than manufacturing a merge.
 
@@ -227,8 +237,8 @@ returns to scope rather than manufacturing a merge.
 
 A draft can be landable without being authorized to merge. `land` independently
 revalidates the current issue digest and approval, base ancestry, actual diff
-and priced surface overflow, required checks, hidden semantic review and native
-review state, threads, branch ownership, and predicted merge result.
+and priced surface overflow, required checks, native review state, threads,
+branch ownership, and predicted merge result.
 
 Only then does the explicitly authorized landing clear draft state and perform
 an ordinary squash merge. Cleanup starts only after GitHub confirms that named

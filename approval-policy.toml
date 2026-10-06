@@ -9,7 +9,7 @@
 #     work may be approved unattended (`authority: policy-auto`); `judge` and
 #     `human` work needs the owner's explicit approval.
 #   - /implement and /land price surface overflow: changed paths outside the
-#     approved surface. `auto` overflow lands with the ordinary direct review,
+#     approved surface. `auto` overflow lands with no further verdict,
 #     `judge` overflow needs the landing agent's own acceptance of each path,
 #     and `human` overflow needs the owner's explicit confirmation.
 #

@@ -187,7 +187,7 @@ Keep these concepts separate:
 
 - local formatting and lint feedback;
 - full CI build and test proof;
-- direct review and thread resolution;
+- native change requests and thread resolution;
 - landing a pull request;
 - packaging with `cargo xtask dist` or `cargo xtask package`;
 - publishing a versioned release.

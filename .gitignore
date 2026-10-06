@@ -22,6 +22,9 @@
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .agents/worktrees/
+# Agent-wait ledger appended by `.hooks/record-agent-wait.sh` and the
+# `.hooks/check-agent-*.sh` refusals: per-machine measurement, never committed.
+.agents/ledger/
 # Codex sessions render visualizations into `.codex/visualizations/` in the
 # checkout they ran from — runtime output, never repo content. Only that
 # subdirectory is ignored; anything else under `.codex/` stays visible.

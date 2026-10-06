@@ -1,6 +1,6 @@
 ---
 name: resolve
-description: "Resolve a named draft pull request's content conflicts by merging current main into its branch, preserving both intents with overflow priced at landing, and driving the resolved head through CI, direct review, and repair."
+description: "Resolve a named draft pull request's content conflicts by merging current main into its branch, preserving both intents with overflow priced at landing, then pushing the resolved head and handing it back at the wait on its checks."
 ---
 
 # /resolve — direct dirty-pull-request producer
@@ -13,10 +13,9 @@ Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/githu
 
 ```
 /resolve <pr>
-/resolve <pr> --retry-cap <N> --wall-clock <minutes>
 ```
 
-Defaults are three real code-failure retries and 30 minutes after the first resolution push.
+Resolve ends at the push of the resolved head. It never waits on checks: an agent ends at a wait.
 
 ## Preconditions
 
@@ -47,24 +46,16 @@ After all hunks are resolved:
 
 If the two sides encode genuinely incompatible product intent, abort the merge and leave the branch unchanged. Return a concrete Define, Design, or Plan revision recommendation with the conflicting files, anchors, and incompatible requirements. Difficulty alone is not incompatibility.
 
-## Resolved-head loop
+## Hand back the resolved head
 
-Tie every step to the new current head:
+After the push, report the pull request number and the new head SHA and end. Do not wait on the checks, poll them, or park on a background task; the hooks in `.hooks/` refuse the wait in a subagent.
 
-1. wait for required CI with `scripts/wave-status.sh --wait <pr>`;
-2. classify and repair deterministic failures at any path; overflow is priced;
-3. commit each repair conventionally and plain-push;
-4. rerun local checks, overflow pricing, and CI after every change;
-5. directly inspect the complete current-head diff against the Plan, both merge intents, current code, and applicable tests and conventions;
-6. post any tight inline findings in ordinary human prose, then append and re-read the hidden issue-body direct-review record through the shared file-backed, byte-for-byte concurrency guard and post-mutation provenance check; never put machine JSON/HTML in a pull-request review or comment;
-7. verify/fix-or-justify findings, reply with the fix commit, resolve addressed threads, and directly confirm prior findings against the delta before recording the new head's verdict.
+The session that dispatched the resolution waits on the new head with `scripts/wave-status.sh --wait <pr>` as one background command. A red head, an active native change request, or an unresolved thread goes to `/implement <issue> --resume`, which repairs it once and hands back again; the dispatching session owns the retry count. When resolve runs in the main session, that session starts the wait itself after reporting.
 
-Do not dispatch hosted work or review jobs. Do not use a separate finding-handling skill. A head change invalidates old CI and review evidence.
-
-At most three repair iterations are allowed. A fourth requested-change result or a current-code contradiction returns a Plan revision recommendation with ordered evidence. Authentication, runner, or network failure preserves the branch and reports the exact retry point.
+Do not dispatch hosted work or review jobs. A head change invalidates old check evidence. Authentication, runner, or network failure preserves the branch and reports the exact retry point.
 
 ## Return to land
 
-Resolution completes only when the same current head is CI-green, overflow priced, approved by a trusted hidden issue-body semantic record for the exact issue/pull request/head/digest, free of active native change requests, and has every review thread resolved. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `/land <pr>` as the next action.
+Resolution completes when the resolved head is pushed with its overflow priced. The draft is landable only once that same head is also CI-green, free of active native change requests, and has every review thread resolved; the dispatching session establishes that after its wait. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `/land <pr>` as the next action once the head is green.
 
-Never open a new pull request, clear draft state, merge, edit managed Plan sections or any issue-body byte except the canonical hidden direct-review append, expand Declared surface, rebase, amend, or force-push.
+Never open a new pull request, clear draft state, merge, edit managed Plan sections or any other issue-body byte, expand Declared surface, rebase, amend, or force-push.

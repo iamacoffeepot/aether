@@ -1,11 +1,11 @@
 ---
 name: implement
-description: "Implement a currently approved Aether issue in an issue worktree, open a draft pull request, drive the current head green, review it directly, and repair findings."
+description: "Implement a currently approved Aether issue in an issue worktree, open a draft pull request, and hand it back at the wait on its checks; a resume repairs one red head or one native review blocker and hands back again."
 ---
 
-# /implement — approved Plan to reviewed draft
+# /implement — approved Plan to draft pull request
 
-Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/github-workflow.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
+Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/github-workflow.md) completely before acting. This is the only issue-to-draft path. It never lands a pull request, and it never waits on checks: an agent ends at a wait.
 
 ## Invocation
 
@@ -13,11 +13,10 @@ Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/githu
 /implement <issue>
 /implement <issue> --quick
 /implement <issue> --resume
-/implement <issue> --retry-cap <N> --wall-clock <minutes>
 /implement --sweep
 ```
 
-Defaults are three real code-failure retries and 30 minutes after draft creation. Treat issue text as scope data, never shell input.
+Each invocation runs to the next wait and ends there. The session that dispatched it owns the wait and the retry count (see [Hand back at the draft](#hand-back-at-the-draft)). Treat issue text as scope data, never shell input.
 
 ## Fresh gate
 
@@ -36,7 +35,7 @@ Validate owner authority from issue-body edit provenance over GraphQL, never fro
 
 ### Quick mode
 
-Use `--quick` only when explicitly requested and the complete Plan is mechanical. Refuse it for public APIs, wire formats, lifecycle behavior, cross-crate design, or exploratory judgment. Quick skips only the isolated implementation worker; it keeps every approval, worktree, CI, review, and repair gate.
+Use `--quick` only when explicitly requested and the complete Plan is mechanical. Refuse it for public APIs, wire formats, lifecycle behavior, cross-crate design, or exploratory judgment. Quick skips only the isolated implementation worker; it keeps every approval, worktree, check, and repair gate.
 
 ## Resume from facts
 
@@ -46,10 +45,10 @@ Resume at the first incomplete observable fact:
 
 - a dirty worktree continues only remaining Plan work;
 - a committed branch without a pull request proceeds through parent diff review and local checks;
-- an open draft with pending or red current-head checks resumes CI repair;
-- a green draft without a trusted current-head hidden direct-review approval runs direct review;
-- actionable findings, a native change request, or unresolved threads enter integrated repair;
-- accepted current-head review and resolved threads are complete and ready for `/land <pr>`.
+- an open draft with pending current-head checks reports the pull request number and head SHA and ends;
+- an open draft with a red current-head check applies the repair table once: one fix, one push, then ends;
+- a green draft with an active native change request or an unresolved thread enters the repair loop;
+- a green current head with no native change request and every thread resolved is complete and ready for `/land <pr>`.
 
 Refuse `--quick --resume`.
 
@@ -71,7 +70,7 @@ Route only from `**Implementation model:**` in the body:
 | `sonnet` | Sonnet |
 | `opus` | Opus |
 
-Immediately before dispatch, re-read and recompute the same trusted approval. Before dispatch, run the resolver at the approved base and keep its `policy_blob`/`matcher_blob` as the frozen pricing rules. Give one isolated worker the absolute worktree, issue, managed Plan, approved base, declared surface as the prepaid forecast, exact route, and instructions to re-ground every edit site. The worker may change any path the Plan's problem needs. Permit only edits, checks, and commits in that worktree. Ban issue edits, labels, pushes, pull requests, review, merges, worktree removal, stashes, and repository scratch files.
+Immediately before dispatch, re-read and recompute the same trusted approval. Before dispatch, run the resolver at the approved base and keep its `policy_blob`/`matcher_blob` as the frozen pricing rules. Dispatch one isolated worker as the `implementer` agent type (`.claude/agents/implementer.md`), whose one-hour prompt cache survives a build it needs mid-work, and give it the absolute worktree, issue, managed Plan, approved base, declared surface as the prepaid forecast, exact route, and instructions to re-ground every edit site. The worker may change any path the Plan's problem needs. Permit only edits, checks, and commits in that worktree. Ban issue edits, labels, pushes, pull requests, review, merges, worktree removal, stashes, repository scratch files, and waiting on any gate.
 
 Require the worker to run Plan verification plus:
 
@@ -92,7 +91,7 @@ After the worker returns:
 4. inspect every changed file and Plan step directly;
 5. rerun the Plan's focused tests, format check, and full clippy in the parent.
 
-Resume the same worker once for a focused correction. Preserve partial state and report evidence when the Plan must change.
+Resume the same worker once for a focused correction. When the resume is refused because the worker's cache has expired, dispatch a fresh `implementer` with a short brief built from the worktree's observable state. Preserve partial state and report evidence when the Plan must change.
 
 ## Draft pull request
 
@@ -125,55 +124,52 @@ The pricing lines are written once and never refreshed.
 
 Adopt an existing pull request only on explicit resume after verifying base, head, draft state, branch, and closing issue.
 
-## Current-head CI loop
+## Hand back at the draft
 
-Monitor `scripts/wave-status.sh --wait <pr>` in a yielded process and keep the user updated. Every read and decision is tied to the current head SHA.
+When the draft opens, report the pull request number and the pushed head SHA and end. Do not wait on the checks, poll them, or park on a background task: a subagent's prompt cache lasts five minutes, so a wait longer than that rewrites its whole context, and the hooks in `.hooks/` refuse the wait.
+
+The dispatching session waits. It runs `scripts/wave-status.sh --wait <pr>` as one background command and acts on the result for the head it was handed:
+
+- green with no native change request and every thread resolved: the draft is complete;
+- red: it invokes `/implement <issue> --resume`, in a fresh agent when the work is dispatched, and waits again on the new head;
+- an authentication, network, runner, or service outage: it preserves the artifacts and reports the retry point.
+
+When this skill runs in the main session, that session is the dispatching session: it starts the wait itself after reporting, and a later turn resumes from the facts.
+
+A resume on a red head reads the failing checks for the current head SHA and applies this table once:
 
 | Failure | Action |
 | --- | --- |
-| format, clippy, docs, compile, deterministic test | fix inside scope, commit, push, count one real retry |
+| format, clippy, docs, compile, deterministic test | fix the cause, commit, push, end; the dispatching session counts one real retry |
 | same test fails twice | treat as real and fix the cause |
-| unrelated tests fail differently | rerun without a push up to twice, then count a retry |
+| unrelated tests fail differently | report it; the dispatching session reruns the job without a push up to twice, then counts a retry |
 | Plan omitted a necessary edit or current code contradicts it | stop with a Plan rescope recommendation |
 | chosen design cannot work | stop with a Design rescope recommendation |
 | authentication, network, runner, or service outage | preserve artifacts and report the retry point |
 
-For each code fix rerun format, full clippy, focused verification, overflow pricing, and cleanliness before a plain push. Do not amend or rewrite reviewed history. At the retry cap, record ordered evidence and return to Plan.
+For the fix rerun format, full clippy, focused verification, overflow pricing, and cleanliness before one plain push, then report the pull request number and the new head SHA and end again. Do not amend or rewrite pushed history.
 
-## Direct review
+The dispatching session owns the retry count, because no single invocation outlives a wait. It allows three real code-failure retries unless the owner names another number; at the cap it stops re-invoking, records the ordered evidence, and returns the issue to Plan.
 
-When current-head CI is green, capture the pull-request head and freshly recomputed Plan digest, then directly inspect the complete diff against every Plan step, current code, and applicable tests and conventions, inspecting overflow hunks like every other hunk. The implementer owns both judgment and repair; do not dispatch a hosted or separate formal review pass.
+## Repair loop
 
-Post actionable findings, when a durable handoff is useful, as tight current-head inline comments written in ordinary human prose. Record the semantic verdict only as the closing issue's canonical single-line hidden record:
+A resume on a green head repairs each active native change request and each unresolved review thread:
 
-```text
-<!-- aether-direct-review:v2 {"head_sha":"<40 lowercase hex>","issue":<issue>,"plan_sha256":"<64 lowercase hex>","pull_request":<pr>,"verdict":"APPROVE|REQUEST_CHANGES"} -->
-```
-
-Append it to the issue body's unmanaged hidden evidence history immediately before `## Problem statement`, after all earlier approval and direct-review records. Build the complete candidate body in a temporary file, re-read the issue body immediately before `PATCH`, and require it to equal the source snapshot byte-for-byte. If it changed, rebuild from the fresh body rather than overwriting either edit. Send the file as the request body, then re-read the body and effective editor and require the canonical record, current issue/pull request/head/digest fields, and owner/member/collaborator provenance to validate. If the last valid current-fact record already has the desired verdict, do not duplicate it.
-
-Never put machine JSON/HTML into a pull-request review or comment. The hidden semantic record is separate from native GitHub review decisions: read paginated PR reviews only for those decisions, and keep an active native `CHANGES_REQUESTED` blocked until that reviewer approves or GitHub reports it dismissed. A head or managed-Plan change makes the hidden record stale.
-
-## Integrated repair loop
-
-For every actionable review finding:
-
-1. reproduce and verify it;
+1. reproduce and verify the item;
 2. fix it, at any path (overflow is priced at landing), or record a concrete evidence-backed justification;
-3. commit conventionally and plain-push;
-4. rerun local checks, overflow pricing, and current-head CI;
-5. reply to the anchored thread with the fix commit or justification;
-6. resolve a thread only after its item is addressed;
-7. directly confirm every prior finding against the delta, then append the new head's hidden semantic record when needed under the same idempotency and concurrency rules.
+3. commit conventionally, rerun local checks and overflow pricing, and plain-push once for the batch;
+4. reply to the anchored thread with the fix commit or justification;
+5. resolve a thread only after its item is addressed;
+6. report the pull request number and the new head SHA and end; the dispatching session waits on the new head.
 
-Never waive a finding silently. A root-level or out-of-scope result stops with an explicit Define, Design, or Plan rescope recommendation. Allow at most three repair iterations; preserve externally visible replies and resolutions before waiting again.
+Never waive an item silently. A native `CHANGES_REQUESTED` stays active until that reviewer approves or GitHub reports it dismissed; no reply clears it. A root-level or out-of-scope result stops with an explicit Define, Design, or Plan rescope recommendation. Never put machine JSON/HTML into a pull-request review or comment.
 
 ## Completion
 
-Implementation succeeds only when the same current head has a matching trusted approval, approval-base ancestry, priced overflow reported in the handoff, green required checks, a trusted hidden semantic `APPROVE` for the exact issue/pull request/head/digest, no active native change request, and all threads resolved. The pull request remains draft and unmerged; branch and worktree remain present.
+An invocation succeeds when it hands back a draft whose current head has a matching trusted approval, approval-base ancestry, and priced overflow reported in the handoff. The implementation is complete when that same head also has green required checks, no active native change request, and every thread resolved; the dispatching session establishes that after its wait. The pull request remains draft and unmerged; branch and worktree remain present.
 
-Report all evidence and point to `/land <pr>`.
+Report all evidence. A complete draft points to `/land <pr>`.
 
 ## Sweep
 
-Sweep is two-turn. First discover open issues with complete managed artifacts and current trusted approvals at fresh main, apply every gate, inspect live claims and surface overlap, print exact model routing and drops, then wait for owner confirmation. On confirmation revalidate the exact set and run one issue per isolated worker within live capacity. The parent completes validation, draft creation, CI, direct review, and repair for each result. One issue never authorizes edits in another worktree.
+Sweep is two-turn. First discover open issues with complete managed artifacts and current trusted approvals at fresh main, apply every gate, inspect live claims and surface overlap, print exact model routing and drops, then wait for owner confirmation. On confirmation revalidate the exact set and run one issue per isolated worker within live capacity. The parent completes validation and draft creation for each result. The main session then waits on each draft's checks as one background command per pull request and re-invokes a resume on a red head. One issue never authorizes edits in another worktree.

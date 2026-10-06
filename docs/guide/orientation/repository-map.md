@@ -133,6 +133,7 @@ uses the nightly fuzzing toolchain.
 | `docs/guide/` | this mdBook source |
 | `.agents/skills/` | current Codex repository workflows |
 | `.claude/skills/` | the Claude Code workflows |
+| `.claude/agents/` | Claude Code agent types the workflows dispatch, such as `implementer` |
 | `.codex/` | Codex MCP configuration and hook wiring |
 | `.hooks/` | local guardrail hook scripts, wired by `.claude/settings.json` and `.codex/hooks.json` |
 | `.github/workflows/` | hosted CI, review, reconciliation, and release jobs |
