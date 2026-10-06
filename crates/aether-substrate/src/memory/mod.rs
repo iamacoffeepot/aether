@@ -16,9 +16,39 @@
 //! Nothing here is on mail dispatch: a charge or a set is one relaxed atomic
 //! operation, and the ledger's lock is taken only when a gauge is minted or
 //! dropped (actor birth and death) and when a report is built.
+//!
+//! # Why this is shared state and not mail
+//!
+//! Three kinds of caller touch the ledger, on different threads. An actor's
+//! birth mints its gauge and its death drops it, on whichever scheduler
+//! thread is running that actor then; a wasm guest's replacement mints a
+//! second one while a republish prepares it. An owner writes its count from
+//! its own handlers. And the report is built inside the handler of whichever
+//! actor asked for it, which today is the inventory capability's, and reads
+//! every owner's count without mailing that owner.
+//!
+//! An owner's own writes need nothing from this module to be safe: the
+//! scheduler runs an actor's handlers one at a time, so no two writes to one
+//! gauge race. The count is an atomic only so that the report's thread can
+//! read it while the owner's thread writes it, and the list is behind a lock
+//! only because births and deaths on different threads, and the report, all
+//! reach the one list.
+//!
+//! The counts could instead have travelled as mail, and do not, for three
+//! reasons. A memory count is a diagnostic that nothing in the engine acts
+//! on, so it needs no ordering against any other effect and a reader that is
+//! a moment stale is correct. Mailing each change to one ledger actor would
+//! funnel every texture created, every geometry created or resized, and every
+//! wasm memory growth in the engine through that actor's mailbox. And asking each owner for its
+//! count when a report is built would mail every actor and hold the report
+//! until the slowest of them had answered.
+//!
+//! The blob store counts its bytes the same way: relaxed atomics its entries
+//! add to and subtract from wherever they are made and dropped, read by this
+//! report with no lock and no mail, beside an index behind a lock.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::mail::MailboxId;
@@ -31,8 +61,6 @@ pub(crate) use process::resident_set_bytes;
 
 /// One live gauge as the ledger lists it.
 struct Entry {
-    /// The gauge's own id, which its drop removes the entry by.
-    id: u64,
     owner: MailboxId,
     label: &'static str,
     bytes: Arc<AtomicUsize>,
@@ -45,25 +73,43 @@ pub(crate) struct LedgerRow {
     pub(crate) bytes: usize,
 }
 
+/// The live gauges, each under the id its gauge removes it by.
+#[derive(Default)]
+struct Listed {
+    entries: BTreeMap<u64, Entry>,
+    /// The id the next gauge takes. It only rises, so an id is never reused
+    /// and a late drop cannot remove a newer gauge's entry.
+    next_id: u64,
+}
+
+impl Listed {
+    /// List `entry` and return the id it is listed under.
+    fn list(&mut self, entry: Entry) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries.insert(id, entry);
+
+        id
+    }
+}
+
 /// The engine's one list of live gauges.
 #[derive(Default)]
 pub(crate) struct MemoryLedger {
-    entries: Mutex<Vec<Entry>>,
-    next_id: AtomicU64,
+    listed: Mutex<Listed>,
 }
 
 impl MemoryLedger {
-    fn lock(&self) -> MutexGuard<'_, Vec<Entry>> {
+    fn lock(&self) -> MutexGuard<'_, Listed> {
         // No operation leaves the list half-updated, so a poisoned lock still
         // guards a consistent list.
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+        self.listed.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Mint a gauge at zero bytes for `owner`, listed until it drops.
     pub(crate) fn gauge(self: &Arc<Self>, owner: MailboxId, label: &'static str) -> MemoryGauge {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let bytes = Arc::new(AtomicUsize::new(0));
-        self.lock().push(Entry { id, owner, label, bytes: Arc::clone(&bytes) });
+        let id = self.lock().list(Entry { owner, label, bytes: Arc::clone(&bytes) });
 
         MemoryGauge { bytes, listing: Some(Listing { ledger: Arc::clone(self), id }) }
     }
@@ -73,7 +119,7 @@ impl MemoryLedger {
     /// are one row with their sum.
     pub(crate) fn rows(&self) -> Vec<LedgerRow> {
         let mut totals: BTreeMap<(MailboxId, &'static str), usize> = BTreeMap::new();
-        for entry in self.lock().iter() {
+        for entry in self.lock().entries.values() {
             let total = totals.entry((entry.owner, entry.label)).or_default();
             *total = total.saturating_add(entry.bytes.load(Ordering::Relaxed));
         }
@@ -137,7 +183,7 @@ impl Default for MemoryGauge {
 impl Drop for MemoryGauge {
     fn drop(&mut self) {
         if let Some(listing) = &self.listing {
-            listing.ledger.lock().retain(|entry| entry.id != listing.id);
+            listing.ledger.lock().entries.remove(&listing.id);
         }
     }
 }
