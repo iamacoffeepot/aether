@@ -2,7 +2,6 @@
 //! reads its own pending writes through before it commits.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
@@ -40,7 +39,7 @@ fn cancel_and_rereserve_in_one_batch_read_through_the_staged_tombstone() {
     let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
-    let first_token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let first_token = starting_token(&reserved.try_take().unwrap().unwrap());
 
     let rebirth = registry
         .submit(EffectBatch::new(vec![
@@ -50,7 +49,7 @@ fn cancel_and_rereserve_in_one_batch_read_through_the_staged_tombstone() {
         .unwrap();
     owner.run_once();
 
-    let applied = rebirth.wait_timeout(Duration::from_millis(100)).unwrap().expect("the tombstone frees the key");
+    let applied = rebirth.try_take().unwrap().expect("the tombstone frees the key");
     let [
         RegistryApplied::StartingCancellation(cancellation),
         RegistryApplied::Starting { id: reserved_id, token: second_token },

@@ -188,10 +188,7 @@ fn owner_shutdown_discards_unapplied_prepared_state_at_home_and_joins() {
 
     let dropped_thread = dropped_rx.try_recv().expect("owner shutdown joins the home-side prepared-state drop");
     assert_ne!(dropped_thread, owner_thread, "initialized state never drops on the registry owner");
-    assert!(matches!(
-        completion.wait_timeout(Duration::from_millis(100)).unwrap(),
-        Err(RegistryEffectError::OwnerClosed)
-    ));
+    assert!(matches!(completion.try_take().unwrap(), Err(RegistryEffectError::OwnerClosed)));
 }
 
 #[test]
@@ -219,7 +216,7 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     ));
     let started = registry.submit(EffectBatch::new(vec![birth])).unwrap();
     owner.run_once();
-    let _ = started.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    let _ = started.try_take().unwrap().unwrap();
     let queued_owner = registry.submit(EffectBatch::new(Vec::new())).unwrap();
     let (drop_done_tx, drop_done_rx) = crossbeam_channel::bounded(1);
     #[allow(clippy::disallowed_methods, reason = "regression needs lease drop concurrent with the occupied worker")]
@@ -232,10 +229,7 @@ fn owner_drop_releases_apply_lock_before_joining_home_cancellation() {
     let _ = block_release_tx.send(());
     drop_done_rx.recv_timeout(Duration::from_secs(1)).expect("lease drop cannot deadlock behind its queued owner slot");
     dropping.join().unwrap();
-    assert!(matches!(
-        queued_owner.wait_timeout(Duration::from_secs(1)).unwrap(),
-        Err(RegistryEffectError::OwnerClosed)
-    ));
+    assert!(matches!(queued_owner.try_take().unwrap(), Err(RegistryEffectError::OwnerClosed)));
     assert!(registry.lookup("owner-drop-home-cancel").is_none());
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
 }
@@ -276,21 +270,15 @@ fn owner_drains_fifo_batches_with_one_publication_per_dirty_view() {
     owner.run_once();
 
     assert_eq!(
-        first.wait_timeout(Duration::from_millis(100)).expect("completion arrives").expect("batch applies"),
+        first.try_take().expect("completion arrives").expect("batch applies"),
         [
             RegistryApplied::Mailbox(id),
             RegistryApplied::Dropped("ordered".to_owned()),
             RegistryApplied::Mailbox(second),
         ]
     );
-    assert!(matches!(
-        rejected.wait_timeout(Duration::from_millis(100)).expect("rejection arrives"),
-        Err(RegistryEffectError::Name(_))
-    ));
-    assert!(matches!(
-        rolled_back.wait_timeout(Duration::from_millis(100)).expect("rollback rejection arrives"),
-        Err(RegistryEffectError::Name(_))
-    ));
+    assert!(matches!(rejected.try_take().expect("rejection arrives"), Err(RegistryEffectError::Name(_))));
+    assert!(matches!(rolled_back.try_take().expect("rollback rejection arrives"), Err(RegistryEffectError::Name(_))));
     assert!(registry.lookup("must-rollback").is_none(), "a rejected batch commits none of its staged keys");
     assert_eq!(registry.route_generation(), 1, "one self-sized drain publishes the keyed view once");
     assert_eq!(registry.mailbox_generation(), 1, "one self-sized drain publishes inventory once");
@@ -317,10 +305,7 @@ fn owner_registers_a_kind_batch_atomically_with_one_publication() {
         .expect("attached owner reserves a prepared kind batch");
     owner.run_once();
 
-    let applied = completion
-        .wait_timeout(Duration::from_millis(100))
-        .expect("owner completion arrives")
-        .expect("kind batch applies");
+    let applied = completion.try_take().expect("owner completion arrives").expect("kind batch applies");
     assert_eq!(applied.len(), 2);
     assert!(registry.kind_id(&first.name).is_some());
     assert!(registry.kind_id(&second.name).is_some());
@@ -413,8 +398,8 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
     let dropped = registry.submit(EffectBatch::new(vec![RegistryEffect::DropMailbox(id)])).unwrap();
     owner.run_once();
 
-    assert!(live.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
-    assert!(dropped.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(live.try_take().unwrap().is_ok());
+    assert!(dropped.try_take().unwrap().is_ok());
     assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)));
     assert!(received.lock().unwrap().is_empty(), "the registry-owner turn never invokes captured Inline code");
 
@@ -462,7 +447,7 @@ fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
         .expect("owner accepts inventory-changing effect");
 
     owner.run_once();
-    assert!(changed.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(changed.try_take().unwrap().is_ok());
     assert_eq!(wakes.load(Ordering::SeqCst), 1, "registry-owner turn cannot invoke the Inline subscriber");
 
     relay.run_once();
@@ -496,7 +481,7 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     let id = canonical_mailbox_id(name);
     let reserved = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(name.to_owned())])).unwrap();
     owner.run_once();
-    let _token = starting_token(&reserved.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let _token = starting_token(&reserved.try_take().unwrap().unwrap());
 
     // Fill the queue to its bound with parkable misses.
     let parked = [1u8, 2].map(|payload| {
@@ -509,10 +494,8 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     // The next miss is refused and takes the unknown-recipient policy.
     let (shed, shed_settled) = traced_unknown_mail(&mailer, &settlement, id, 3, vec![3]);
     mailer.push(shed);
-    assert!(shed_settled.recv_timeout(Duration::from_millis(100)).is_ok(), "a shed envelope settles rather than hangs");
-    assert!(
-        matches!(outbound_rx.recv_timeout(Duration::from_millis(100)).unwrap(), EgressEvent::UnresolvedMail { payload, .. } if payload == [3])
-    );
+    assert!(shed_settled.try_recv().is_ok(), "a shed envelope settles rather than hangs");
+    assert!(matches!(outbound_rx.try_recv().unwrap(), EgressEvent::UnresolvedMail { payload, .. } if payload == [3]));
     for settled in &parked {
         assert!(settled.try_recv().is_err(), "shedding one miss does not disturb the misses already parked");
     }
@@ -530,7 +513,7 @@ fn owner_sheds_route_misses_at_capacity_but_never_reserved_effects() {
     assert_eq!(metrics.depth, 3);
 
     owner.run_once();
-    assert!(queued.unwrap().wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(queued.unwrap().try_take().unwrap().is_ok());
     assert_eq!(registry.owner_queue_metrics().unwrap().shed, 1, "draining does not retroactively shed");
 }
 
@@ -572,7 +555,7 @@ fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
     );
     let birth_completion = registry.submit(EffectBatch::new(vec![birth])).unwrap();
     owner.run_once();
-    let token = starting_token(&birth_completion.wait_timeout(Duration::from_millis(100)).unwrap().unwrap());
+    let token = starting_token(&birth_completion.try_take().unwrap().unwrap());
 
     // Fill the bound with ordinary mail parked behind the same unpromoted birth.
     for payload in [2u8, 3] {
@@ -620,7 +603,7 @@ fn owner_drain_metrics_measure_whole_batches_and_busy_time() {
     let second = registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named("drain-metrics-b".to_owned())]));
     owner.run_once();
     for completion in [first, second] {
-        assert!(completion.unwrap().wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+        assert!(completion.unwrap().try_take().unwrap().is_ok());
     }
 
     let metrics = registry.owner_queue_metrics().unwrap();
@@ -672,13 +655,13 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
     assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
 
     assert_eq!(owner.run_once(), CycleResult::Requeue, "the re-entered suffix schedules another owner turn");
-    let reentered = reentered_rx.recv_timeout(Duration::from_millis(100)).expect("completion staged owner work");
+    let reentered = reentered_rx.try_recv().expect("completion staged owner work");
     let metrics = registry.owner_queue_metrics().unwrap();
     assert_eq!(metrics.depth, 1, "the meter retains the command admitted during apply");
     assert_eq!((metrics.drained, metrics.drains), (1, 1));
 
     assert_eq!(owner.run_once(), CycleResult::Idle);
-    assert!(reentered.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
+    assert!(reentered.try_take().unwrap().is_ok());
     assert_eq!(registry.owner_queue_metrics().unwrap().depth, 0);
     let done = binding
         .dispatch_take::<RegistryBatchResult, ()>(dispatch_id)
@@ -707,7 +690,7 @@ fn owner_close_rejects_queued_and_future_submissions_without_stranding_completio
     drop(owner);
 
     assert!(matches!(
-        completion.wait_timeout(Duration::from_millis(100)).expect("close resolves queued completion"),
+        completion.try_take().expect("close resolves queued completion"),
         Err(RegistryEffectError::OwnerClosed)
     ));
     assert!(registry.submit(EffectBatch::new(Vec::new())).is_none(), "closed owner rejects future submissions");
@@ -740,7 +723,7 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
 
     drop(owner);
 
-    let wake = wake_rx.recv_timeout(Duration::from_millis(100)).expect("owner close emits deferred completion wake");
+    let wake = wake_rx.try_recv().expect("owner close emits deferred completion wake");
     assert_eq!(wake.kind, TaskCompletionWake::ID);
     let wake = TaskCompletionWake::decode_from_bytes(wake.payload.bytes()).expect("completion wake decodes");
     assert_eq!(DispatchId(wake.dispatch_id), dispatch_id);
@@ -778,7 +761,7 @@ fn owner_submit_racing_close_is_rejected_or_completed() {
 
     if let Some(completion) = submit.join().expect("submitter does not panic") {
         assert!(matches!(
-            completion.wait_timeout(Duration::from_millis(100)).expect("accepted race resolves on close"),
+            completion.try_take().expect("accepted race resolves on close"),
             Err(RegistryEffectError::OwnerClosed)
         ));
     }
