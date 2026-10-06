@@ -1,21 +1,25 @@
-//! Acceptance: a held key drives the keyboard camera controller, which steers
-//! the camera instance its config names, which scrolls the rendered view
-//! (issue 2820).
+//! Acceptance: window input drives the camera controller, which steers the
+//! camera instance its config names, which scrolls the rendered view (issues
+//! 2820 and 7479).
 //!
-//! Loads two `aether-kit` actors — a `CameraComponent` instance at
-//! `aether.kit.camera:main` and a `CameraController` whose default config
-//! names it — tells the renderer to follow the camera, draws a high-contrast
-//! world-anchored striped ground straight to `aether.render` at each capture,
-//! and captures three frames: before any key, after a held `D` pans the
-//! camera's target across the ground, and after the key is released. The
-//! controller owns no pixels; the honest rendered signal that the whole
+//! Each scenario loads two `aether-kit` actors: a `CameraComponent` instance
+//! at `aether.kit.camera:main` and a `CameraController` whose default config
+//! names it and the `main` window. Input is the window's own event kinds,
+//! mailed to the controller as the window manager would publish them, and
+//! the camera's answer to `aether.kit.camera.where` says where that left it.
+//!
+//! The first scenario also renders: it tells the renderer to follow the
+//! camera, draws a high-contrast world-anchored striped ground straight to
+//! `aether.render` at each capture, and captures three frames: before any
+//! key, after a held `D` pans the camera's target across the ground, and
+//! after the key is released. The controller owns no pixels; the honest
+//! rendered signal that the whole
 //! `key → controller → aether.kit.camera.pose → camera → view → renderer`
 //! chain composed is that the pan frame differs from the first frame, while
 //! the released frame matches the pan frame (the zero-mail-idle invariant, end
-//! to end). The camera's own answer to `aether.kit.camera.where` says how far
-//! the target moved. The controller's per-tick integration math is pinned by
-//! its own unit tests; this is the composition-and-motion proof the harness
-//! split routes to `SubstrateHarness`.
+//! to end). The controller's input-to-pose maths is pinned by its own unit
+//! tests; these are the composition proofs the harness split routes to
+//! `SubstrateHarness`.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
@@ -34,17 +38,24 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail};
+use aether_kinds::{Key, KeyRelease, LoadComponent, MouseButton, MouseMove, MouseWheel, NamedMail, mouse_button};
 use aether_kit::camera::controller::{CameraController, ControllerConfig};
 use aether_kit::camera::{CameraComponent, CameraConfig, Distance, Lens, Pitch, Pixels, Pose, Viewport, Where, Yaw};
 use aether_math::{Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
+use aether_window::WindowFocus;
 
 /// Capture surface — a 4:3 frame, which the camera's fixed viewport matches.
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
+
+/// The window the default controller config reads.
 fn test_window() -> ErasedActorPath {
-    aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+    window_named("main")
+}
+
+fn window_named(name: &str) -> ErasedActorPath {
+    aether_window::window_path(&aether_data::LoadName::new(name).expect("a valid window name"))
 }
 
 /// Spawn the `aether_kit` export `R` as the instance `main` with init-config
@@ -127,79 +138,99 @@ fn pose_of(harness: &mut SubstrateHarness, camera: ActorRef<CameraComponent>) ->
         .expect("decode the pose")
 }
 
-/// **The keyboard camera controller, end to end.** A held `D` pans the
-/// camera's target east across the striped ground; the world-anchored ground
-/// scrolls under the camera, so the pan frame differs from the first frame,
-/// and the camera reports its target 48 ticks of pan to the east. Releasing
-/// the key freezes the pose, so the next frame matches the pan frame — the
-/// zero-mail-idle invariant proven through the full render chain. Proves the
-/// controller proves the camera its config names, starts from the pose the
-/// camera reports, and that input reaches the rendered view without the
-/// controller ever touching the render sink itself. A controller that never
-/// heard the camera's answer to `where` would send no pose at all.
+/// A booted harness with the overhead camera and a default controller for it
+/// loaded, in that order: the controller proves the camera's path and
+/// subscribes to its view when it wires.
+struct Scene {
+    harness: SubstrateHarness,
+    camera: ActorRef<CameraComponent>,
+    controller: ActorRef<CameraController>,
+}
+
+impl Scene {
+    /// `None` when the runtime gate skips the scenario.
+    fn boot() -> Option<Self> {
+        let kit_wasm = fs::read(require_runtime("aether_kit")?).expect("read kit wasm");
+        // Composition: GPU captures + wasm loads; every input event is mailed
+        // straight to the controller's mailbox, so no input fan-out cap.
+        let mut harness = SubstrateHarness::builder()
+            .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .with_render()
+            .with_component_host()
+            .build()
+            .expect("boot");
+
+        let camera = load_main::<CameraComponent>(&mut harness, &kit_wasm, overhead_camera().encode_into_bytes());
+        let controller =
+            load_main::<CameraController>(&mut harness, &kit_wasm, ControllerConfig::default().encode_into_bytes());
+
+        Some(Self { harness, camera, controller })
+    }
+
+    /// Run `steps` in order, each to settlement. An input event sent to the
+    /// controller settles with the controller's question to the camera and
+    /// the camera's answer, which ride its chain.
+    fn run(&mut self, steps: Vec<(&'static str, HarnessOp)>) {
+        self.harness.execute(steps).expect("the steps run");
+    }
+
+    fn pose(&mut self) -> Pose {
+        pose_of(&mut self.harness, self.camera)
+    }
+}
+
+/// **A held key, end to end.** A held `D` pans the camera's target east
+/// across the striped ground; the world-anchored ground scrolls under the
+/// camera, so the pan frame differs from the first frame, and the camera
+/// reports its target 0.8 seconds of pan to the east at its distance of 12.
+/// Releasing the key freezes the pose, so the next frame matches the pan
+/// frame — the zero-mail-idle invariant proven through the full render chain.
+/// Proves the controller proves the camera its config names, starts the
+/// gesture from the pose the camera reports, and that input reaches the
+/// rendered view without the controller ever touching the render sink itself.
+/// A controller that never heard the camera's answer to `where` would send no
+/// pose at all.
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn held_key_pans_the_camera_over_the_painted_world() {
-    let Some(kit_path) = require_runtime("aether_kit") else {
+    let Some(mut scene) = Scene::boot() else {
         return;
     };
-    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
-    // Composition: GPU captures + wasm loads; every Key / WindowSize is
-    // mailed straight to a component mailbox, so no input fan-out cap.
-    let mut harness = SubstrateHarness::builder()
-        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .with_render()
-        .with_component_host()
-        .build()
-        .expect("boot");
-
-    // The camera first: the controller proves its path when it wires and asks
-    // it where it is, so the keys step from the camera's own pose.
-    let camera = load_main::<CameraComponent>(&mut harness, &kit_wasm, overhead_camera().encode_into_bytes());
-    let controller =
-        load_main::<CameraController>(&mut harness, &kit_wasm, ControllerConfig::default().encode_into_bytes());
 
     // The renderer takes its view from the camera; the view the camera sends
     // back rides the request's chain.
     let follow = ViewFrom { source: CameraComponent::main_path().narrow::<ViewSource>() };
-    harness
-        .execute(vec![
-            ("follow", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &follow)),
-            ("settle", HarnessOp::advance(2)),
-        ])
-        .expect("follow + settle");
+    let render = scene.harness.actor_ref::<RenderCapability>();
+    scene.run(vec![("follow", HarnessOp::send_and_settle(&render, &follow)), ("settle", HarnessOp::advance(2))]);
 
-    let seeded = capture_scene(&mut harness, "seeded");
+    let seeded = capture_scene(&mut scene.harness, "seeded");
 
     // Hold D (no release): each tick the controller pans the target east
-    // across the stripes and mails the pose to the camera. 48 ticks at the
-    // default 0.15 m/tick pan walks the target 7.2 m — nearly two stripe widths.
-    harness
-        .execute(vec![
-            ("press_d", HarnessOp::send_and_settle(&controller, &Key { window: test_window(), code: KEY_D })),
-            ("pan", HarnessOp::advance(48)),
-        ])
-        .expect("hold D + pan");
+    // across the stripes and mails the pose to the camera. 48 ticks of
+    // 16,667 microseconds at the default one camera distance per second walk
+    // the target 0.8 of the camera's 12 units: 9.6, over two stripe widths.
+    let press = Key { window: test_window(), code: KEY_D };
+    scene
+        .run(vec![("press_d", HarnessOp::send_and_settle(&scene.controller, &press)), ("pan", HarnessOp::advance(48))]);
 
-    let panned = capture_scene(&mut harness, "panned");
-    let panned_pose = pose_of(&mut harness, camera);
+    let panned = capture_scene(&mut scene.harness, "panned");
+    let panned_pose = scene.pose();
     assert!(
-        (panned_pose.target.x - 7.2).abs() < 0.01,
-        "48 ticks of D at 0.15 per tick move the target 7.2 east; the camera reports {:?}",
+        (panned_pose.target.x - 9.6).abs() < 0.01,
+        "0.8 seconds of D from 12 back move the target 9.6 east; the camera reports {:?}",
         panned_pose.target,
     );
 
     // Release D and advance: with no key held the controller emits no mail, so
     // the camera pose is frozen and the view stops moving.
-    harness
-        .execute(vec![
-            ("release_d", HarnessOp::send_and_settle(&controller, &KeyRelease { window: test_window(), code: KEY_D })),
-            ("idle", HarnessOp::advance(48)),
-        ])
-        .expect("release D + idle");
+    let release = KeyRelease { window: test_window(), code: KEY_D };
+    scene.run(vec![
+        ("release_d", HarnessOp::send_and_settle(&scene.controller, &release)),
+        ("idle", HarnessOp::advance(48)),
+    ]);
 
-    let idle = capture_scene(&mut harness, "idle");
-    assert_eq!(pose_of(&mut harness, camera), panned_pose, "no key held, so the camera keeps its pose");
+    let idle = capture_scene(&mut scene.harness, "idle");
+    assert_eq!(scene.pose(), panned_pose, "no key held, so the camera keeps its pose");
 
     let seeded_img = decode_png(&seeded).expect("decode seeded png");
     let panned_img = decode_png(&panned).expect("decode panned png");
@@ -241,6 +272,117 @@ fn held_key_pans_the_camera_over_the_painted_world() {
          mean-absolute-error after release was {idle_mae:.3} (expected < 0.02) — the camera \
          kept moving with no key held",
     );
+}
+
+/// A left-drag turns the camera by the cursor's travel, and a held button
+/// with a still mouse turns it no further. The controller is a viewer of the
+/// camera and asks it where it is on the press; one that never took the
+/// answer, or that did not subscribe the mouse kinds, leaves the yaw where
+/// it was.
+#[test]
+fn a_left_drag_turns_the_camera() {
+    let Some(mut scene) = Scene::boot() else {
+        return;
+    };
+    let before = scene.pose();
+
+    // 40 pixels to the right at the default 0.005 radians per pixel.
+    let press = MouseButton { window: test_window(), button: mouse_button::LEFT, x: 44.0, y: 48.0 };
+    let drag = MouseMove { window: test_window(), x: 84.0, y: 48.0 };
+    scene.run(vec![
+        ("press", HarnessOp::send_and_settle(&scene.controller, &press)),
+        ("drag", HarnessOp::send_and_settle(&scene.controller, &drag)),
+        ("turn", HarnessOp::advance(1)),
+    ]);
+
+    let turned = scene.pose();
+    let yaw = turned.yaw.get();
+    assert!((yaw + 0.2).abs() < 1e-4, "40 pixels to the right turn the yaw to -0.2; the camera reports {yaw}");
+    assert_eq!((turned.target, turned.pitch, turned.distance), (before.target, before.pitch, before.distance));
+
+    scene.run(vec![("hold", HarnessOp::advance(8))]);
+    assert_eq!(scene.pose(), turned, "the button is held and the mouse is still");
+}
+
+/// A pose sent to the camera between two gestures is the pose the second
+/// gesture starts from. A controller that kept its own copy of the pose
+/// would send the camera that copy on the second gesture's first tick and
+/// snap an agent's pose back to where the keys left it.
+#[test]
+fn a_pose_set_between_gestures_is_where_the_next_gesture_starts() {
+    let Some(mut scene) = Scene::boot() else {
+        return;
+    };
+
+    let press = Key { window: test_window(), code: KEY_D };
+    let release = KeyRelease { window: test_window(), code: KEY_D };
+    scene.run(vec![
+        ("press_d", HarnessOp::send_and_settle(&scene.controller, &press)),
+        ("pan", HarnessOp::advance(4)),
+        ("release_d", HarnessOp::send_and_settle(&scene.controller, &release)),
+    ]);
+    assert!(scene.pose().target.x > 0.5, "the first gesture moved the camera");
+
+    // No tick separates the release from the pose from the next gesture: the
+    // release itself ends the first one.
+    let set = Pose {
+        target: Vec3::new(5.0, 0.0, -3.0),
+        yaw: Yaw::new(1.0).expect("a finite yaw"),
+        pitch: Pitch::new(-0.5).expect("a pitch above the ground"),
+        distance: Distance::new(20.0).expect("a positive distance"),
+    };
+    let one_step_in = MouseWheel { window: test_window(), delta_x: 0.0, delta_y: 40.0, x: 64.0, y: 48.0 };
+    scene.run(vec![
+        ("set", HarnessOp::send_and_settle(&scene.camera, &set)),
+        ("wheel", HarnessOp::send_and_settle(&scene.controller, &one_step_in)),
+        ("zoom", HarnessOp::advance(1)),
+    ]);
+
+    let zoomed = scene.pose();
+    assert_eq!((zoomed.target, zoomed.yaw, zoomed.pitch), (set.target, set.yaw, set.pitch));
+    let distance = zoomed.distance.get();
+    assert!((distance - 18.0).abs() < 1e-3, "one wheel step in from 20 is 18; the camera reports {distance}");
+}
+
+/// The controller reads its own window's input, and drops what is held when
+/// that window loses focus. A controller that took every window's keys would
+/// move this camera from another window's typing; one that kept a held key
+/// across a loss of focus would pan forever, because the release goes to the
+/// window that took the focus.
+#[test]
+fn input_is_read_from_the_controller_s_window_until_it_loses_focus() {
+    let Some(mut scene) = Scene::boot() else {
+        return;
+    };
+    let before = scene.pose();
+
+    let elsewhere = Key { window: window_named("other"), code: KEY_D };
+    scene.run(vec![
+        ("press_elsewhere", HarnessOp::send_and_settle(&scene.controller, &elsewhere)),
+        ("idle", HarnessOp::advance(4)),
+    ]);
+    assert_eq!(scene.pose(), before, "a key pressed in another window moves nothing");
+
+    // Losing another window's focus releases nothing here.
+    let press = Key { window: test_window(), code: KEY_D };
+    let other_blurred = WindowFocus { window: window_named("other"), focused: false };
+    scene.run(vec![
+        ("press_d", HarnessOp::send_and_settle(&scene.controller, &press)),
+        ("pan", HarnessOp::advance(4)),
+        ("blur_other", HarnessOp::send_and_settle(&scene.controller, &other_blurred)),
+    ]);
+    let panning = scene.pose();
+    assert!(panning.target.x > 0.5, "the held key pans the camera");
+
+    scene.run(vec![("pan_on", HarnessOp::advance(4))]);
+    let panned = scene.pose();
+    assert!(panned.target.x > panning.target.x + 0.5, "the key is still held after another window lost focus");
+
+    // No release is sent: the loss of focus is all the controller hears.
+    let blurred = WindowFocus { window: test_window(), focused: false };
+    scene
+        .run(vec![("blur", HarnessOp::send_and_settle(&scene.controller, &blurred)), ("after", HarnessOp::advance(8))]);
+    assert_eq!(scene.pose(), panned, "the held key was dropped with the window's focus");
 }
 
 /// A controller whose config names a camera that is not live fails its load,

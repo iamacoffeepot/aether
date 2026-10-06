@@ -10,8 +10,9 @@
 //!   `aether.kit.camera:<key>`, selected by the `aether_kit@aether.kit.camera`
 //!   export (ADR-0096). It publishes its view to whoever subscribed, the
 //!   renderer included; its `aether.kit.camera.*` kinds live in [`camera`].
-//! - [`camera::controller::CameraController`] — a keyboard driver that steers
-//!   one [`camera::CameraComponent`] instance (WASD / arrows / zoom), selected
+//! - [`camera::controller::CameraController`] — a mouse and keyboard driver
+//!   that steers one [`camera::CameraComponent`] instance (drag to orbit and
+//!   pan, wheel to zoom, WASD / arrows to pan the ground), selected
 //!   by the `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
