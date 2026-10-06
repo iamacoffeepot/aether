@@ -79,10 +79,65 @@ fn coverage_rgba(coverage: &[u8]) -> Vec<u8> {
     coverage.iter().flat_map(|&alpha| [255, 255, 255, alpha]).collect()
 }
 
+/// Where a laid-out glyph's quad sits against the pen and the baseline, and
+/// the atlas rect it samples. `left` is added to the pen and `rise` is
+/// taken from the baseline to give the quad's top-left corner.
+#[derive(Clone, Copy)]
+pub struct GlyphPlacement {
+    pub left: f32,
+    pub rise: f32,
+    pub width: f32,
+    pub height: f32,
+    pub entry: AtlasEntry,
+}
+
+/// Everything a draw needs for one character of one font at one exact
+/// size: how far the pen moves, and the quad to emit, if the glyph has
+/// pixels.
+#[derive(Clone, Copy)]
+pub struct LaidGlyph {
+    pub advance: f32,
+    pub placement: Option<GlyphPlacement>,
+}
+
+/// The laid-out glyphs of one font at one exact size, by character. ASCII
+/// is a table indexed by the character, so a warm run of it costs an index
+/// per character and no hash.
+pub struct RunGlyphs {
+    ascii: [Option<LaidGlyph>; 128],
+    other: HashMap<char, LaidGlyph>,
+}
+
+impl RunGlyphs {
+    fn new() -> Self {
+        Self { ascii: [None; 128], other: HashMap::new() }
+    }
+
+    /// The laid-out glyph for `ch`, or `None` if no draw has laid it out
+    /// since the atlas was last reset.
+    pub fn get(&self, ch: char) -> Option<LaidGlyph> {
+        self.ascii.get(ch as usize).map_or_else(|| self.other.get(&ch).copied(), |slot| *slot)
+    }
+
+    pub fn insert(&mut self, ch: char, glyph: LaidGlyph) {
+        match self.ascii.get_mut(ch as usize) {
+            Some(slot) => *slot = Some(glyph),
+            None => {
+                self.other.insert(ch, glyph);
+            }
+        }
+    }
+}
+
 /// A left-to-right, top-to-bottom shelf packer over the fixed atlas square,
 /// with the cache of what it has placed.
 pub struct Atlas {
     cache: HashMap<GlyphKey, Option<AtlasEntry>>,
+    /// Laid-out glyphs by `(font_id, bits of the exact size)`. The raster
+    /// cache above shares one image between sizes that round alike; a
+    /// glyph's advance and quad do not round, so this is keyed by the size
+    /// as authored. Every entry names an atlas rect, so a reset clears it.
+    laid: HashMap<(u32, u32), RunGlyphs>,
     shelf_x: u32,
     shelf_y: u32,
     shelf_height: u32,
@@ -98,7 +153,7 @@ impl Default for Atlas {
 impl Atlas {
     /// An empty atlas.
     pub fn new() -> Self {
-        Self { cache: HashMap::new(), shelf_x: 0, shelf_y: 0, shelf_height: 0, full: false }
+        Self { cache: HashMap::new(), laid: HashMap::new(), shelf_x: 0, shelf_y: 0, shelf_height: 0, full: false }
     }
 
     /// `true` once any glyph failed to pack into the atlas. The layout
@@ -114,10 +169,25 @@ impl Atlas {
     /// one's gutter would sample it.
     pub fn reset(&mut self) {
         self.cache.clear();
+        self.laid.clear();
         self.shelf_x = 0;
         self.shelf_y = 0;
         self.shelf_height = 0;
         self.full = false;
+    }
+
+    /// Take the laid-out glyphs of `font_id` at exactly `size_pixels` out
+    /// of the atlas for the length of one run, so the run reads them
+    /// without a lookup per character. [`Self::put_run_glyphs`] gives them
+    /// back.
+    pub fn take_run_glyphs(&mut self, font_id: u32, size_pixels: f32) -> RunGlyphs {
+        self.laid.remove(&(font_id, size_pixels.to_bits())).unwrap_or_else(RunGlyphs::new)
+    }
+
+    /// Give back what [`Self::take_run_glyphs`] took, with whatever the
+    /// run added.
+    pub fn put_run_glyphs(&mut self, font_id: u32, size_pixels: f32, glyphs: RunGlyphs) {
+        self.laid.insert((font_id, size_pixels.to_bits()), glyphs);
     }
 
     /// Cheap cache probe: the cached slot for `key`, or `None` if the

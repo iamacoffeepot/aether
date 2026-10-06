@@ -6,7 +6,7 @@
 use aether_kinds::{FontMetrics, GlyphAdvance};
 use aether_math::Rgba;
 
-use super::atlas::{Atlas, AtlasEntry, GlyphKey, GlyphSlot};
+use super::atlas::{Atlas, AtlasEntry, GlyphKey, GlyphPlacement, GlyphSlot, LaidGlyph};
 use crate::kinds::{TextRun, TexturedQuad};
 use crate::runtime::texture::StagedTexture;
 
@@ -17,30 +17,34 @@ pub fn glyph_dimensions(metrics: &fontdue::Metrics) -> (u32, u32) {
     (metrics.width as u32, metrics.height as u32)
 }
 
-/// Place a glyph's quad in screen pixels. fontdue uses +y up with
-/// `ymin` the glyph's bottom above the baseline; screen space is y-down
-/// with the baseline at `baseline`, so the top row sits at
-/// `baseline - (ymin + height)` and the left edge at `pen_x + xmin`.
-/// Glyph extents are small integers, exact in `f32`.
+/// Where a glyph's quad sits against the pen and the baseline. fontdue
+/// uses +y up with `ymin` the glyph's bottom above the baseline; screen
+/// space is y-down, so the top row sits `ymin + height` above the baseline
+/// and the left edge `xmin` right of the pen. Glyph extents are small
+/// integers, exact in `f32`.
 #[allow(clippy::cast_precision_loss)]
-pub fn glyph_quad(
-    metrics: &fontdue::Metrics,
-    pen_x: f32,
-    baseline: f32,
-    entry: &AtlasEntry,
-    tint: Rgba,
-) -> TexturedQuad {
-    let top = baseline - (metrics.ymin as f32 + metrics.height as f32);
-    let left = pen_x + metrics.xmin as f32;
-    TexturedQuad {
-        x: left,
-        y: top,
+fn glyph_placement(metrics: &fontdue::Metrics, entry: AtlasEntry) -> GlyphPlacement {
+    GlyphPlacement {
+        left: metrics.xmin as f32,
+        rise: metrics.ymin as f32 + metrics.height as f32,
         width: metrics.width as f32,
         height: metrics.height as f32,
-        u0: entry.u0,
-        v0: entry.v0,
-        u1: entry.u1,
-        v1: entry.v1,
+        entry,
+    }
+}
+
+/// The quad of a placed glyph with the pen at `pen_x` and the baseline at
+/// `baseline`.
+fn glyph_quad(placement: &GlyphPlacement, pen_x: f32, baseline: f32, tint: Rgba) -> TexturedQuad {
+    TexturedQuad {
+        x: pen_x + placement.left,
+        y: baseline - placement.rise,
+        width: placement.width,
+        height: placement.height,
+        u0: placement.entry.u0,
+        v0: placement.entry.v0,
+        u1: placement.entry.u1,
+        v1: placement.entry.v1,
         tint,
     }
 }
@@ -54,28 +58,39 @@ pub fn quantize_size(size_pixels: f32) -> u32 {
     rounded
 }
 
-/// The atlas rect a character's glyph samples, or `None` when it draws
-/// nothing: a glyph with no coverage, or one the full atlas could not
-/// place. A glyph seen for the first time is rasterized here and its
-/// pixels written into `texture`, the reserved atlas texture's staged
-/// pixels, so the quad that samples it this frame finds it there.
-fn glyph_entry(
+/// A character laid out for the first time since the atlas was reset, and
+/// whether the result may be kept: a glyph the full atlas could not place
+/// is laid out again by the next draw, after the reset.
+struct FirstLayout {
+    glyph: LaidGlyph,
+    keep: bool,
+}
+
+/// Lay one character out from the font: its advance, and its quad if the
+/// glyph has pixels. A glyph the atlas has not placed is rasterized here
+/// and its pixels written into `texture`, the reserved atlas texture's
+/// staged pixels, so the quad that samples it this frame finds it there.
+fn lay_out_glyph(
     font: &fontdue::Font,
     atlas: &mut Atlas,
     texture: &mut StagedTexture,
-    key: GlyphKey,
+    font_id: u32,
     ch: char,
     size: f32,
-) -> Option<AtlasEntry> {
+) -> FirstLayout {
+    let metrics = font.metrics(ch, size);
+    // Quantize the size for the raster cache key — two draws at the same
+    // nominal size share one raster.
+    let key = GlyphKey { font_id, glyph_index: font.lookup_glyph_index(ch), size_pixels: quantize_size(size) };
     // Rasterize only on a cache miss.
     let slot = atlas.cached(&key).unwrap_or_else(|| {
-        let (metrics, coverage) = font.rasterize(ch, size);
-        let (width, height) = glyph_dimensions(&metrics);
+        let (raster, coverage) = font.rasterize(ch, size);
+        let (width, height) = glyph_dimensions(&raster);
         atlas.get_or_insert(key, width, height, &coverage)
     });
 
-    match slot {
-        GlyphSlot::Cached(entry) => Some(entry),
+    let (entry, keep) = match slot {
+        GlyphSlot::Cached(entry) => (Some(entry), true),
         GlyphSlot::Placed { entry, rgba } => {
             let written = texture.apply_subrect(entry.x, entry.y, entry.width, entry.height, &rgba);
             if !written {
@@ -88,18 +103,26 @@ fn glyph_entry(
                     "a packed glyph does not fit the atlas texture; it draws blank",
                 );
             }
-            Some(entry)
+            (Some(entry), true)
         }
-        // Empty: no pixels, just advance the pen. Full: the atlas
-        // saturated during this draw; it is reset at the top of the next
-        // text draw, which places the glyph then.
-        GlyphSlot::Empty | GlyphSlot::Full => None,
-    }
+        // No pixels: the pen still advances.
+        GlyphSlot::Empty => (None, true),
+        // The atlas saturated during this draw; it is reset at the top of
+        // the next text draw, which places the glyph then.
+        GlyphSlot::Full => (None, false),
+    };
+    let placement = entry.map(|entry| glyph_placement(&metrics, entry));
+    FirstLayout { glyph: LaidGlyph { advance: metrics.advance_width, placement }, keep }
 }
 
 /// Lay one run out and append its glyph quads to `quads`. `world` says the
 /// batch draws under `QuadSpace::World`, where the quads are pixel offsets
 /// from the anchor and the run's `origin` is ignored.
+///
+/// A character this font has drawn at this size since the last atlas reset
+/// costs one table read and one quad: its advance and placement are kept
+/// with the atlas, and the font is consulted only for a character seen for
+/// the first time.
 pub fn lay_out_run(
     font: &fontdue::Font,
     atlas: &mut Atlas,
@@ -109,21 +132,25 @@ pub fn lay_out_run(
     quads: &mut Vec<TexturedQuad>,
 ) {
     let size = run.size_pixels;
-    // Quantize the size for the glyph cache key — two draws at the same
-    // nominal size share one raster.
-    let size_key = quantize_size(size);
     let baseline = font.horizontal_line_metrics(size).map_or(size, |line| line.ascent);
     let first = quads.len();
+    let mut glyphs = atlas.take_run_glyphs(run.font_id, size);
 
     let mut pen_x = 0.0f32;
     for ch in run.text.chars() {
-        let metrics = font.metrics(ch, size);
-        let key = GlyphKey { font_id: run.font_id, glyph_index: font.lookup_glyph_index(ch), size_pixels: size_key };
-        if let Some(entry) = glyph_entry(font, atlas, texture, key, ch, size) {
-            quads.push(glyph_quad(&metrics, pen_x, baseline, &entry, run.color));
+        let glyph = glyphs.get(ch).unwrap_or_else(|| {
+            let laid = lay_out_glyph(font, atlas, texture, run.font_id, ch, size);
+            if laid.keep {
+                glyphs.insert(ch, laid.glyph);
+            }
+            laid.glyph
+        });
+        if let Some(placement) = &glyph.placement {
+            quads.push(glyph_quad(placement, pen_x, baseline, run.color));
         }
-        pen_x += metrics.advance_width;
+        pen_x += glyph.advance;
     }
+    atlas.put_run_glyphs(run.font_id, size, glyphs);
 
     // World quads carry pixel offsets relative to the anchor, not absolute
     // screen positions: centre the string horizontally and put the

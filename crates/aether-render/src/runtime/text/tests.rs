@@ -45,11 +45,11 @@ fn draw(runs: Vec<TextRun>) -> DrawText {
     DrawText { clip: None, space: QuadSpace::Screen, runs }
 }
 
-/// The quads of the one overlay batch the frame has accumulated, which
+/// The quads of the last overlay batch the frame has accumulated, which
 /// must be a textured batch over the reserved glyph atlas.
 fn glyph_quads(state: &RenderCapabilityState) -> Vec<TexturedQuad> {
-    let [OverlayBatch::Textured { texture_id, quads, .. }] = state.overlay_frame.as_slice() else {
-        panic!("one text draw accumulates one textured batch, got {} batches", state.overlay_frame.len());
+    let Some(OverlayBatch::Textured { texture_id, quads, .. }) = state.overlay_frame.last() else {
+        panic!("a text draw accumulates a textured batch, got {} batches", state.overlay_frame.len());
     };
     assert_eq!(*texture_id, GLYPH_ATLAS_TEXTURE_ID, "a text batch samples the reserved glyph atlas");
     quads.clone()
@@ -73,13 +73,35 @@ fn a_run_with_an_unknown_font_is_dropped_and_the_runs_around_it_draw() {
     assert!(quads[0].x < quads[1].x, "the surviving runs keep their listed order");
 }
 
+/// Catches a laid-out glyph reused across sizes: runs of one string at two
+/// sizes that round to one raster, and at a third twice as large, each
+/// advance and size their quads by their own size.
+#[test]
+fn a_glyph_laid_out_at_one_size_is_not_reused_at_another() {
+    let (mut render, font_id) = render_with_font();
+    let sized = |size_pixels: f32| TextRun { size_pixels, ..run(font_id, "AA", 0.0) };
+
+    render.send(&draw(vec![sized(16.0), sized(16.4), sized(32.0)]));
+
+    let quads = render.read(glyph_quads);
+    let [small, nearby, large] = [0, 2, 4].map(|first| quads[first + 1].x - quads[first].x);
+    assert!(nearby > small, "16.4 px advances further than 16 px though both sample one raster");
+    let ratio = large / small;
+    assert!((ratio - 2.0).abs() < 0.01, "32 px advances twice as far as 16 px, not {ratio} times");
+    assert!(quads[4].width > quads[0].width, "the 32 px glyph's quad is the larger");
+}
+
 /// Catches a full atlas that drops the draw's glyphs instead of resetting,
-/// and a reset that clears the packer but leaves the old image in the
-/// texture, where a later glyph's gutter would sample it.
+/// a reset that clears the packer but leaves the old image in the texture,
+/// where a later glyph's gutter would sample it, and a glyph laid out
+/// before the reset that keeps the rect it had then.
 #[test]
 fn a_draw_after_the_atlas_fills_resets_it_and_still_draws() {
     let (mut render, font_id) = render_with_font();
     let last = ATLAS_BYTES - 4;
+    render.send(&draw(vec![run(font_id, "BA", 0.0)]));
+    let placed_second = render.read(glyph_quads)[1].u0;
+    assert!(placed_second > 0.0, "precondition: `A` was first placed beside `B`, away from the origin");
     render
         .cap
         .host_turn(|state, _ctx| {
