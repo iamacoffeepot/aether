@@ -125,7 +125,7 @@ mailbox:
 | `aether.component.publish` | bind a module's namespaces (admission), register its kinds; a successor republishes every live instance of them as one group | `PublishResult` |
 | `aether.component.spawn` | stand up an instance of a published type at `NS`, `NS:key`, or `parent/NS:key`, or return a live one | `SpawnResult` |
 | `aether.component.load` | publish the module, then spawn the export it selects, in one call | `LoadResult` |
-| `aether.component.drop` | run the guest's `unwire` and close the instance; its name tombstones | `DropResult` |
+| `aether.component.drop` | close the instance, which runs the guest's `unwire`; answers once the guest is released; its name tombstones | `DropResult` |
 | `aether.component.list` | enumerate the engine's live components | `ListComponentsResult` |
 | `aether.component.describe` | introspect one component's receive-side capabilities | `DescribeComponentResult` |
 
@@ -240,6 +240,17 @@ that lineage — and its name tombstones for the engine's lifetime
 `MonitorNotice`, and a later load or spawn of the same name is refused as
 retired. A second drop at the path is refused. Load or spawn under a new key
 to bring the component back.
+
+The close is what releases the guest: it runs the guest's `unwire`, answers each
+reply the guest still holds with its registered `unanswered` value, and drops
+the instance. The drop request is answered `DropResult::Ok` once that is done,
+so a caller that reads `Ok` reads a released guest. Mail the guest sends from
+`unwire` starts its own chains, outside the drop's, and is on its recipients'
+inboxes before the drop answers. The same close runs when nobody drops the
+instance and the engine tears down
+([ADR-0247](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0247-six-invariants-where-actors-meet-the-engine.md)
+rule 5): a guest's `unwire` runs on every exit of its instance, so what its
+`wire` created can be released there.
 
 In practice you drive this through the MCP harness — `publish(engine_id,
 selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,

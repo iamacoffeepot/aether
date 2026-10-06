@@ -5,7 +5,7 @@
 use super::support::DrivenTestChassis;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
-use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, RootPusher, RunError};
+use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RootPusher, RunError};
 use crate::chassis::inbox::SettlingInbox;
 use crate::mail::KindId;
 use crate::testing::{TestChassis, bare_substrate};
@@ -125,7 +125,7 @@ impl DriverCapability for EchoDriver {
 }
 
 impl DriverRunning for EchoDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
         let root = self.echo.push_root(&RootPing { tag: 7 }, Some(&self.inbox));
 
         let reply =
@@ -133,7 +133,7 @@ impl DriverRunning for EchoDriverRunning {
         assert_eq!(reply.kind(), RootPong::ID);
         assert_eq!(RootPong::decode_from_bytes(reply.payload()).map(|pong| pong.tag), Some(7));
         assert_eq!(reply.root(), Some(root), "the reply joins the root the door pushed");
-        Ok(())
+        (Ok(()), PumpedRoots::none())
     }
 }
 

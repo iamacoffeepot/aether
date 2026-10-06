@@ -149,10 +149,6 @@ impl FrameHook for GpuFrameHook {
         self.render
     }
 
-    fn shutdown(&mut self) {
-        self.slot.shutdown();
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -1,12 +1,16 @@
 //! A dropped instance closes, and its name is spent (ADR-0241 §8, issue
 //! #7066).
 //!
-//! `aether.component.drop` runs the guest's `unwire` and closes its
-//! trampoline: the close tail tombstones the name, retires its route to
-//! `Dropped`, and sends each watcher a `MonitorNotice`. The scenario waits on
-//! that notice, the signal production watchers act on, through a native
+//! `aether.component.drop` closes the instance's trampoline: the close runs
+//! the guest's `unwire`, and its tail tombstones the name, retires its route
+//! to `Dropped`, and sends each watcher a `MonitorNotice`. The scenario waits
+//! on that notice, the signal production watchers act on, through a native
 //! watcher composed beside the component host, and then checks that nothing
 //! can take the name back.
+//!
+//! A guest that is never dropped closes the same way when its engine tears
+//! down (ADR-0247 rule 5), which the last scenario reads off the boot
+//! fixture's `unwire` marker.
 
 use std::fs;
 
@@ -15,12 +19,18 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice, Publish, PublishResult};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, MonitorNotice, Publish, PublishResult};
 use aether_substrate::BootError;
 use aether_substrate::MonitorHandle;
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::Panel;
+
+// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
+// entries, the boot fixture's markers among them, are present in this test
+// binary.
+#[allow(unused_imports)]
+use aether_test_fixtures_kinds as _;
 
 const BUNDLE: &str = "aether_test_fixtures_bundle";
 /// An instanced export, so a load names its key.
@@ -198,5 +208,42 @@ fn a_drop_at_a_live_route_the_host_did_not_load_is_refused() {
     assert!(
         error.contains("no live component to drop at") && error.contains(target.as_str()),
         "the refusal names the path: {error}"
+    );
+}
+
+/// The boot fixture's markers (`aether-test-fixtures-boot`): its boot actor
+/// mails `BOOT_OBSERVED` from `wire` and `BOOT_TORN_DOWN` from `unwire`.
+const BOOT_FIXTURE: &str = "aether_test_fixtures_boot";
+const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
+const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
+
+/// Catches a guest whose `unwire` export runs only on a drop addressed at
+/// it: a guest nobody dropped still runs `unwire` when its engine tears down,
+/// because every close of its trampoline releases it (ADR-0247 rule 5).
+#[test]
+fn engine_teardown_runs_the_unwire_of_a_guest_nobody_dropped() {
+    let Some(wasm_path) = require_wasm(BOOT_FIXTURE) else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let host = harness.actor_ref::<ComponentHostCapability>();
+
+    // Any load of the module stands its boot actor up beside the export.
+    let load =
+        LoadComponent { wasm, name: None, config: Vec::new(), export: Some("aether.test.boot.widget_a".to_owned()) };
+    let loaded =
+        harness.execute(vec![("load", HarnessOp::send_and_await_reply(&host, &load))]).expect("load the widget");
+    if let LoadResult::Err { error } = loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        panic!("the widget loads: {error}");
+    }
+    harness.execute(vec![("settle", HarnessOp::advance(1))]).expect("settle the boot's wire");
+    assert_eq!(harness.count_observed(BOOT_OBSERVED), 1, "the boot wired; observed: {:?}", harness.observed_kinds());
+    assert_eq!(harness.count_observed(BOOT_TORN_DOWN), 0, "a live boot has not run unwire");
+
+    assert_eq!(
+        harness.close_and_count_observed(BOOT_TORN_DOWN),
+        1,
+        "engine teardown closes the boot, and its close runs the guest's unwire",
     );
 }

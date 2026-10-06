@@ -16,7 +16,11 @@
 //! rather than methods on either slot. That is what keeps `describe`, trace
 //! hops, and `actor_cost` identical across the two homes instead of drifting
 //! into two nearly-equal copies.
+//!
+//! `close` holds the one close sequence, which every exit of an actor from
+//! either home enters (ADR-0247 rule 5).
 
+pub(crate) mod close;
 pub(crate) mod dispatch;
 pub(crate) mod dispatcher;
 pub mod pumped;

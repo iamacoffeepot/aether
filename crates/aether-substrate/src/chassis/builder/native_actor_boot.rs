@@ -8,9 +8,11 @@ use aether_actor::trace::ActorTraceRing;
 use aether_data::ErasedActorPath;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
+use super::teardown::{ClosingSlot, TeardownGate};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::local;
+use crate::actor::native::slot::close::close;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::ctx::{ChassisCtx, DropOnShutdownClaim, MailboxWakeSlot};
@@ -272,9 +274,7 @@ where
         // `wake_slot` in the mailbox closure fires the pool wake hook on
         // every accepted send.
         let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
-        let mailer_clone = ctx.mail_send_handle();
-        let slot =
-            DispatcherSlot::<A>::new(actor, Arc::clone(&transport), slots, actor_registry, mailer_clone, mailbox_id);
+        let slot = DispatcherSlot::<A>::new(actor, transport, slots, actor_registry, mailbox_id);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this
@@ -295,21 +295,22 @@ where
         // installed, so the closure-side wake fired against an empty
         // `wake_slot`. Fire one wake here so a populated inbox enters the
         // ready queue. Mirrors the same fix `Spawner::spawn_actor`'s
-        // Pooled branch carries (issue 635 Phase 3).
-        let manual_wake = wake.clone();
+        // Pooled branch carries (issue 635 Phase 3). The chassis keeps this
+        // handle: its teardown wakes the slot once more to run its close.
+        let teardown_wake = wake.clone();
         wake_slot.set(Arc::new(move || {
             // Inbox-sender hook — same fire-and-forget shape as the
             // spawn.rs analogue: scheduler deduplicates the CAS, so the
             // bool is irrelevant here.
             let _ = wake.wake();
         }));
-        let _ = manual_wake.wake();
+        let _ = teardown_wake.wake();
         // ADR-0230: the boot claim published this capability's route, and
         // `init` and `wire` succeeded, so the actor is `Live` and its dispatcher
         // slot is installed. Record the reference the chassis handle's
         // `actor_ref` reads back.
         ctx.record_reference(Registry::activated::<A>(mailbox_id));
-        Ok(Box::new(PooledActorShutdown::<A> { slot: Some(slot) }) as Box<dyn DynShutdown>)
+        Ok(Box::new(PooledActorShutdown::<A> { slot, wake: teardown_wake }) as Box<dyn DynShutdown>)
     }
 
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
@@ -329,25 +330,33 @@ where
             BootState::Claimed { resources, .. } | BootState::Initialized { resources, .. } => {
                 ctx.withdraw_claim(resources.mailbox_id);
             }
-            // After `wire`, mail stamped with the id may already sit in a
-            // draining peer's inbox, so the route retires to `Dropped` and
-            // keeps the name that mail's sender still answers to (#6656).
-            BootState::Wired { resources, .. } => {
-                ctx.retire_claim(resources.mailbox_id);
+            // The actor wired, so it closes (ADR-0247 rule 5): the one close
+            // drains what peers' `wire` queued for it, runs its `unwire`, and
+            // ends its name. Its route has been `Live` since the claim, and
+            // mail stamped with the id may already sit in a peer's inbox, so
+            // the close tombstones the name and stages the route's
+            // retirement to `Dropped`; the record is never removed, so the
+            // name that mail's sender still answers to stays (#6656). It
+            // runs here, on the boot thread that ran the actor's `init` and
+            // `wire`: no dispatcher was ever handed this actor.
+            BootState::Wired { resources, actor } => {
+                let ClaimResources { transport, slots, .. } = resources;
+                close::<A>(actor, &transport, &slots, ctx.spawner_arc().actor_registry(), || transport.try_recv());
             }
         }
     }
 }
 
-/// Shutdown adapter for a `Pooled` [`NativeActor`] (issue 635 PR C).
-/// On chassis shutdown:
-/// 1. Sets the binding's `should_shutdown` flag so the next
-///    [`crate::scheduler::Drainable::run_cycle`] observes the
-///    signal and runs `unwire` + registry finalize.
-/// 2. Drops the slot Arc — the chassis-held strong ref. The pool
-///    worker's strong ref (via the ready queue) drops at end of the
-///    final cycle. The pool's `Drop` joins workers, so any in-flight
-///    cycle finishes before chassis shutdown returns.
+/// What the chassis keeps of a composed root once its dispatcher slot is
+/// installed: the slot's strong reference, and a wake for it.
+///
+/// A root is retained through teardown the way an instanced actor is, so
+/// teardown closes it the same way (ADR-0247 rule 5). Its `shutdown_dyn`
+/// tells the slot the engine is going, wakes it so a pool worker runs the one
+/// close sequence (residual drain, `unwire`, cost rows, held replies,
+/// registry tail), and waits for its close-done signal through the chassis's
+/// teardown gate. An idle root is woken like a busy one, so a root that
+/// received no mail still runs its `unwire`.
 ///
 /// Every actor drains on the pool (issue 635 Phase 3 made `Pooled` the
 /// default; issue 1187 removed the `Dedicated` opt-out), so this is the
@@ -356,22 +365,23 @@ struct PooledActorShutdown<A>
 where
     A: NativeActor,
 {
-    slot: Option<Arc<DispatcherSlot<A>>>,
+    slot: Arc<DispatcherSlot<A>>,
+    wake: WakeHandle,
 }
 
 impl<A> DynShutdown for PooledActorShutdown<A>
 where
     A: NativeActor,
 {
-    fn shutdown_dyn(mut self: Box<Self>) {
-        // Releasing the slot frees the binding and its inbox once no worker
-        // holds the slot: the inbox's drop settles what is queued or in
-        // the middle of being sent, a later send is refused at the relay,
-        // and subsequent wakes silently no-op via WakeHandle's Weak
-        // failing to upgrade.
-        if let Some(slot) = &self.slot {
-            slot.binding().signal_engine_teardown();
-        }
-        drop(self.slot.take());
+    fn shutdown_dyn(self: Box<Self>, gate: &TeardownGate<'_>) {
+        gate.close(&[ClosingSlot {
+            gate: format!("shutdown_root.close_done[{}]", A::NAMESPACE),
+            slot: &*self.slot,
+            wake: &self.wake,
+        }]);
+        // The closed slot is released as `self` drops, which frees the
+        // binding and its inbox once no worker holds the slot: the inbox's
+        // drop settles what arrived after the close, a later send is refused
+        // at the relay, and a later wake no-ops on its dead `Weak`.
     }
 }

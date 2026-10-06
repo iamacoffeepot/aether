@@ -92,12 +92,6 @@ impl HarnessDriver {
         self.render_slot.drain_available();
     }
 
-    /// Run the pumped slot's Closed-path teardown (`unwire` logs the triangle
-    /// count). Called before the `PassiveChassis` and the boot drop.
-    pub fn shutdown(&mut self) {
-        self.render_slot.shutdown();
-    }
-
     /// Drive the chassis event loop on the main thread. `Advance` runs the
     /// requested frames; `RenderMail` drains the pumped slot so a settled
     /// capture pre-mail is serviced while the loop is otherwise idle. After

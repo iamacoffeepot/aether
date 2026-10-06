@@ -8,7 +8,7 @@
 use super::support::DrivenTestChassis;
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
-use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, RunError};
+use crate::chassis::builder::{Builder, DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RunError};
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::registry::{MailDispatch, RouteContract};
 use crate::mail::{KindId, Mail, SourceAddr};
@@ -52,8 +52,8 @@ impl DriverCapability for SealProbeDriver {
 }
 
 impl DriverRunning for SealProbeRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
-        Ok(())
+    fn run(self: Box<Self>) -> (Result<(), RunError>, PumpedRoots) {
+        (Ok(()), PumpedRoots::none())
     }
 }
 

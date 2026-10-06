@@ -129,6 +129,17 @@ the loop exits. *Then* the chassis tears actors down, running each actor's
 graceful "everything still works" cleanup; `unwire` is the post-lifecycle "the
 world is going away" finaliser. The two aren't interchangeable.
 
+**Teardown closes actors in dependency order.** Every actor is closed, an idle one
+included: the chassis tells it the engine is going, wakes it, and waits for its
+close, which drains its inbox, runs `unwire`, and ends its name. The order is
+fixed. Instanced actors go first, loaded components among them. The chassis's
+composed capabilities follow in reverse boot order. The pumped capabilities a
+driver owns (`aether.window` and `aether.render` on the desktop chassis) go last,
+render before window, because the others depend on them. A departing actor's
+`MonitorNotice`, and what a component sends from `unwire` (a texture it destroys,
+say), is therefore on the inbox of a capability that is still open, and that
+capability's own close dispatches it.
+
 **The interrupt/stage split.** Key presses, mouse movement, and resizes are
 asynchronous *interrupts* — they arrive whenever the platform produces them, on
 the window actor's selector-aware streams. `Tick`, `Render`, and `Present` are

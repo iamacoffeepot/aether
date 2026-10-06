@@ -8,37 +8,42 @@
 //! actor outright. It is deliberately **not `Send`**: it lives and dies on
 //! the pumping thread.
 //!
-//! The per-envelope dispatch body and the Phase-4 registry close are the
-//! **same** free functions the pooled slot runs (`dispatch_envelope` and
-//! `finalize_close_and_fan_out`), so `describe`, trace hops, and
-//! `actor_cost` behave identically across the two homes — the drift a
-//! hand-rolled driver drain would accrue is structurally impossible.
+//! The per-envelope dispatch body and the close are the **same** free
+//! functions the pooled slot runs (`dispatch_envelope` and `close`), so
+//! `describe`, trace hops, and `actor_cost` behave identically across the two
+//! homes — the drift a hand-rolled driver drain would accrue is structurally
+//! impossible.
 //!
 //! [`PumpedSlot::drain_available`] drains every queued envelope; it is
 //! callable from any pump point on the owning thread.
 //! [`PumpedSlot::host_turn`] gives that thread bounded mutable host ingress
 //! under the actor's stamped context without draining queued mail.
-//! [`PumpedSlot::shutdown`] runs the pooled Closed path's phases in order:
-//! residual drain, `unwire` under `with_stamped`, cost-row drop
-//! (iamacoffeepot/aether#3051), and the registry close + parent-key release
-//! + monitor fan-out.
+//!
+//! A pumped slot closes by being dropped, and in no other way (ADR-0247
+//! rule 5). Its `Drop` hands the actor to the one close sequence on the
+//! pumping thread, so a slot cannot be freed without closing, and its owner
+//! cannot close it early by calling something: the only choice an owner has
+//! is when the slot drops. A chassis drops its pumped roots after its
+//! passives (ADR-0160 §3), because the pumped roots are the ones the others
+//! depend on.
 
 use core::marker::PhantomData;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::thread;
 
 use aether_actor::Single;
 use aether_actor::local::ActorSlots;
 
-use super::dispatcher::{dispatch_envelope, finalize_close_and_fan_out};
+use super::close::close;
+use super::dispatcher::dispatch_envelope;
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
-use crate::mail::{KindId, MailboxId, Source};
-use crate::runtime::effect_chain::{EffectChain, Uncaused};
+use crate::mail::{KindId, Source};
 
 /// The externally-pumped dispatch home for a native actor (ADR-0160 §1).
 /// See the [module docs](self) for how it relates to the pooled
@@ -48,9 +53,9 @@ where
     A: NativeActor,
 {
     /// The actor itself, owned outright — no mutex, because one pump thread
-    /// is the sole accessor. `Option` so [`Self::shutdown`] can take the box
-    /// out to run `unwire` on it and mark the slot spent (a second
-    /// `shutdown` / a post-shutdown `drain_available` is then a no-op).
+    /// is the sole accessor. `Option` only so the slot's `Drop` can move the
+    /// box into the close, which consumes it; it is `Some` for the whole of
+    /// the slot's life.
     actor: Option<Box<A::State>>,
     /// Per-actor binding (inbox + reply machinery + outbound buffer). The
     /// pump reaches the inbox through [`NativeBinding::try_recv`].
@@ -60,12 +65,9 @@ where
     /// slot's `Sync`-wrapped `PooledSlots`: a pumped slot is single-threaded,
     /// so the interior `RefCell` never races.
     slots: Box<ActorSlots>,
-    /// Chassis-level actor registry — drained + pruned by the Phase-4 close
-    /// on [`Self::shutdown`].
+    /// Chassis-level actor registry, which the close ends this actor's name
+    /// in.
     actor_registry: Arc<ActorRegistry>,
-    /// This slot's mailbox id — passed to the cost-table drop and the
-    /// registry close.
-    self_id: MailboxId,
     /// Envelopes [`Self::queued_kinds`] took off the inbox to read, in
     /// arrival order. Every dispatch takes from here before the inbox, so
     /// reading the queue never reorders it.
@@ -99,17 +101,8 @@ where
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         actor_registry: Arc<ActorRegistry>,
-        self_id: MailboxId,
     ) -> Self {
-        Self {
-            actor: Some(actor),
-            binding,
-            slots,
-            actor_registry,
-            self_id,
-            lookahead: VecDeque::new(),
-            _not_send: PhantomData,
-        }
+        Self { actor: Some(actor), binding, slots, actor_registry, lookahead: VecDeque::new(), _not_send: PhantomData }
     }
 
     /// Release the mail `wire` sent, held since before `wire` ran, once the
@@ -118,17 +111,10 @@ where
         self.binding.release_outbound_after_activation();
     }
 
-    /// Reject the mail `wire` sent when the boot fails after `wire` ran,
-    /// balancing its settlement.
-    pub(crate) fn discard_outbound_after_activation(&self) {
-        self.binding.discard_outbound_after_activation();
-    }
-
     /// Drain every envelope currently queued on the actor's inbox, running
     /// the shared `dispatch_envelope` body for each. Callable from any pump
     /// point on the owning thread (the desktop driver calls it in
-    /// `about_to_wait`). A no-op once [`Self::shutdown`] has consumed the
-    /// actor.
+    /// `about_to_wait`).
     pub fn drain_available(&mut self) {
         let Some(actor) = self.actor.as_mut() else {
             return;
@@ -140,8 +126,7 @@ where
 
     /// Dispatch the one envelope at the head of the actor's inbox, through
     /// the same `dispatch_envelope` body [`Self::drain_available`] runs, and
-    /// answer its kind; `None` when the inbox is empty or the slot has shut
-    /// down. A driver that must stop between two envelopes steps with this —
+    /// answer its kind; `None` when the inbox is empty. A driver that must stop between two envelopes steps with this —
     /// a test holding the component host after one reply's turn, before the
     /// work that turn staged comes back to it.
     pub fn dispatch_one(&mut self) -> Option<KindId> {
@@ -174,8 +159,7 @@ where
     /// self-mail; callers retain explicit control over pump ordering through
     /// [`Self::drain_available`].
     ///
-    /// Returns `None` without invoking `turn` once [`Self::shutdown`] has
-    /// consumed the actor.
+    /// Always answers `Some`: a slot holds its actor until it drops.
     // Issue 4158: the ctx is typed by `A`, so a host turn can stage a child
     // under the pumped actor — the desktop window cap's create path does.
     pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> R) -> Option<R> {
@@ -193,53 +177,46 @@ where
     /// state — the render driver reads its pending capture's deadline to set
     /// `ControlFlow::WaitUntil` — and this is the only such access it gets:
     /// `f` receives a shared `&A::State`, so no `&mut` escapes and everything
-    /// that mutates the actor still goes through a pumped handler. Returns
-    /// `None` once [`Self::shutdown`] has taken the actor out (the slot is
-    /// spent), otherwise `Some(f(&state))`.
+    /// that mutates the actor still goes through a pumped handler. Always
+    /// answers `Some(f(&state))`: a slot holds its actor until it drops.
     pub fn read_state<R>(&self, f: impl FnOnce(&A::State) -> R) -> Option<R> {
         self.actor.as_deref().map(f)
     }
+}
 
-    /// Run the pooled Closed path's teardown phases on the pumping thread,
-    /// in order: drain any residual inbox mail, run `A::unwire` under
-    /// `with_stamped` (the hook a hand-rolled driver drain never had), drop
-    /// the finalized mailbox's cost rows (iamacoffeepot/aether#3051), and
-    /// run the registry close + parent-key release + monitor fan-out.
-    /// Every caller is a chassis tearing the engine down, so the close
-    /// settles the held replies the actor still owes silently rather than
-    /// answering them (ADR-0243 §1). Idempotent — the actor is
-    /// taken out on the first call, so a second `shutdown` (or any later
-    /// `drain_available`) is a no-op.
-    pub fn shutdown(&mut self) {
-        let Some(mut actor) = self.actor.take() else {
+impl<A> Drop for PumpedSlot<A>
+where
+    A: NativeActor,
+{
+    /// Close the actor on the pumping thread: the slot's only close. It
+    /// marks the close as part of engine teardown, since whoever drops a
+    /// pumped root is taking its engine down, so the held replies the actor
+    /// still owes settle silently (ADR-0243 §1); then it hands the actor to
+    /// the one close sequence with the lookahead and then the inbox as its
+    /// residual mail.
+    ///
+    /// A slot that never went `Live` (its boot failed after `wire`) closes
+    /// the same way. Its outbound hold still stands, so the close discards
+    /// what `wire` and `unwire` sent.
+    ///
+    /// A slot dropped by a panic unwinding the pump thread runs no actor
+    /// code: a second panic there would abort the process and hide the
+    /// first. It settles the held-reply ledger silently, so a `Held` in the
+    /// actor's state drops without panicking as a lost reply. A crash is the
+    /// one exit the close does not cover.
+    fn drop(&mut self) {
+        let Some(actor) = self.actor.take() else {
             return;
         };
-        // Every caller is a chassis tearing the engine down, so the close
-        // tail settles held replies silently (ADR-0243 §1).
-        self.binding.signal_engine_teardown();
-        // Phase 2: drain residual inbox synchronously.
-        while let Some(env) = next_envelope(&mut self.lookahead, &self.binding) {
-            dispatch_envelope::<A>(&mut actor, &self.binding, &self.slots, env);
+        if thread::panicking() {
+            self.binding.settle_held_for_engine_teardown();
+            return;
         }
-        // Phase 3: the `unwire` hook, under this actor's stamped slots so any
-        // final `tracing::*` / `Local<T>` access resolves to its rings.
-        local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, None, None);
-            A::unwire(actor.as_mut(), &mut close_ctx);
-        });
-        // iamacoffeepot/aether#3051: the close hook is the last phase allowed
-        // to observe this actor's handler costs; drop its global rows now so
-        // native instance churn can't retain stale cells.
-        self.binding.mailer().cost_table().drop_mailbox(self.self_id);
-        // Phase 4: registry close + parent-key release + monitor fan-out.
-        finalize_close_and_fan_out(
-            &self.actor_registry,
-            &self.binding,
-            self.self_id,
-            EffectChain::Uncaused(Uncaused::CloseTail),
-        );
-        // `actor` drops here — the box was taken out of the `Option`, so the
-        // slot is now spent.
+
+        self.binding.signal_engine_teardown();
+        let binding = &self.binding;
+        let lookahead = &mut self.lookahead;
+        close::<A>(actor, binding, &self.slots, &self.actor_registry, || next_envelope(lookahead, binding));
     }
 }
 
@@ -295,8 +272,8 @@ mod tests {
         seq: u32,
     }
 
-    // A sentinel: no pumped test closes the actor while the engine keeps
-    // running, so no close answers a held `Pong` with it.
+    // A sentinel: a pumped slot only closes as part of engine teardown, so
+    // no close answers a held `Pong` with it.
     impl HeldReply for Pong {
         fn unanswered() -> Self {
             Self { seq: u32::MAX }
@@ -360,8 +337,8 @@ mod tests {
         /// Set by `on_ping` — proves the typed handler ran (not asserted
         /// directly, but keeps the handler `&mut self`).
         pings: u32,
-        /// When present, `unwire` flips it — the test 4 observable that
-        /// `shutdown` ran the close hook after the actor is gone.
+        /// When present, `unwire` flips it: the observable that dropping
+        /// the slot ran the close hook.
         unwired: Option<Arc<AtomicBool>>,
         /// When present, `on_defer` ships its retained inbound guard here so
         /// the test replies from a worker thread (test 5).
@@ -541,7 +518,7 @@ mod tests {
 
         let slots = Box::new(ActorSlots::new());
         seed_slots(&fx.mailer, self_id, &slots);
-        PumpedSlot::new(Box::new(actor), binding, slots, Arc::clone(&fx.actor_registry), self_id)
+        PumpedSlot::new(Box::new(actor), binding, slots, Arc::clone(&fx.actor_registry))
     }
 
     /// Register a `Component` inbox that discharges each armed reply and
@@ -653,16 +630,16 @@ mod tests {
         assert_eq!(row.samples, 2, "each pumped drain folds one handler-cost sample");
     }
 
-    /// ADR-0160 §1 (re-homes `window_inbox_drain_settles_root_on_guard_drop`):
-    /// `shutdown` runs the pooled Closed path's phases — it drains residual
-    /// inbox mail (settling its root), runs `unwire`, and drops the
-    /// finalized mailbox's cost rows — and is idempotent on a second call.
+    /// Catches a pumped slot that loses its `Drop`, or whose `Drop` runs only
+    /// part of the close: dropping the slot, with no other call, dispatches
+    /// the residual inbox mail (settling its root), runs `unwire`, drops the
+    /// mailbox's cost rows, and tombstones the name in the actor registry.
     #[test]
-    fn shutdown_runs_unwire_settles_residual_and_drops_cost() {
+    fn drop_runs_the_whole_close() {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0004);
         let unwired = Arc::new(AtomicBool::new(false));
-        let mut slot = boot_probe(
+        let slot = boot_probe(
             &fx,
             self_id,
             PumpProbe { unwired: Some(Arc::clone(&unwired)), ..Default::default() },
@@ -670,8 +647,8 @@ mod tests {
             None,
         );
 
-        // An armed residual mail queued but never handed to `drain_available`
-        // — `shutdown`'s residual drain must dispatch it and settle its root.
+        // An armed residual mail queued but never handed to `drain_available`:
+        // the close's residual drain must dispatch it and settle its root.
         let root = MailId::new(self_id, 1);
         let mail_id = MailId::new(self_id, 2);
         fx.mailer.record_sent_inflight(root);
@@ -679,26 +656,26 @@ mod tests {
         let bytes = Ping { seq: 5 }.encode_into_bytes();
         fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(Some(mail_id), Some(root), None));
 
-        slot.shutdown();
+        assert!(!fx.actor_registry.is_tombstoned(self_id), "the name is open until the slot drops");
 
-        assert!(unwired.load(Ordering::SeqCst), "shutdown ran the unwire hook");
-        settle.recv().expect("shutdown's residual drain settled the queued root");
+        drop(slot);
+
+        assert!(unwired.load(Ordering::SeqCst), "the drop ran the unwire hook");
+        settle.recv().expect("the close's residual drain settled the queued root");
         let CostTailResult::Ok { rows } = fx.mailer.cost_table().tail_at(self_id, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
-        assert!(rows.is_empty(), "shutdown dropped the finalized mailbox's cost rows");
-
-        // Idempotent: the actor was consumed on the first call.
-        slot.shutdown();
+        assert!(rows.is_empty(), "the close dropped the mailbox's cost rows");
+        assert!(fx.actor_registry.is_tombstoned(self_id), "the close's registry tail tombstoned the name");
     }
 
-    /// Catches a pumped shutdown, which only a chassis teardown runs, that
+    /// Catches a pumped close, which only an engine teardown runs, that
     /// answers a held reply every requester is closing too late to read, and
     /// a close tail that drops actor state before settling the ledger (the
     /// `Held` kept in state would then find its entry still held and panic
     /// as a lost reply).
     #[test]
-    fn shutdown_settles_a_held_reply_silently() {
+    fn drop_settles_a_held_reply_silently() {
         let fx = fixtures();
         let counter = Arc::clone(fx.mailer.trace_handle().settlement_counter());
         let self_id = MailboxId(0x_0DED_0012);
@@ -717,12 +694,11 @@ mod tests {
         slot.drain_available();
         assert_eq!(counter.held_open(root), 1, "the Held kept in state holds the caller's chain open");
 
-        slot.shutdown();
-        assert_eq!(counter.held_open(root), 0, "shutdown released the held reply's hold");
-        assert!(
-            reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "an engine-teardown shutdown sends no answer for the held reply"
-        );
+        drop(slot);
+        assert_eq!(counter.held_open(root), 0, "the close released the held reply's hold");
+        // A reply routes synchronously into the caller's inbox handler, so
+        // one the close sent would already be here.
+        assert!(reply_rx.try_recv().is_err(), "an engine-teardown close sends no answer for the held reply");
     }
 
     /// Catches an untaken-reply check that runs before the handler, reads
@@ -978,10 +954,9 @@ mod tests {
 
     /// ADR-0164 §3: host ingress never hides a recursive pump. Self-mail is
     /// flushed to the slot's inbox when the context drops, but state does not
-    /// observe it until the owner explicitly drains. A spent slot rejects the
-    /// turn without invoking its closure.
+    /// observe it until the owner explicitly drains.
     #[test]
-    fn host_turn_queues_self_mail_until_drain_and_stops_after_shutdown() {
+    fn host_turn_queues_self_mail_until_drain() {
         let fx = fixtures();
         let self_id = MailboxId(0x_0DED_0011);
         let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
@@ -1002,11 +977,6 @@ mod tests {
         );
         slot.drain_available();
         assert_eq!(slot.read_state(|state| state.pings), Some(11), "the explicit drain dispatches queued self-mail");
-
-        slot.shutdown();
-        let mut invoked = false;
-        assert!(slot.host_turn(|_, _| invoked = true).is_none(), "a spent slot rejects host ingress");
-        assert!(!invoked, "the rejected host-turn closure was not invoked");
     }
 
     /// ADR-0161 §Decision 2: `await_settlement_pumped` returns `Settled` when

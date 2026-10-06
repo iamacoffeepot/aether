@@ -464,16 +464,21 @@ impl NativeBinding {
     /// dispatches still process incoming mail, but
     /// `should_shutdown` reports `true` so the trampoline can drain
     /// the inbox synchronously, run `unwire`, and exit. Idempotent.
+    ///
+    /// `SeqCst`: the teardown walk stores this flag and then wakes the slot,
+    /// while a pooled slot draining to empty parks `Idle` and then reads the
+    /// flag again. Both sides sit in the one total order the slot's state
+    /// machine uses, so the wake and the re-read cannot both miss.
     pub(crate) fn signal_shutdown(&self) {
-        self.shutdown_flag.store(true, Ordering::Release);
+        self.shutdown_flag.store(true, Ordering::SeqCst);
     }
 
     /// The chassis teardown's shutdown signal: mark this actor's close as
     /// part of engine teardown, then [`Self::signal_shutdown`]. Its close
     /// tail then settles the held replies it still owes silently, because
     /// every requester is closing with the engine (ADR-0243 §1). Only the
-    /// teardown walks call it: `Spawner::shutdown_instanced`, the root
-    /// shutdown, and `PumpedSlot::shutdown`. Idempotent.
+    /// teardown exits call it: the walk over instanced actors and composed
+    /// roots, and a pumped slot's drop. Idempotent.
     pub(crate) fn signal_engine_teardown(&self) {
         self.engine_teardown.store(true, Ordering::Release);
         self.signal_shutdown();
@@ -511,7 +516,7 @@ impl NativeBinding {
     /// setting this flag, so the trampoline takes either signal as a
     /// trigger to wind down.
     pub(crate) fn should_shutdown(&self) -> bool {
-        self.shutdown_flag.load(Ordering::Acquire)
+        self.shutdown_flag.load(Ordering::SeqCst)
     }
 
     /// The scheduler slots' non-blocking drain: take the next queued

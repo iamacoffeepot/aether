@@ -41,7 +41,7 @@ pub use aether_kinds::{DropComponent, DropResult, LoadResult};
 use aether_substrate::actor::native::ctx::GuestHost;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
-    Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, TaskDone,
+    Dispatch, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, TaskDone,
 };
 pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::Component;
@@ -140,6 +140,7 @@ impl NativeActor for WasmTrampoline {
             config: config.config,
             module: config.module,
             modules: config.modules,
+            drops: Vec::new(),
         })
     }
 
@@ -169,28 +170,43 @@ impl NativeActor for WasmTrampoline {
         }
     }
 
-    /// The close hook: answer each reply the guest still holds with the
-    /// `unanswered` value it registered (ADR-0243 §6), before the
-    /// trampoline's state, and the guest with it, drops. A prepared
-    /// candidate is discarded without re-wiring the kept guest. Engine
-    /// teardown answers nothing, and a guest a `DropComponent` released
-    /// already answered. No guest code runs, the guest's own `unwire`
-    /// export included.
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        state.answer_held_at_close();
+    /// The close hook: release the guest (ADR-0241 §8, ADR-0247 rule 5). A
+    /// live guest runs its own `unwire` export, has each reply it still
+    /// holds answered with the `unanswered` value it registered (ADR-0243
+    /// §6), and is dropped. Every close of the trampoline runs this: a
+    /// `DropComponent`, an engine teardown, and a birth cancelled after
+    /// `wire`. Engine teardown answers nothing for the guest, and a prepared
+    /// candidate is discarded without wiring or unwiring the kept guest
+    /// again. A drop request the close was asked for is answered here, once
+    /// the guest is released (see `WasmTrampolineState::close_guest`).
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        state.close_guest(ctx);
     }
 
-    /// Close this instance (ADR-0241 §8). Releases the guest, which runs its
-    /// `unwire` pre-shutdown hook and drops the `Component`, then shuts the
-    /// trampoline down. The close tail tombstones the name, retires its route
-    /// to `Dropped`, and sends each watcher of the mailbox and of its
-    /// inline-child aliases a `MonitorNotice`. A later load of the name is
-    /// refused as retired, and nothing refills it.
+    /// Ask this instance to close (ADR-0241 §8). The request shuts the
+    /// trampoline down and holds its answer; the close that follows the
+    /// handler drains the mail still queued to the guest, releases the guest
+    /// through [`Self::unwire`], which answers this request `Ok`, and then
+    /// tombstones the name, retires its route to `Dropped`, and sends each
+    /// watcher of the mailbox and of its inline-child aliases a
+    /// `MonitorNotice`. A later load of the name is refused as retired, and
+    /// nothing refills it.
+    ///
+    /// `DropResult::Ok` therefore means what it always has: the guest ran
+    /// its `unwire`, its held replies are answered, and its mailbox accepts
+    /// nothing. The guest's `unwire` runs in the close, with no mail in
+    /// flight, so what it sends starts its own chains; those sends are on
+    /// their recipients' inboxes before this request is answered.
     #[handler::request]
-    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
-        state.release_guest(ctx);
+    fn on_drop_component(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        _payload: DropComponent,
+    ) -> Pending<DropResult> {
+        let (pending, held) = ctx.hold::<DropResult>();
+        state.drops.push(held);
         ctx.shutdown();
-        DropResult::Ok
+        pending
     }
 
     /// Answer the requester of the load that produced this trampoline, in the
@@ -288,6 +304,9 @@ impl NativeActor for WasmTrampoline {
         match &mut state.slot {
             Slot::Live(component) => WasmTrampolineState::deliver_to_guest(ctx, component, env),
             Slot::Prepared(prepared) => prepared.gated.push_back(ctx.take_inbound()),
+            // The slot is empty only inside the close, after the residual
+            // drain, so no mail is forwarded to it; the arm keeps the match
+            // honest.
             Slot::Released => tracing::warn!(
                 target: "aether_component",
                 actor = %ctx.path(),

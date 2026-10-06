@@ -276,7 +276,8 @@ impl RenderCapabilityState {
     /// report (ADR-0161). The pumped runtime owns `triangles_rendered` as
     /// plain state, so the driver reads it through
     /// [`PumpedSlot::read_state`](aether_substrate::actor::native::PumpedSlot::read_state)
-    /// before `shutdown` consumes the actor; `unwire` logs the same count.
+    /// before the slot drops and closes the actor; `unwire` logs the same
+    /// count.
     #[must_use]
     pub fn triangles_rendered(&self) -> u64 {
         self.triangles_rendered

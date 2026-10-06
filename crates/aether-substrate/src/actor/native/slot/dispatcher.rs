@@ -21,9 +21,8 @@
 //!      no race; worker drops the slot Arc.
 //!    - [`CycleResult::Requeue`] — budget hit (state `Ready`) or
 //!      post-empty recheck won the requeue CAS; worker re-pushes.
-//!    - [`CycleResult::Closed`] — shutdown observed; the slot ran the
-//!      post-shutdown drain + `unwire` hook + registry finalize
-//!      sequence and is done forever.
+//!    - [`CycleResult::Closed`] — shutdown observed; the slot handed its
+//!      actor to the one [`close`] sequence and is done forever.
 //!
 //! ## Sole dispatch path
 //!
@@ -90,22 +89,20 @@ impl Deref for PooledSlots {
     }
 }
 
-use crate::actor::monitor::{notify_alias_departures, notify_departure};
+use super::close::close;
 use crate::actor::native::NativeActor;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::actor::registry::ActorRegistry;
-use crate::mail::mailer::Mailer;
-use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
-use crate::mail::{MailId, MailboxId, Source};
-use crate::runtime::effect_chain::{EffectChain, Uncaused};
+use crate::mail::{MailId, MailboxId};
+use crate::runtime::effect_chain::EffectChain;
 use crate::scheduler::{
     BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, cascade_note_mail, time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
-/// `Pooled` actor; held strongly by the chassis (so `unwire` and
-/// registry finalize run when the cap shuts down) and weakly by the
+/// `Pooled` actor; held strongly by the chassis (which signals, wakes, and
+/// awaits its close at teardown) and weakly by the
 /// pool's [`crate::scheduler::WakeHandle`] (so a wake after the cap
 /// is gone silently no-ops). A spawned instanced actor's strong
 /// reference is its spawner's entry, which the slot's own close cycle
@@ -124,8 +121,8 @@ where
     /// reach the slot — e.g. a recheck-window dispatch racing a fresh
     /// `seize_and_run` — serialize here rather than relying on
     /// [`SlotState`] alone, which is the scheduling filter above it.
-    /// `Option` so the `Closed` finalize path can take the box and run
-    /// `unwire` on the consumed actor.
+    /// `Option` so an exit can take the box and hand it to [`close`], which
+    /// consumes it.
     actor: Mutex<Option<Box<A::State>>>,
     /// Per-actor binding (inbox + shutdown flag + reply machinery).
     binding: Arc<NativeBinding>,
@@ -133,25 +130,22 @@ where
     /// envelope dispatch. Wrapped in [`PooledSlots`] for the `Sync`
     /// safety story — see that type's doc-comment.
     slots: PooledSlots,
-    /// Chassis-level actor registry. Used by [`Self::finalize_registry`]
-    /// to drain `monitors_of[id]` and prune `monitoring[id]` from each
-    /// target on shutdown.
+    /// Chassis-level actor registry, which [`close`] ends this actor's name
+    /// in.
     actor_registry: Arc<ActorRegistry>,
-    /// Mailer used to dispatch [`aether_kinds::MonitorNotice`] mail to
-    /// any watchers when the slot finalizes.
-    mailer: Arc<Mailer>,
-    /// This slot's mailbox id — passed to `actor_registry.close_actor`.
+    /// This slot's mailbox id, which names the spawner entry the close
+    /// cycle gives up.
     self_id: MailboxId,
     /// Static label for tracing / fairness logs. Today this is the
     /// actor's `NAMESPACE`.
     label: &'static str,
     /// Issue 714: one-shot completion sender installed by
-    /// [`crate::actor::native::spawn::Spawner::shutdown_instanced`].
+    /// the chassis teardown walk (`Spawner::shutdown_instanced` for an
+    /// instanced actor, the root's own shutdown for a composed one).
     /// Fired exactly once after the `Closed` branch of [`Self::run_cycle`]
-    /// finishes its `unwire` + registry-close + `actor_guard.take()`
-    /// sequence. The Spawner waits on the matching receiver via
-    /// `recv_timeout` so chassis teardown settles deterministically
-    /// without a 2 ms polling loop. `Mutex<Option<_>>` so the slot can
+    /// has run [`close`]. The walk waits on the matching receiver, so
+    /// chassis teardown settles deterministically without a 2 ms polling
+    /// loop. `Mutex<Option<_>>` so the slot can
     /// take + send without holding the lock across the actor mutex.
     close_done_tx: Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
@@ -160,14 +154,24 @@ impl<A> Drop for DispatcherSlot<A>
 where
     A: NativeActor,
 {
-    /// A slot dropped with its actor still in it never ran its close cycle:
-    /// the chassis teardown drops a root actor's last strong reference after
-    /// flagging shutdown, with nothing left to wake it. That is the actor
-    /// closing as part of engine teardown, so its ledger settles the held
-    /// replies and staged tasks silently first (ADR-0243 §1, §9), and a
-    /// `Held` or unstarted task in the actor's state then drops silently
-    /// with it, as the close tail would have it. No close hook runs here. A
-    /// slot whose close cycle ran finds the ledger already emptied.
+    /// The last resort for a slot freed with its actor still in it. Every
+    /// exit the engine takes hands the actor to [`close`] on a pool worker
+    /// first, and a slot that did so finds its ledger already emptied here.
+    /// One freed around its close is left only by an exit the engine did not
+    /// take: a worker that unwound mid-turn, or a pool that stopped with the
+    /// slot's close cycle still queued.
+    ///
+    /// The close does not run here. Actor-authored code runs at the actor's
+    /// execution home (ADR-0165), and this runs on whichever thread frees the
+    /// slot. What does run is the silent settlement of the held replies and
+    /// staged tasks (ADR-0243 §1, §9), so a `Held` or an unstarted task in
+    /// the actor's state then drops silently with it and never panics as a
+    /// lost reply.
+    ///
+    /// It writes no log line. A pool worker's thread-local deque can hold
+    /// the last reference to a slot, so this can run inside a thread-local
+    /// destructor at thread exit, where a log event reaches thread-local
+    /// state that is already gone and aborts the process.
     fn drop(&mut self) {
         self.binding.settle_held_for_engine_teardown();
     }
@@ -183,21 +187,11 @@ where
         &self.state
     }
 
-    /// Borrow this slot's [`NativeBinding`]. The chassis-cap shutdown
-    /// path uses this to call [`NativeBinding::signal_shutdown`] when
-    /// the cap is going down — the next call into [`Self::run_cycle`]
-    /// observes the flag and runs the `unwire` + registry finalize
-    /// sequence.
-    pub(crate) fn binding(&self) -> &Arc<NativeBinding> {
-        &self.binding
-    }
-
     pub(crate) fn new(
         actor: Box<A::State>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         actor_registry: Arc<ActorRegistry>,
-        mailer: Arc<Mailer>,
         self_id: MailboxId,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -206,7 +200,6 @@ where
             binding,
             slots: PooledSlots(slots),
             actor_registry,
-            mailer,
             self_id,
             label: A::NAMESPACE,
             close_done_tx: Mutex::new(None),
@@ -236,23 +229,28 @@ where
         drop(actor_guard);
     }
 
-    /// Cancel a wired-but-not-live activation at the same execution home.
+    /// Cancel a wired-but-not-live activation at the same execution home:
+    /// the actor wired, so it closes. Its route still reads `Starting`, so
+    /// [`close`] ends no name, and the activation hold still stands, so
+    /// nothing `wire` or `unwire` sent leaves.
     pub(crate) fn cancel_activation(&self) {
-        let mut actor = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(actor) = actor.as_mut() {
-            self.run_close_hook(actor);
+        let mut actor_guard = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(actor) = actor_guard.take() {
+            self.close_here(actor);
         }
-        // A cancelled activation never reaches the close tail, so it answers
-        // the held replies itself before the actor's state drops.
-        self.binding.answer_held_for_actor_close();
-        actor.take();
-        drop(actor);
+        drop(actor_guard);
         self.state.mark_idle();
+    }
+
+    /// Hand `actor` to the one [`close`] sequence, with this slot's inbox as
+    /// its residual mail.
+    fn close_here(&self, actor: Box<A::State>) {
+        close::<A>(actor, &self.binding, &self.slots, &self.actor_registry, || self.binding.try_recv());
     }
 
     /// Issue 714: fire the installed one-shot completion sender if any.
     /// Called once from the `Closed` branch of [`Self::run_cycle`] after
-    /// `unwire` + registry close + `actor_guard.take()` have run. Take +
+    /// [`close`] has run. Take +
     /// `try_send`: bounded(1) guarantees the receiver only sees the
     /// first send; subsequent calls (idempotent — there should never be
     /// any) are no-ops. Done outside the actor mutex.
@@ -287,33 +285,6 @@ where
     /// that can drift.
     fn dispatch_one(&self, actor: &mut Box<A::State>, env: Envelope) {
         dispatch_envelope::<A>(actor, &self.binding, &self.slots, env);
-    }
-
-    /// The close hook in the slot teardown sequence. Wraps `actor.unwire`
-    /// in `with_stamped` so any final tracing or `Local<T>` access from
-    /// the close hook resolves to this actor's slots.
-    fn run_close_hook(&self, actor: &mut Box<A::State>) {
-        local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, None, None);
-            A::unwire(actor.as_mut(), &mut close_ctx);
-        });
-    }
-
-    /// Phase 4 — a one-line delegation to the shared
-    /// [`finalize_close_and_fan_out`] free function (drain
-    /// `monitors_of[self_id]`, prune `monitoring[id]` from each target,
-    /// mark Dead, release the parent-local live child key, fan
-    /// `MonitorNotice` mail out via the chassis mailer), the close tail
-    /// both this slot and
-    /// [`PumpedSlot`](super::pumped::PumpedSlot) run
-    /// (ADR-0160 §1).
-    fn finalize_registry(&self) {
-        finalize_close_and_fan_out(
-            &self.actor_registry,
-            &self.binding,
-            self.self_id,
-            EffectChain::Uncaused(Uncaused::CloseTail),
-        );
     }
 
     /// Shared drain tail for [`Drainable::run_cycle`] (no seed) and
@@ -399,23 +370,14 @@ where
         }
 
         if shutdown_observed {
-            // Phase 2: drain residual inbox synchronously.
-            while let Some(env) = self.binding.try_recv() {
-                self.dispatch_one(actor, env);
+            // The actor leaves the guard and is consumed by the one close:
+            // residual drain, `unwire`, cost rows, held replies, registry
+            // tail.
+            if let Some(actor) = actor_guard.take() {
+                self.close_here(actor);
             }
-            // Phase 3: unwire hook.
-            self.run_close_hook(actor);
-            // iamacoffeepot/aether#3051: the close hook is the last actor
-            // lifecycle phase allowed to observe its handler costs. Once it
-            // returns, remove the finalized mailbox's global rows so native
-            // instance churn cannot retain stale cells.
-            self.mailer.cost_table().drop_mailbox(self.self_id);
-            // Phase 4: registry close + parent-key release + monitor fan-out.
-            self.finalize_registry();
-            actor_guard.take();
             // Drop the actor mutex before signalling so the waiter (the
-            // chassis-teardown thread in `Spawner::shutdown_instanced`)
-            // wakes onto an unlocked slot.
+            // chassis-teardown thread) wakes onto an unlocked slot.
             drop(actor_guard);
             self.state.mark_idle();
             // Issue #7402: the spawner gives the slot up here, after the
@@ -449,21 +411,26 @@ where
         //     wins; they push the slot to the ready queue. Our CAS
         //     `Idle → Ready` fails (state is `Ready` now). The slot
         //     is already requeued — we return `Idle`.
+        //
+        // A shutdown signal races this cycle the same way and carries no
+        // mail: the teardown walk sets the flag and then wakes, and a wake
+        // that finds the slot `Running` does nothing. If the flag landed
+        // after this cycle's last look at it, the cycle would park `Idle`
+        // with its close never run and the walk waiting on it. So the flag
+        // is read again after `mark_idle`, in the same total order as the
+        // wake's CAS: either the wake saw `Idle` and queued the slot, or
+        // this read sees the flag and requeues it.
         debug_assert!(inbox_empty);
         self.state.mark_idle();
-        // match arms read clearer than `map_or_else(|| ..., |env| ...)` here
-        // because the Some arm runs multi-line side effects.
-        #[allow(clippy::option_if_let_else)]
-        match self.binding.try_recv() {
-            Some(env) => {
-                self.dispatch_one(actor, env);
-                if self.state.try_self_requeue() {
-                    CycleResult::Requeue
-                } else {
-                    CycleResult::Idle
-                }
-            }
-            None => CycleResult::Idle,
+        if let Some(env) = self.binding.try_recv() {
+            self.dispatch_one(actor, env);
+        } else if !self.binding.should_shutdown() {
+            return CycleResult::Idle;
+        }
+        if self.state.try_self_requeue() {
+            CycleResult::Requeue
+        } else {
+            CycleResult::Idle
         }
     }
 }
@@ -506,10 +473,9 @@ where
     /// Issue 685: chassis-teardown signal. Forwards to the binding's
     /// `signal_engine_teardown`, so the close settles held replies silently
     /// (ADR-0243 §1), and the next [`Self::run_cycle`] observes
-    /// `should_shutdown` at the top of its drain loop and runs the
-    /// close path (phases 2-4 already implemented). Spawner walks
-    /// every instanced slot at chassis teardown and calls this before
-    /// firing a wake.
+    /// `should_shutdown` at the top of its drain loop and runs
+    /// [`close`]. The chassis teardown walk calls this on every instanced
+    /// slot and every composed root before firing a wake.
     fn signal_engine_teardown(&self) {
         self.binding.signal_engine_teardown();
     }
@@ -705,66 +671,4 @@ where
         binding.mailer().record_finished(mail_id, root);
         env.discharge();
     }
-}
-
-/// The Phase 4 close tail both the pooled [`DispatcherSlot`] and the
-/// externally-pumped
-/// [`PumpedSlot`](super::pumped::PumpedSlot) run
-/// (ADR-0160 §1): answer each held reply still in the binding's ledger with
-/// its `R::unanswered()` and then release its hold, or, when the actor closes
-/// as part of engine teardown, settle them silently (ADR-0243 §1), then drain `monitors_of[self_id]`, prune `monitoring[id]`
-/// from each target, mark the slot Dead, retire the route to `Dropped`,
-/// release this actor's parent-local live child key, and fan one
-/// [`MonitorNotice`](aether_kinds::MonitorNotice) out to every watcher via
-/// the binding's mailer. A free function for the same reason as
-/// [`dispatch_envelope`]: one home, no drift.
-///
-/// The actor registry's tombstone is the synchronous authority spawn
-/// admission and `register_monitor` read. The route's `Dropped` record is
-/// its published mirror for route readers — `resolve_live` refuses it and
-/// the live inventory drops it — staged through the ADR-0165 owner, so it
-/// lands at the owner's next apply. The route keeps its proven name, so a
-/// held reference still names its path, and the name is never registered
-/// again (ADR-0079 §7). An owner that closed first is chassis shutdown, and
-/// the logged sink stays quiet about it.
-///
-/// The closing actor's inline-child aliases (ADR-0114 §2) depart with it, so
-/// each of those addresses fans out under its own name too — see
-/// `notify_alias_departures`. Each alias closes with it and tombstones
-/// (ADR-0241 §8), so a watch on it is refused and its key is never spawned
-/// again; only `self_id` goes `Dead`, because an alias is served by this slot
-/// rather than owning one. An alias resolves through its target, so its route
-/// reads `Dropped` with it.
-///
-/// The key release sits between the registry close and the fan-out on
-/// purpose. A watcher that re-stages the dead child's subname the moment its
-/// notice lands then finds the key already free and the id already
-/// tombstoned, so owner-time activation answers `SubnameRetired` — the
-/// authoritative reason (ADR-0165) — rather than a stale parent-local
-/// `SubnameInUse`.
-///
-/// `chain` is the caller's ADR-0168 §3 declaration. Both callers reach this
-/// after the closing chain has recorded `Finished`, so the only honest answer
-/// is [`Uncaused::CloseTail`] — the registry close and the `MonitorNotice`
-/// fan-out are outside settlement, and no consumer can wait for either. That
-/// is a property of the close tail, not a gap to be repaired here; taking the
-/// declaration as an argument is what stops the next reader from having to
-/// re-derive which of the two it is.
-pub fn finalize_close_and_fan_out(
-    actor_registry: &ActorRegistry,
-    binding: &NativeBinding,
-    self_id: MailboxId,
-    chain: EffectChain,
-) {
-    debug_assert!(chain.held_root().is_none(), "the close tail runs past its chain's Finished, so it can hold nothing");
-    if binding.is_engine_teardown() {
-        binding.settle_held_for_engine_teardown();
-    } else {
-        binding.answer_held_for_actor_close();
-    }
-    let watchers = actor_registry.close_actor(self_id);
-    binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
-    binding.release_parent_child_reservation();
-    notify_departure(binding, self_id, watchers);
-    notify_alias_departures(actor_registry, binding, self_id);
 }

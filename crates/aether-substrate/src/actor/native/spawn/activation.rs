@@ -572,14 +572,8 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             guest: _,
             wire_root,
         } = prepared;
-        let slot = DispatcherSlot::new(
-            Box::new(state),
-            Arc::clone(&binding),
-            slots,
-            Arc::clone(spawner.actor_registry()),
-            Arc::clone(spawner.mailer()),
-            id,
-        );
+        let slot =
+            DispatcherSlot::new(Box::new(state), Arc::clone(&binding), slots, Arc::clone(spawner.actor_registry()), id);
         binding.hold_outbound_for_activation();
         slot.wire_activation(chain, wire_root.as_ref().map(WireRoot::root));
 
@@ -588,8 +582,9 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 
     fn cancel_here(self) {
         let finalizer = self.finalizer.as_ref().map(Arc::clone);
+        // The actor wired, so it closes: the one close runs `unwire` and
+        // discards everything `wire` and `unwire` sent behind the hold.
         self.slot.cancel_activation();
-        self.binding.discard_outbound_after_activation();
         // Every counted `wire` send is balanced now, so the wire root's hold
         // goes before the rejection reaches the staging caller: its chain
         // then settles after the wire root, as a discarded birth's does.

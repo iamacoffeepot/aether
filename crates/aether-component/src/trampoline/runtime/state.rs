@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::mem;
 use std::sync::Arc;
 
-use aether_kinds::ComponentCapabilities;
+use aether_kinds::{ComponentCapabilities, DropResult};
 use aether_substrate::InboundMail;
-use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::native::envelope::Envelope;
+use aether_substrate::actor::native::{Held, NativeCtx};
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::MailId;
@@ -18,8 +18,8 @@ use crate::trampoline::WasmTrampoline;
 /// split — the addressing identity is the distinct ZST
 /// [`WasmTrampoline`]). Holds the wasm guest in a `Slot`: live, prepared
 /// beside a candidate during a republish (ADR-0241 §7), or released. A
-/// `DropComponent` releases the guest and closes the trampoline, so its name
-/// tombstones (ADR-0241 §8).
+/// `DropComponent` closes the trampoline, whose close releases the guest, so
+/// its name tombstones (ADR-0241 §8).
 ///
 /// Its fields are crate-private, so no crate outside `aether-component` can
 /// build one to hand [`NativeCtx::sync_guest`].
@@ -55,6 +55,11 @@ pub struct WasmTrampolineState {
     /// here, so a replacement already live anywhere in the engine is not
     /// compiled again.
     pub(crate) modules: ModuleCache,
+    /// The drop requests this instance owes an answer. The close answers
+    /// each `Ok` once the guest is released, so a requester that reads
+    /// `DropResult::Ok` reads a released guest. More than one stands when a
+    /// second drop was forwarded before the first one's close ran.
+    pub(crate) drops: Vec<Held<DropResult>>,
 }
 
 /// Where the trampoline's guest stands (ADR-0241 §7).
@@ -66,7 +71,8 @@ pub enum Slot {
     /// installs the candidate or an abort reinstates it and hands that state
     /// back.
     Prepared(Box<PreparedSlot>),
-    /// The guest is released; mail to the trampoline warn-drops.
+    /// No guest is resident: the transient a republish step holds while it
+    /// moves a guest, and the state the trampoline's close leaves.
     Released,
 }
 
@@ -187,31 +193,6 @@ impl WasmTrampolineState {
         self.release_gated(ctx, gated);
     }
 
-    /// Answer the replies the guest still holds as its trampoline closes
-    /// (ADR-0243 §6), each with the `unanswered` value the guest registered.
-    /// No guest code runs: the guest's own `unwire` export does not, and a
-    /// prepared candidate is discarded without an abort, which would wire
-    /// the kept guest again and deliver its gated mail inside the close.
-    /// Instead the candidate's held outbox is discarded, which restores any
-    /// slot a held answer reserved, and the reply table it took over moves
-    /// back to the kept guest; the gated mail drops, and each chain settles
-    /// as it does. Engine teardown answers nothing. A guest already released
-    /// answered at its release.
-    pub(crate) fn answer_held_at_close(&mut self) {
-        self.slot = match mem::replace(&mut self.slot, Slot::Released) {
-            Slot::Prepared(prepared) => {
-                let PreparedSlot { mut old, mut candidate, .. } = *prepared;
-                candidate.discard_held_outbox();
-                old.resume_replies(candidate.take_pending_replies());
-                Slot::Live(Box::new(old))
-            }
-            other => other,
-        };
-        if let Slot::Live(component) = &mut self.slot {
-            component.answer_held_at_close();
-        }
-    }
-
     /// Deliver the mail a prepared slot's gate queued, in arrival order, to
     /// the guest now live. Each mail's chain closes once it is delivered.
     pub(crate) fn release_gated(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>, gated: VecDeque<InboundMail>) {
@@ -223,42 +204,59 @@ impl WasmTrampolineState {
         }
     }
 
-    /// Release the **wasm guest**: run its `unwire` pre-shutdown hook, answer
-    /// each reply it still holds with its registered `unanswered` value
-    /// (ADR-0243 §6), drop the `Component`, and sync the now-empty slot, so
-    /// the accept set clears and only the framework cost cells stay. A
-    /// prepared candidate is discarded first and the kept guest reinstated,
-    /// so the guest released is the one that ran. The caller, a
-    /// `DropComponent`, then closes the trampoline.
-    pub fn release_guest(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
-        if matches!(self.slot, Slot::Prepared(_)) {
-            self.abort(ctx);
+    /// Release the **wasm guest** as its trampoline closes: the one way a
+    /// guest leaves its slot for good, whichever exit closes the trampoline
+    /// (ADR-0247 rule 5).
+    ///
+    /// A live guest runs its `unwire` pre-shutdown hook, the single one
+    /// (ADR-0079 amended), and then each reply it still holds is answered
+    /// with the `unanswered` value it registered (ADR-0243 §6): closing
+    /// saves no guest state, so no ticket survives to answer a held slot.
+    /// The answers come after `unwire`, which may still answer handles
+    /// itself (#6409). Engine teardown answers nothing. The `Component` then
+    /// drops, tearing down linear memory.
+    ///
+    /// A prepared slot discards its candidate, which restores any slot a
+    /// held answer reserved, moves the reply table the candidate took over
+    /// back to the kept guest, and answers from there. The kept guest is not
+    /// wired again and its `unwire` does not run again: it ran `unwire` at
+    /// prepare (ADR-0241 §7), and an abort here would wire it and deliver
+    /// its gated mail inside the close. The gated mail drops, and each chain
+    /// settles as it does.
+    ///
+    /// A trap in the guest's `unwire` is logged where it is caught and the
+    /// close goes on, so the held replies still settle and the name still
+    /// ends.
+    ///
+    /// Then the now-empty slot is synced, so the accept set clears
+    /// (iamacoffeepot/aether#1037) and the released guest's cost cells leave
+    /// the global table and the per-actor cache together
+    /// (iamacoffeepot/aether#1128): the close runs on the trampoline's own
+    /// thread inside `with_stamped`.
+    ///
+    /// Last, each drop request that asked for this close is answered `Ok`.
+    /// The answer comes after everything above, so it still means the guest
+    /// is released, as it did when the drop handler released the guest
+    /// itself.
+    pub(crate) fn close_guest(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
+        match mem::replace(&mut self.slot, Slot::Released) {
+            Slot::Live(mut component) => {
+                component.unwire();
+                component.answer_held_at_close();
+            }
+            Slot::Prepared(prepared) => {
+                let PreparedSlot { mut old, mut candidate, .. } = *prepared;
+                candidate.discard_held_outbox();
+                old.resume_replies(candidate.take_pending_replies());
+                old.answer_held_at_close();
+            }
+            Slot::Released => {}
         }
-        if let Slot::Live(mut component) = mem::replace(&mut self.slot, Slot::Released) {
-            // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
-            // single pre-shutdown hook — the legacy `on_drop`
-            // retired alongside `WasmActor::on_drop`. Component
-            // drops at end of scope, tearing down linear memory.
-            component.unwire();
-            // #6409: after `unwire`, which may still answer handles.
-            // ADR-0243 §6: releasing saves no guest state, so no ticket
-            // survives to answer a held slot; each requester receives the
-            // `unanswered` value its guest registered when it held.
-            component.answer_held_at_close();
-        }
-        // The slot is empty now, so the declaration reads `None` and the sync
-        // releases the guest. iamacoffeepot/aether#1037: the mailbox accepts
-        // nothing more. iamacoffeepot/aether#1128: the released guest's cost
-        // cells leave the global table and the per-actor cache together,
-        // because the release runs on the trampoline's own thread inside
-        // `with_stamped`.
-        //
-        // The trampoline's own framework arms are re-seeded rather than
-        // dropped with them (iamacoffeepot/aether#4269): the releasing
-        // handler folds into its cell just after it returns, and the closing
-        // trampoline dispatches until its inbox drains. The re-seed is
-        // neutral, which is the honest reading of an estimate whose occupant
-        // just changed.
+
         ctx.sync_guest(self);
+
+        for held in self.drops.drain(..) {
+            held.answer(ctx, &DropResult::Ok);
+        }
     }
 }

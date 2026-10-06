@@ -225,12 +225,6 @@ pub struct SubstrateHarness {
     /// pumped component host's settle wait takes.
     wake_tx: Sender<PumpWake>,
 
-    /// Frame-pump render seam, `Some` iff the builder registered a
-    /// render extension (issues #3764/#3765). Captures require it; an
-    /// advance without one skips the per-frame draw. ADR-0161 slice R4:
-    /// the hook owns the pumped `aether.render` slot.
-    hook: Option<Box<dyn FrameHook>>,
-
     /// The `aether.lifecycle` capability's proven reference, read off the
     /// chassis's composed record at boot. `advance()` fires one
     /// `LifecycleAdvance` here per requested tick; the lifecycle driver
@@ -276,28 +270,32 @@ pub struct SubstrateHarness {
     /// Only the `#[cfg(test)]` fixtures read it, through `Self::boot`.
     _boot: SubstrateBoot,
 
+    /// `PassiveChassis<SubstrateHarnessChassis>` holding the booted
+    /// passives via the `chassis_builder` typed map. Held for the harness's
+    /// lifetime so the passives' dispatchers stay alive. Fields drop in
+    /// declaration order, and this one is declared before the two pumped
+    /// roots below, so the chassis tears down first: its instanced actors
+    /// and composed roots close while the pumped roots they depend on are
+    /// still open (ADR-0160 §3).
+    pub(crate) passive: PassiveChassis<SubstrateHarnessChassis>,
+
     /// The pumped component host, when the builder asked for one. Declared
-    /// before `passive` and `_boot` so it shuts down, running its close
-    /// tail, while the chassis it lives on is still up.
+    /// after `passive`, so it closes, in its slot's drop, once the guests it
+    /// hosted are gone.
     component_host: Option<PumpedHost>,
 
-    /// `PassiveChassis<SubstrateHarnessChassis>` holding the booted Log +
-    /// Render passives via the `chassis_builder` typed map. Held for
-    /// the harness's lifetime so the passives' dispatcher threads
-    /// stay alive; drops in reverse declaration order before
-    /// `_boot`, so render+log shut down before the scheduler joins.
-    pub(crate) passive: PassiveChassis<SubstrateHarnessChassis>,
+    /// Frame-pump render seam, `Some` iff the builder registered a
+    /// render extension (issues #3764/#3765). Captures require it; an
+    /// advance without one skips the per-frame draw. ADR-0161 slice R4:
+    /// the hook owns the pumped `aether.render` slot. Declared last, so
+    /// render closes after everything that draws through it, and mail a
+    /// closing actor left on its inbox is dispatched by its close.
+    hook: Option<Box<dyn FrameHook>>,
 }
 
-/// The pumped component host's slot, shut down when the harness drops so the
-/// host's close tail runs while its chassis is still up.
+/// The pumped component host's slot, which closes when the harness drops
+/// it.
 struct PumpedHost(PumpedSlot<ComponentHostCapability>);
-
-impl Drop for PumpedHost {
-    fn drop(&mut self) {
-        self.0.shutdown();
-    }
-}
 
 /// A request enqueued through [`SubstrateHarness::send_deferred`] whose reply will
 /// be awaited later.
@@ -629,6 +627,32 @@ impl SubstrateHarness {
     #[cfg(feature = "test-support")]
     pub fn await_registry_applied(&self) {
         self.passive.await_registry_applied();
+    }
+
+    /// Tear the engine down and count the reports matching `kind_name` the
+    /// observer inbox had received by the end of the teardown: what
+    /// [`Self::count_observed`] would answer if it could be asked after the
+    /// drop. A scenario reads what the engine's own teardown made actors do,
+    /// such as a guest's `unwire`, through this.
+    ///
+    /// # Panics
+    /// Panics if the `observed_kinds` mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    #[must_use]
+    pub fn close_and_count_observed(self, kind_name: &str) -> usize {
+        let wanted = self.passive.kind_id(kind_name);
+        let observed = Arc::clone(&self.observed_kinds);
+        drop(self);
+
+        let Some(wanted) = wanted else {
+            return 0;
+        };
+        observed
+            .lock()
+            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
+            .iter()
+            .filter(|kind| **kind == wanted)
+            .count()
     }
 
     fn start_inner(builder: SubstrateHarnessBuilder) -> Result<Self, SubstrateHarnessError> {

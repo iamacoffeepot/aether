@@ -8,6 +8,7 @@
 //! settles when that request is answered.
 
 use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -378,7 +379,11 @@ fn an_untaken_held_context_on_a_task_completion_fails_fast() {
     let _tripped = record.tripwire().recv_timeout(PATIENCE);
     let reason = record.reason().expect("the untaken context reached the chassis aborter");
     assert!(reason.contains(Stranded::NAME), "the failure names the untaken context kind: {reason}");
-    drop(chassis);
+
+    // A chassis that fatally aborted reports the abort at teardown rather
+    // than waiting on its actors' closes.
+    let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));
+    assert!(teardown.is_err(), "teardown of an aborted chassis reports the abort");
 }
 
 /// Catches an unstarted task whose drop keeps the chain it staged on open,
