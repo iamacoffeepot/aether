@@ -234,12 +234,48 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
     try_boot_offscreen(wireframe).expect("initial offscreen render device acquisition failed")
 }
 
+/// How a window surface presents a finished frame. From the surface's side
+/// only two behaviours exist, so this is all render is told: who paces a
+/// window that does not wait is its owner's business.
+#[cfg(feature = "desktop")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SurfacePresent {
+    /// The present waits for the display's refresh.
+    InStep,
+    /// The present returns at once, whatever the display is doing.
+    Unsynced,
+}
+
+/// The wgpu present mode that serves `present` on a surface offering
+/// `offered`, or an error naming what the surface does offer.
+///
+/// `InStep` is `Fifo`. `Unsynced` is `Immediate`, else `Mailbox`: both
+/// return without waiting, and `Immediate` is the one more surfaces offer.
+/// Nothing falls back to a mode with the other behaviour, so a caller that
+/// asked not to wait is never handed a display-paced surface in silence.
+/// wgpu's `AutoVsync` and `AutoNoVsync` are such fallback chains (the second
+/// ends in `Fifo`) and `FifoRelaxed` tears when a frame is late, so none of
+/// the three is chosen.
+#[cfg(feature = "desktop")]
+pub fn present_mode(present: SurfacePresent, offered: &[wgpu::PresentMode]) -> Result<wgpu::PresentMode, String> {
+    let preferred: &[wgpu::PresentMode] = match present {
+        SurfacePresent::InStep => &[wgpu::PresentMode::Fifo],
+        SurfacePresent::Unsynced => &[wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox],
+    };
+    preferred.iter().copied().find(|mode| offered.contains(mode)).ok_or_else(|| {
+        format!(
+            "the surface cannot present {present:?}: it offers {offered:?}, and {present:?} needs one of {preferred:?}"
+        )
+    })
+}
+
 #[cfg(feature = "desktop")]
 fn surface_configuration(
     surface: &wgpu::Surface<'_>,
     adapter: &wgpu::Adapter,
     size: (u32, u32),
     required_format: Option<wgpu::TextureFormat>,
+    present: SurfacePresent,
 ) -> Result<(wgpu::SurfaceConfiguration, wgpu::TextureFormat), String> {
     let caps = surface.get_capabilities(adapter);
     if !caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
@@ -261,13 +297,7 @@ fn surface_configuration(
             .or_else(|| caps.formats.first().copied())
             .ok_or_else(|| "surface reports no compatible formats".to_owned())?,
     };
-    let present_mode = caps
-        .present_modes
-        .iter()
-        .copied()
-        .find(|mode| *mode == wgpu::PresentMode::Fifo)
-        .or_else(|| caps.present_modes.first().copied())
-        .ok_or_else(|| "surface reports no presentation modes".to_owned())?;
+    let present_mode = present_mode(present, &caps.present_modes)?;
     let alpha_mode = caps.alpha_modes.first().copied().ok_or_else(|| "surface reports no alpha modes".to_owned())?;
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
@@ -291,6 +321,7 @@ pub fn boot_surface(
     target: impl Into<wgpu::SurfaceTarget<'static>>,
     size: (u32, u32),
     wireframe: Option<&str>,
+    present: SurfacePresent,
 ) -> Result<BootedSurface, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let surface = instance.create_surface(target).map_err(|error| format!("create render surface: {error}"))?;
@@ -302,7 +333,7 @@ pub fn boot_surface(
     }))
     .map_err(|error| format!("request compatible render adapter: {error}"))?;
     let adapter_info = adapter.get_info();
-    let (config, format) = surface_configuration(&surface, &adapter, size, None)?;
+    let (config, format) = surface_configuration(&surface, &adapter, size, None, present)?;
 
     // Wireframe rendering is opt-in via `AETHER_WIREFRAME`; the line modes
     // need the adapter's `POLYGON_MODE_LINE` feature, so if unsupported we
@@ -338,9 +369,10 @@ pub fn attach_surface(
     target: impl Into<wgpu::SurfaceTarget<'static>>,
     size: (u32, u32),
     format: wgpu::TextureFormat,
+    present: SurfacePresent,
 ) -> Result<AttachedSurface, String> {
     let surface = instance.create_surface(target).map_err(|error| format!("create render surface: {error}"))?;
-    let (config, _) = surface_configuration(&surface, adapter, size, Some(format))?;
+    let (config, _) = surface_configuration(&surface, adapter, size, Some(format), present)?;
     surface.configure(device, &config);
     Ok(AttachedSurface { surface, config })
 }
@@ -498,6 +530,29 @@ mod tests {
             render_limits().max_texture_dimension_2d,
             "a limit mail-time validation reads stays at the floor",
         );
+    }
+
+    /// The present-mode table, over lists a surface might offer. Fails if a
+    /// silent fallback returns: `Unsynced` handed `Fifo` on a surface that
+    /// offers nothing else, which turns an uncapped window into a
+    /// display-paced one with no word to its owner, or `InStep` handed
+    /// whichever mode a surface lists first.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_present_mode_the_surface_lacks_is_an_error_naming_what_it_offers() {
+        use wgpu::PresentMode::{Fifo, FifoRelaxed, Immediate, Mailbox};
+
+        use super::{SurfacePresent, present_mode};
+
+        let refused = present_mode(SurfacePresent::Unsynced, &[Fifo]).expect_err("Fifo waits for the display");
+        assert!(refused.contains("Fifo"), "the refusal names the offered modes: {refused}");
+        assert_eq!(present_mode(SurfacePresent::Unsynced, &[Fifo, Mailbox]), Ok(Mailbox));
+        assert_eq!(present_mode(SurfacePresent::Unsynced, &[Fifo, Mailbox, Immediate]), Ok(Immediate));
+        assert_eq!(present_mode(SurfacePresent::Unsynced, &[Fifo, FifoRelaxed]).ok(), None);
+
+        assert_eq!(present_mode(SurfacePresent::InStep, &[Immediate, Fifo]), Ok(Fifo));
+        let refused = present_mode(SurfacePresent::InStep, &[Immediate, Mailbox]).expect_err("neither waits");
+        assert!(refused.contains("Immediate") && refused.contains("Mailbox"), "{refused}");
     }
 
     // Tripwire: pins the `AETHER_WIREFRAME` tri-state parse (threaded from

@@ -8,6 +8,10 @@ use aether_kinds::{
 };
 use serde::{Deserialize, Serialize};
 
+mod presentation;
+
+pub use presentation::{FrameRate, FrameRateError, WindowPresentation};
+
 /// Select one window, by its canonical actor path, or every current and
 /// future window.
 ///
@@ -33,6 +37,7 @@ pub struct WindowSpec {
     pub title: String,
     pub mode: WindowMode,
     pub size: Option<WindowSizeRequest>,
+    pub presentation: WindowPresentation,
 }
 
 /// Public state for one live window. `path` is the window's canonical actor
@@ -48,6 +53,7 @@ pub struct WindowInfo {
     pub height: u32,
     pub focused: bool,
     pub occluded: bool,
+    pub presentation: WindowPresentation,
 }
 
 /// List every live window in ascending path order, which is ascending window
@@ -116,6 +122,28 @@ pub enum SetWindowModeResult {
 }
 
 impl HeldReply for SetWindowModeResult {
+    fn unanswered() -> Self {
+        Self::Err { error: "window endpoint closed before answering".into() }
+    }
+}
+
+/// Change how one window presents its frames.
+///
+/// A surface that cannot serve the asked value answers `Err` naming the
+/// modes it offers, and the window keeps the presentation it had.
+#[aether_data::kind(name = "aether.window.set_presentation", copy, eq)]
+pub struct SetWindowPresentation {
+    pub presentation: WindowPresentation,
+}
+
+/// Reply to [`SetWindowPresentation`] with the presentation now in force.
+#[aether_data::kind(name = "aether.window.set_presentation_result", eq)]
+pub enum SetWindowPresentationResult {
+    Ok { presentation: WindowPresentation },
+    Err { error: String },
+}
+
+impl HeldReply for SetWindowPresentationResult {
     fn unanswered() -> Self {
         Self::Err { error: "window endpoint closed before answering".into() }
     }
@@ -291,11 +319,12 @@ pub struct ApplyWindowCommand {
     pub command: WindowCommand,
 }
 
-/// The seven per-window operations a child forwards to its manager.
+/// The eight per-window operations a child forwards to its manager.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum WindowCommand {
     Close,
     SetMode { mode: WindowMode, width: Option<u32>, height: Option<u32> },
+    SetPresentation { presentation: WindowPresentation },
     SetTitle { title: String },
     SetMenu { menus: Vec<WindowMenu> },
     SetCursor { icon: CursorIcon },
@@ -318,6 +347,9 @@ impl WindowCommand {
         match self {
             Self::Close => ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }),
             Self::SetMode { .. } => ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error }),
+            Self::SetPresentation { .. } => {
+                ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Err { error })
+            }
             Self::SetTitle { .. } => ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error }),
             Self::SetMenu { .. } => ApplyWindowCommandResult::SetMenu(SetWindowMenuResult::Err { error }),
             Self::SetCursor { .. } => ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Err { error }),
@@ -333,6 +365,7 @@ impl WindowCommand {
 pub enum ApplyWindowCommandResult {
     Close(CloseWindowResult),
     SetMode(SetWindowModeResult),
+    SetPresentation(SetWindowPresentationResult),
     SetTitle(SetWindowTitleResult),
     SetMenu(SetWindowMenuResult),
     SetCursor(SetWindowCursorResult),

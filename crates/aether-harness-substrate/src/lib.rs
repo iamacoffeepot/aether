@@ -31,7 +31,7 @@
 //! use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 //! use aether_window::{
 //!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, WindowCapability, WindowMode,
-//!     WindowSizeRequest, WindowSpec,
+//!     WindowPresentation, WindowSizeRequest, WindowSpec,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,6 +43,7 @@
 //!     title: "example".to_owned(),
 //!     mode: WindowMode::Windowed,
 //!     size: Some(WindowSizeRequest { width: 320, height: 240 }),
+//!     presentation: WindowPresentation::Display,
 //! };
 //!
 //! let result = harness.execute(vec![

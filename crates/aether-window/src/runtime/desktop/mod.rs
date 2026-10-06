@@ -11,6 +11,7 @@ mod application;
 mod cursor;
 mod input;
 mod menu;
+mod pacing;
 mod slot;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -48,9 +49,9 @@ use super::manager::{RoutableWindow, WindowCommands};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
-    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
-    WindowCapability, WindowClosed, WindowCommand, WindowFocus, WindowInfo, WindowInstance, WindowMenuActivated,
-    WindowOpened, WindowSpec,
+    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowPresentationResult,
+    SetWindowTitleResult, WindowCapability, WindowClosed, WindowCommand, WindowFocus, WindowInfo, WindowInstance,
+    WindowMenuActivated, WindowOpened, WindowPresentation, WindowSpec,
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
@@ -134,14 +135,27 @@ impl DesktopWindowBoot {
 /// `ActiveEventLoop`.
 #[derive(Clone, Debug)]
 pub enum WindowHostAction {
-    Create { path: ErasedActorPath, spec: WindowSpec },
-    Close { path: ErasedActorPath },
+    Create {
+        path: ErasedActorPath,
+        spec: WindowSpec,
+    },
+    Close {
+        path: ErasedActorPath,
+    },
+    /// Ask the integration's surface for `presentation`. The window's
+    /// surface is render's, so the manager cannot answer the request on its
+    /// own turn: its `finish_window_presentation` answers it with what the
+    /// integration said.
+    SetPresentation {
+        path: ErasedActorPath,
+        presentation: WindowPresentation,
+    },
 }
 
 /// Owned semantic changes produced by a window host turn.
 #[derive(Clone, Debug)]
 pub enum WindowHostEffect {
-    Created { path: ErasedActorPath, window: Arc<Window> },
+    Created { path: ErasedActorPath, window: Arc<Window>, presentation: WindowPresentation },
     Closing { path: ErasedActorPath },
     Dirty { path: ErasedActorPath },
     Occluded { path: ErasedActorPath, occluded: bool },
@@ -191,6 +205,9 @@ struct DesktopWindowState {
     modifiers: Modifiers,
     focused: bool,
     occluded: bool,
+    /// The presentation the window's surface was last configured for: the
+    /// spec's at attachment, then each change the integration accepted.
+    presentation: WindowPresentation,
     lifecycle: DesktopWindowLifecycle,
     /// The command proof installed when attachment publishes the child. It is
     /// cleared on departure while the explicitly tracked closing window stays
@@ -212,6 +229,7 @@ impl DesktopWindowState {
             height: self.height,
             focused: self.focused,
             occluded: self.occluded,
+            presentation: self.presentation,
         }
     }
 }
@@ -238,6 +256,14 @@ pub struct DesktopWindows {
     pending_creates: HashMap<ErasedActorPath, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
     pending_host_effects: Vec<WindowHostEffect>,
+    /// The forwarding children's held replies for presentation changes in
+    /// flight, one per queued [`WindowHostAction::SetPresentation`] and in
+    /// the same order: the application realizes actions in queue order and
+    /// finishes each exactly once, so the front reply is always the one the
+    /// action being finished owes. They sit beside the action queue rather
+    /// than on a window, so a window removed first still has its caller
+    /// answered.
+    presentation_helds: VecDeque<Held<ApplyWindowCommandResult>>,
     initial_window_reserved: bool,
     shutdown_when_idle: bool,
 }
@@ -255,6 +281,7 @@ impl DesktopWindows {
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
             pending_host_effects: Vec::new(),
+            presentation_helds: VecDeque::new(),
             initial_window_reserved: false,
             shutdown_when_idle: false,
         }
@@ -281,13 +308,16 @@ impl DesktopWindows {
     /// Apply one per-window command at the native window of the child that
     /// forwarded it.
     ///
-    /// `Close` is the exception every other arm is not: it cannot answer here,
-    /// because the window is only gone once the integration has detached its
-    /// render target and the manager has retired its child, so it hands its
-    /// held reply to the close queue and is answered from
-    /// [`Self::finish_window_close`]. Everything else resolves against the
-    /// live `Arc<Window>` on this same turn — the desktop backend is pumped,
-    /// so this *is* the winit thread — and answers immediately.
+    /// `Close` and `SetPresentation` are the exceptions every other arm is
+    /// not. A close cannot answer here, because the window is only gone once
+    /// the integration has detached its render target and the manager has
+    /// retired its child, so it hands its held reply to the close queue and
+    /// is answered from [`Self::finish_window_close`]. A presentation change
+    /// cannot either, because the surface that takes or refuses it is the
+    /// integration's, so its held reply waits for
+    /// [`Self::finish_window_presentation`]. Everything else resolves against
+    /// the live `Arc<Window>` on this same turn — the desktop backend is
+    /// pumped, so this *is* the winit thread — and answers immediately.
     pub(super) fn apply_command<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
@@ -301,13 +331,22 @@ impl DesktopWindows {
             );
             return;
         };
-        if matches!(command, WindowCommand::Close) {
-            if let Err((error, Some(held))) = self.queue_close(&path, Some(held)) {
-                held.answer(ctx, &ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
+        match command {
+            WindowCommand::Close => {
+                if let Err((error, Some(held))) = self.queue_close(&path, Some(held)) {
+                    held.answer(ctx, &ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
+                }
             }
-            return;
+            WindowCommand::SetPresentation { presentation } => {
+                if let Err((error, held)) = self.queue_presentation(&path, presentation, held) {
+                    held.answer(
+                        ctx,
+                        &ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Err { error }),
+                    );
+                }
+            }
+            command => held.answer(ctx, &self.apply_at_window(&path, command)),
         }
-        held.answer(ctx, &self.apply_at_window(&path, command));
     }
 
     /// A monitored actor departed: when it is a window child, its window's
@@ -381,14 +420,16 @@ impl DesktopWindows {
                 modifiers: Modifiers { window: path.clone(), shift: false, ctrl: false, alt: false, meta: false },
                 focused: window.has_focus(),
                 occluded: size.width == 0 || size.height == 0,
+                presentation: pending.spec.presentation,
                 lifecycle: DesktopWindowLifecycle::Attaching,
                 commands: None,
                 close_held: None,
             },
         );
+        let presentation = pending.spec.presentation;
         self.winit_windows.insert(window.id(), path.clone());
         self.native_windows.insert(path.clone(), Arc::clone(&window));
-        Ok(WindowHostEffect::Created { path, window })
+        Ok(WindowHostEffect::Created { path, window, presentation })
     }
 
     /// Complete render attachment for a staged create by staging the window's
@@ -593,6 +634,31 @@ impl DesktopWindows {
         Vec::new()
     }
 
+    /// Finish a presentation change with what the integration's surface
+    /// answered: record the new value and answer `Ok`, or answer `Err` with
+    /// the surface's message and leave the stored value, so
+    /// `aether.window.list` keeps reporting the presentation still in force.
+    pub fn finish_window_presentation<A>(
+        &mut self,
+        path: &ErasedActorPath,
+        presentation: WindowPresentation,
+        outcome: Result<(), String>,
+        ctx: &mut NativeCtx<'_, A, Single>,
+    ) {
+        let Some(held) = self.presentation_helds.pop_front() else {
+            return;
+        };
+        let reply = match (outcome, self.windows.get_mut(path)) {
+            (Ok(()), Some(state)) => {
+                state.presentation = presentation;
+                SetWindowPresentationResult::Ok { presentation }
+            }
+            (Ok(()), None) => SetWindowPresentationResult::Err { error: format!("unknown window {path}") },
+            (Err(error), _) => SetWindowPresentationResult::Err { error },
+        };
+        held.answer(ctx, &ApplyWindowCommandResult::SetPresentation(reply));
+    }
+
     /// The synchronous half of the per-window command family: resolve the
     /// native window once, then apply. A command naming a window that is gone
     /// or not yet live comes back as that command's own `Err` rather than a
@@ -606,6 +672,10 @@ impl DesktopWindows {
         match command {
             // Answered from the close queue, never here.
             WindowCommand::Close => command.refused(format!("close for {path} did not reach the close queue")),
+            // Answered once the integration has asked its surface, never here.
+            WindowCommand::SetPresentation { .. } => {
+                command.refused(format!("presentation change for {path} did not reach the host-action queue"))
+            }
             WindowCommand::SetMode { mode, width, height } => self.apply_mode(path, &window, mode, width, height),
             WindowCommand::SetTitle { title } => {
                 window.set_title(&title);
@@ -913,6 +983,22 @@ impl DesktopWindows {
         Ok(())
     }
 
+    /// Queue a presentation change for the application's next host turn,
+    /// keeping `held` until [`Self::finish_window_presentation`] answers it.
+    fn queue_presentation(
+        &mut self,
+        path: &ErasedActorPath,
+        presentation: WindowPresentation,
+        held: Held<ApplyWindowCommandResult>,
+    ) -> Result<(), (String, Held<ApplyWindowCommandResult>)> {
+        if let Err(error) = self.live_state(path) {
+            return Err((error, held));
+        }
+        self.presentation_helds.push_back(held);
+        self.pending_host_actions.push_back(WindowHostAction::SetPresentation { path: path.clone(), presentation });
+        Ok(())
+    }
+
     fn remove_window(&mut self, path: &ErasedActorPath) -> bool {
         if let Some(window) = self.native_windows.remove(path) {
             self.winit_windows.remove(&window.id());
@@ -922,16 +1008,20 @@ impl DesktopWindows {
         self.windows.remove(path).is_some()
     }
 
-    fn live_window(&self, path: &ErasedActorPath) -> Result<Arc<Window>, String> {
+    /// The state of the window at `path`, when it is live.
+    fn live_state(&self, path: &ErasedActorPath) -> Result<&DesktopWindowState, String> {
         match self.windows.get(path) {
             None => Err(format!("unknown window {path}")),
             Some(window) if window.lifecycle != DesktopWindowLifecycle::Live => {
                 Err(format!("window {path} is not live"))
             }
-            Some(_) => {
-                self.native_windows.get(path).cloned().ok_or_else(|| format!("window {path} has no native handle"))
-            }
+            Some(window) => Ok(window),
         }
+    }
+
+    fn live_window(&self, path: &ErasedActorPath) -> Result<Arc<Window>, String> {
+        self.live_state(path)?;
+        self.native_windows.get(path).cloned().ok_or_else(|| format!("window {path} has no native handle"))
     }
 
     /// The `WindowSize` event for a physical size, carrying the scale
@@ -1009,7 +1099,13 @@ mod tests {
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {
-        WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+        WindowSpec {
+            name: name.to_owned(),
+            title: title.to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        }
     }
 
     fn rig() -> Rig<WindowCapability> {
@@ -1021,7 +1117,11 @@ mod tests {
     }
 
     /// Insert a live (or closing) window named `name`, answering its path.
-    fn insert_window(state: &mut DesktopWindows, name: &str, closing: bool) -> ErasedActorPath {
+    pub(in crate::runtime::desktop) fn insert_window(
+        state: &mut DesktopWindows,
+        name: &str,
+        closing: bool,
+    ) -> ErasedActorPath {
         let window = path(name);
         state.windows.insert(
             window.clone(),
@@ -1037,6 +1137,7 @@ mod tests {
                 modifiers: Modifiers { window: window.clone(), shift: false, ctrl: false, alt: false, meta: false },
                 focused: false,
                 occluded: false,
+                presentation: WindowPresentation::Display,
                 lifecycle: if closing {
                     DesktopWindowLifecycle::Closing
                 } else {

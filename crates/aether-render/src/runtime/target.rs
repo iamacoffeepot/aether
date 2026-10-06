@@ -23,7 +23,10 @@ use aether_data::ErasedActorPath;
 use winit::window::Window;
 
 use super::pipeline::RenderGpu;
-use super::surface::{acquire_surface_texture, attach_surface, boot_surface, build_wireframe_overlay_pipeline};
+use super::surface::{
+    SurfacePresent, acquire_surface_texture, attach_surface, boot_surface, build_wireframe_overlay_pipeline,
+    present_mode,
+};
 
 /// Window-keyed render targets. Generic over the target so the identity rules
 /// — no duplicate attach, detach returns the target, capture selection
@@ -139,6 +142,10 @@ pub struct RenderTarget {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// What the surface's owner last asked of its present, kept beside the
+    /// wgpu mode in `config` so a device replacement asks the rebuilt surface
+    /// for the same behaviour.
+    present: SurfacePresent,
     pub occluded: bool,
 }
 
@@ -175,6 +182,7 @@ impl RenderTarget {
                     (size.width, size.height),
                     wireframe,
                     vertex_buffer_bytes,
+                    live.present,
                 )?;
                 target.occluded = live.occluded;
                 Ok((target, first_gpu.expect("boot_first always returns the selected desktop GPU")))
@@ -187,6 +195,7 @@ impl RenderTarget {
                     Arc::clone(&live.window),
                     (size.width, size.height),
                     first_gpu.gpu.color_format,
+                    live.present,
                 )?;
                 debug_assert!(install.is_none(), "later windows never replace the shared desktop GPU");
                 target.occluded = live.occluded;
@@ -204,9 +213,12 @@ impl RenderTarget {
         window: Arc<Window>,
         size: (u32, u32),
         format: wgpu::TextureFormat,
+        present: SurfacePresent,
     ) -> Result<(Self, Option<FirstWindowGpu>), String> {
-        let attached = attach_surface(&context.instance, &context.adapter, device, Arc::clone(&window), size, format)?;
-        Ok((Self { window, surface: attached.surface, config: attached.config, occluded: false }, None))
+        let attached =
+            attach_surface(&context.instance, &context.adapter, device, Arc::clone(&window), size, format, present)?;
+        log_present_mode(&attached.config, present);
+        Ok((Self { window, surface: attached.surface, config: attached.config, present, occluded: false }, None))
     }
 
     /// Attach the first window, booting the adapter, device, and shared
@@ -216,8 +228,10 @@ impl RenderTarget {
         size: (u32, u32),
         wireframe: Option<&str>,
         vertex_buffer_bytes: usize,
+        present: SurfacePresent,
     ) -> Result<(Self, Option<FirstWindowGpu>), String> {
-        let booted = boot_surface(Arc::clone(&window), size, wireframe)?;
+        let booted = boot_surface(Arc::clone(&window), size, wireframe, present)?;
+        log_present_mode(&booted.config, present);
         let gpu = RenderGpu::new(
             Arc::clone(&booted.device),
             Arc::clone(&booted.queue),
@@ -232,13 +246,30 @@ impl RenderTarget {
             .then(|| build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout));
 
         Ok((
-            Self { window, surface: booted.surface, config: booted.config, occluded: false },
+            Self { window, surface: booted.surface, config: booted.config, present, occluded: false },
             Some(FirstWindowGpu {
                 context: DesktopGpuContext { instance: booted.instance, adapter: booted.adapter },
                 gpu,
                 wire_pipeline,
             }),
         ))
+    }
+
+    /// Reconfigure the surface to present as `present` asks. The mode is
+    /// chosen from what the surface offers before anything is touched, so a
+    /// refusal leaves the configuration, and the surface, as they were.
+    pub fn set_present(
+        &mut self,
+        context: &DesktopGpuContext,
+        device: &wgpu::Device,
+        present: SurfacePresent,
+    ) -> Result<(), String> {
+        let offered = self.surface.get_capabilities(&context.adapter).present_modes;
+        self.config.present_mode = present_mode(present, &offered)?;
+        self.present = present;
+        self.surface.configure(device, &self.config);
+        log_present_mode(&self.config, present);
+        Ok(())
     }
 
     /// Reconfigure to the window's current size and acquire a swapchain image.
@@ -260,6 +291,18 @@ impl RenderTarget {
         let surface_texture = acquire_surface_texture(&self.surface, device, &self.config);
         Some((self.config.width, self.config.height, surface_texture))
     }
+}
+
+/// Say which wgpu mode a surface was configured with: `Unsynced` is served
+/// by either of two modes, and which one a platform gave is what explains a
+/// tearing or a tear-free uncapped window.
+fn log_present_mode(config: &wgpu::SurfaceConfiguration, present: SurfacePresent) {
+    tracing::info!(
+        target: "aether_substrate::render",
+        asked = ?present,
+        mode = ?config.present_mode,
+        "window surface present mode chosen",
+    );
 }
 
 #[cfg(test)]

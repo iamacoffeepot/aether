@@ -23,7 +23,9 @@ use aether_actor::Addressable;
 use aether_data::{ErasedActorPath, Kind};
 use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_render::{Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig};
+use aether_render::{
+    Frame, Occluded, RenderCapability, RenderCapabilityState, RenderParams, RenderTuningConfig, SurfacePresent,
+};
 use aether_substrate::actor::native::PumpedSlot;
 use aether_substrate::chassis::builder::{
     DriverCapability, DriverCtx, DriverRunning, PumpedRoots, RootPusher, RunError,
@@ -37,7 +39,7 @@ use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{ChassisCtx, HubOutbound, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId};
 use aether_window::{
     DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowSlot, INITIAL_WINDOW_NAME, WindowCapability,
-    WindowSizeRequest, WindowSpec,
+    WindowPresentation, WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::event_loop::EventLoop;
@@ -260,17 +262,40 @@ impl DesktopRenderIntegration {
     }
 }
 
+/// What a window's presentation asks of its surface. Only `Display` waits
+/// for the display: an uncapped window is paced by nothing and a capped one
+/// by the window event loop, so the surface of either presents at once.
+fn surface_present(presentation: WindowPresentation) -> SurfacePresent {
+    match presentation {
+        WindowPresentation::Display => SurfacePresent::InStep,
+        WindowPresentation::Uncapped | WindowPresentation::Capped { .. } => SurfacePresent::Unsynced,
+    }
+}
+
 impl DesktopWindowIntegration for DesktopRenderIntegration {
-    fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String> {
+    fn attach_window(
+        &mut self,
+        path: ErasedActorPath,
+        window: Arc<Window>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String> {
+        let present = surface_present(presentation);
         let attachment = self
             .render_slot
-            .host_turn(|state, ctx| state.attach_window(ctx, path, window))
+            .host_turn(|state, ctx| state.attach_window(ctx, path, window, present))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
         let attached = Instant::now();
         self.started.get_or_insert(attached);
         self.last_tick.get_or_insert(attached);
         Ok(())
+    }
+
+    fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String> {
+        let present = surface_present(presentation);
+        self.render_slot
+            .host_turn(|state, _ctx| state.set_window_present(path, present))
+            .ok_or_else(|| "render actor is unavailable during a presentation change".to_owned())?
     }
 
     fn detach_window(&mut self, path: &ErasedActorPath) {
@@ -423,6 +448,7 @@ impl DriverCapability for DesktopDriverCapability {
             title,
             mode,
             size: size.map(|(width, height)| WindowSizeRequest { width, height }),
+            presentation: WindowPresentation::Display,
         };
 
         // ADR-0161: the desktop driver boots the pumped `aether.render` actor

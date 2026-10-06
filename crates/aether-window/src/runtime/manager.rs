@@ -8,10 +8,10 @@ use aether_substrate::actor::native::NativeCtx;
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult,
+    SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult,
 };
 
-/// The seven command rows a concrete window endpoint exposes, each naming the
+/// The eight command rows a concrete window endpoint exposes, each naming the
 /// reply its endpoint holds and answers later. A manager retains only this
 /// view of each successfully published child, so a root forward cannot select
 /// a kind outside the shared endpoint surface.
@@ -19,6 +19,7 @@ use crate::{
 pub trait WindowCommands {
     fn close(mail: CloseWindow) -> CloseWindowResult;
     fn set_mode(mail: SetWindowMode) -> SetWindowModeResult;
+    fn set_presentation(mail: SetWindowPresentation) -> SetWindowPresentationResult;
     fn set_title(mail: SetWindowTitle) -> SetWindowTitleResult;
     fn set_menu(mail: SetWindowMenu) -> SetWindowMenuResult;
     fn set_cursor(mail: SetWindowCursor) -> SetWindowCursorResult;
@@ -38,7 +39,7 @@ pub struct RoutableWindow {
 /// Re-dispatch one root-addressed per-window command at the sole live window,
 /// answering the *original* requester rather than this manager.
 ///
-/// The seven command kinds are the window endpoint's (`runtime::instance`), so
+/// The eight command kinds are the window endpoint's (`runtime::instance`), so
 /// the root owns no copy of their semantics: it proves the sole window live
 /// (ADR-0230) and forwards the request verbatim through that proof with the
 /// requester's own `reply_to` pinned, and the reply the endpoint holds
@@ -88,7 +89,7 @@ mod tests {
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
     use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability, WindowInstance};
-    use crate::{WindowMode, WindowSpec};
+    use crate::{WindowMode, WindowPresentation, WindowSpec};
 
     /// The sole window's child departs while a root command for it is
     /// already queued behind the departure: the window stays listed until
@@ -98,8 +99,13 @@ mod tests {
     #[test]
     fn sole_window_departure_is_refused_before_its_monitor_notice_is_processed() {
         let mut rig = Rig::synthetic();
-        let spec =
-            WindowSpec { name: "main".to_owned(), title: "Main".to_owned(), mode: WindowMode::Windowed, size: None };
+        let spec = WindowSpec {
+            name: "main".to_owned(),
+            title: "Main".to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        };
         rig.send(&CreateWindow { spec });
         let CreateWindowResult::Ok { window } = rig.reply::<CreateWindowResult>() else {
             panic!("the synthetic manager creates the window");

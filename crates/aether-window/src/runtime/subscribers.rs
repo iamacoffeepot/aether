@@ -505,7 +505,13 @@ pub mod fixture {
         where
             M: HandlesKind<K>,
         {
-            self.driver.send_tracked(self.manager(), mail, Some(session()))
+            self.push_to(self.manager(), mail)
+        }
+
+        /// [`Self::push`] to `to`: for a request one of the manager's
+        /// children forwards and the manager holds past its turn.
+        pub fn push_to<R: HandlesKind<K>, K: Kind>(&self, to: ActorRef<R>, mail: &K) -> MailId {
+            self.driver.send_tracked(to, mail, Some(session()))
         }
 
         /// [`Self::send_to`] the manager.

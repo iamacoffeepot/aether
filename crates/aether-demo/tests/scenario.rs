@@ -26,7 +26,9 @@ use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png};
 use aether_kinds::{LoadComponent, LogTail, LogTailResult};
-use aether_window::{CreateWindow, CreateWindowResult, WindowCapability, WindowMode, WindowSizeRequest, WindowSpec};
+use aether_window::{
+    CreateWindow, CreateWindowResult, WindowCapability, WindowMode, WindowPresentation, WindowSizeRequest, WindowSpec,
+};
 use serde_json::Value;
 
 const WIDTH: u32 = 640;
@@ -89,6 +91,7 @@ fn open_main_window(harness: &mut SubstrateHarness) {
         title: "aether".to_owned(),
         mode: WindowMode::Windowed,
         size: Some(WindowSizeRequest { width: WIDTH, height: HEIGHT }),
+        presentation: WindowPresentation::Display,
     };
     let opened = harness
         .execute(vec![(

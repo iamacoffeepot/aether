@@ -54,6 +54,11 @@ pub use runtime::{
     RenderTuningOverlay, StagedGeometry, StagedInstances, WHITE_TEXTURE_ID, apply_manifest_clear_color,
 };
 
+// What the desktop driver tells render about a window surface's present,
+// on `attach_window` and `set_window_present`.
+#[cfg(feature = "desktop")]
+pub use runtime::SurfacePresent;
+
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
 // form): it reads the cap's runtime module off disk and emits the
 // always-on addressing markers + handler inventory against the struct here.

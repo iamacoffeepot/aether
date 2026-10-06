@@ -36,7 +36,7 @@ use aether_kit::camera::{
 };
 use aether_math::{Rgb, Vec2, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
-use aether_window::{CreateWindow, WindowCapability, WindowMode, WindowSizeRequest, WindowSpec};
+use aether_window::{CreateWindow, WindowCapability, WindowMode, WindowPresentation, WindowSizeRequest, WindowSpec};
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -230,6 +230,7 @@ fn a_window_camera_publishes_once_its_window_has_a_size() {
         title: "main".to_owned(),
         mode: WindowMode::Windowed,
         size: Some(WindowSizeRequest { width: 128, height: 96 }),
+        presentation: WindowPresentation::Display,
     };
     harness
         .execute(vec![(
