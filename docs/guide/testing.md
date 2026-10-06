@@ -218,7 +218,9 @@ wake, and the wait returns when the roots settle. Boot the actor through
   close tail, a `send_detached` send, a child's `after_init` mail.
   No root the test holds covers it, so the observing actor signals a test
   channel and the test waits with `testing::await_signal`, which names the
-  wait as the signal it is rather than as settlement. A FIFO tracked barrier
+  wait as the signal it is rather than as settlement. When the observed effect
+  carries a value the test asserts on, the test waits with
+  `testing::await_event` on the channel that carries it. A FIFO tracked barrier
   (a tracked send of the same kind to the same inbox) fits only mail already
   in the inbox: an actor's own sends flush onto the pool, so a barrier the
   test delivers directly can overtake them.

@@ -343,46 +343,79 @@ required `window` names the render target (the window's actor path as
 tool never guesses a primary or focused window), its `mails` bundle dispatches before the readback (the state that should
 appear) and `after_mails` after (cleanup), all around one synchronous PNG read.
 So to see a
-camera change, stage the `aether.kit.camera.*` driver mail (or a `DrawTriangle`
-directly) in `mails` and read the frame back inline. The renderer's retained
+camera change, stage an `aether.kit.camera.pose` or `.frame` addressed to the
+camera instance (or a `DrawTriangle` directly) in `mails` and read the frame
+back inline. The renderer's retained
 geometry means a capture that doesn't advance a tick still shows the last live
 frame.
 
 ## How to extend or reuse it
 
-- **A new camera mode** is component work, not substrate work. `aether-kit`'s
-  `camera` export is the worked example: it hosts N named cameras, advances each
-  on `Tick`, and publishes the active one's `view_proj` on `Render`. It boots a
-  default `"main"` camera in orbit mode and exposes driver kinds —
-  `aether.kit.camera.{create, destroy, set_active, set_mode, orbit.set, topdown.set}`
-  — for adding cameras and poking their parameters live. A new mode (follow,
-  cinematic, free-fly) is a new `view_proj` computation in a camera component;
-  the renderer needs no change because it only ever applies the matrix it's
-  handed. Peers that need the current eye send the source-bound
-  `aether.kit.camera.eye` request. Its `aether.kit.camera.eye_result` reply
-  carries the active orbit or top-down eye as world-space `(x, y, z)`, or
-  `None` while the active binding is absent or no longer live. This is a
-  request/reply read-back, not a subscription stream; the camera still
-  publishes only `view_proj` to `aether.render`. Loaded by the
-  `aether_kit@aether.kit.camera` selector, the camera answers at
-  `aether.kit.camera`, its published name — the address `LoadResult.path` hands
-  back.
-- **Driving a camera from the keyboard** is a peer component's job, not the
-  camera's. `aether-kit`'s `camera-controller` export subscribes `Key` /
-  `KeyRelease` / `Tick`, keeps a shadow of the pose it drives, and mails
-  `aether.kit.camera.orbit.set` / `aether.kit.camera.topdown.set` deltas to a peer
-  camera — WASD pan the target across the ground, the arrows yaw and pitch, Z/X
-  dolly the distance, and an idle tick produces no mail. It loads by the
-  `aether_kit@aether.kit.camera-controller` selector with an
-  `aether.kit.camera-controller.config` init-config that picks the target
-  camera, mode, per-tick rates, and clamps, so the camera stays a pure
-  projection state machine while the keyboard policy lives in the controller.
-  The config's optional `seed` (`{ target, yaw, pitch, distance }`) replaces the
-  compiled starting orbit pose, a three-quarter overhead look at the origin
-  from 12 units back. The controller seeds its own shadow with it, so a subject
-  framed at boot stays framed once a key is pressed, where an
-  `aether.kit.camera.orbit.set` sent from elsewhere would snap back to the
-  shadow on the first held key. It applies in orbit mode only.
+- **A camera** is component work, not substrate work, and `aether-kit`'s
+  `camera` export is the one to use: an instanced actor, one camera per
+  instance at `aether.kit.camera:<key>`, spawned with an
+  `aether.kit.camera.config` (`{ lens, viewport, pose }`) and removed by
+  dropping the instance. It is a view source: it publishes its
+  `ViewProjection` to its subscribers when the view changes and at no other
+  time, and the renderer is one once `aether.render.view_from` names it, so
+  the active camera is whichever one the renderer follows.
+  - **One pose and one lens.** A pose is `{ target, yaw, pitch, distance }`:
+    the eye sits `distance` from `target` and looks back at it. A lens is
+    `Perspective { fov }` or `Orthographic { extent }`, where `extent` is the
+    half-height at the target per unit of distance. The view is the inverse of
+    the eye's rigid transform, so a pitch of `-PI/2` (straight down) is an
+    ordinary pose, and top-down is that pitch with an orthographic lens. The
+    scalars are validated: a pitch outside `[-PI/2, PI/2]`, a distance or an
+    extent that is not above zero, or a field of view outside `(0, PI)` does
+    not decode.
+  - **Depth follows distance.** A perspective lens puts the planes at
+    `distance / 100` and `distance * 100`, an orthographic one at
+    `∓distance * 100`, and `ViewProjection`'s `near` and `far` carry them. A
+    scene a thousand units across needs no tuning; a drawer that knows better
+    bounds can still send its own `ViewProjection`.
+  - **The viewport** is `Fixed { width, height }` or `Window(path)`. A window
+    camera follows its window's size and publishes nothing until it has
+    learned it.
+  - **Mail.** `aether.kit.camera.pose` sets the pose; `.frame { bounds }`
+    looks at a box from far enough back to see all of it; `.glide { to,
+    over_millis }` eases to a pose, stepping on `Tick` only while it runs;
+    `.where` is answered with the current pose; `.ray { pixel }` is answered
+    with the world-space ray through a pixel (`ray_result`), ready for
+    `aether-math`'s `Ray::plane_hit`.
+  - **A republish** of the kit module keeps a camera's pose, glide and learned
+    viewport size and drops its viewers, which the camera logs at warn: send
+    `aether.render.view_from` again, and have any other viewer subscribe
+    again.
+- **Driving a camera with the mouse and the keyboard** is a peer component's
+  job, not the camera's. `aether-kit`'s `camera-controller` export, an
+  instance at `aether.kit.camera-controller:<key>`, subscribes the window's
+  key, mouse and focus events and `Tick`, and sends the camera only
+  `aether.kit.camera.pose`, the message a script or an agent sends: at most
+  one a tick, and none while nothing is held.
+  - **Controls.** Left-drag orbits. The wheel zooms, multiplying the distance
+    per step within the config's `nearest` and `farthest`. Right-drag or
+    middle-drag pans with the grabbed point staying under the cursor. WASD
+    and the arrows pan the target across the ground at a rate that scales
+    with the camera's distance, and Q/E turn the camera about its target.
+    Key rates use the tick's elapsed time.
+  - **It reads before it writes.** A gesture starts when input arrives while
+    nothing is held: the controller asks the camera
+    `aether.kit.camera.where` and steps from the answer, and it forgets the
+    pose when the last key and button are released. A `pose`, `frame` or
+    `glide` sent from elsewhere between gestures stands, and the next
+    gesture continues from wherever the camera is.
+  - **It is a viewer of its camera.** It sends the camera
+    `aether.render.view_subscribe` and casts a drag pan's rays through the
+    view the drag began in, so the pan is exact for either lens with no
+    request per mouse move.
+  - **One window.** Its `aether.kit.camera-controller.config` names the
+    camera (`"camera": "aether.kit.camera:main"`) and the window whose input
+    it reads (`"window": "aether.window/aether.window.instance:main"`), and
+    sets the rates and the zoom range. Input from any other window is
+    ignored, and when its window loses focus it drops every held key and
+    button, whose releases went to another window.
+  - Load the camera first: a controller whose camera is not live fails its
+    load.
 - **A new drawing component** subscribes the `Render` stage and emits
   `DrawTriangle`s in world space, with `z` chosen against the depth convention
   (backdrop at `z = 0`, movers above). Multiple components can draw into one

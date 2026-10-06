@@ -10,7 +10,6 @@ use std::any::{TypeId, type_name};
 use std::fmt::Write as _;
 use std::iter;
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_actor::{Addressable, One};
 use aether_data::name_inventory::{
@@ -371,7 +370,7 @@ impl Fixture {
     fn apply(&self, batch: EffectBatch) -> Result<Vec<RegistryApplied>, RegistryEffectError> {
         let completion = self.registry.submit(batch).expect("the attached owner reserves the batch");
         self.owner.run_once();
-        completion.wait_timeout(Duration::from_secs(5)).expect("the owner completes the batch")
+        completion.try_take().expect("the owner completes the batch")
     }
 
     fn publish(&self, module: &Module) -> Result<(), String> {

@@ -43,7 +43,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
 
     let (r, mailer, wakes, target) = inventory_subscription_fixture();
     let subscription = r.subscribe_inventory(target, mailer);
-    wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
+    wakes.try_recv().expect("initial inventory wake");
     let initial_inventory = r.inventory();
     subscription.acknowledge(initial_inventory.mailbox_generation, initial_inventory.kind_generation);
     let kind = r.register_kind(&auth(), "test.seize.kind");
@@ -59,7 +59,7 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
     // live handle after `install_seize_handle`.
     let pooled_id = r.register_inbox(&auth(), "pooled", noop_handler());
     let inventory_generation = r.mailbox_generation();
-    wakes.recv_timeout(Duration::from_millis(100)).expect("live and kind publications coalesce");
+    wakes.try_recv().expect("live and kind publications coalesce");
     let published = r.inventory();
     subscription.acknowledge(published.mailbox_generation, published.kind_generation);
     let before_install = r.route_lookup(kind, pooled_id);

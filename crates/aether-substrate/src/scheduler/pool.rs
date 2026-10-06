@@ -435,6 +435,7 @@ mod tests {
     use crate::scheduler::slot::BATCH_MAX_USEC;
     use crate::scheduler::slot::tests::{CounterSlot, TEST_WORKERS};
     use crate::scheduler::{SlotStateLabel, WakeHandle};
+    use crate::testing::await_signal;
     use crossbeam_deque::Steal;
     use std::sync::Weak;
     use std::time::Duration;
@@ -442,6 +443,33 @@ mod tests {
 
     fn standard_handle(workers: usize) -> PoolHandle {
         Pool::start(PoolConfig { workers, budget_template: BudgetTemplate::Standard }, Arc::new(PanicAborter))
+    }
+
+    /// A [`PanicAborter`] that first signals a test channel, so a test waits
+    /// on the abort itself before it shuts the pool down. A worker that has
+    /// not reached its abort yet exits cleanly on shutdown, which is not the
+    /// outcome these tests are about.
+    struct SignallingAborter {
+        aborted: crossbeam_channel::Sender<()>,
+    }
+
+    impl FatalAborter for SignallingAborter {
+        fn abort(&self, reason: String) -> ! {
+            let _ = self.aborted.send(());
+            PanicAborter.abort(reason)
+        }
+    }
+
+    /// A pool whose aborter is a [`SignallingAborter`], beside the channel
+    /// it signals. The channel is unbounded because one panic can reach the
+    /// aborter twice — from the worker loop, and again from the worker's
+    /// fail-fast boundary as the first abort unwinds through it — and
+    /// neither send may block the unwinding worker.
+    fn signalling_handle(workers: usize) -> (PoolHandle, crossbeam_channel::Receiver<()>) {
+        let (aborted_tx, aborted_rx) = crossbeam_channel::unbounded();
+        let aborter = Arc::new(SignallingAborter { aborted: aborted_tx });
+
+        (Pool::start(PoolConfig { workers, budget_template: BudgetTemplate::Standard }, aborter), aborted_rx)
     }
 
     fn wait_until<F: Fn() -> bool>(timeout: Duration, f: F) -> bool {
@@ -537,11 +565,9 @@ mod tests {
     /// uses [`PanicAborter`] (the test-only aborter) which `panic!`s
     /// instead of `process::exit`; the worker thread propagates the
     /// panic, and `shutdown` returns it via `JoinHandle::join`. Body here,
-    /// `#[test]` wrapper alongside (issue 1522 — pool + `wait_until`).
+    /// `#[test]` wrapper alongside (issue 1522 — spawns a worker pool).
     fn handler_panic_escalates_via_aborter_body() {
-        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let handle =
-            Pool::start(PoolConfig { workers: 1, budget_template: BudgetTemplate::Standard }, Arc::clone(&aborter));
+        let (handle, aborted) = signalling_handle(1);
         let slot = CounterSlot::new("panicker").with_panic_at(2);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
@@ -551,12 +577,14 @@ mod tests {
         slot.push(1);
         slot.push(2); // this one panics
         slot.push(3);
-        // Seeding wake — test asserts on `dispatched()` / panic
-        // outcome, not on the CAS-win bool.
+        // Seeding wake — test asserts on the panic outcome, not on the
+        // CAS-win bool.
         let _ = wake.wake();
 
-        // Wait for at least the first envelope to dispatch.
-        assert!(wait_until(Duration::from_secs(2), || slot.dispatched() >= 1));
+        // Wait for the abort the second envelope raises. Waiting only for
+        // the first dispatch lets the shutdown below reach a worker whose
+        // cycle yielded between the two, and that worker exits cleanly.
+        await_signal(&aborted, "test.pool.handler_panic_abort");
 
         drop(wake);
         let results = handle.shutdown_with_results();
@@ -655,13 +683,10 @@ mod tests {
     /// Handed to the pool as its only strong reference, so the worker's
     /// `drop(slot)` after `run_cycle` is the last drop — the path that runs
     /// an actor's state `Drop` impls outside the per-cycle catch.
-    struct DropPanicSlot {
-        ran: Arc<AtomicBool>,
-    }
+    struct DropPanicSlot;
 
     impl Drainable for DropPanicSlot {
         fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
-            self.ran.store(true, Ordering::Release);
             CycleResult::Closed
         }
 
@@ -683,14 +708,13 @@ mod tests {
     /// A panic on a pool worker outside `run_cycle` — here the last drop of
     /// a closed slot — escalates through the [`FatalAborter`] with the site
     /// and the panic payload in the reason, rather than ending the worker
-    /// silently. Body here, `#[test]` wrapper alongside (issue 1522 — pool +
-    /// `wait_until`).
+    /// silently. Body here, `#[test]` wrapper alongside (issue 1522 — spawns
+    /// a worker pool).
     fn worker_panic_outside_a_handler_escalates_via_aborter_body() {
-        let handle = standard_handle(1);
-        let ran = Arc::new(AtomicBool::new(false));
-        handle.wake_sink().schedule(Arc::new(DropPanicSlot { ran: Arc::clone(&ran) }));
+        let (handle, aborted) = signalling_handle(1);
+        handle.wake_sink().schedule(Arc::new(DropPanicSlot));
 
-        assert!(wait_until(Duration::from_secs(5), || ran.load(Ordering::Acquire)));
+        await_signal(&aborted, "test.pool.worker_panic_abort");
 
         let results = handle.shutdown_with_results();
         let payload = results.into_iter().next().unwrap().expect_err("the worker must end in the escalated panic");

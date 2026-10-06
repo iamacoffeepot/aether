@@ -1,126 +1,215 @@
 //! Camera-controller wire kinds: the [`ControllerConfig`] init-config
-//! shape (loaded once at instantiation, ADR-0090) and the
-//! [`ControllerMode`] it selects. The controller *drives* the camera
-//! component through its existing `aether.kit.camera.*` kinds
-//! ([`crate::camera`]); this module holds only the controller's own
-//! configuration vocabulary.
+//! (loaded once at instantiation, ADR-0090) and the validated values it is
+//! built from. The controller drives a camera through the camera's own
+//! `aether.kit.camera.*` kinds ([`crate::camera`]); this module holds only
+//! the controller's own configuration vocabulary.
 //!
-//! [`ControllerConfig`] is a non-unit typed config. A bare load with no
-//! `config_path` boots the compiled [`Default`] control scheme; callers can
-//! still encode and pass a config to override that baseline.
+//! A load with no config boots the compiled [`Default`] control scheme:
+//! `aether.kit.camera:main` driven by the input of the chassis's initial
+//! window.
 
-use alloc::string::String;
+use core::borrow::Borrow;
+use core::error::Error as StdError;
+use core::fmt;
 
-use serde::{Deserialize, Serialize};
+use aether_actor::ActorPath;
+use aether_data::LoadName;
+use aether_window::{INITIAL_WINDOW_NAME, WindowCapability, WindowInstance};
 
-/// Which projection the controller drives on its target camera. The
-/// controller emits `aether.kit.camera.orbit.set` in [`Orbit`](Self::Orbit)
-/// and `aether.kit.camera.topdown.set` in [`Topdown`](Self::Topdown); the
-/// target camera must already be in the matching mode (the camera
-/// component warn-drops a mode-mismatched delta), so this pairs with
-/// the camera's own mode rather than switching it.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ControllerMode {
-    /// Drive the orbit camera: WASD pans the orbit `target` across the
-    /// ground plane, ←/→ yaw, ↑/↓ pitch, Z/X dolly the eye distance.
-    #[default]
-    Orbit,
-    /// Drive the top-down camera: WASD pans the ortho `center`, Z/X
-    /// scale the ortho `extent` (zoom).
-    Topdown,
+use crate::camera::{CameraComponent, Distance};
+
+/// Why a controller value was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerValueError {
+    /// A rate that is not finite or is below zero.
+    RateNegative,
+    /// A zoom step that is not finite or not greater than zero.
+    ZoomStepNotPositive,
 }
 
-/// An initial orbit pose for the controller's shadow, in place of the compiled
-/// baseline. Carried by [`ControllerConfig::seed`]; the fields mirror the
-/// orbit camera's own (`aether.kit.camera.orbit.set`, see
-/// [`OrbitParams`](crate::camera::OrbitParams)).
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-pub struct OrbitSeed {
-    /// World-space point the eye orbits and looks at.
-    pub target: [f32; 3],
-    /// Orbit yaw, radians.
-    pub yaw: f32,
-    /// Orbit pitch, radians. Negative places the eye above the target
-    /// looking down.
-    pub pitch: f32,
-    /// Eye distance from `target`, world units.
-    pub distance: f32,
+impl ControllerValueError {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::RateNegative => "rate-negative",
+            Self::ZoomStepNotPositive => "zoom-step-not-positive",
+        }
+    }
+}
+
+impl aether_data::Invariant for ControllerValueError {
+    fn reason(&self) -> &'static str {
+        Self::reason(*self)
+    }
+}
+
+impl fmt::Display for ControllerValueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+impl StdError for ControllerValueError {}
+
+/// How fast an input moves the camera, in the unit its config field names.
+/// Finite and not negative; zero turns that input off.
+#[derive(Debug, Clone, Copy, PartialEq, aether_data::Storage)]
+#[storage(validate)]
+pub struct Rate(f32);
+
+impl Rate {
+    /// Accept a finite rate that is not negative.
+    ///
+    /// # Errors
+    ///
+    /// [`ControllerValueError::RateNegative`] otherwise.
+    pub fn new(rate: f32) -> Result<Self, ControllerValueError> {
+        Self::check(rate)?;
+        Ok(Self(rate))
+    }
+
+    /// The rate.
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+
+    // `#[storage(validate)]` calls `check(&inner)`; `Borrow` takes that
+    // reference and `new`'s owned value alike.
+    fn check(rate: impl Borrow<f32>) -> Result<(), ControllerValueError> {
+        let rate = *rate.borrow();
+        let usable = rate >= 0.0 && rate.is_finite();
+        if usable {
+            Ok(())
+        } else {
+            Err(ControllerValueError::RateNegative)
+        }
+    }
+}
+
+/// What one wheel step multiplies the camera's distance by. Finite and
+/// greater than zero: below one a step toward the scene zooms in, above one
+/// it zooms out, and one turns the wheel off.
+#[derive(Debug, Clone, Copy, PartialEq, aether_data::Storage)]
+#[storage(validate)]
+pub struct ZoomStep(f32);
+
+impl ZoomStep {
+    /// Accept a finite multiplier greater than zero.
+    ///
+    /// # Errors
+    ///
+    /// [`ControllerValueError::ZoomStepNotPositive`] otherwise.
+    pub fn new(multiplier: f32) -> Result<Self, ControllerValueError> {
+        Self::check(multiplier)?;
+        Ok(Self(multiplier))
+    }
+
+    /// The multiplier.
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+
+    fn check(multiplier: impl Borrow<f32>) -> Result<(), ControllerValueError> {
+        let multiplier = *multiplier.borrow();
+        let positive = multiplier > 0.0 && multiplier.is_finite();
+        if positive {
+            Ok(())
+        } else {
+            Err(ControllerValueError::ZoomStepNotPositive)
+        }
+    }
 }
 
 /// Init-config for [`CameraController`](crate::camera::controller::CameraController):
-/// which camera to drive, in which mode, and the per-tick rates and
-/// clamps the keymap integrates. Every rate is expressed per tick, so
-/// the control feel is tick-rate-relative like the rest of the kit.
+/// the camera it drives, the window whose input it reads, and how fast each
+/// input moves the camera. The key rates are per second and the pan rate is
+/// a fraction of the camera's distance, so the feel is the same at any frame
+/// rate and any scale.
 ///
 /// # Agent
-/// Encode one of these to the controller's `Config` shape and pass it
-/// as the `config` bytes of the `aether.component.load` that
-/// instantiates the controller (or `load_component`'s `config_path`).
-/// Omitting config bytes boots [`ControllerConfig::default()`].
-#[aether_data::kind(name = "aether.kit.camera-controller.config")]
+/// Pass as `config` to `load_component` / `spawn` with `namespace:
+/// "aether.kit.camera-controller"` and a `key`, for example `{"camera":
+/// "aether.kit.camera:main", "window":
+/// "aether.window/aether.window.instance:main", "orbit_radians_per_pixel":
+/// 0.005, "key_turn_radians_per_sec": 1.5, "zoom_per_wheel_step": 0.9,
+/// "key_pan_distances_per_sec": 1.0, "nearest": 0.05, "farthest": 10000.0}`.
+/// The camera must be live first. A config whose `nearest` is beyond its
+/// `farthest` is refused at load.
+#[aether_data::kind(name = "aether.kit.camera-controller.config", partial_eq, no_serde)]
 pub struct ControllerConfig {
-    /// Name of the camera *within* the target camera component to
-    /// drive — the `name` field of every emitted `aether.kit.camera.*`
-    /// delta. Defaults to `"main"`, the camera component's boot camera.
-    /// This is not the component's load name (the controller resolves
-    /// the component instance separately); it selects which of that
-    /// component's named cameras the keys steer.
-    pub camera: String,
-    /// Which projection to drive. Must match the target camera's actual
-    /// mode; the controller does not switch modes.
-    pub mode: ControllerMode,
-    /// Ground-plane pan rate, world units per tick, for the WASD keys
-    /// (orbit `target` / topdown `center`). Diagonals are
-    /// velocity-normalized, so a diagonal covers the same ground per
-    /// tick as a cardinal.
-    pub pan_speed: f32,
-    /// Orbit yaw rate, radians per tick, for the ←/→ keys. Unused in
-    /// topdown mode.
-    pub yaw_speed: f32,
-    /// Orbit pitch rate, radians per tick, for the ↑/↓ keys. Unused in
-    /// topdown mode.
-    pub pitch_speed: f32,
-    /// Per-tick multiplicative zoom rate for the Z/X keys: Z scales the
-    /// controlled dimension (orbit `distance` / topdown `extent`) down
-    /// by this factor, X scales it up. `1.0` disables zoom.
-    pub zoom_rate: f32,
-    /// Absolute clamp on the orbit pitch magnitude, radians. Keeps the
-    /// eye out of the degenerate `±π/2` poles. Unused in topdown mode.
-    pub pitch_limit: f32,
-    /// Lower clamp on the controlled zoom dimension (orbit `distance` /
-    /// topdown `extent`), world units, so a zoom-in never collapses the
-    /// camera onto its target.
-    pub distance_floor: f32,
-    /// Initial orbit pose. `None` seeds the compiled baseline, a
-    /// three-quarter overhead look at the origin from 12 units back.
-    /// `Some` replaces it: the controller seeds its shadow, and through
-    /// it the target camera at `wire`, with this pose, so the first held
-    /// key moves from here rather than snapping back to the baseline.
-    /// Orbit mode only; topdown always seeds its compiled pose. The
-    /// orbit auto-advance stays pinned off (`speed: 0`) either way.
-    pub seed: Option<OrbitSeed>,
+    /// The camera to drive, `aether.kit.camera:<key>`. It is sent to, so it
+    /// is typed: a path whose leaf is not a kit camera does not decode.
+    pub camera: ActorPath<CameraComponent>,
+    /// The window whose keys, mouse and focus the controller reads,
+    /// `aether.window/aether.window.instance:<name>`. Input from any other
+    /// window is ignored. The path is compared, never sent to; it is typed
+    /// so a config cannot name something that is not a window.
+    pub window: ActorPath<WindowInstance>,
+    /// How far a left-drag turns the camera, in radians per physical pixel
+    /// of cursor travel: across for yaw, up and down for pitch.
+    pub orbit_radians_per_pixel: Rate,
+    /// How fast the Q and E keys turn the camera about its target, in
+    /// radians per second.
+    pub key_turn_radians_per_sec: Rate,
+    /// What one wheel step multiplies the camera's distance by.
+    pub zoom_per_wheel_step: ZoomStep,
+    /// How fast WASD and the arrow keys move the target across the ground,
+    /// in camera distances per second: at `1.0` a second of a held key moves
+    /// the target as far as the eye sits from it.
+    pub key_pan_distances_per_sec: Rate,
+    /// The closest the wheel may bring the eye to the target.
+    pub nearest: Distance,
+    /// The farthest the wheel may take the eye from the target.
+    pub farthest: Distance,
+}
+
+impl ControllerConfig {
+    /// The chassis's initial window, `main`.
+    fn initial_window() -> ActorPath<WindowInstance> {
+        let name = LoadName::new(INITIAL_WINDOW_NAME).expect("the initial window's name is a valid segment");
+
+        ActorPath::<WindowInstance>::child(&ActorPath::<WindowCapability>::root(), &name)
+            .expect("a window path is two valid steps, under both caps")
+    }
 }
 
 impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
-            camera: String::from("main"),
-            mode: ControllerMode::Orbit,
-            // ~0.15 m/tick ≈ 9 m/s at 60 Hz — a brisk but controllable
-            // scene-navigation pan.
-            pan_speed: 0.15,
-            // Gentle look rates, in the same ballpark as the mover's
-            // arrow-key orbit (radians/tick).
-            yaw_speed: 0.02,
-            pitch_speed: 0.015,
-            // 1.5% dolly per held tick — smooth zoom, ~60 ticks to halve
-            // or ~1.6× the distance.
-            zoom_rate: 0.985,
-            // Just inside the ±π/2 pole so `look_at` never degenerates.
-            pitch_limit: 1.5,
-            // Never dolly closer than 1 world unit to the target.
-            distance_floor: 1.0,
-            seed: None,
+            camera: CameraComponent::main_path(),
+            window: Self::initial_window(),
+            // 200 pixels of drag turn the camera one radian.
+            orbit_radians_per_pixel: Rate(0.005),
+            // A quarter turn takes about a second.
+            key_turn_radians_per_sec: Rate(1.5),
+            // Seven steps toward the scene halve the distance.
+            zoom_per_wheel_step: ZoomStep(0.9),
+            // A second of a held key crosses about the height of the view.
+            key_pan_distances_per_sec: Rate(1.0),
+            nearest: Distance::new(0.05).expect("a twentieth of a unit is a positive distance"),
+            farthest: Distance::new(10_000.0).expect("ten thousand units is a positive distance"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each check's bounds are open or closed as its doc says. A zero rate
+    /// is a switched-off input and must be accepted; a zero zoom step would
+    /// ask the camera for a zero distance, and a negative rate would reverse
+    /// an input the config has no field to reverse.
+    #[test]
+    fn value_bounds_are_open_or_closed_as_documented() {
+        assert!(Rate::new(0.0).is_ok());
+        assert_eq!(Rate::new(-0.001), Err(ControllerValueError::RateNegative));
+        assert_eq!(Rate::new(f32::NAN), Err(ControllerValueError::RateNegative));
+        assert_eq!(Rate::new(f32::INFINITY), Err(ControllerValueError::RateNegative));
+
+        assert_eq!(ZoomStep::new(0.0), Err(ControllerValueError::ZoomStepNotPositive));
+        assert_eq!(ZoomStep::new(f32::INFINITY), Err(ControllerValueError::ZoomStepNotPositive));
+        assert!(ZoomStep::new(1.25).is_ok());
     }
 }
