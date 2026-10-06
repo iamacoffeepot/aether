@@ -17,6 +17,7 @@ use aether_actor::ProtocolRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::{KindId, MailId};
 use aether_fs::{FsCapability, NamespaceRoots};
+use aether_inventory::InventoryCapability;
 use aether_kinds::{CaptureFrame, CaptureFrameResult, FrameVerdict};
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
@@ -261,8 +262,8 @@ pub struct SubstrateHarnessEnv {
     /// benches that never touch wasm skip the cap entirely.
     pub component_host: ComponentHostMode,
     /// Caller-supplied capability composition, applied to the chassis
-    /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
-    /// lifecycle, synthetic window) in push order. The harness gives the
+    /// [`Builder`] after the harness basics (trace dispatch, inventory, the
+    /// harness cap, lifecycle, synthetic window) in push order. The harness gives the
     /// basics; each embedder composes exactly the caps its scenario
     /// needs (issue #3764).
     pub compose: Vec<ComposeFn>,
@@ -452,7 +453,7 @@ impl SubstrateHarnessChassis {
         // to the stage subscriber set.
         //
         // Issue #3764: the fixed chain below is the harness basics — trace
-        // dispatch, the harness cap, lifecycle, and the synthetic window.
+        // dispatch, inventory, the harness cap, lifecycle, and the synthetic window.
         // Everything else is embedder-composed: the render cap
         // and component host ride env flags (they need boot-internal
         // wiring), fs rides pre-validated roots, and arbitrary caps
@@ -475,7 +476,8 @@ impl SubstrateHarnessChassis {
             .with_ring_capacities(ring_capacities)
             .with_scheduler_tuning(scheduler_tuning)
             .with_teardown_budget(teardown_budget)
-            .with_actor::<TraceDispatchCapability>(());
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<InventoryCapability>(());
         let host_params = || ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),

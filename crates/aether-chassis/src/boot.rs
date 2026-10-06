@@ -754,6 +754,7 @@ impl<C: Chassis> ComposeBase<C> for ChassisBase {
             // env read), so they declare membership only.
             .declare_config_member::<RuntimeConfig>()
             .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<InventoryCapability>(())
     }
 }
 
@@ -995,16 +996,16 @@ impl CommonEnv {
 
 /// Wire the worker count and the full-stack app caps that desktop and headless
 /// share (`ComponentHost`, `Fs`, `Http`, `Tcp`, `Process`). `Inventory` rides
-/// [`with_rpc_server`] instead. A chassis composes only the capabilities it
+/// [`ChassisBase`] with the rest of the base stratum. A chassis composes only the capabilities it
 /// serves, so the renderer / window / text / audio caps are each chassis's own
 /// `.with_actor::<_>()` additions after this, and a chassis that cannot serve
 /// one composes nothing at its mailbox.
 ///
 /// The universal base stratum — the aborter, the config sources, the non-cap
-/// ring / scheduler / settlement members, the two declare-only members, and
-/// `TraceDispatchCapability` — is NOT here: it is minted by `composed` and
-/// installed by [`ChassisBase`] ahead of every chassis's `compose` delta. This
-/// function is the delta-scoped remainder desktop and headless call inside their
+/// ring / scheduler / settlement members, the two declare-only members,
+/// `TraceDispatchCapability`, and `InventoryCapability` — is NOT here: it is
+/// minted by `composed` and installed by [`ChassisBase`] ahead of every
+/// chassis's `compose` delta. This function is the delta-scoped remainder desktop and headless call inside their
 /// own `compose`; `ChassisBootConfig` (workers) stays here rather than in the
 /// base so `boot_manifest` is only accepted where a component host exists
 /// (ADR-0162).
@@ -1185,14 +1186,14 @@ pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<Pr
 /// [`boot_standard`] opens it after the boot components have loaded, and the
 /// Bloomery's `build_mounted` after mounting its journal owner and driver.
 ///
-/// `aether.inventory` is composed here, ahead of the server, because the RPC
-/// server is the door `aether-mcp` enters through and `aether-mcp` resolves
-/// every textual address and every kind outside its static vocabulary through
-/// the inventory. Composing them together means an engine a caller can reach
-/// over RPC can always be driven, however narrow the rest of its roster.
+/// `aether.inventory` is not composed here: it rides [`ChassisBase`] on every
+/// chassis, so an engine a caller can reach over RPC can always be driven
+/// (`aether-mcp` resolves every textual address and every kind outside its
+/// static vocabulary through the inventory), however narrow the rest of its
+/// roster.
 #[must_use]
 pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
-    builder.with_actor::<InventoryCapability>(()).with_actor::<RpcServerCapability>(RpcServerParams {
+    builder.with_actor::<RpcServerCapability>(RpcServerParams {
         peer_kind: PeerKind::Substrate {
             engine_name: aether_substrate::engine_name::<C>(),
             engine_version: env!("CARGO_PKG_VERSION").into(),

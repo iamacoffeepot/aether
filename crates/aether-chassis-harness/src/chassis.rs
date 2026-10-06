@@ -94,8 +94,8 @@ impl BootableChassis for HarnessChassis {
     /// harness composes its own basics in: the component host first, then the
     /// caps a driven harness answers mail on, the synthetic window, the
     /// `aether.substrate_harness` advance cap, the frame lifecycle graph, and
-    /// the fs roots last. The trace dispatcher and the four non-cap tuning
-    /// members arrive ahead of all of it from [`ChassisBase`].
+    /// the fs roots last. The trace dispatcher, the inventory, and the four non-cap
+    /// tuning members arrive ahead of all of it from [`ChassisBase`].
     ///
     /// The pumped `aether.render` actor is reserved rather than composed: the
     /// slot is published at the Claim stage, so `aether.text` may declare its

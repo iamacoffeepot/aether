@@ -12,7 +12,7 @@
 //!   of a socket. Rust integration tests link this directly via
 //!   `aether_harness_substrate::SubstrateHarness`.
 //!
-//! The harness boots basics only — trace dispatch, the harness cap,
+//! The harness boots basics only — trace dispatch, inventory, the harness cap,
 //! lifecycle, the deterministic synthetic window, the observer mailbox — and
 //! each test composes the caps its scenario needs on the builder (issue
 //! #3764). GPU capture support plugs in through the [`FrameHook`] hook
