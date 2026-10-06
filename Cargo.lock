@@ -489,6 +489,8 @@ dependencies = [
  "aether-harness-substrate-capture",
  "aether-kinds",
  "aether-kit",
+ "aether-render",
+ "aether-window",
  "serde_json",
  "tracing",
 ]
@@ -719,7 +721,6 @@ dependencies = [
  "aether-render",
  "aether-window",
  "inventory",
- "serde",
  "tracing",
 ]
 

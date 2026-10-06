@@ -118,20 +118,30 @@ Pre-build component wasm with `cargo xtask build-wasm` before a scenario suite (
 A component is an actor whose receive side is declared with **`#[actor]`** on one `impl WasmActor for C` block (ADR-0033 / ADR-0074). Guide: `docs/guide/writing-guest-code.md`, `docs/guide/systems/components.md`, `docs/guide/foundations/actor-model.md`, and `docs/guide/architecture/guest-native-boundary.md`.
 
 ```rust
-#[actor(root, depends(LifecycleCapability, RenderCapability))]
+#[actor(instanced, root, depends(LifecycleCapability))]
 impl WasmActor for CameraComponent {
-    const NAMESPACE: &'static str = "aether.kit.camera";   // published name
+    type Config = CameraConfig;                             // decoded from the spawn's config
+    const NAMESPACE: &'static str = "aether.kit.camera";   // published name; an instance is `aether.kit.camera:<key>`
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> { /* build state; no mail yet */ }
+    fn init(config: CameraConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> { /* build state; no mail yet */ }
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> { // post-init, mail allowed: subscribe here
         ctx.subscribe::<LifecycleCapability, Tick>();
         Ok(())
     }
 
+    #[handler::tell]                                         // a view source: keep whoever subscribes
+    fn on_view_subscribe(&mut self, ctx: &mut WasmCtx<'_>, _s: ViewSubscribe) {
+        let Some(sender) = ctx.sender() else { return };
+        let Some(viewer) = ctx.cast::<Subscriber<ViewProjection>>(sender) else { return };
+        self.viewers.add(viewer);
+        ctx.send_to(viewer, &self.view());
+    }
+
     #[handler::event]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
-        ctx.send::<RenderCapability>(&ViewProjection { view_proj });
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+        self.step(tick);
+        self.viewers.send(&mut ctx.sends(), &self.view()); // ViewProjection { view, projection, eye, near, far, extent }
     }
 }
 aether_actor::export!(public = [CameraComponent]);         // required; emits wasm32-only FFI shims

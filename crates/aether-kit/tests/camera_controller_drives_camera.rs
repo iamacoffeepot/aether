@@ -1,20 +1,21 @@
 //! Acceptance: a held key drives the keyboard camera controller, which steers
-//! the peer camera component, which scrolls the rendered view (issue 2820).
+//! the camera instance its config names, which scrolls the rendered view
+//! (issue 2820).
 //!
-//! Loads two `aether-kit` actors — `CameraComponent` (the projection
-//! state machine, loaded under its default name `aether.kit.camera`) and
-//! `CameraController` (the keyboard driver, loaded with an init-config) —
-//! draws a high-contrast world-anchored striped ground straight to
-//! `aether.render` at each capture, and captures three frames: after the
-//! controller seeds the camera (idle), after a held `D` pans the orbit target
-//! across the ground, and after the key is released.
-//! The controller owns no pixels; the honest rendered signal that the whole
-//! `key → controller → aether.kit.camera.orbit.set → camera → view_proj → world`
-//! chain composed is that the pan frame differs from the seeded frame, while
+//! Loads two `aether-kit` actors — a `CameraComponent` instance at
+//! `aether.kit.camera:main` and a `CameraController` whose default config
+//! names it — tells the renderer to follow the camera, draws a high-contrast
+//! world-anchored striped ground straight to `aether.render` at each capture,
+//! and captures three frames: before any key, after a held `D` pans the
+//! camera's target across the ground, and after the key is released. The
+//! controller owns no pixels; the honest rendered signal that the whole
+//! `key → controller → aether.kit.camera.pose → camera → view → renderer`
+//! chain composed is that the pan frame differs from the first frame, while
 //! the released frame matches the pan frame (the zero-mail-idle invariant, end
-//! to end). The controller's per-tick integration math is pinned by its own
-//! unit tests; this is the composition-and-motion proof the harness split
-//! routes to `SubstrateHarness`.
+//! to end). The camera's own answer to `aether.kit.camera.where` says how far
+//! the target moved. The controller's per-tick integration math is pinned by
+//! its own unit tests; this is the composition-and-motion proof the harness
+//! split routes to `SubstrateHarness`.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
@@ -33,36 +34,47 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail, Render, WindowSize};
-use aether_kit::camera::CameraComponent;
+use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail};
 use aether_kit::camera::controller::{CameraController, ControllerConfig};
-use aether_math::Rgb;
-use aether_render::{DrawTriangle, Vertex};
+use aether_kit::camera::{CameraComponent, CameraConfig, Distance, Lens, Pitch, Pixels, Pose, Viewport, Where, Yaw};
+use aether_math::{Rgb, Vec3};
+use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
 
-/// Capture surface — a 4:3 frame the camera's aspect matches once the
-/// `WindowSize` below lands.
+/// Capture surface — a 4:3 frame, which the camera's fixed viewport matches.
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
 fn test_window() -> ErasedActorPath {
     aether_window::window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
 }
 
-/// Load the `aether_kit` export `R` under its own namespace with optional
-/// init-config bytes, blocking on `LoadResult` so the component is
-/// instantiated and subscribed before the next op. Returns its reference and
-/// the lineage path a capture bundle's `NamedMail` carries.
-fn load_kit_export<R: Addressable>(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    config: Vec<u8>,
-) -> (ActorRef<R>, ErasedActorPath) {
-    let name = R::NAMESPACE;
+/// Spawn the `aether_kit` export `R` as the instance `main` with init-config
+/// bytes, blocking on `LoadResult` so the component is instantiated and wired
+/// before the next op.
+fn load_main<R: Addressable>(harness: &mut SubstrateHarness, wasm: &[u8], config: Vec<u8>) -> ActorRef<R> {
+    let namespace = R::NAMESPACE;
     let actor = harness
-        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: None, config, export: None })
-        .unwrap_or_else(|error| panic!("load {name}: {error}"));
-    let path = harness.actor_path(&actor);
-    assert_eq!(path.to_string(), name, "singleton export {name} should register at its own namespace");
-    (actor, path)
+        .load::<R>(LoadComponent { wasm: wasm.to_vec(), name: Some("main".to_owned()), config, export: None })
+        .unwrap_or_else(|error| panic!("load {namespace}: {error}"));
+    assert_eq!(harness.actor_path(&actor).to_string(), format!("{namespace}:main"));
+
+    actor
+}
+
+/// A three-quarter overhead look at the world origin from 12 units back, over
+/// a fixed viewport of the capture's size.
+fn overhead_camera() -> CameraConfig {
+    let pose = Pose {
+        target: Vec3::ZERO,
+        yaw: Yaw::new(0.0).expect("a finite yaw"),
+        pitch: Pitch::new(-1.1).expect("a pitch above the ground"),
+        distance: Distance::new(12.0).expect("a positive distance"),
+    };
+    let viewport = Viewport::Fixed {
+        width: Pixels::new(WINDOW_WIDTH).expect("a width that is not zero"),
+        height: Pixels::new(WINDOW_HEIGHT).expect("a height that is not zero"),
+    };
+
+    CameraConfig { lens: Lens::BOOT, viewport, pose: Some(pose) }
 }
 
 /// A world-anchored ground plane at `y = 0` striped along `x` — green and gray
@@ -96,26 +108,35 @@ fn ground_stripes() -> Vec<NamedMail> {
         .collect()
 }
 
-/// Capture one frame that draws both the ground and the camera's projection:
-/// the camera's `Render` publishes its (controller-driven) `view_proj`, then
-/// the striped ground accumulates under it, both into the accumulator right
-/// before the GPU readback.
-fn capture_scene(harness: &mut SubstrateHarness, camera: &ErasedActorPath, label: &'static str) -> Vec<u8> {
-    let mut pre = vec![envelope(&camera.to_string(), &Render)];
-    pre.extend(ground_stripes());
-    let captured =
-        harness.execute(vec![(label, HarnessOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
+/// Capture one frame of the striped ground under the view the renderer was
+/// last sent: the camera publishes when its pose changes, so the capture
+/// stages only the ground.
+fn capture_scene(harness: &mut SubstrateHarness, label: &'static str) -> Vec<u8> {
+    let captured = harness
+        .execute(vec![(label, HarnessOp::capture_with_mails(ground_stripes(), Vec::new()))])
+        .expect("capture-with-mails");
     captured.captured(label).expect("capture step ran").to_vec()
 }
 
-/// **The keyboard camera controller, end to end.** A held `D` pans the orbit
-/// target east across the striped ground; the world-anchored ground scrolls
-/// under the camera, so the pan frame differs from the seeded frame. Releasing
+/// The camera's answer to `aether.kit.camera.where`.
+fn pose_of(harness: &mut SubstrateHarness, camera: ActorRef<CameraComponent>) -> Pose {
+    harness
+        .execute(vec![("where", HarnessOp::send_and_await_reply(&camera, &Where))])
+        .expect("the camera answers where it is")
+        .reply::<Pose>("where")
+        .expect("decode the pose")
+}
+
+/// **The keyboard camera controller, end to end.** A held `D` pans the
+/// camera's target east across the striped ground; the world-anchored ground
+/// scrolls under the camera, so the pan frame differs from the first frame,
+/// and the camera reports its target 48 ticks of pan to the east. Releasing
 /// the key freezes the pose, so the next frame matches the pan frame — the
 /// zero-mail-idle invariant proven through the full render chain. Proves the
-/// controller co-loads with the camera (the export wiring this change adds),
-/// drives it over the loaded-peer path, and that input reaches the rendered
-/// view without the controller ever touching the render sink itself.
+/// controller proves the camera its config names, starts from the pose the
+/// camera reports, and that input reaches the rendered view without the
+/// controller ever touching the render sink itself. A controller that never
+/// heard the camera's answer to `where` would send no pose at all.
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn held_key_pans_the_camera_over_the_painted_world() {
@@ -132,40 +153,27 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         .build()
         .expect("boot");
 
-    // The controller resolves its target camera by the camera export's default
-    // load name (`aether.kit.camera`), so the camera must be loaded under it.
-    let (camera, camera_path) = load_kit_export::<CameraComponent>(&mut harness, &kit_wasm, Vec::new());
-    // Default config drives the camera's boot `"main"` orbit camera — the
-    // documented baseline. Loaded last so the camera instance exists when the
-    // controller's `wire()` seed mail arrives.
-    let config = ControllerConfig::default().encode_into_bytes();
-    let (controller, _) = load_kit_export::<CameraController>(&mut harness, &kit_wasm, config);
+    // The camera first: the controller proves its path when it wires and asks
+    // it where it is, so the keys step from the camera's own pose.
+    let camera = load_main::<CameraComponent>(&mut harness, &kit_wasm, overhead_camera().encode_into_bytes());
+    let controller =
+        load_main::<CameraController>(&mut harness, &kit_wasm, ControllerConfig::default().encode_into_bytes());
 
-    // Feed the camera a real window aspect, then settle the seed +
-    // subscriptions before the first capture.
+    // The renderer takes its view from the camera; the view the camera sends
+    // back rides the request's chain.
+    let follow = ViewFrom { source: CameraComponent::main_path().narrow::<ViewSource>() };
     harness
         .execute(vec![
-            (
-                "aspect",
-                HarnessOp::send_and_settle(
-                    &camera,
-                    &WindowSize {
-                        window: test_window(),
-                        width: WINDOW_WIDTH,
-                        height: WINDOW_HEIGHT,
-                        scale_factor: 1.0,
-                    },
-                ),
-            ),
+            ("follow", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &follow)),
             ("settle", HarnessOp::advance(2)),
         ])
-        .expect("aspect + settle");
+        .expect("follow + settle");
 
-    let seeded = capture_scene(&mut harness, &camera_path, "seeded");
+    let seeded = capture_scene(&mut harness, "seeded");
 
-    // Hold D (no release): each tick the controller pans the orbit target east
-    // across the stripes and mails the delta to the camera. 48 ticks at the
-    // default 0.15 m/tick pan walks the target ~7 m — nearly two stripe widths.
+    // Hold D (no release): each tick the controller pans the target east
+    // across the stripes and mails the pose to the camera. 48 ticks at the
+    // default 0.15 m/tick pan walks the target 7.2 m — nearly two stripe widths.
     harness
         .execute(vec![
             ("press_d", HarnessOp::send_and_settle(&controller, &Key { window: test_window(), code: KEY_D })),
@@ -173,7 +181,13 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         ])
         .expect("hold D + pan");
 
-    let panned = capture_scene(&mut harness, &camera_path, "panned");
+    let panned = capture_scene(&mut harness, "panned");
+    let panned_pose = pose_of(&mut harness, camera);
+    assert!(
+        (panned_pose.target.x - 7.2).abs() < 0.01,
+        "48 ticks of D at 0.15 per tick move the target 7.2 east; the camera reports {:?}",
+        panned_pose.target,
+    );
 
     // Release D and advance: with no key held the controller emits no mail, so
     // the camera pose is frozen and the view stops moving.
@@ -184,7 +198,8 @@ fn held_key_pans_the_camera_over_the_painted_world() {
         ])
         .expect("release D + idle");
 
-    let idle = capture_scene(&mut harness, &camera_path, "idle");
+    let idle = capture_scene(&mut harness, "idle");
+    assert_eq!(pose_of(&mut harness, camera), panned_pose, "no key held, so the camera keeps its pose");
 
     let seeded_img = decode_png(&seeded).expect("decode seeded png");
     let panned_img = decode_png(&panned).expect("decode panned png");
@@ -198,8 +213,8 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     assert!(
         seeded_cov > 0.1 && panned_cov > 0.1,
         "both captures should render the striped ground (coverage > 0.1); \
-         seeded={seeded_cov:.3} panned={panned_cov:.3} — the controller did not seed / \
-         drive the camera over the scene",
+         seeded={seeded_cov:.3} panned={panned_cov:.3} — the camera's view did not reach \
+         the renderer",
     );
 
     // The camera moved: panning the orbit target scrolled the world-anchored
@@ -226,4 +241,34 @@ fn held_key_pans_the_camera_over_the_painted_world() {
          mean-absolute-error after release was {idle_mae:.3} (expected < 0.02) — the camera \
          kept moving with no key held",
     );
+}
+
+/// A controller whose config names a camera that is not live fails its load,
+/// and the refusal names the camera's path. A `wire` that logged the failure
+/// and carried on would stand up a controller that takes keys and moves
+/// nothing.
+#[test]
+fn a_controller_whose_camera_is_not_live_is_refused_at_load() {
+    let Some(kit_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&kit_path).expect("read kit wasm");
+    let mut harness = SubstrateHarness::builder()
+        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        .with_render()
+        .with_component_host()
+        .build()
+        .expect("boot");
+
+    let refused = harness
+        .load::<CameraController>(LoadComponent {
+            wasm,
+            name: Some("main".to_owned()),
+            config: Vec::new(),
+            export: None,
+        })
+        .expect_err("a controller with no camera to drive does not load");
+
+    let reason = refused.to_string();
+    assert!(reason.contains("aether.kit.camera:main"), "the refusal names the camera's path: {reason}");
 }

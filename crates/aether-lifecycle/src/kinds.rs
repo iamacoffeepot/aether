@@ -17,7 +17,7 @@ macro_rules! subscription {
         /// an actor that handles the stage silently (ADR-0231 §8).
         ///
         /// Over MCP each variant takes the subscriber's canonical path, as in
-        /// `{"Tick": "aether.kit.camera"}`.
+        /// `{"Tick": "aether.kit.camera:main"}`.
         #[derive(aether_data::Schema, Debug, Clone, PartialEq, Eq)]
         pub enum LifecycleSubscription {
             $(

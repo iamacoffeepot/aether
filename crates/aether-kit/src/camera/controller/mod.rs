@@ -2,79 +2,56 @@
 // dispatch ABI; the macro-generated trampoline owns the payload.
 #![allow(clippy::needless_pass_by_value)]
 
-//! [`CameraController`] — a keyboard driver for the [`camera`](crate::camera)
-//! component.
+//! [`CameraController`] — a keyboard driver for one [`camera`](crate::camera)
+//! instance, at `aether.kit.camera-controller:<key>`.
 //!
-//! Turns held keys into camera-pose deltas and mails them to a peer
-//! [`CameraComponent`], so plain scene
-//! navigation ("look around with the keyboard") composes without dragging in
-//! a gameplay body the way `aether-kit-terrain`'s `WorldMover` embedded
-//! follow-camera does. The camera stays a pure projection state machine; all
-//! keyboard policy lives here.
+//! Turns held keys into poses and mails them to the camera its config names,
+//! so plain scene navigation ("look around with the keyboard") composes
+//! without dragging in a gameplay body. The camera stays a pose and a lens;
+//! all keyboard policy lives here.
 //!
 //! # Design
 //!
-//! The controller keeps a **shadow pose** — its own copy of the camera state
-//! it drives — because the camera's `aether.kit.camera.*` deltas are *absolute*
-//! (`Some` overwrites, `None` keeps; see [`OrbitParams`]) and the camera
-//! exposes no read-back kind. On `wire`
-//! it sends one full seed so the shadow is authoritative from the first frame
-//! (every field `Some`, including `speed: Some(0.0)` to pin the orbit
-//! auto-advance so it never fights the keys), and each tick it emits only the
-//! fields that changed. A tick with no mapped key held produces no mail at all.
+//! The controller keeps a **shadow pose**, its own copy of the pose it
+//! drives. At `wire` it proves the camera's path and asks the camera
+//! [`Where`], and the answer is the shadow's first value, so the keys move the
+//! camera from wherever its config put it. Each tick with a mapped key held
+//! it steps the shadow and sends the camera the whole [`Pose`]. A tick with
+//! no mapped key held produces no mail at all.
 //!
-//! Accepted limit: an out-of-band pose edit (an MCP poke straight to the
-//! camera) is snapped back on the next held-key tick, since the shadow, not
-//! the camera, is the source of truth.
+//! Accepted limit: a pose sent to the camera from elsewhere (an MCP poke, a
+//! `Frame`, a `Glide`) is replaced on the next held-key tick, since the
+//! shadow, not the camera, is what the keys step.
+//!
+//! A controller whose camera does not prove at `wire` fails its birth, so
+//! load the camera first. A republish does not run `wire`, so `on_rehydrate`
+//! proves the camera and asks again; the shadow is whatever the camera
+//! answers.
 //!
 //! # Config
 //!
-//! [`ControllerConfig`] (init-config, ADR-0090) selects the target camera
-//! name, the mode, the per-tick rates and clamps, and an optional initial
-//! orbit pose ([`ControllerConfig::seed`]) — control-scheme variation is
-//! config, not code. The seed replaces the compiled baseline pose in the
-//! shadow itself, so a subject framed at boot stays framed once the keys
-//! take over. A bare load boots [`ControllerConfig::default()`].
+//! [`ControllerConfig`] (init-config, ADR-0090) names the camera and sets the
+//! per-tick rates and clamps: control-scheme variation is config, not code.
 //!
 //! # Mail surface
 //!
-//! - [`Key`] / [`KeyRelease`] — set / clear a held key. Orbit: WASD pan the
+//! - [`Key`] / [`KeyRelease`] — set / clear a held key. WASD pan the pose's
 //!   `target` across the ground plane (yaw-relative, diagonals normalized),
-//!   ←/→ yaw, ↑/↓ pitch (clamped), Z/X dolly the eye distance. Topdown: WASD
-//!   pan the `center`, Z/X scale the `extent`.
-//! - [`Tick`] — integrate the held keys and emit the changed-field delta to
-//!   the target camera.
+//!   ←/→ yaw, ↑/↓ pitch (clamped), Z/X dolly the eye distance.
+//! - [`Tick`] — step the shadow by the held keys and send the camera the
+//!   pose.
 
 mod kinds;
 pub use kinds::*;
 
-use core::f32::consts::FRAC_PI_3;
-
-use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorRef, PriorState, ResolveError, WasmActor, WasmCtx, WasmDropCtx};
+use aether_actor::{WasmInitCtx, actor};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::LifecycleCapability;
-use aether_math::{TAU, Vec2, Vec3};
+use aether_math::{TAU, Vec3};
 use aether_window::WindowCapability;
 
-use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
-
-/// Compiled baseline orbit pose the controller seeds into the target camera:
-/// a three-quarter overhead look at the world origin, far enough back to frame
-/// a scene, used when the config carries no [`ControllerConfig::seed`].
-/// Auto-advance is pinned off at seed time (`speed: Some(0.0)`).
-const SEED_TARGET: [f32; 3] = [0.0, 0.0, 0.0];
-const SEED_DISTANCE: f32 = 12.0;
-/// Negative pitch places the eye above the target looking down (see
-/// [`OrbitParams::pitch`]); ~-63° is a legible
-/// three-quarter angle well inside the `±π/2` pole.
-const SEED_PITCH: f32 = -1.1;
-const SEED_YAW: f32 = 0.0;
-/// Baseline vertical FOV (radians) — matches the camera component's own orbit
-/// default so the seed doesn't visibly change the lens.
-const SEED_FOV: f32 = FRAC_PI_3;
-/// Compiled baseline topdown pose: origin-centered, matching the eye distance.
-const SEED_CENTER: [f32; 2] = [0.0, 0.0];
-const SEED_EXTENT: f32 = 12.0;
+use crate::camera::{CameraComponent, Distance, Pitch, Pose, Where, Yaw};
 
 /// Which mapped keys are currently held. Independent flags so opposite keys
 /// (A+D, ←+→) resolve to a zero axis rather than the last one winning.
@@ -93,75 +70,68 @@ struct Held {
     zoom_out: bool,
 }
 
-/// The controller's authoritative copy of the orbit pose it drives.
+/// The controller's hold on the camera it drives.
 #[derive(Debug, Clone, Copy)]
-struct OrbitShadow {
-    target: Vec3,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+enum Link {
+    /// Not wired yet, or a republish found the camera gone; the keys move
+    /// nothing.
+    Unlinked,
+    /// The camera is proven and has been asked where it is.
+    Asked(ActorRef<CameraComponent>),
+    /// The camera answered: `pose` is the shadow the keys step.
+    Driving { camera: ActorRef<CameraComponent>, pose: Pose },
 }
 
-/// The controller's authoritative copy of the topdown pose it drives.
-#[derive(Debug, Clone, Copy)]
-struct TopdownShadow {
-    center: Vec2,
-    extent: f32,
-}
+/// What a controller carries across a republish: nothing of its own, since
+/// the camera holds the pose. Saving it is what makes the replacement's
+/// `on_rehydrate` run.
+#[aether_data::kind(name = "aether.kit.camera-controller.state", copy, eq, no_serde)]
+struct ControllerState;
 
-/// The shadow pose, one variant per driven mode.
-#[derive(Debug, Clone, Copy)]
-enum Shadow {
-    Orbit(OrbitShadow),
-    Topdown(TopdownShadow),
-}
-
-/// Keyboard driver for a peer camera component. Singleton, like the camera it
-/// drives; loaded as a non-entry export of `aether_kit.wasm`.
+/// Keyboard driver for one camera instance.
 pub struct CameraController {
     config: ControllerConfig,
     held: Held,
-    shadow: Shadow,
+    link: Link,
 }
 
-#[actor(root, depends(WindowCapability, LifecycleCapability, CameraComponent))]
+#[actor(instanced, root, depends(WindowCapability, LifecycleCapability))]
 impl WasmActor for CameraController {
     type Config = ControllerConfig;
     const NAMESPACE: &'static str = "aether.kit.camera-controller";
 
     fn init(config: ControllerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let shadow = match config.mode {
-            ControllerMode::Orbit => {
-                let seed = config.seed.unwrap_or(OrbitSeed {
-                    target: SEED_TARGET,
-                    yaw: SEED_YAW,
-                    pitch: SEED_PITCH,
-                    distance: SEED_DISTANCE,
-                });
-                Shadow::Orbit(OrbitShadow {
-                    target: Vec3::from_array(seed.target),
-                    yaw: seed.yaw,
-                    pitch: seed.pitch,
-                    distance: seed.distance,
-                })
-            }
-            ControllerMode::Topdown => Shadow::Topdown(TopdownShadow {
-                center: Vec2::new(SEED_CENTER[0], SEED_CENTER[1]),
-                extent: SEED_EXTENT,
-            }),
-        };
-        Ok(Self { config, held: Held::default(), shadow })
+        Ok(Self { config, held: Held::default(), link: Link::Unlinked })
     }
 
-    /// Subscribe the all-window key streams and the tick stage, then seed the target
-    /// camera so the shadow is authoritative from frame one. `wire` is the
-    /// placement for the seed — `init`'s ctx can't mail.
+    /// Subscribe the all-window key streams and the tick stage, then prove
+    /// the camera and ask where it is. `init`'s ctx can't mail.
+    ///
+    /// # Errors
+    ///
+    /// When the config's camera path does not prove: a controller with no
+    /// camera would take keys and move nothing, so its birth fails and the
+    /// load that asked is told which path.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, KeyRelease>();
         ctx.subscribe::<LifecycleCapability, Tick>();
-        self.seed(ctx);
-        Ok(())
+
+        self.link_camera(ctx).map_err(|error| ActorInitError::new(format!("the controller's camera: {error}")))
+    }
+
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+        ctx.save_state_kind(0, &ControllerState);
+    }
+
+    /// Prove the camera and ask where it is again: a republish does not run
+    /// `wire`, and a reference does not outlive the instance that proved it.
+    /// A rehydrate cannot refuse, so a camera that no longer proves is
+    /// logged and the keys move nothing.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+        if let Err(error) = self.link_camera(ctx) {
+            tracing::error!(target: "aether_kit", %error, "the controller's camera does not prove; the keys move nothing");
+        }
     }
 
     #[handler::event]
@@ -174,56 +144,40 @@ impl WasmActor for CameraController {
         self.set_held(key.code, false);
     }
 
-    /// Integrate the held keys one tick and, if anything moved, emit the
-    /// changed-field delta to the target camera. Nothing held → no mail.
+    /// Step the shadow by the held keys and, if anything moved, send the
+    /// camera the pose. Nothing held → no mail.
     #[handler::event]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        let held = self.held;
-        let camera = self.config.camera.clone();
-        match &mut self.shadow {
-            Shadow::Orbit(orbit) => {
-                if let Some(params) = step_orbit(orbit, held, &self.config) {
-                    ctx.send::<CameraComponent>(&CameraOrbitSet { name: camera, params });
-                }
-            }
-            Shadow::Topdown(topdown) => {
-                if let Some(params) = step_topdown(topdown, held, &self.config) {
-                    ctx.send::<CameraComponent>(&CameraTopdownSet { name: camera, params });
-                }
-            }
+        let Link::Driving { camera, pose } = &mut self.link else {
+            return;
+        };
+
+        if let Some(stepped) = step(*pose, self.held, &self.config) {
+            *pose = stepped;
+            ctx.send_to(*camera, &stepped);
         }
+    }
+
+    /// The camera's answer to [`Where`]: the pose the keys step from.
+    #[handler::response]
+    fn on_pose(&mut self, _ctx: &mut WasmCtx<'_>, pose: Pose) {
+        self.link = match self.link {
+            Link::Unlinked => Link::Unlinked,
+            Link::Asked(camera) | Link::Driving { camera, .. } => Link::Driving { camera, pose },
+        };
     }
 }
 
 impl CameraController {
-    /// Send the full-`Some` seed for the current mode, pinning orbit
-    /// auto-advance off so it never fights the keys.
-    fn seed<A: DependsOn<CameraComponent>>(&self, ctx: &mut WasmCtx<'_, A>) {
-        let camera = self.config.camera.clone();
-        match &self.shadow {
-            Shadow::Orbit(orbit) => {
-                ctx.send::<CameraComponent>(&CameraOrbitSet {
-                    name: camera,
-                    params: OrbitParams {
-                        distance: Some(orbit.distance),
-                        pitch: Some(orbit.pitch),
-                        yaw: Some(orbit.yaw),
-                        speed: Some(0.0),
-                        fov_y_rad: Some(SEED_FOV),
-                        target: Some([orbit.target.x, orbit.target.y, orbit.target.z]),
-                    },
-                });
-            }
-            Shadow::Topdown(topdown) => {
-                ctx.send::<CameraComponent>(&CameraTopdownSet {
-                    name: camera,
-                    params: TopdownParams {
-                        center: Some([topdown.center.x, topdown.center.y]),
-                        extent: Some(topdown.extent),
-                    },
-                });
-            }
-        }
+    /// Prove the config's camera path and ask the camera where it is. A path
+    /// that does not prove leaves the controller unlinked.
+    fn link_camera(&mut self, ctx: &mut WasmCtx<'_, Self>) -> Result<(), ResolveError> {
+        self.link = Link::Unlinked;
+        let camera = ctx.resolve(&self.config.camera)?;
+        ctx.send_to(camera, &Where);
+        self.link = Link::Asked(camera);
+
+        Ok(())
     }
 
     fn set_held(&mut self, code: u32, down: bool) {
@@ -254,11 +208,11 @@ fn zoom_factor(held: Held, config: &ControllerConfig) -> Option<f32> {
     }
 }
 
-/// Advance the orbit shadow one tick from the held keys and return the delta
-/// to send — `Some` carrying only the fields that changed this tick, or `None`
-/// when no mapped key produced motion (the zero-mail-idle invariant).
-fn step_orbit(shadow: &mut OrbitShadow, held: Held, config: &ControllerConfig) -> Option<OrbitParams> {
-    let mut params = OrbitParams::default();
+/// `pose` stepped one tick by the held keys, or `None` when no mapped key
+/// produced motion (the zero-mail-idle invariant). A step whose value a
+/// config rate pushed out of range keeps the pose's own.
+fn step(pose: Pose, held: Held, config: &ControllerConfig) -> Option<Pose> {
+    let mut stepped = pose;
     let mut changed = false;
 
     // Pan the target across the ground plane in a yaw-relative basis: at
@@ -268,61 +222,35 @@ fn step_orbit(shadow: &mut OrbitShadow, held: Held, config: &ControllerConfig) -
     let forward = f32::from(held.forward) - f32::from(held.back);
     let right = f32::from(held.right) - f32::from(held.left);
     if forward != 0.0 || right != 0.0 {
-        let (sin_yaw, cos_yaw) = (shadow.yaw.sin(), shadow.yaw.cos());
-        let fwd = Vec3::new(-sin_yaw, 0.0, -cos_yaw);
-        let rgt = Vec3::new(cos_yaw, 0.0, -sin_yaw);
-        let dir = (fwd * forward + rgt * right).normalize();
-        shadow.target += dir * config.pan_speed;
-        params.target = Some([shadow.target.x, shadow.target.y, shadow.target.z]);
+        let (sin_yaw, cos_yaw) = pose.yaw.get().sin_cos();
+        let ahead = Vec3::new(-sin_yaw, 0.0, -cos_yaw);
+        let across = Vec3::new(cos_yaw, 0.0, -sin_yaw);
+        stepped.target += (ahead * forward + across * right).normalize() * config.pan_speed;
         changed = true;
     }
 
     let yaw_dir = f32::from(held.yaw_pos) - f32::from(held.yaw_neg);
     if yaw_dir != 0.0 {
-        shadow.yaw = yaw_dir.mul_add(config.yaw_speed, shadow.yaw).rem_euclid(TAU);
-        params.yaw = Some(shadow.yaw);
+        let yaw = yaw_dir.mul_add(config.yaw_speed, pose.yaw.get()).rem_euclid(TAU);
+        stepped.yaw = Yaw::new(yaw).unwrap_or(pose.yaw);
         changed = true;
     }
 
     let pitch_dir = f32::from(held.pitch_pos) - f32::from(held.pitch_neg);
     if pitch_dir != 0.0 {
-        shadow.pitch =
-            pitch_dir.mul_add(config.pitch_speed, shadow.pitch).clamp(-config.pitch_limit, config.pitch_limit);
-        params.pitch = Some(shadow.pitch);
+        let limit = config.pitch_limit.get().abs();
+        let pitch = pitch_dir.mul_add(config.pitch_speed, pose.pitch.get()).clamp(-limit, limit);
+        stepped.pitch = Pitch::new(pitch).unwrap_or(pose.pitch);
         changed = true;
     }
 
     if let Some(factor) = zoom_factor(held, config) {
-        shadow.distance = (shadow.distance * factor).max(config.distance_floor);
-        params.distance = Some(shadow.distance);
+        let distance = (pose.distance.get() * factor).max(config.distance_floor.get());
+        stepped.distance = Distance::new(distance).unwrap_or(pose.distance);
         changed = true;
     }
 
-    changed.then_some(params)
-}
-
-/// Advance the topdown shadow one tick: WASD pan the ortho center (normalized
-/// diagonals), Z/X scale the ortho extent. `None` when idle.
-fn step_topdown(shadow: &mut TopdownShadow, held: Held, config: &ControllerConfig) -> Option<TopdownParams> {
-    let mut params = TopdownParams::default();
-    let mut changed = false;
-
-    let forward = f32::from(held.forward) - f32::from(held.back);
-    let right = f32::from(held.right) - f32::from(held.left);
-    if forward != 0.0 || right != 0.0 {
-        let dir = Vec2::new(right, forward).normalize();
-        shadow.center += dir * config.pan_speed;
-        params.center = Some([shadow.center.x, shadow.center.y]);
-        changed = true;
-    }
-
-    if let Some(factor) = zoom_factor(held, config) {
-        shadow.extent = (shadow.extent * factor).max(config.distance_floor);
-        params.extent = Some(shadow.extent);
-        changed = true;
-    }
-
-    changed.then_some(params)
+    changed.then_some(stepped)
 }
 
 #[cfg(test)]
@@ -331,30 +259,24 @@ mod tests {
 
     use super::*;
 
-    fn orbit(yaw: f32) -> OrbitShadow {
-        OrbitShadow { target: Vec3::ZERO, yaw, pitch: 0.0, distance: SEED_DISTANCE }
+    fn level(yaw: f32) -> Pose {
+        Pose { yaw: Yaw::new(yaw).expect("a finite yaw"), pitch: Pitch::new(0.0).expect("level"), ..Pose::BOOT }
     }
 
     fn held_keys(codes: &[u32]) -> Held {
-        let mut c = CameraController {
-            config: ControllerConfig::default(),
-            held: Held::default(),
-            shadow: Shadow::Orbit(orbit(0.0)),
-        };
+        let mut controller =
+            CameraController { config: ControllerConfig::default(), held: Held::default(), link: Link::Unlinked };
         for &code in codes {
-            c.set_held(code, true);
+            controller.set_held(code, true);
         }
-        c.held
+        controller.held
     }
 
     #[test]
-    fn idle_emits_no_delta() {
+    fn idle_steps_nothing() {
         // Tripwire: the zero-mail-idle invariant. No mapped key held → no
-        // delta → the on_tick handler sends nothing.
-        let mut s = orbit(0.0);
-        assert!(step_orbit(&mut s, Held::default(), &ControllerConfig::default()).is_none());
-        let mut t = TopdownShadow { center: Vec2::ZERO, extent: SEED_EXTENT };
-        assert!(step_topdown(&mut t, Held::default(), &ControllerConfig::default()).is_none());
+        // stepped pose → the on_tick handler sends nothing.
+        assert_eq!(step(level(0.0), Held::default(), &ControllerConfig::default()), None);
     }
 
     #[test]
@@ -363,13 +285,11 @@ mod tests {
         // the same Euclidean distance per tick as a lone W — no √2 speed-up.
         let config = ControllerConfig::default();
 
-        let mut cardinal = orbit(0.0);
-        step_orbit(&mut cardinal, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
+        let cardinal = step(level(0.0), held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         let cardinal_mag = cardinal.target.length();
 
-        let mut diagonal = orbit(0.0);
-        step_orbit(&mut diagonal, held_keys(&[keycode::KEY_W, keycode::KEY_D]), &config)
-            .expect("W+D held pans the target");
+        let diagonal =
+            step(level(0.0), held_keys(&[keycode::KEY_W, keycode::KEY_D]), &config).expect("W+D held pans the target");
         let diagonal_mag = diagonal.target.length();
 
         assert!(
@@ -389,13 +309,11 @@ mod tests {
         // stay screen-relative as the camera orbits.
         let config = ControllerConfig::default();
 
-        let mut at_zero = orbit(0.0);
-        step_orbit(&mut at_zero, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
+        let at_zero = step(level(0.0), held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         assert!(at_zero.target.x.abs() < 1e-5, "yaw 0: no X drift");
         assert!(at_zero.target.z < 0.0, "yaw 0: W moves -Z");
 
-        let mut at_quarter = orbit(FRAC_PI_2);
-        step_orbit(&mut at_quarter, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
+        let at_quarter = step(level(FRAC_PI_2), held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         assert!(at_quarter.target.z.abs() < 1e-5, "quarter turn: no Z drift");
         assert!(at_quarter.target.x < 0.0, "quarter turn: W moves -X");
     }
@@ -403,36 +321,22 @@ mod tests {
     #[test]
     fn pitch_and_distance_clamp() {
         // Tripwire: the clamps. Holding ↑ forever saturates pitch at
-        // +pitch_limit (never reaching the degenerate pole); holding Z forever
-        // floors the eye distance rather than collapsing onto the target.
+        // +pitch_limit; holding Z forever floors the eye distance rather
+        // than collapsing onto the target.
         let config = ControllerConfig::default();
 
-        let mut s = orbit(0.0);
+        let mut pose = level(0.0);
         for _ in 0..100_000 {
-            step_orbit(&mut s, held_keys(&[keycode::KEY_UP]), &config);
+            pose = step(pose, held_keys(&[keycode::KEY_UP]), &config).expect("↑ held pitches");
         }
-        assert!((s.pitch - config.pitch_limit).abs() < 1e-4, "pitch saturated at the limit; got {}", s.pitch);
+        let pitch = pose.pitch.get();
+        assert!((pitch - config.pitch_limit.get()).abs() < 1e-4, "pitch saturated at the limit; got {pitch}");
 
-        let mut s = orbit(0.0);
+        let mut pose = level(0.0);
         for _ in 0..100_000 {
-            step_orbit(&mut s, held_keys(&[keycode::KEY_Z]), &config);
+            pose = step(pose, held_keys(&[keycode::KEY_Z]), &config).expect("Z held zooms");
         }
-        assert!((s.distance - config.distance_floor).abs() < 1e-4, "distance floored; got {}", s.distance);
-    }
-
-    #[test]
-    fn delta_omits_untouched_fields() {
-        // Tripwire: the partial-poke contract. A tick that only pans emits a
-        // delta with `target` set and every other field `None`, so it rides a
-        // single kind without restating (and overwriting) the rest of the pose.
-        let config = ControllerConfig::default();
-        let mut s = orbit(0.0);
-        let params = step_orbit(&mut s, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
-        assert!(params.target.is_some(), "pan sets target");
-        assert!(params.yaw.is_none(), "yaw untouched");
-        assert!(params.pitch.is_none(), "pitch untouched");
-        assert!(params.distance.is_none(), "distance untouched");
-        assert!(params.speed.is_none(), "speed untouched");
-        assert!(params.fov_y_rad.is_none(), "fov untouched");
+        let distance = pose.distance.get();
+        assert!((distance - config.distance_floor.get()).abs() < 1e-4, "distance floored; got {distance}");
     }
 }

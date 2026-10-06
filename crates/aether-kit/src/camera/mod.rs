@@ -1,583 +1,437 @@
-// Camera math: bounded tick counts cast to f32 for orbit angle
-// accumulation are domain-correct.
+// Camera math: pixel extents and glide times cast to f32 for a ratio are
+// domain-correct.
 #![allow(clippy::cast_precision_loss)]
 // `#[handler]` methods take the decoded mail by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the
 // decoded payload and hands it off, so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-//! Multi-camera runtime. Hosts N named cameras (each in one of two
-//! modes — orbit or orthographic top-down), advances every camera each
-//! tick, and publishes the active camera's `view_proj` to
-//! `"aether.render"` (the camera mailbox folded into render per
-//! ADR-0074 §Decision 7 as `aether.view_projection`).
+//! The camera: one instance per camera, at `aether.kit.camera:<key>`.
 //!
-//! Boots with one default camera, `name = "main"`, in orbit mode at a
-//! static (frozen) pose — `speed: 0.0`, yaw `0.0`, pitch `0.3`,
-//! distance `3.0`, target origin — and marked active, so loading the
-//! component produces a visible 3D camera with a fixed eye point and no
-//! further mail. Create / destroy / activate / mode-switch via the
-//! `aether.kit.camera.*` mail family.
+//! A camera is a [`Pose`] and a [`Lens`] over a [`Viewport`], all set by its
+//! [`CameraConfig`] at spawn. It is a view source
+//! ([`aether_render::ViewSource`]): whoever sends it
+//! `aether.render.view_subscribe` is sent its
+//! [`ViewProjection`] at once and again each
+//! time the view changes, and at no other time, so an idle camera sends no
+//! mail. The renderer becomes such a viewer when it is sent
+//! `aether.render.view_from` naming this camera; the active camera is the one
+//! the renderer follows, and nothing in the camera says so. A component that
+//! draws through its own render program subscribes the same way.
 //!
 //! # Mail surface
 //!
-//! - `aether.kit.camera.create { name, mode }` — add a new camera. Errors
-//!   (warn-log) if `name` already exists.
-//! - `aether.kit.camera.destroy { name }` — drop a camera. If the active
-//!   one is destroyed, publishing pauses until another is activated.
-//! - `aether.kit.camera.set_active { name }` — promote a camera to be the
-//!   one whose `view_proj` publishes each tick.
-//! - `aether.kit.camera.set_mode { name, mode }` — replace an existing
-//!   camera's mode in place. Prior-mode state is discarded.
-//! - `aether.kit.camera.orbit.set { name, params }` — apply orbit-mode
-//!   field deltas (Option per field). No-op (warn-log) if the camera
-//!   is in a different mode.
-//! - `aether.kit.camera.topdown.set { name, params }` — same for topdown
-//!   mode.
-//! - `aether.kit.camera.eye` — source-bound request for the active camera's
-//!   world-space eye; replies with `aether.kit.camera.eye_result` carrying
-//!   `None` while no live camera is active.
+//! - [`Pose`] sets the pose.
+//! - [`Frame`] `{ bounds }` looks at a box from far enough back to see it all.
+//! - [`Glide`] `{ to, over_millis }` eases to a pose over time.
+//! - [`Where`] is answered with the current [`Pose`].
+//! - [`CameraRay`] `{ pixel }` is answered with the world-space ray through a
+//!   pixel of the viewport ([`CameraRayResult`]).
+//! - `aether.render.view_subscribe` / `view_unsubscribe` add and remove the
+//!   sender as a viewer.
 //!
-//! Inactive cameras still tick — orbit yaw keeps accumulating — so
-//! re-activating a camera doesn't snap it to a stale yaw.
+//! # The viewport
 //!
-//! WASD / arrow-key direct input is deliberately deferred (same
-//! reason as the prior single-mode camera: winit `KeyCode` ints
-//! aren't a stable named contract through `aether-kinds`). Control
-//! mail is the driver surface.
+//! A `Fixed` viewport is known from the config. A `Window` viewport is
+//! learned: at `wire` the camera subscribes to the window manager's
+//! `WindowSize` and `WindowOpened` and asks `aether.window.list`, and takes
+//! its window's size from whichever names its window first. Until then it has
+//! no extent: it holds its viewers, publishes nothing, refuses a [`Frame`],
+//! and answers [`CameraRay`] with `NoViewport`.
+//!
+//! # Across a republish
+//!
+//! `on_dehydrate` saves the pose, any glide, and the viewport with the
+//! extent learned for it; `on_rehydrate` restores them. The lens and the
+//! viewport come from the instance's config, which the host hands the
+//! replacement's `init` again. The viewers cannot be saved (a proven
+//! reference has no codec), so a republish of this module drops them and each
+//! must subscribe again; the camera says how many at warn. The renderer does
+//! so when it is sent `aether.render.view_from` again.
 
 pub mod controller;
 
 mod kinds;
+mod pose;
+mod viewers;
+
 pub use kinds::*;
 
-use std::collections::HashMap;
+use aether_actor::{ActorInitError, ActorPath, PriorState, ReplyMode, Sends, Subscriber, WasmActor, WasmCtx};
+use aether_actor::{WasmDropCtx, WasmInitCtx, actor};
+use aether_data::{ErasedActorPath, Kind, LoadName};
+use aether_kinds::{Tick, WindowSize};
+use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
+use aether_render::{ViewProjection, ViewSubscribe, ViewUnsubscribe, ViewportExtent};
+use aether_window::{ListWindows, ListWindowsResult, WindowCapability, WindowOpened};
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{Render, Tick, WindowSize};
-use aether_lifecycle::LifecycleCapability;
-use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
-use aether_render::{RenderCapability, ViewProjection, ViewportExtent};
-use aether_window::WindowCapability;
+use pose::Gliding;
+use viewers::Viewers;
 
-const Z_NEAR: f32 = 0.1;
-const Z_FAR: f32 = 100.0;
-/// Viewport used before the first `WindowSize` arrives, a 16:9 aspect. The
-/// substrate re-pulses `WindowSize` every tick so this only shows for one
-/// frame.
-const DEFAULT_EXTENT: ViewportExtent = ViewportExtent { width: 1280, height: 720 };
-
-/// Compiled defaults used when a created camera leaves an `Option`
-/// field unset, or when a mode-switch lands without all fields seeded.
-mod defaults {
-    use super::{PI, Vec2, Vec3};
-
-    pub const ORBIT_DISTANCE: f32 = 3.0;
-    /// Roughly one full revolution every 12 seconds at 60 fps —
-    /// matches the prior single-mode orbit camera so existing demos
-    /// don't visibly change cadence.
-    pub const ORBIT_SPEED: f32 = PI / 360.0;
-    pub const ORBIT_PITCH: f32 = 0.3;
-    pub const ORBIT_FOV: f32 = PI / 3.0;
-    pub const ORBIT_TARGET: Vec3 = Vec3::ZERO;
-    pub const ORBIT_YAW: f32 = 0.0;
-
-    pub const TOPDOWN_CENTER: Vec2 = Vec2::ZERO;
-    pub const TOPDOWN_EXTENT: f32 = 3.0;
-    /// Eye height along `+Z`. Orthographic projection is translation-
-    /// invariant along the view axis; just needs to be positive and
-    /// inside the far plane.
-    pub const TOPDOWN_EYE_HEIGHT: f32 = 10.0;
-    /// Floor for `TopdownParams::extent` to keep the projection from
-    /// degenerating into NaN on a zero / negative request.
-    pub const TOPDOWN_EXTENT_FLOOR: f32 = 0.001;
+/// What a camera knows of its viewport's size.
+#[derive(aether_data::Schema, Debug, Clone, Copy, PartialEq, Eq)]
+enum Extent {
+    /// A window viewport whose size has not arrived yet.
+    Awaited,
+    Known(ViewportExtent),
 }
 
-#[derive(Debug, Clone, Copy)]
-struct OrbitState {
-    distance: f32,
-    pitch: f32,
-    yaw: f32,
-    speed: f32,
-    fov_y_rad: f32,
-    target: Vec3,
-}
-
-impl OrbitState {
-    fn from_params(p: &OrbitParams) -> Self {
-        Self {
-            distance: p.distance.unwrap_or(defaults::ORBIT_DISTANCE),
-            pitch: p.pitch.unwrap_or(defaults::ORBIT_PITCH),
-            yaw: p.yaw.unwrap_or(defaults::ORBIT_YAW),
-            speed: p.speed.unwrap_or(defaults::ORBIT_SPEED),
-            fov_y_rad: p.fov_y_rad.unwrap_or(defaults::ORBIT_FOV),
-            target: p.target.map_or(defaults::ORBIT_TARGET, Vec3::from_array),
-        }
-    }
-
-    fn apply(&mut self, p: &OrbitParams) {
-        if let Some(v) = p.distance {
-            self.distance = v;
-        }
-        if let Some(v) = p.pitch {
-            self.pitch = v;
-        }
-        if let Some(v) = p.yaw {
-            self.yaw = v;
-        }
-        if let Some(v) = p.speed {
-            self.speed = v;
-        }
-        if let Some(v) = p.fov_y_rad {
-            self.fov_y_rad = v;
-        }
-        if let Some(v) = p.target {
-            self.target = Vec3::from_array(v);
-        }
-    }
-
-    fn tick(&mut self) {
-        self.yaw += self.speed;
-        if self.yaw > TAU {
-            self.yaw -= TAU;
-        } else if self.yaw < 0.0 {
-            self.yaw += TAU;
-        }
-    }
-
-    fn eye(&self) -> Vec3 {
-        let orientation = Quat::from_euler_yxz(self.yaw, self.pitch, 0.0);
-        self.target + orientation * Vec3::new(0.0, 0.0, self.distance)
-    }
-
-    fn view(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye(), self.target, Vec3::Y)
-    }
-
-    fn projection(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov_y_rad, aspect, Z_NEAR, Z_FAR)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TopdownState {
-    center: Vec2,
-    extent: f32,
-}
-
-impl TopdownState {
-    fn from_params(p: &TopdownParams) -> Self {
-        Self {
-            center: p.center.map_or(defaults::TOPDOWN_CENTER, |c| Vec2::new(c[0], c[1])),
-            extent: p.extent.map_or(defaults::TOPDOWN_EXTENT, |e| e.max(defaults::TOPDOWN_EXTENT_FLOOR)),
-        }
-    }
-
-    fn apply(&mut self, p: &TopdownParams) {
-        if let Some(c) = p.center {
-            self.center = Vec2::new(c[0], c[1]);
-        }
-        if let Some(e) = p.extent {
-            self.extent = e.max(defaults::TOPDOWN_EXTENT_FLOOR);
-        }
-    }
-
-    fn eye(&self) -> Vec3 {
-        Vec3::new(self.center.x, self.center.y, defaults::TOPDOWN_EYE_HEIGHT)
-    }
-
-    fn view(&self) -> Mat4 {
-        let target = Vec3::new(self.center.x, self.center.y, 0.0);
-
-        Mat4::look_at_rh(self.eye(), target, Vec3::Y)
-    }
-
-    fn projection(&self, aspect: f32) -> Mat4 {
-        let half_w = self.extent * aspect;
-
-        Mat4::orthographic_rh(-half_w, half_w, -self.extent, self.extent, Z_NEAR, Z_FAR)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ModeState {
-    Orbit(OrbitState),
-    Topdown(TopdownState),
-}
-
-impl ModeState {
-    fn from_init(mode: &ModeInit) -> Self {
-        match mode {
-            ModeInit::Orbit(p) => Self::Orbit(OrbitState::from_params(p)),
-            ModeInit::Topdown(p) => Self::Topdown(TopdownState::from_params(p)),
-        }
-    }
-
-    fn tick(&mut self) {
-        if let Self::Orbit(state) = self {
-            state.tick();
-        }
-    }
-
-    fn view(&self) -> Mat4 {
-        match self {
-            Self::Orbit(state) => state.view(),
-            Self::Topdown(state) => state.view(),
-        }
-    }
-
-    fn projection(&self, aspect: f32) -> Mat4 {
-        match self {
-            Self::Orbit(state) => state.projection(aspect),
-            Self::Topdown(state) => state.projection(aspect),
-        }
-    }
-
-    /// The view the renderer applies, for a viewport of `extent`.
-    fn view_projection(&self, extent: ViewportExtent) -> ViewProjection {
-        let aspect = extent.width as f32 / extent.height as f32;
-
-        ViewProjection {
-            view: self.view(),
-            projection: self.projection(aspect),
-            eye: self.eye(),
-            near: Z_NEAR,
-            far: Z_FAR,
-            extent,
-        }
-    }
-
-    fn eye(&self) -> Vec3 {
-        match self {
-            Self::Orbit(state) => state.eye(),
-            Self::Topdown(state) => state.eye(),
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Orbit(_) => "orbit",
-            Self::Topdown(_) => "topdown",
-        }
-    }
-}
-
-/// A single camera the component is hosting. Identity is its key in
-/// `CameraComponent::cameras`; the per-mode state is the only payload.
+/// What a camera carries across a republish.
+#[aether_data::kind(name = "aether.kit.camera.state", no_serde)]
 struct CameraState {
-    mode: ModeState,
+    pose: Pose,
+    glide: Option<Gliding>,
+    /// The viewport `extent` was learned for. The replacement keeps `extent`
+    /// only when its own config names the same viewport.
+    viewport: Viewport,
+    extent: Extent,
+    /// How many viewers the instance held, so the replacement can say how
+    /// many it lost.
+    viewers: u32,
 }
 
 pub struct CameraComponent {
-    cameras: HashMap<String, CameraState>,
-    active: Option<String>,
-    /// The window's size in physical pixels, which sets the projection's
-    /// aspect.
-    extent: ViewportExtent,
+    pose: Pose,
+    lens: Lens,
+    viewport: Viewport,
+    extent: Extent,
+    glide: Option<Gliding>,
+    viewers: Viewers,
 }
 
-/// Multi-camera component. Hosts N named cameras, ticks all, publishes
-/// the active one's `view_proj` each frame.
+/// One camera. Publishes its view to its viewers when the view changes.
 ///
 /// # Agent
-/// Boots with a default camera named `"main"` in a frozen orbit pose
-/// (speed `0.0`, yaw `0.0`, pitch `0.3`, distance `3.0`, target
-/// origin), marked active. The eye is pinned — no auto-rotation on
-/// load. Iterate from there:
-///
-/// - `aether.kit.camera.create { name, mode: Orbit(OrbitParams { … }) }`
-///   to add another camera (e.g. a topdown overview).
-/// - `aether.kit.camera.set_active { name }` to switch which camera's
-///   `view_proj` reaches the GPU.
-/// - `aether.kit.camera.orbit.set { name, params: { distance: Some(5.0) } }`
-///   for live deltas — every `Some` field overwrites, `None` leaves
-///   the camera's current value alone.
-/// - `aether.kit.camera.set_mode { name, mode }` to re-shape an existing
-///   camera in place.
-///
-/// Use `capture_frame` between sends to verify each change.
-#[actor(root, depends(WindowCapability, LifecycleCapability, RenderCapability))]
+/// Spawn one with `load_component` / `spawn`, `namespace: "aether.kit.camera"`,
+/// a `key` (the demo uses `main`) and a [`CameraConfig`]; it answers at
+/// `aether.kit.camera:<key>`. Make it the renderer's camera by sending
+/// `aether.render.view_from { source: "aether.kit.camera:<key>" }` to
+/// `aether.render`; send that again with another camera's path to switch.
+/// Then drive it with `aether.kit.camera.pose`, `.frame` or `.glide`, and
+/// `capture_frame` to see the result. Drop the instance to remove the camera.
+#[actor(instanced, root, depends(WindowCapability, LifecycleCapability))]
 impl WasmActor for CameraComponent {
+    type Config = CameraConfig;
     const NAMESPACE: &'static str = "aether.kit.camera";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let mut cameras = HashMap::new();
-        cameras.insert(
-            "main".to_owned(),
-            CameraState {
-                mode: ModeState::Orbit(OrbitState::from_params(&OrbitParams {
-                    speed: Some(0.0),
-                    ..Default::default()
-                })),
-            },
-        );
-        Ok(CameraComponent { cameras, active: Some("main".to_owned()), extent: DEFAULT_EXTENT })
+    fn init(config: CameraConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let pose = config.pose.unwrap_or(Pose::BOOT);
+        if !pose::is_finite(pose.target) {
+            return Err(ActorInitError::new(format!("{} has a pose whose target is not finite", CameraConfig::NAME)));
+        }
+        let extent = match &config.viewport {
+            Viewport::Fixed { width, height } => {
+                Extent::Known(ViewportExtent { width: width.get(), height: height.get() })
+            }
+            Viewport::Window(_) => Extent::Awaited,
+        };
+
+        Ok(Self {
+            pose,
+            lens: config.lens,
+            viewport: config.viewport,
+            extent,
+            glide: None,
+            viewers: Viewers::default(),
+        })
     }
 
-    /// Subscribe the lifecycle stages the camera advances against
-    /// (`Tick`, `Render`) on `aether.lifecycle`, plus all-window
-    /// `WindowSize` events on `aether.window`. `wire` (post-init,
-    /// mail-allowed) is the placement — `init`'s ctx has no send surface
-    /// and can't mail.
+    /// Start following the window a `Window` viewport names. `init`'s ctx has
+    /// no send surface, so the subscriptions and the list request go here.
     ///
-    /// `Tick` and `Render` are frame-lifecycle stages (ADR-0082), so they
-    /// ride `aether.lifecycle`; `WindowSize` originates at a window and
-    /// rides the selector-aware window actor (ADR-0164).
-    ///
-    /// On a chassis whose lifecycle graph omits `Render` (headless), the
-    /// cap replies `Err(UnsupportedStage)` to that fire-and-forget
-    /// subscribe; the reply warn-drops and the camera simply never
-    /// receives `Render` and never submits — a no-op there, where the
-    /// render cap discards anyway (ADR-0082 §7 / §11).
+    /// Nothing here can fail: the window is named by a path the camera
+    /// compares and never proves, so a window that is not open yet is waited
+    /// for.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
-        ctx.subscribe::<WindowCapability, WindowSize>();
-        ctx.subscribe::<LifecycleCapability, Tick>();
-        ctx.subscribe::<LifecycleCapability, Render>();
+        let follows_window = matches!(self.viewport, Viewport::Window(_));
+        if follows_window {
+            Self::follow_window(ctx);
+        }
         Ok(())
     }
 
-    /// Advance every camera's per-mode state each tick. Inactive cameras
-    /// still tick (so orbit yaw keeps accumulating); the active camera's
-    /// `view_proj` is submitted later, on the `Render` stage, once every
-    /// actor's per-frame Tick compute has settled (ADR-0082 §11).
-    ///
-    /// # Agent
-    /// Tick-driven; not useful to send manually.
-    #[handler::event]
-    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        for cam in self.cameras.values_mut() {
-            cam.mode.tick();
+    /// Save what a republish would otherwise reset (see the module docs).
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+        let state = CameraState {
+            pose: self.pose,
+            glide: self.glide,
+            viewport: self.viewport.clone(),
+            extent: self.extent,
+            viewers: u32::try_from(self.viewers.len()).unwrap_or(u32::MAX),
+        };
+
+        ctx.save_state_kind(0, &state);
+    }
+
+    /// Take back what `on_dehydrate` saved. A replacement holds no viewers
+    /// and says how many it lost; an instance reinstated after an aborted
+    /// republish still holds its own.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+        let Some(saved) = prior.decode_kind::<CameraState>() else {
+            tracing::warn!(target: "aether_kit", "the saved camera state does not decode; starting from the config");
+            return;
+        };
+        self.pose = saved.pose;
+        self.glide = saved.glide;
+
+        let same_viewport = saved.viewport == self.viewport;
+        if same_viewport {
+            self.extent = saved.extent;
         }
-    }
-
-    /// Publish the active camera's `view_proj` to `"aether.render"`. Runs
-    /// on the `Render` lifecycle stage — after the whole `Tick` chain has
-    /// settled — so the submitted view matches the fully-integrated
-    /// per-frame state (issue 1378). Publishing pauses while no camera is
-    /// active.
-    ///
-    /// # Agent
-    /// Lifecycle-driven; not useful to send manually.
-    #[handler::event]
-    fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
-        if let Some(name) = &self.active
-            && let Some(cam) = self.cameras.get(name)
-        {
-            ctx.send::<RenderCapability>(&cam.mode.view_projection(self.extent));
+        // A republish does not run `wire`, so a replacement whose config
+        // names another window asks for its size here.
+        if self.extent == Extent::Awaited {
+            Self::follow_window(ctx);
         }
-    }
 
-    /// Reply to the sender with the active camera's world-space eye. The
-    /// source-bound reply carries `None` when the active binding is absent or
-    /// names a camera that is no longer live.
-    #[handler::request]
-    fn on_eye(&mut self, _ctx: &mut WasmCtx<'_>, _request: CameraEyeRequest) -> CameraEyeResult {
-        self.eye_result()
-    }
-
-    /// Track the live window size so 3D / orthographic projections stay
-    /// unsquashed on non-square windows.
-    ///
-    /// # Agent
-    /// Publish-subscribe; the substrate pulses this every tick. Not
-    /// useful to send manually.
-    #[handler::event]
-    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
-        if size.width > 0 && size.height > 0 {
-            self.extent = ViewportExtent { width: size.width, height: size.height };
-        }
-    }
-
-    /// Add a new named camera in the supplied mode. Errors (warn-log)
-    /// if `name` is already bound — use `set_mode` to swap an existing
-    /// camera instead. Newly-created cameras are not made active
-    /// automatically; pair with `set_active` to switch publishing.
-    #[handler::tell]
-    fn on_create(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraCreate) {
-        if self.cameras.contains_key(&msg.name) {
+        let held = u32::try_from(self.viewers.len()).unwrap_or(u32::MAX);
+        let lost = saved.viewers.saturating_sub(held);
+        if lost > 0 {
             tracing::warn!(
                 target: "aether_kit",
-                name = %msg.name,
-                "camera.create rejected: name already bound; use set_mode to swap modes",
+                lost,
+                "a republish dropped this camera's viewers; each must send aether.render.view_subscribe again",
             );
+        }
+    }
+
+    /// Set the pose, ending any glide in progress.
+    ///
+    /// # Agent
+    /// `{"target": {"x": 0, "y": 0, "z": 0}, "yaw": 0.6, "pitch": -0.4,
+    /// "distance": 5}`. A negative pitch looks down on the target;
+    /// `-1.5707964` looks straight down. A value out of range does not
+    /// decode, and a target that is not finite is refused with a warn.
+    #[handler::tell]
+    fn on_pose(&mut self, ctx: &mut WasmCtx<'_>, pose: Pose) {
+        if pose::is_finite(pose.target) {
+            self.rest_at(ctx, pose);
+        } else {
+            tracing::warn!(target: "aether_kit", "pose refused: its target is not finite");
+        }
+    }
+
+    /// Look at the centre of a box from far enough back to see all of it,
+    /// keeping yaw, pitch and lens, and ending any glide in progress.
+    ///
+    /// # Agent
+    /// `{"bounds": {"min": {"x": -1, "y": 0, "z": -1}, "max": {"x": 1, "y": 2,
+    /// "z": 1}}}`. Refused with a warn for an empty, zero-size or non-finite
+    /// box, and while a window viewport's size has not arrived.
+    #[handler::tell]
+    fn on_frame(&mut self, ctx: &mut WasmCtx<'_>, frame: Frame) {
+        let Extent::Known(extent) = self.extent else {
+            tracing::warn!(target: "aether_kit", "frame refused: the viewport's size is not known yet");
+            return;
+        };
+
+        if let Some(framed) = pose::framed(self.pose, self.lens, extent, frame.bounds) {
+            self.rest_at(ctx, framed);
+        } else {
+            tracing::warn!(target: "aether_kit", bounds = ?frame.bounds, "frame refused: nothing to frame");
+        }
+    }
+
+    /// Ease from the current pose to `to` over `over_millis`. The camera
+    /// subscribes `Tick` for the glide's duration and steps on each one.
+    ///
+    /// # Agent
+    /// `{"to": <pose>, "over_millis": 800}`. A later `pose`, `frame` or
+    /// `glide` ends this one where it stands.
+    #[handler::tell]
+    fn on_glide(&mut self, ctx: &mut WasmCtx<'_>, glide: Glide) {
+        if !pose::is_finite(glide.to.target) {
+            tracing::warn!(target: "aether_kit", "glide refused: its target is not finite");
             return;
         }
-        self.cameras.insert(msg.name, CameraState { mode: ModeState::from_init(&msg.mode) });
-    }
+        if glide.over_millis == 0 {
+            self.rest_at(ctx, glide.to);
+            return;
+        }
 
-    /// Drop a camera by name. Idempotent — silently no-ops if the
-    /// camera doesn't exist. If the active camera is destroyed,
-    /// publishing pauses (no `aether.view_projection` mail goes out) until
-    /// `set_active` picks a survivor.
-    #[handler::tell]
-    fn on_destroy(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraDestroy) {
-        self.cameras.remove(&msg.name);
-        if self.active.as_deref() == Some(msg.name.as_str()) {
-            self.active = None;
+        let was_gliding = self.glide.replace(Gliding::start(self.pose, glide.to, glide.over_millis)).is_some();
+        if !was_gliding {
+            ctx.subscribe::<LifecycleCapability, Tick>();
         }
     }
 
-    /// Promote `name` to be the camera whose `view_proj` publishes to
-    /// `"aether.render"` each tick. Errors (warn-log, no state
-    /// change) if `name` isn't bound.
-    #[handler::tell]
-    fn on_set_active(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetActive) {
-        if self.cameras.contains_key(&msg.name) {
-            self.active = Some(msg.name);
+    /// Step the glide in progress by the tick's elapsed time.
+    ///
+    /// # Agent
+    /// Lifecycle-driven while a glide runs; not useful to send manually.
+    #[handler::event]
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+        // No glide to step: a tick already on its way when one ended, or a
+        // subscription that outlived a glide a republish did not carry over.
+        let Some(glide) = &mut self.glide else {
+            ctx.unsubscribe::<LifecycleCapability, Tick>();
+            return;
+        };
+        glide.advance(tick.delta_micros);
+        let glide = *glide;
+
+        if glide.finished() {
+            self.rest_at(ctx, glide.destination());
         } else {
-            tracing::warn!(
-                target: "aether_kit",
-                name = %msg.name,
-                "camera.set_active rejected: no camera bound under that name",
-            );
+            self.pose = glide.pose();
+            self.publish(&mut ctx.sends());
         }
     }
 
-    /// Replace an existing camera's mode in place. Prior-mode state is
-    /// discarded; the new mode is seeded from the supplied params plus
-    /// per-mode compiled defaults. No-op (warn-log) if `name` isn't
-    /// bound.
-    #[handler::tell]
-    fn on_set_mode(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraSetMode) {
-        if let Some(cam) = self.cameras.get_mut(&msg.name) {
-            cam.mode = ModeState::from_init(&msg.mode);
-        } else {
-            tracing::warn!(
-                target: "aether_kit",
-                name = %msg.name,
-                "camera.set_mode rejected: no camera bound under that name",
-            );
+    /// The lifecycle's answer to a glide's `Tick` subscription.
+    #[handler::response]
+    fn on_tick_subscription(&mut self, _ctx: &mut WasmCtx<'_>, result: LifecycleSubscribeResult) {
+        let _ = self;
+        if let LifecycleSubscribeResult::Err(error) = result {
+            tracing::error!(target: "aether_kit", ?error, "the lifecycle refused the camera's tick subscription");
         }
     }
 
-    /// Apply orbit-mode field deltas to the named camera. Every `Some`
-    /// field overwrites; `None` leaves the current value alone. No-op
-    /// (warn-log) if the camera doesn't exist or is in a different
-    /// mode.
+    /// The current pose; during a glide, the pose reached so far.
+    #[handler::request]
+    fn on_where(&mut self, _ctx: &mut WasmCtx<'_>, _where: Where) -> Pose {
+        self.pose
+    }
+
+    /// The world-space ray through a pixel of the viewport.
+    ///
+    /// # Agent
+    /// `{"pixel": {"x": 640, "y": 360}}`, physical pixels from the top-left
+    /// corner. Intersect the ray with your scene; `aether-math`'s
+    /// `Ray::plane_hit` does a ground plane.
+    #[handler::request]
+    fn on_ray(&mut self, _ctx: &mut WasmCtx<'_>, ray: CameraRay) -> CameraRayResult {
+        let Extent::Known(extent) = self.extent else {
+            return CameraRayResult::NoViewport;
+        };
+        let view = pose::view_projection(self.pose, self.lens, extent);
+
+        pose::pixel_ray(&view, ray.pixel).map_or(CameraRayResult::NoRay, CameraRayResult::Ok)
+    }
+
+    /// Add the sender as a viewer and send it the current view.
+    ///
+    /// # Agent
+    /// Sent by an actor that wants this camera's view; the renderer sends it
+    /// when `aether.render.view_from` names this camera. A sender that does
+    /// not take `aether.view_projection` silently is refused with a warn.
     #[handler::tell]
-    fn on_orbit_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraOrbitSet) {
-        if let Some(cam) = self.cameras.get_mut(&msg.name) {
-            match &mut cam.mode {
-                ModeState::Orbit(state) => state.apply(&msg.params),
-                other @ ModeState::Topdown(_) => tracing::warn!(
-                    target: "aether_kit",
-                    name = %msg.name,
-                    actual = %other.name(),
-                    "camera.orbit.set rejected: camera is in a different mode; switch with set_mode first",
-                ),
+    fn on_view_subscribe(&mut self, ctx: &mut WasmCtx<'_>, _subscribe: ViewSubscribe) {
+        let Some(sender) = ctx.sender() else {
+            tracing::warn!(target: "aether_kit", "view subscribe arrived with no sender; ignoring");
+            return;
+        };
+        let Some(viewer) = ctx.cast::<Subscriber<ViewProjection>>(sender) else {
+            tracing::warn!(target: "aether_kit", "view subscribe sender does not take a view projection; ignoring");
+            return;
+        };
+
+        self.viewers.add(viewer);
+        if let Extent::Known(extent) = self.extent {
+            ctx.send_to(viewer, &pose::view_projection(self.pose, self.lens, extent));
+        }
+    }
+
+    /// Remove the sender as a viewer. A sender that never subscribed changes
+    /// nothing.
+    #[handler::tell]
+    fn on_view_unsubscribe(&mut self, ctx: &mut WasmCtx<'_>, _unsubscribe: ViewUnsubscribe) {
+        if let Some(sender) = ctx.sender() {
+            self.viewers.remove(sender);
+        }
+    }
+
+    /// Follow the window's size.
+    ///
+    /// # Agent
+    /// Published by the window manager; not useful to send manually.
+    #[handler::event]
+    fn on_window_size(&mut self, ctx: &mut WasmCtx<'_>, size: WindowSize) {
+        self.resize(&mut ctx.sends(), &size.window, size.width, size.height);
+    }
+
+    /// Take the size of a window that opened after this camera wired.
+    #[handler::event]
+    fn on_window_opened(&mut self, ctx: &mut WasmCtx<'_>, opened: WindowOpened) {
+        let window = opened.window;
+
+        self.resize(&mut ctx.sends(), &window.path, window.width, window.height);
+    }
+
+    /// The window manager's answer to the list `wire` asked for: take the
+    /// size of this camera's window, if it is open yet.
+    #[handler::response]
+    fn on_windows(&mut self, ctx: &mut WasmCtx<'_>, result: ListWindowsResult) {
+        match result {
+            ListWindowsResult::Ok { windows } => {
+                for window in windows {
+                    self.resize(&mut ctx.sends(), &window.path, window.width, window.height);
+                }
             }
-        } else {
-            tracing::warn!(
-                target: "aether_kit",
-                name = %msg.name,
-                "camera.orbit.set rejected: no camera bound under that name",
-            );
-        }
-    }
-
-    /// Apply topdown-mode field deltas to the named camera. Same
-    /// semantics as `orbit.set` for the orthographic mode's `center`
-    /// / `extent`.
-    #[handler::tell]
-    fn on_topdown_set(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraTopdownSet) {
-        if let Some(cam) = self.cameras.get_mut(&msg.name) {
-            match &mut cam.mode {
-                ModeState::Topdown(state) => state.apply(&msg.params),
-                other @ ModeState::Orbit(_) => tracing::warn!(
-                    target: "aether_kit",
-                    name = %msg.name,
-                    actual = %other.name(),
-                    "camera.topdown.set rejected: camera is in a different mode; switch with set_mode first",
-                ),
+            ListWindowsResult::Err { error } => {
+                tracing::error!(target: "aether_kit", %error, "the window manager did not list its windows");
             }
-        } else {
-            tracing::warn!(
-                target: "aether_kit",
-                name = %msg.name,
-                "camera.topdown.set rejected: no camera bound under that name",
-            );
         }
     }
 }
 
 impl CameraComponent {
-    fn eye_result(&self) -> CameraEyeResult {
-        let eye =
-            self.active.as_deref().and_then(|name| self.cameras.get(name)).map(|camera| camera.mode.eye().to_array());
-        CameraEyeResult { eye }
+    /// The key the kit's defaults give a scene's one camera.
+    pub const MAIN_KEY: &'static str = "main";
+
+    /// `aether.kit.camera:main`: the camera a controller or a mesh viewer
+    /// with no config names.
+    ///
+    /// # Panics
+    ///
+    /// Never: [`Self::MAIN_KEY`] is a valid segment.
+    #[must_use]
+    pub fn main_path() -> ActorPath<Self> {
+        ActorPath::instance(&LoadName::new(Self::MAIN_KEY).expect("the main camera's key is a valid segment"))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use aether_actor::WasmInitCtx;
+    /// Subscribe to window sizes and openings, then ask for the windows open
+    /// now: the manager sends a new subscriber nothing until the next change.
+    fn follow_window(ctx: &mut WasmCtx<'_, Self>) {
+        ctx.subscribe::<WindowCapability, WindowSize>();
+        ctx.subscribe::<WindowCapability, WindowOpened>();
+        ctx.send::<WindowCapability>(&ListWindows);
+    }
 
-    use super::*;
+    /// End any glide in progress, take `pose`, and publish.
+    fn rest_at<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>, pose: Pose) {
+        if self.glide.take().is_some() {
+            ctx.unsubscribe::<LifecycleCapability, Tick>();
+        }
+        self.pose = pose;
 
-    /// The boot `"main"` camera is seeded with `speed: 0.0`, so its orbit
-    /// speed must be exactly zero after `init`.
-    #[test]
-    fn default_camera_boots_with_zero_speed() {
-        let mut ctx = WasmInitCtx::__new();
-        let comp = <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), (), &mut ctx).expect("init");
-        let main = comp.cameras.get("main").expect("\"main\" camera present");
-        match main.mode {
-            ModeState::Orbit(state) => {
-                assert_eq!(state.speed, 0.0, "boot \"main\" orbit speed must be 0.0 (frozen); got {}", state.speed);
-            }
-            ModeState::Topdown(_) => panic!("\"main\" camera must boot in orbit mode"),
+        self.publish(&mut ctx.sends());
+    }
+
+    /// Take `width` by `height` as the viewport's size when `window` is the
+    /// one this camera follows, and publish if that changed the view. A zero
+    /// size, a minimised window, keeps the last one.
+    fn resize(&mut self, sends: &mut Sends<'_, Self>, window: &ErasedActorPath, width: u32, height: u32) {
+        let Viewport::Window(followed) = &self.viewport else {
+            return;
+        };
+        let Some(extent) = pose::extent_of(width, height) else {
+            return;
+        };
+
+        let ours = followed.as_erased() == window;
+        let changed = self.extent != Extent::Known(extent);
+        if ours && changed {
+            self.extent = Extent::Known(extent);
+            self.publish(sends);
         }
     }
 
-    /// An `OrbitState` with `speed: 0.0` must not change its yaw across
-    /// repeated `tick()` calls.
-    #[test]
-    fn frozen_orbit_yaw_is_stable_across_ticks() {
-        let mut state = OrbitState::from_params(&OrbitParams { speed: Some(0.0), ..Default::default() });
-        let yaw_before = state.yaw;
-        for _ in 0..10 {
-            state.tick();
+    /// Send every viewer the current view. Every change of pose or extent
+    /// ends here; a camera with no extent yet has no view to send.
+    fn publish(&self, sends: &mut Sends<'_, Self>) {
+        if let Extent::Known(extent) = self.extent {
+            self.viewers.send(sends, &pose::view_projection(self.pose, self.lens, extent));
         }
-        assert_eq!(
-            state.yaw, yaw_before,
-            "frozen orbit (speed=0.0) yaw must not change across ticks; \
-             before={yaw_before}, after={}",
-            state.yaw
-        );
-    }
-
-    #[test]
-    fn orbit_eye_matches_the_pose_used_by_view_projection() {
-        let state = OrbitState::from_params(&OrbitParams {
-            distance: Some(5.0),
-            pitch: Some(0.0),
-            yaw: Some(PI / 2.0),
-            target: Some([1.0, 2.0, 3.0]),
-            ..Default::default()
-        });
-
-        let eye = state.eye();
-        assert!((eye.x - 6.0).abs() < 1e-6);
-        assert!((eye.y - 2.0).abs() < 1e-6);
-        assert!((eye.z - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn topdown_eye_tracks_the_center_at_the_fixed_height() {
-        let state = TopdownState::from_params(&TopdownParams { center: Some([4.0, -3.0]), extent: None });
-
-        assert_eq!(state.eye(), Vec3::new(4.0, -3.0, defaults::TOPDOWN_EYE_HEIGHT));
-    }
-
-    #[test]
-    fn eye_result_is_none_without_a_live_active_camera() {
-        let mut ctx = WasmInitCtx::__new();
-        let mut component =
-            <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), (), &mut ctx).expect("init");
-        component.active = None;
-        assert_eq!(component.eye_result(), CameraEyeResult { eye: None });
-
-        component.active = Some("missing".to_owned());
-        assert_eq!(component.eye_result(), CameraEyeResult { eye: None });
     }
 }
