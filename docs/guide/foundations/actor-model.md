@@ -288,8 +288,8 @@ publishes a module, and a module's facts about a native namespace are ignored,
 so a module never changes a native short path.
 
 A loaded component needs no short path to reach it: it is named by its own
-namespace, so its canonical address is already short (`aether.kit.camera`, or
-`aether.widget:panel` for an instanced one). Its children are reached by a hole
+namespace, so its canonical address is already short (`aether.kit.mesh`, or
+`aether.kit.camera:main` for an instanced one). Its children are reached by a hole
 beneath it: `game.world/:north/:gate` for an inline child and its own inline
 child, or `game.world/:k` for a guest a `Spawn` with `parent` placed at
 `game.world/NS:k`. A parent that several instanced child types list in their
@@ -630,10 +630,9 @@ dispatch arm, one manifest record. Re-declaring the same kind as a local
 A set member's ctx is typed by the adopting actor: `WasmCtx<'_>` in a set reads
 as `WasmCtx<'_, Self>`, where `Self` is whichever actor adopts the set. A
 default body that reaches another actor therefore states that reach on the
-trait, as a supertrait — the real `WidgetDefaults` is
-`pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability>`, because
-its theme handler measures fonts through the text capability — and every
-adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
+trait, as a supertrait — `pub trait WidgetDefaults: DependsOn<TextCapability>`
+for a set whose theme handler measures fonts through the text capability — and
+every adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
 supertraits as well. An override is a plain trait-method impl that no macro
 rewrites, so it spells the typed signature itself: `WasmCtx<'_, Self>`.
 
@@ -714,9 +713,14 @@ handler the others do not, declare it locally in that adopter's own `#[actor]`
 block, where `#[cfg]` already means the adopter's configuration.
 
 Put in a set only what is genuinely uniform. When bodies disagree on something
-load-bearing — the widgets' `SetWidgetState` handlers disagree about which
-predicate cancels an activation — a shared body has to pick one reading and
-silently change the rest, which is worse than the repetition it removes.
+load-bearing — which predicate cancels an activation, say — a shared body has
+to pick one reading and silently change the rest, which is worse than the
+repetition it removes.
+
+The example above is illustrative. The in-tree wasm adopter is the
+`HandlerSetAdopter` fixture in
+`crates/aether-test-fixtures-bundle/src/handler_set.rs`, which
+`crates/aether-component/tests/harness_handler_set.rs` loads and mails.
 
 ## Configuring an actor
 
@@ -814,7 +818,7 @@ only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera` actor. The dash has no addressing semantics — it makes neither actor a child of the other, and the full
 `NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
 not use a dash merely to spell a multi-word segment; that is what an underscore
-is for, as in `aether.widget.menu_bar` and `aether.widget.text_field`.
+is for, as in `aether.substrate_harness.observer`.
 
 `ctx.actor_ref::<Camera>()` returns an `ActorRef<Camera>` for the physical
 trampoline mailbox: the trampoline and its loaded guest share one mailbox, while

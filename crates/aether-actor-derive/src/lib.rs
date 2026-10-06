@@ -217,12 +217,12 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[handler_set]
-/// pub trait WidgetDefaults {
-///     fn widget_frame(&mut self) -> &mut WidgetFrame;
+/// pub trait Framed {
+///     fn frame(&mut self) -> &mut Frame;
 ///
 ///     #[handler::tell]
-///     fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
-///         *self.widget_frame() = frame;
+///     fn on_set_frame(&mut self, _ctx: &mut WasmCtx<'_>, set: SetFrame) {
+///         *self.frame() = set.frame;
 ///     }
 /// }
 /// ```
@@ -234,8 +234,8 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// A member is typed by its adopter (ADR-0231 §7): a ctx that omits its actor
 /// reads as `WasmCtx<'_, Self>`, where `Self` is the adopting actor, and only a
 /// member spelling `Erased` gets the erased view. So the set states what its
-/// default bodies reach as supertraits — the real `WidgetDefaults` is
-/// `WidgetChrome + DependsOn<TextCapability>` — and the macro adds `Sized` to
+/// default bodies reach as supertraits — `trait Framed: DependsOn<TextCapability>`
+/// for a body that mails the text capability — and the macro adds `Sized` to
 /// them. An override is a plain trait-method impl the macro never rewrites, so
 /// it spells the typed signature: `WasmCtx<'_, Self>`.
 #[proc_macro_attribute]

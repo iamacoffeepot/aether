@@ -72,7 +72,7 @@ name *plus its schema* ([ADR-0030](https://github.com/iamacoffeepot/aether/blob/
   the id to a different instance ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8).
 
 One sharp edge follows from the lineage fold: a `/`-rendered address
-(`aether.widget/aether.widget.button:ok`) resolves in the host registry,
+(`aether.window/aether.window.instance:main`) resolves in the host registry,
 which parses it into segments and folds their ActorIds node by node. Hashing the
 joined string as a flat name yields an id the registry never registered, and
 mail to it warn-drops — the string is a rendering of the lineage, never the

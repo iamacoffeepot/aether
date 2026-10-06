@@ -941,7 +941,6 @@ dependencies = [
  "aether-render",
  "aether-tcp",
  "aether-test-fixtures-kinds",
- "aether-widget",
  "aether-window",
  "serde",
  "tracing",
@@ -1147,31 +1146,6 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "inventory",
-]
-
-[[package]]
-name = "aether-widget"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-clipboard",
- "aether-component",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-lifecycle",
- "aether-math",
- "aether-render",
- "aether-substrate",
- "aether-test-fixtures-bundle",
- "aether-test-fixtures-kinds",
- "aether-text",
- "aether-window",
- "inventory",
- "serde",
- "tracing",
 ]
 
 [[package]]

@@ -936,7 +936,7 @@ impl SubstrateHarness {
     }
 
     /// `actor`'s per-handler cost rows (ADR-0036), what the `actor_cost` MCP tool reports.
-    /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-widget/tests/widget_actor_cost.rs`.
+    /// Consumers: `aether-substrate/tests/cost_table.rs`, `aether-render/tests/actor_draw_cost_scenario.rs`.
     #[must_use]
     pub fn actor_cost(&self, actor: ErasedActorRef) -> CostTailResult {
         self.passive.actor_cost(actor, &CostTail { kind: None })

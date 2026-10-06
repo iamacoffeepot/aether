@@ -55,10 +55,8 @@ pub mod mesh;
 // independently loaded actors (camera, camera controller, mesh viewer, asset
 // bundle) with no unselected entry (a load or spawn names its namespace, ADR-0241
 // §9), so this holds for every export here: each is reached by `module@actor` selector, never by
-// list position. The widget set and its `EditorShell` arbiter live in
-// `aether-widget`, exported from its own cdylib, not here (the shelved
-// terrain / sim / workbench siblings likewise owned their own cdylibs while
-// they were in the workspace).
+// list position. The shelved terrain / sim / workbench siblings each owned
+// their own cdylib while they were in the workspace.
 aether_actor::export!(
     public =
         [camera::CameraComponent, camera::controller::CameraController, mesh::MeshViewer, bundle::BundleComponent,]

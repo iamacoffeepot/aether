@@ -546,18 +546,17 @@ jobs:
       #
       # `hash` scatters by test name, which is even in expectation but
       # blind to where the heavy tests land: it splits `render_scenario`
-      # 4/6/8 and `widget_render_interaction` 3/8/4.
+      # 4/6/8.
       #
       # `slice` deals the whole cross-binary list out round-robin, so
       # shard sizes are even by construction (1081/1081/1081) and a
       # multi-test binary's tests go to different shards rather than
-      # clumping — `render_scenario` 6/6/6, `widget_render_interaction`
-      # 5/5/5. A single-test binary still falls wherever its position in
-      # that list puts it, which no count-based mode can weigh; what
-      # changes is that the position varies instead of always being
-      # shard 1. `hash`'s one advantage, a test keeping its shard as the
-      # suite grows, buys nothing here: no cache or artifact is keyed by
-      # shard.
+      # clumping — `render_scenario` 6/6/6. A single-test binary still
+      # falls wherever its position in that list puts it, which no
+      # count-based mode can weigh; what changes is that the position
+      # varies instead of always being shard 1. `hash`'s one advantage, a
+      # test keeping its shard as the suite grows, buys nothing here: no
+      # cache or artifact is keyed by shard.
       #
       # `strategy.job-total` is 1 on the pull-request lane, and
       # `slice:1/1` selects every test, so the flag is inert there.
