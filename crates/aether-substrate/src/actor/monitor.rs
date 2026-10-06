@@ -3,11 +3,13 @@
 //! every departure goes through.
 //!
 //! Monitoring never fails (ADR-0079 §8). `MonitorHandle::register` is the
-//! one entry point: it needs only a binding, so a transport that is not a
-//! native ctx (a host function serving a guest) can call it as
-//! [`NativeCtx::monitor`] does. The [`ActorRegistry`] holds the forward and
-//! reverse indices and the argument that a registration racing a close is
-//! answered by exactly one notice.
+//! one entry point, and it has two callers. [`NativeCtx::monitor`] registers
+//! its own actor. A wasm component's `watch_p32` host fn registers once per
+//! watcher and target for a guest, through the instance's watch table
+//! (`crate::actor::wasm::watch_table`), where the watcher is the guest's
+//! mailbox or one of its inline-child aliases. The [`ActorRegistry`] holds
+//! the forward and reverse indices and the argument that a registration
+//! racing a close is answered by exactly one notice.
 //!
 //! [`NativeCtx::monitor`]: crate::actor::native::ctx::NativeCtx::monitor
 
@@ -35,6 +37,11 @@ use crate::mail::{Mail, Mailer};
 /// walks `monitoring[watcher]`. Deregistering an entry a close already took
 /// is a no-op.
 ///
+/// A native actor holds the handle itself. A wasm guest holds none: its
+/// instance's watch table keeps one handle per watcher and target, whatever
+/// the number of watched types on that pair, and drops it when the pair's
+/// last watch ends or the instance drops.
+///
 /// Not `Clone` — a monitor is a unique (watcher, target) registration;
 /// duplicating the handle would duplicate the deregistration on Drop
 /// (still benign because deregister is idempotent, but cloneable
@@ -49,18 +56,24 @@ pub struct MonitorHandle {
 }
 
 impl MonitorHandle {
-    /// Register `binding`'s actor as a monitor of `target` and return the
-    /// handle. It never refuses. A target that had already closed is not
-    /// entered in the index; its notice is posted to the watcher here,
-    /// through the post its close would have used, so the watcher handles
-    /// the same mail either way.
+    /// Register `watcher` as a monitor of `target` and return the handle.
+    /// It never refuses. A target that had already closed is not entered in
+    /// the index; its notice is posted to `watcher` here, through the post
+    /// its close would have used, so the watcher handles the same mail
+    /// either way.
+    ///
+    /// `watcher` is the position the notice is mailed to: the calling
+    /// actor's own mailbox for [`NativeCtx::monitor`], and for a wasm guest
+    /// its mailbox or the alias of the inline child that watched, which the
+    /// host fn has already checked against the guest's cluster.
     ///
     /// The lifecycle table is the route registry's, reached through the
     /// binding's mailer, so a binding with no spawner registers in the
     /// table a chassis over the same routes closes against.
-    pub(crate) fn register(binding: &NativeBinding, target: MailboxId) -> Self {
+    ///
+    /// [`NativeCtx::monitor`]: crate::actor::native::ctx::NativeCtx::monitor
+    pub(crate) fn register(binding: &NativeBinding, watcher: MailboxId, target: MailboxId) -> Self {
         let registry = Arc::clone(binding.mailer().registry().actor_registry());
-        let watcher = binding.self_mailbox();
 
         let watching = registry.register_monitor(watcher, target);
         if !watching {

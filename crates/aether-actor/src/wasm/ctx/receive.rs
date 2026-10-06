@@ -45,8 +45,9 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     pub(super) source: Option<ErasedActorRef>,
     /// Whether this ctx came from a top-level host dispatch. Cluster-drained
     /// in-place dispatches carry no host correlation, so `in_reply_to` must
-    /// not read the outer dispatch's ambient host scalar.
-    host_dispatch: bool,
+    /// not read the outer dispatch's ambient host scalar. A departure notice
+    /// is host mail too, so the watch it ends is asked for only here.
+    pub(super) host_dispatch: bool,
     /// ADR-0114: the per-component inline-child registry the
     /// [`Self::spawn_inline_child`] / [`Self::despawn_inline_child`] verbs
     /// drive. The `export!` membrane threads in the component's emitted

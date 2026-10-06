@@ -30,6 +30,9 @@
 //!   `WasmCtx::cast`, and the `__PublishedRows` answer it decodes; and
 //!   ADR-0231 §3 route rows (`route_rows`), the transport under a guest's
 //!   decode of a `ProtocolPath`, which answers a `__PublishedRows` too.
+//! - `watch` — ADR-0079 §8 watches on other actors (`watch`, `unwatch`,
+//!   `watch_ended`), the transport under `WasmCtx::watch` / `WasmCtx::unwatch`
+//!   and the departure arm `#[actor]` emits.
 //!
 //! Per-stage capability ctx impls in [`crate::wasm::ctx`] call these
 //! functions directly; the cross-target abstraction layer is the
@@ -45,6 +48,7 @@ pub(crate) mod init;
 pub(crate) mod log;
 pub(crate) mod mail;
 pub(crate) mod persist;
+pub(crate) mod watch;
 
 /// A guest address or length as the `_p32` ABI's `u32`. Guest memory is
 /// addressed by 32 bits on wasm32, so the conversion is exact there;

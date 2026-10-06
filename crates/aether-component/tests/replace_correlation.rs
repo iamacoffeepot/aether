@@ -204,7 +204,7 @@ fn a_replace_that_reshapes_a_carried_context_kind_is_refused() {
     match swap {
         PublishResult::Err { error } => assert!(
             error.contains(
-                "replacement does not declare its carried request context \
+                "replacement does not declare its carried context \
                  aether.test_fixtures.republish_carried_context"
             ),
             "the refusal must name the carried context kind: {error}",

@@ -22,6 +22,9 @@
 //! - `blob_table` — one instance's held blob-store entries, keyed by hash,
 //!   that the `blob_*_p32` host fns resolve against (crate-private,
 //!   ADR-0238).
+//! - `watch_table` — one instance's watches on other actors and the
+//!   registrations behind them, which the `watch_p32` / `unwatch_p32` /
+//!   `watch_ended_p32` host fns read and write (crate-private, ADR-0079 §8).
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.
 //! - [`module`] — code as a value (ADR-0241 §2): the engine's one
@@ -43,5 +46,6 @@ pub mod host_fns;
 pub mod kind_manifest;
 pub mod module;
 pub(crate) mod reply_table;
+pub(crate) mod watch_table;
 
 pub use component::{Component, ComponentCtx};

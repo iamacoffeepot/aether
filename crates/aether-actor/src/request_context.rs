@@ -4,6 +4,13 @@
 //! request. Context values are ordinary `Kind`s, so the stored bytes carry a
 //! schema-derived `KindId` and can be restored across guest replacement.
 //!
+//! A wasm guest's table also holds the context of each watch it has on
+//! another actor (ADR-0079 §8), keyed by the watch's id. A watch id is drawn
+//! from the same per-mailbox sequence as a request id, so the two never
+//! collide and one table serves both. A watch's context leaves by a take
+//! when its departure notice arrives, or by [`RequestContextTable::discard`]
+//! when the watch is released first.
+//!
 //! Request ids are monotonic per mailbox (ADR-0139 §3): a native actor mints
 //! them from its binding's counter, and a wasm guest's counter carries across
 //! `replace_component`. An id never repeats within a mailbox's life, so a
@@ -218,6 +225,18 @@ impl RequestContextTable {
             tracing::warn!(request = request.0, kind = C::ID.0, "request context decode failed",);
         }
         decoded
+    }
+
+    /// Remove the context stored under `request` without decoding it, and
+    /// return the kind it was stored as. `None` when nothing was stored.
+    ///
+    /// For a context that no handler will take: a released watch's
+    /// (ADR-0079 §8), or one stored as a kind its handler does not take. The
+    /// bytes are dropped as they are, so the context must hold no `Held`
+    /// reply, whose ticket only a decode claims back. A watch context is
+    /// `ActorMail`, which a kind holding a `Held` is not.
+    pub fn discard(&mut self, request: RequestId) -> Option<KindId> {
+        self.entries.remove(&request).map(|entry| entry.kind)
     }
 
     #[must_use]
@@ -507,6 +526,18 @@ mod tests {
         let mut table = RequestContextTable::new();
         table.insert(RequestId(7), &TestContext { value: 42 });
         assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
+        assert_eq!(table.take::<TestContext>(RequestId(7)), None);
+    }
+
+    /// A discard that decoded, or that left the entry, would hand a released
+    /// watch's context to a later take under a reused table slot.
+    #[test]
+    fn discard_removes_the_entry_and_names_its_kind() {
+        let mut table = RequestContextTable::new();
+        table.insert(RequestId(7), &TestContext { value: 42 });
+
+        assert_eq!(table.discard(RequestId(7)), Some(TestContext::ID));
+        assert_eq!(table.discard(RequestId(7)), None);
         assert_eq!(table.take::<TestContext>(RequestId(7)), None);
     }
 

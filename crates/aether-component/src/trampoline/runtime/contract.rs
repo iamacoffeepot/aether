@@ -1,7 +1,7 @@
 //! Carried-context refusal (ADR-0139 §4, #6429): a replacement whose module
-//! does not declare the kind of a request context the old instance carries is
-//! refused after the old instance's hooks ran, and the old instance is
-//! reinstalled.
+//! does not declare the kind of a context the old instance carries, a
+//! request's or a watch's (ADR-0079 §8), is refused after the old instance's
+//! hooks ran, and the old instance is reinstalled.
 //!
 //! Inline-child types (ADR-0231 §4): the namespace and contract each actor
 //! type a module can spawn inline publishes on its alias, and the
@@ -50,7 +50,7 @@ pub(super) fn undeclared_context(
 /// The refusal error naming the actor, by the replace request's own target,
 /// and the carried context kind the replacement does not declare.
 pub(super) fn context_refusal(actor: &impl Display, kind: &str) -> String {
-    format!("{actor} replacement does not declare its carried request context {kind}")
+    format!("{actor} replacement does not declare its carried context {kind}")
 }
 
 #[cfg(test)]

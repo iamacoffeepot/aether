@@ -39,6 +39,7 @@ mod blob;
 mod cast;
 mod held;
 mod outbox;
+mod watch;
 
 /// A disarmed, unstamped inbound for `Component::deliver`: `payload` of `kind`
 /// routed to `recipient`, replying to `sender`.

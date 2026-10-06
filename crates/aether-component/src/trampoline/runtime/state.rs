@@ -82,8 +82,8 @@ pub enum Slot {
 /// gate queued meanwhile.
 pub struct PreparedSlot {
     /// The guest that ran until prepare. It has run `unwire` and
-    /// `on_dehydrate`, and its reply table and correlation cursor moved to
-    /// the candidate. An abort reinstates it with [`Self::saved`].
+    /// `on_dehydrate`, and its reply table, correlation cursor and watches
+    /// moved to the candidate. An abort reinstates it with [`Self::saved`].
     pub(crate) old: Component,
     /// The state the kept guest saved in `on_dehydrate`, which the candidate
     /// rehydrated from. An abort hands it back to the kept guest through its
@@ -160,11 +160,15 @@ impl WasmTrampolineState {
     /// §7), shared by a refused prepare and an abort. The candidate's held
     /// mail is discarded, and its staged aliases drop with it, so nothing it
     /// did leaves. The reply table and correlation cursor it took over move
-    /// back, past every id it minted. `old` then gets back the state its
+    /// back, past every id it minted, and so do the watches, less the ones it
+    /// added (ADR-0079 §8). `old` then gets back the state its
     /// `on_dehydrate` saved, `saved`, through its own `on_rehydrate`, so a
     /// value the dehydrate moved out, a held reply among it, returns to it
-    /// (ADR-0016 §4). It runs `wire` again, since its `unwire` ran at
-    /// prepare, and then receives the mail its gate queued, in order. Only
+    /// (ADR-0016 §4), the context of each watch among it. It runs `wire`
+    /// again, since its `unwire` ran at prepare; a watch that `wire` makes
+    /// again finds the one standing and takes its id. Then it receives the
+    /// mail its gate queued, in order, a departure notice for a watched actor
+    /// that closed meanwhile among it. Only
     /// teardown outside that saved state and outside what `wire` rebuilds
     /// stays gone.
     ///
@@ -183,7 +187,12 @@ impl WasmTrampolineState {
         candidate.discard_held_outbox();
         old.resume_replies(candidate.take_pending_replies());
         old.resume_correlations(candidate.correlation_cursor());
+        old.resume_watches(candidate.take_watches());
         drop(candidate);
+        // A watch of the kept guest that still waited for its watcher's
+        // alias when the table moved registers now if that alias was
+        // published while the slot was prepared.
+        old.register_published_watches();
 
         if let Some(bundle) = saved
             && let Err(e) = old.call_on_rehydrate(&bundle)
@@ -230,6 +239,11 @@ impl WasmTrampolineState {
     /// prepare (ADR-0241 §7), and an abort here would wire it and deliver
     /// its gated mail inside the close. The gated mail drops, and each chain
     /// settles as it does.
+    ///
+    /// Every watch the mailbox holds is released as its guest drops
+    /// (ADR-0079 §8): the watch table goes with the `Component` that holds
+    /// it, the candidate's in a prepared slot, and each registration with
+    /// it, whether or not the guest's `unwire` ran or trapped.
     ///
     /// A trap in the guest's `unwire` is logged where it is caught and the
     /// close goes on, so the held replies still settle and the name still

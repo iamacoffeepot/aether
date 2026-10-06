@@ -1,0 +1,62 @@
+error[E0271]: type mismatch resolving `<ActorRef<Camera> as WatchTarget>::Watched == Provider`
+  --> tests/ui/rejects_watch_calls.rs:61:17
+   |
+61 |             ctx.watch(camera, NoContext);
+   |                 ^^^^^ expected `Provider`, found `Camera`
+
+error[E0271]: type mismatch resolving `<ActorRef<Camera> as WatchTarget>::Watched == Provider`
+  --> tests/ui/rejects_watch_calls.rs:61:13
+   |
+61 |             ctx.watch(camera, NoContext);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Provider`, found `Camera`
+
+error[E0308]: mismatched types
+  --> tests/ui/rejects_watch_calls.rs:61:31
+   |
+61 |             ctx.watch(camera, NoContext);
+   |                 -----         ^^^^^^^^^ expected `Note`, found `NoContext`
+   |                 |
+   |                 arguments to this method are incorrect
+   |
+note: method defined here
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/watch.rs
+   |
+   |     pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
+   |            ^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/rejects_watch_calls.rs:64:33
+   |
+64 |             ctx.watch(provider, NoContext);
+   |                 -----           ^^^^^^^^^ expected `Note`, found `NoContext`
+   |                 |
+   |                 arguments to this method are incorrect
+   |
+note: method defined here
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/watch.rs
+   |
+   |     pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
+   |            ^^^^^
+
+error[E0277]: `ErasedActorRef` is not a reference `ctx.watch` takes
+  --> tests/ui/rejects_watch_calls.rs:68:23
+   |
+68 |             ctx.watch(erased, Note { seq: ping.seq });
+   |                 ----- ^^^^^^ the trait `WatchTarget` is not implemented for `ErasedActorRef`
+   |                 |
+   |                 required by a bound introduced by this call
+   |
+   = note: watch through an `ActorRef<R>` or a `ProtocolRef<P>`; cast an `ErasedActorRef` to a protocol first with `ctx.cast` (ADR-0079 §8)
+help: the following other types implement trait `WatchTarget`
+  --> $WORKSPACE/crates/aether-actor/src/model/contract.rs
+   |
+   | impl<R: Addressable + Watchable<Ref = Self>> WatchTarget for ActorRef<R> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ActorRef<R>`
+...
+   | impl<P: Protocol + Watchable<Ref = Self>> WatchTarget for ProtocolRef<P> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ProtocolRef<P>`
+note: required by a bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, M>>::watch`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/watch.rs
+   |
+   |     pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
+   |                     ^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, M>>::watch`

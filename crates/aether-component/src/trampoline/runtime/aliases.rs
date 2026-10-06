@@ -6,7 +6,7 @@ use aether_actor::Single;
 use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, TaskDone};
 use aether_substrate::mail::registry::{PreparedAliasRetirement, PreparedAliasRoute};
 
-use super::state::WasmTrampolineState;
+use super::state::{Slot, WasmTrampolineState};
 
 impl WasmTrampolineState {
     /// Publish the logical inline-child routes a guest call staged. The
@@ -36,9 +36,27 @@ impl WasmTrampolineState {
         }
     }
 
-    /// Log an alias batch the owner refused after staging. The batch owes no
+    /// Finish an alias batch the owner applied or refused. The batch owes no
     /// reply; its context names the alias it staged (ADR-0243 §9).
-    pub(super) fn finish_inline_aliases<A>(ctx: &mut NativeCtx<'_, A, Single>, done: TaskDone<RegistryBatchResult>) {
+    ///
+    /// A published alias has a route, so each watch an inline child made
+    /// before its alias had one registers now (ADR-0079 §8), on every guest
+    /// the slot holds: the live one, or a prepared slot's kept guest and its
+    /// candidate. A refused batch is then logged.
+    pub(super) fn finish_inline_aliases<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, Single>,
+        done: TaskDone<RegistryBatchResult>,
+    ) {
+        match &mut self.slot {
+            Slot::Live(component) => component.register_published_watches(),
+            Slot::Prepared(prepared) => {
+                prepared.old.register_published_watches();
+                prepared.candidate.register_published_watches();
+            }
+            Slot::Released => {}
+        }
+
         let Some(InlineAliasContext { alias }) = ctx.take_context() else {
             return;
         };

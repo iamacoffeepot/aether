@@ -403,6 +403,131 @@ pub fn check_intent_signature(
     Ok(Some(ResponseContext { ty: (*pt.ty).clone(), optional: false }))
 }
 
+/// A wasm actor's departure handler (ADR-0079 §8): a `#[handler::event]`
+/// whose third parameter is `Departed<W>`. It is not a mail handler of its
+/// own. Every departure handler of an actor shares the one row, manifest
+/// record, and dispatch arm of the engine's departure notice, and the arm
+/// picks among them by the watched type `W`.
+pub struct WatchHandlerFn {
+    pub method: syn::ImplItemFn,
+    /// `W`, read syntactically out of `Departed<W>`.
+    pub watched_ty: Type,
+    /// The context kind `C` of a `context: C` fourth parameter, or `None`
+    /// for a handler that takes none, whose context kind is `NoContext`.
+    pub context_ty: Option<Type>,
+    /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]).
+    pub cfgs: Vec<Attribute>,
+}
+
+/// `W` when `ty` spells `Departed<W>`: any path whose last segment is
+/// `Departed` with one type argument. The macro has no type resolution, so
+/// the match is syntactic, as it is for `Pending<R>` and `TaskDone<O>`.
+pub fn departed_watched_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segment = type_path.path.segments.last()?;
+    if segment.ident != "Departed" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(GenericArgument::Type(watched)) if args.args.len() == 1 => Some(watched),
+        _ => None,
+    }
+}
+
+/// Check a wasm departure handler's signature (ADR-0079 §8) and read its
+/// context kind. It is a `#[handler::event]` that answers nothing. Its
+/// optional fourth parameter is the context every watch of its watched type
+/// stores, so it is `context: C` and never `Option<C>`: a watch always
+/// stores its context, and a handler with nothing to note leaves the
+/// parameter out.
+pub fn check_watch_signature(
+    attr: &Attribute,
+    intent: Option<HandlerIntent>,
+    reply: &HandlerReply,
+    sig: &Signature,
+) -> syn::Result<Option<Type>> {
+    if intent != Some(HandlerIntent::Event) {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "a `Departed<W>` handler is `#[handler::event]`: a watched actor's departure arrives because this \
+             actor watched it, and the handler answers nothing (ADR-0079 §8)",
+        ));
+    }
+    if !matches!(reply, HandlerReply::None) {
+        return Err(syn::Error::new_spanned(
+            &sig.output,
+            "a `Departed<W>` handler answers nothing, so it returns `()`: a departure has no one waiting for a reply",
+        ));
+    }
+    let Some(fourth) = sig.inputs.get(3) else {
+        return Ok(None);
+    };
+    let FnArg::Typed(pt) = fourth else {
+        return Err(syn::Error::new_spanned(fourth, "the context parameter must be `context: C`"));
+    };
+    if let Type::Path(type_path) = &*pt.ty
+        && type_path.qself.is_none()
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+    {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            "a `Departed<W>` handler's context is never optional: a watch always stores its context. Write \
+             `context: C` for the kind every `ctx.watch` of this type passes, or leave the parameter out and \
+             watch with `NoContext` (ADR-0079 §8)",
+        ));
+    }
+    Ok(Some((*pt.ty).clone()))
+}
+
+/// Reject two departure handlers for one watched type (ADR-0079 §8). One
+/// handler serves each watched type and fixes its context kind; a second
+/// would never run, and would give the type two context kinds. The macro has
+/// no type resolution, so the comparison is by token equality.
+pub fn reject_duplicate_watched_types(handlers: &[WatchHandlerFn]) -> syn::Result<()> {
+    for (index, later) in handlers.iter().enumerate() {
+        let earlier = handlers[..index].iter().find(|earlier| types_token_eq(&earlier.watched_ty, &later.watched_ty));
+        if let Some(earlier) = earlier {
+            let earlier_name = &earlier.method.sig.ident;
+            let watched_ty = &later.watched_ty;
+            return Err(syn::Error::new_spanned(
+                &later.method.sig.ident,
+                format!(
+                    "two handlers take `Departed<{}>` (also `{earlier_name}`): one handler serves each watched \
+                     type, and its signature fixes the context kind every watch of that type stores. Tell the \
+                     watches apart by the context value; an enum kind carries notes of different shapes",
+                    quote!(#watched_ty)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a `Departed<W>` handler where no watch can be declared for it
+/// (ADR-0079 §8): `Departed<W>` is the event of a wasm component's
+/// `ctx.watch`, and `#[actor]` on the component's own impl is what declares
+/// the watch. `instead` says what the author writes there.
+pub fn reject_departed_handler(kind_ty: &Type, instead: &str) -> syn::Result<()> {
+    if departed_watched_type(kind_ty).is_none() {
+        return Ok(());
+    }
+    Err(syn::Error::new_spanned(
+        kind_ty,
+        format!("`Departed<W>` is the event of a wasm component's `ctx.watch` (ADR-0079 §8): {instead}"),
+    ))
+}
+
+/// What a native actor writes in place of a `Departed<W>` handler.
+const NATIVE_WATCH_FORM: &str = "a native actor watches with `ctx.monitor(reference)`, keeps the `MonitorHandle`, \
+                                 and takes `MonitorNotice` in its `#[handler::event]`, reading the departed actor \
+                                 from `ctx.sender()`";
+
 /// Push `#[allow(clippy::needless_pass_by_value)]` onto a response handler
 /// that takes its context parameter (ADR-0243 §10): the arm hands the taken
 /// context over by value, so a body that only reads it would trip the lint for
@@ -1110,6 +1235,7 @@ pub fn extract_native_actor_handler_kind(
     {
         return Ok(((*slice.elem).clone(), true));
     }
+    reject_departed_handler(&pt.ty, NATIVE_WATCH_FORM)?;
     Ok(((*pt.ty).clone(), false))
 }
 

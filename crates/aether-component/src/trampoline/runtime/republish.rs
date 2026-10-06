@@ -75,8 +75,8 @@ impl WasmTrampolineState {
     /// running guest is still wired: `init` cannot send mail, so a failed
     /// `init` drops the candidate before the running guest runs any hook
     /// (#6134). The running guest then runs `unwire` and `on_dehydrate`, its
-    /// correlation cursor and reply table move to the candidate, and the
-    /// candidate rehydrates. A refusal after the hooks reinstates the running
+    /// correlation cursor, reply table and watches move to the candidate, and
+    /// the candidate rehydrates. A refusal after the hooks reinstates the running
     /// guest with the state it saved. A slot that is not live has nothing to
     /// prepare and refuses.
     pub(super) fn prepare(
@@ -252,8 +252,8 @@ impl WasmTrampolineState {
     }
 
     /// The part of [`Self::start_candidate`] after the old guest's hooks:
-    /// move its cursor and reply table to the candidate, then refuse or
-    /// rehydrate the candidate from `saved`.
+    /// move its cursor, reply table and watches to the candidate, then refuse
+    /// or rehydrate the candidate from `saved`.
     fn rehydrate_candidate(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
@@ -271,6 +271,13 @@ impl WasmTrampolineState {
         // own requester. Both precede `on_rehydrate` and every delivery.
         candidate.resume_correlations(old.correlation_cursor());
         candidate.resume_replies(old.take_pending_replies());
+        // ADR-0079 §8: the old guest's watches move with the mailbox, after
+        // its `unwire` had the chance to end any. Nothing is registered or
+        // released: a registration is keyed by the watcher's mailbox, which a
+        // republish does not change. Their contexts reach the candidate in
+        // the saved bundle's request-context table, restored before its
+        // `on_rehydrate` runs.
+        candidate.resume_watches(old.take_watches());
         candidate.close_load_window();
 
         if let Some(error) = old.take_save_error() {
@@ -286,8 +293,9 @@ impl WasmTrampolineState {
         })
     }
 
-    /// ADR-0139 §4 (#6429): every request context the old instance carries
-    /// in its saved bundle must have a kind the replacement module declares.
+    /// ADR-0139 §4 (#6429): every context the old instance carries in its
+    /// saved bundle, a request's or a watch's (ADR-0079 §8), must have a kind
+    /// the replacement module declares.
     /// Only kinds the predecessor module declares are judged: a context kind
     /// defined in a shared kinds crate may be missing from both sections, and
     /// the host has no record to judge it by. The contexts come out of

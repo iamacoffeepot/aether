@@ -490,7 +490,7 @@ not refused: it binds as a first publish.
 Then each member prepares: its inbox gate closes, so mail for it waits; the
 candidate instantiates behind the same binding with its outbox held, the old
 guest runs `unwire` and `on_dehydrate` and is kept, the correlation cursor,
-reply table and request contexts move to the candidate, and it runs
+reply table, request contexts and watches move to the candidate, and it runs
 `on_rehydrate`. Once every member is ready the module publishes, and each member
 commits: its held mail leaves on a chain of its own, and the mail its gate queued
 reaches the candidate in order. `PublishResult::Ok { types }`, each republished
@@ -502,10 +502,10 @@ exported types and its `export!` `private` list, each under its old alias; the
 spawn inline.
 
 A refusal in any member's prepare (a failed `init`, a rejected state save, a
-carried request context the candidate does not declare
+carried context, a request's or a watch's, that the candidate does not declare
 ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
 §4), or a failed rehydrate), or a refused publish, aborts every member: each
-reinstates its old guest with its reply table and counters, hands it back the
+reinstates its old guest with its reply table, counters and watches, hands it back the
 state its `on_dehydrate` saved through its `on_rehydrate`, runs its `wire`
 again, and receives the mail its gate queued; nothing a candidate sent leaves.
 Only teardown outside that saved state and outside what `wire` rebuilds is not
@@ -516,6 +516,20 @@ onto what the instance already holds.
 While a republish is in flight, a load of one of its namespaces and a drop of a
 member wait for the answer and then run against the code that won; a republish
 that arrives while a load of its namespaces is in flight waits for those births.
+
+A component's watches on other actors stand across a republish with no code
+from its author ([Watching another actor](#watching-another-actor)). The host
+moves each registration with the mailbox, and each watch's context rides the
+saved state whether or not the component overrides `on_dehydrate`, so the
+successor's handler runs with the context its predecessor stored, under the id
+its predecessor was given. A watched actor that closes while the component is
+prepared is reported to the guest that wins: its notice waits at the inbox
+gate with the rest of the mail. A reinstated guest's `wire` runs again, and a
+watch it makes there finds the one standing and takes its id, so an aborted
+republish never doubles a watch. A successor whose handler for a watched type
+takes another context kind is refused when it no longer declares the old
+kind; one that still declares it gets an error in its log ring at the notice,
+and its handler does not run.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): each swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
@@ -723,6 +737,87 @@ The worked example is the environment bootstrap script,
 `ctx.resolve`, logs one error and stops on a refusal, and otherwise drives an
 import, merge, and publish sequence through the two kind-checked references
 (see [Building an environment](workspace.md#building-an-environment)).
+
+## Watching another actor
+
+A component that keeps state on behalf of another actor needs to learn when
+that actor is gone, whether or not it said so on its way out. `ctx.watch`
+does that for any typed reference the component holds
+([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)
+§8): when the target closes, by a drop, a trap in its own `unwire`, or engine
+teardown, the component's handler for the type it was watched through runs
+once.
+
+```rust
+/// What the ledger notes about each provider it holds rows for.
+#[aether_data::kind(name = "example.ledger.provider_note")]
+pub struct ProviderNote {
+    pub last: u32,
+}
+
+#[handler::tell]
+fn on_admit(&mut self, ctx: &mut WasmCtx<'_>, admit: Admit) {
+    let Some(sender) = ctx.sender() else { return };
+    let Some(provider) = ctx.cast::<Provider>(sender) else { return };   // ProtocolRef<Provider>
+    let watch = ctx.watch(provider, ProviderNote { last: admit.id });    // the same id on every mail from this provider
+    self.rows.entry(watch).or_default().push(admit.row);
+}
+
+#[handler::event]
+fn on_provider_gone(&mut self, _ctx: &mut WasmCtx<'_>, event: Departed<Provider>, _note: ProviderNote) {
+    self.rows.remove(&event.watch);          // event.actor: ProtocolRef<Provider>
+}
+```
+
+The pattern is: cast the sender to a protocol and watch it on every mail, key
+the component's own table by the returned `WatchId`, and remove by
+`event.watch` in the handler. The cast and the watch are one host call each.
+
+- **The target is a typed reference.** An `ActorRef<R>` watches through the
+  actor type, and a `ProtocolRef<P>` through a protocol, such as a sender cast
+  at receipt. An `ErasedActorRef` is cast first.
+- **One handler per watched type.** The handler is a `#[handler::event]` whose
+  third parameter is `Departed<W>`, and `ctx.watch` compiles only for a type
+  the actor has one for. `event.actor` is the departed actor as the reference
+  it was watched through, for identity, an in-memory key, or a log line;
+  `event.watch` is the id `watch` returned.
+- **One context kind per watched type.** The handler's fourth parameter is the
+  context every `watch` of that type passes; a watch with another kind does
+  not compile. A component that keeps notes of different shapes about actors
+  of one type declares one enum kind for them. The context is never
+  `Option<C>`, since a watch always stores one.
+- **`NoContext` for nothing to note.** A handler that leaves the fourth
+  parameter out is watched for with `ctx.watch(camera, NoContext)`.
+- **A watch is unique per target and watched type.** Watching a target that is
+  already watched through the same type makes no second watch: it returns the
+  same `WatchId` and replaces the stored context with the one passed. So the
+  id is the component's own stable name for the target. One actor
+  watched through two types is two watches with two ids, and its departure
+  runs each handler once.
+- **The id stays with the component that holds it.** A `WatchId` names a row
+  in its holder's own watch table and is meaningful only to that actor: the
+  same number in another actor's hands names one of that actor's own watches.
+  It has actor reach, so a kind with a `WatchId` field is never mail and does
+  not compile as a handler's kind or a send's argument, and no component
+  builds one from a number. It may sit in the component's saved state and in
+  a context it stores with a request. Two actors that must speak of one watch
+  use a name of their own, such as a key the watcher keeps beside the id.
+- **It never fails.** A target that had already closed is noticed the same
+  way. The notice is mail, handled after the handler that watched returns, so
+  what that handler keyed on the id is in place.
+- **A watch ends at its notice**, or at `ctx.unwatch(id)`. A notice already
+  posted when `unwatch` runs finds no watch and runs no handler. Watching the
+  target again afterwards is a new id.
+- **The host releases every watch** when the component closes, fails or traps
+  in `wire`, or is dropped as a republish candidate, with none of its code
+  run. An inline child watches from its own `wire` like any actor and hears
+  its own notice.
+
+`watch` and `unwatch` are on `WasmCtx`, so a handler, `wire`, `unwire`, and
+`on_rehydrate` can call them; `init` and `on_dehydrate` cannot. A watch stands
+across a republish of the watcher ([Hot reload](#hot-reload)). A native actor
+watches with `ctx.monitor`, keeps the `MonitorHandle`, and takes
+`MonitorNotice`.
 
 ## Where to read more
 
