@@ -216,9 +216,19 @@ changes is the old guest's `on_dehydrate`: a trap there is a trap in the live
 guest, and it aborts the substrate where today it is logged and the republish
 goes on.
 
-A native actor is never a discardable second copy, so only the second case
-applies to it: a panic in a hook aborts the engine. ADR-0247's Context
-records that for `wire`; the other native hooks were not read for this ADR.
+A native actor differs in one way, and for a reason. A wasm guest lives in
+a store the engine can throw away, which is what makes the first case
+possible. A native actor lives in the engine's own memory, so there is
+nothing to discard around a panic, and only the second case applies: a panic
+in any native hook or handler takes the engine down. On a pool worker the
+cycle runs under `catch_unwind` and a caught panic escalates to a fatal abort
+(`crates/aether-substrate/src/scheduler/pool.rs`, citing ADR-0063); that
+covers a handler, a close's `unwire`, and a post-seal `init` and `wire`,
+which run inside the spawning handler. A composed root's `init` and `wire`
+run on the boot thread with no `catch_unwind` around them
+(`crates/aether-substrate/src/chassis/builder/native_actor_boot.rs`), so a
+panic there unwinds boot. No native hook's panic is contained, and none
+should be: this is the rule, not work to do.
 
 ### 3. Every guest instance has one fixed sequence
 
@@ -279,13 +289,18 @@ birth fails is only logged.
 
 | Step | Can refuse | A refusal | A panic | Serves |
 | --- | --- | --- | --- | --- |
-| `init` | yes | the birth fails; the requester is told | the engine aborts | 3 |
-| `wire` | yes | the birth fails; the actor is closed, which runs `unwire` | the engine aborts | 3, 5 |
+| `init` | yes | the birth fails and its requester is told; a composed root withdraws its mailbox claim and the boot fails | the engine goes down (§2) | 3 |
+| `wire`, its mail held until the actor is activated | yes | the birth fails; the actor goes through the one `close`, which runs `unwire` and discards what both hooks sent; a composed root fails the boot, whose rollback closes it with its wired siblings | the engine goes down | 3, 5 |
+| The contract publishes, the held mail is released, the actor is live | | | | 3 |
 
-ADR-0247's Context counts three native birth sequences that differ in when
-the route goes `Live`. They were not read again for this ADR, and unifying
-them is ADR-0247's open single stepped birth. The hook order and the
-signatures above hold in all three.
+Read: `NativeActorBoot` (`chassis/builder/native_actor_boot.rs`: claim,
+`init`, `wire`, then the dispatcher), `commit_directly`
+(`actor/native/spawn/spawner/commit.rs`: `hold_outbound_for_activation`,
+`A::wire`, and `close::<A>` with `SpawnError::WireFailed` on an error) and
+`prepare.rs` (`A::init` on the calling thread), all under
+`crates/aether-substrate/src`. The routes differ in when the name is
+published, which is ADR-0247's open single stepped birth. The hook order,
+the signatures and what a refusal does are the same on each.
 
 #### A close: a drop, an engine teardown, a birth cancelled after `wire`
 
@@ -312,8 +327,21 @@ runs none of the guest rows.
 An inline child that is despawned runs its own `unwire`, is dropped, and its
 alias is retired and spent (`despawn_inline_child`). A child that despawns
 itself mid-dispatch skips `unwire` today; under rule 5 it runs `unwire` when
-its dispatch returns, before its box drops. A native actor's close is
-ADR-0247 rule 5's one `close`: drain, `unwire`, release, registry tail.
+its dispatch returns, before its box drops.
+
+A native actor's close is the one `close`
+(`crates/aether-substrate/src/actor/native/slot/close.rs`), which takes the
+actor by value and has no variant: drain the residual inbox, `unwire`, drop
+the cost rows, discard mail still held for an activation that never landed,
+settle the held replies (silently at engine teardown, `unanswered`
+otherwise), end the name in the registries, drop the actor. Its four exits
+are the actor asking to close, engine teardown, a birth cancelled after
+`wire`, and a boot rolled back. Teardown closes the spawned instanced actors
+before the composed roots (`spawner/teardown.rs`), and wakes an idle slot so
+it too runs `unwire` (`chassis/builder/teardown.rs`). `unwire` cannot refuse,
+and a panic in it takes the engine down (§2). A guest's trampoline is a
+native actor, so the guest close table above is this sequence with
+`close_guest` as its `unwire`.
 
 Closing a parent does not close a child that owns its own slot. That is
 ADR-0247's open question about what a closing actor owns, and stays there.
@@ -413,13 +441,10 @@ once for one mailbox, so an author writes it to be correct when what it sets
 up is already standing.
 
 - **Subscriptions, watches and route claims** are idempotent at the door that
-  takes them, so `wire` repeats them freely. Two doors were read for this
-  ADR: a lifecycle subscription is an insert into a set keyed by the
-  subscriber (`crates/aether-lifecycle/src/subscribers.rs`), and a watch of a
-  standing target answers the standing id (`ComponentCtx::watch`,
-  `crates/aether-substrate/src/actor/wasm/component/ctx.rs`). The other
-  doors were not audited here; one that is found not to be idempotent is a
-  defect at that door.
+  takes them, so `wire` repeats them freely. The table below is every such
+  door a `wire` body in the tree uses, found by searching the bodies outside
+  the fixtures, with what a second identical call from the same mailbox
+  does.
 - **A one-shot send in `wire` repeats on a republish.** An author who wants
   it once keeps a flag in saved state and checks it in `wire`.
   `on_rehydrate` runs before `wire` so that `wire` can read what was carried.
@@ -427,6 +452,27 @@ up is already standing.
   the resident child.** Nothing is initialised again. On `main` such a spawn
   runs a second `init` and replaces the resident child's box without its
   `unwire` (`install_inline_child`, `Registry::insert_child`).
+
+| Door | A second identical call | Read in |
+| --- | --- | --- |
+| `aether.lifecycle` subscribe | no change: an insert into a map keyed by the subscriber | `crates/aether-lifecycle/src/subscribers.rs` |
+| `aether.window` subscribe | no change: the subscriber map and the holder's row set are both keyed inserts | `KindSubscribers::insert`, `crates/aether-window/src/runtime/subscribers.rs` |
+| `aether.http` route claim | `Ok`, no change: "the same sole holder re-claiming its own key is an idempotent `Ok`" | `crates/aether-http/src/server/runtime/state.rs` |
+| `aether.rpc` engine route | `Ok`, no change: "the same registrant re-registering its own engine is `Ok` and changes nothing" | `on_register_engine_route`, `crates/aether-rpc/src/server/runtime.rs` |
+| `aether.kit.camera` view subscribe | held once; the camera sends its current view again | `Viewers::add`, `on_view_subscribe`, `crates/aether-kit/src/camera/` |
+| `aether.render` view-from | keeps the hold and subscribes to the source again, which answers with its current view | `follow_view`, `crates/aether-render/src/runtime/view_source.rs` |
+| `ctx.watch` | answers the standing id | `ComponentCtx::watch`, `crates/aether-substrate/src/actor/wasm/component/ctx.rs` |
+| `aether.tcp` bind for the sender | **not idempotent**: each call spawns a fresh listener for the address | `on_bind_self`, `crates/aether-tcp/src/runtime.rs` |
+
+The TCP bind is the one door that fails the rule, and making a second bind
+of the same address by the same consumer answer with the standing listener
+is implementation work under this ADR. Its only `wire` caller today is a
+test. That a second bind then fails at the socket is inferred from the
+handler's doc, not read in the socket code.
+
+The other sends found in `wire` bodies are one-shot commands or queries
+(`CreateTexture`, a workspace import, a window list request, a mesh load),
+which the second bullet covers.
 
 A `wire` and `unwire` written as a pair need no guard: at commit the old
 guest's release arrives before the successor's request (§4).
@@ -530,15 +576,33 @@ winner receives it in order
 publishing to the mailbox throughout, because its key is the mailbox, which
 both guests share.
 
-One limit remains, by inference from the order of the two mails. When a
-paired `unwire` unsubscribes and the successor's `wire` subscribes again, the
-publisher handles the two mails back to back but not atomically. An event it
-publishes between them is not sent to the mailbox. A component that leaves a
-mailbox-keyed subscription standing in `unwire` has no such window. For a
-lifecycle subscription it loses nothing by that at a close: a closed
-subscriber leaves every stage through its `MonitorNotice`
-(`crates/aether-lifecycle/src/subscribers.rs`). Other publishers were not
-read.
+One case can miss an event, and it is stated here as a limit. When the old
+guest's `unwire` unsubscribes and the successor's `wire` subscribes again,
+the two mails reach the publisher in that order but as two separate
+deliveries: each guest send is routed as its own mail
+(`ComponentCtx::send`, `route`, `flush_held`), and the publisher's inbox
+takes mail from other senders between them. An event the publisher emits
+between handling the two is not sent to the mailbox. The engine has no
+delivery that hands one recipient two mails as a unit, and this ADR does not
+add one, because no door in the tree needs it:
+
+- **A publisher that holds its rows against the mailbox and releases them
+  when the subscriber closes** needs no unsubscribe in `unwire`, so there is
+  no first mail and no window. Lifecycle, window, HTTP and RPC all release on
+  the subscriber's `MonitorNotice` (each read: `subscribers.rs` in
+  `aether-lifecycle` and `aether-window`, `state.watch` in `aether-http`, the
+  departure handler in `aether-rpc`). The rule for an author: do not
+  unsubscribe in `unwire` from a publisher that releases on close.
+- **A publisher of state that answers a subscribe with its current value**
+  loses nothing across the window: the successor's subscribe is answered
+  with the latest value. The kit camera is this case, and it does not watch
+  its viewers, so `aether.kit.mesh` and `aether.kit.camera-controller` are
+  right to unsubscribe in `unwire`.
+
+A publisher of events that neither releases on close nor replays would be
+exposed. None exists in the tree, and one that is written should release on
+close, which ADR-0247 rule 5 already asks of whatever holds a row for an
+actor.
 
 ### Why the contract has this shape: hooks read as mail
 
@@ -745,11 +809,26 @@ above from the code or from precedent: the generated `on_rehydrate` (§1), a
 trap in `on_dehydrate` (§2), a result on `on_dehydrate` (§1), mail from
 `on_dehydrate` (§8), and the order children wire in (§6).
 
-Three things the tables point at stay open in ADR-0247, because each needs a
-mechanism that is outside a hook contract and is not designed: a module
-boot's birth failing with no requester to tell; closing a parent's
-separately slotted children; and the single stepped birth that would make
-the three native sequences one. None changes a hook's order or signature.
+Three things the tables point at are not lifecycle questions pending here.
+Each is owned by ADR-0247, which records it as an open mechanism to be
+settled by its own ADR or an amendment there; no issue is filed for any of
+them yet.
+
+- **A module boot's birth that fails with no requester to tell** (ADR-0247
+  rule 3). The boot runs the birth table above and fails as it says. What is
+  missing is how a `Publish` reply waits on that birth, which is a question
+  about the publish door's reply.
+- **Closing a parent's separately slotted children** (ADR-0247 rule 5). Each
+  such child is an actor with its own slot and runs the close table when it
+  closes. What is missing is who decides that it closes, which is a question
+  of ownership between actors.
+- **The single stepped birth** (ADR-0247 rules 3 and 4). The native routes
+  run the same hooks in the same order with the same refusals, read above.
+  They differ in when the registry publishes the name, which is registry and
+  boot-seal work.
+
+None of the three changes which hooks run, their order, their signatures, or
+what a refusal or a trap does.
 
 ## Alternatives considered
 
