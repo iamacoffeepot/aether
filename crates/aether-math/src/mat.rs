@@ -5,6 +5,7 @@
 use core::ops::Mul;
 
 use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
 use crate::quat::Quat;
 use crate::vec::{Vec3, Vec4};
@@ -15,7 +16,9 @@ use crate::vec::{Vec3, Vec4};
 /// transpose. `M * v` applies `M` to `v` in standard left-multiply
 /// convention.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable, aether_data::Schema)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Mat4 {
     pub cols: [Vec4; 4],
 }

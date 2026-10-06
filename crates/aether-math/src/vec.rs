@@ -1,14 +1,21 @@
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
+
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -24,8 +31,16 @@ pub struct Vec3 {
 /// `#[repr(C)]` + `Pod` makes the kind cast-shaped: its 16 bytes are
 /// the four `f32`s in `x, y, z, w` order, the same layout a wgpu
 /// uniform expects, so it encodes/decodes without serialization.
+///
+/// The serde pair is named because `pod` drops it and a `Vec4` is also a
+/// field of serde-carrying kinds, directly and inside `Mat4`.
 #[repr(C)]
-#[aether_data::kind(name = "aether.math.vec4", pod, partial_eq)]
+#[aether_data::kind(
+    name = "aether.math.vec4",
+    pod,
+    partial_eq,
+    derive(Serialize, Deserialize, aether_data::StorageLeaf)
+)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
