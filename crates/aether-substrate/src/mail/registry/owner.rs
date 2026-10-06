@@ -1,5 +1,7 @@
 use std::any::Any;
 use std::collections::VecDeque;
+#[cfg(test)]
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, Weak};
 #[cfg(test)]
 use std::time::Duration;
@@ -295,6 +297,10 @@ impl RegistryOwnerLease {
     /// [`Self::apply_once_then_observe_before_next_apply_for_test`] with the
     /// patience for the next command spelled out, so a test can drive the
     /// wedge in milliseconds.
+    ///
+    /// # Panics
+    /// Panics when nothing is queued for the prefix, when no command follows
+    /// it within `cumulative_cap`, and with whatever `observe` panics with.
     #[cfg(test)]
     pub(crate) fn apply_once_then_observe_within(
         &self,
@@ -302,20 +308,17 @@ impl RegistryOwnerLease {
         cumulative_cap: Duration,
         observe: impl FnOnce(),
     ) {
-        let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
-        let registry = self.slot.registry.upgrade().expect("test registry remains live");
-        self.apply_queued_for_test(&registry);
+        self.under_apply_guard(|| {
+            let registry = self.slot.registry.upgrade().expect("test registry remains live");
+            assert!(self.apply_queued_for_test(&registry), "test owner step requires one queued prefix");
 
-        // A panic with the apply guard held poisons the lock, and the lease's
-        // `Drop` then panics a second time during the unwind and aborts the
-        // process. Release the guard before reporting the wedge.
-        if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
-            drop(apply);
-            panic!("{}", wedge.reason());
-        }
+            if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
+                panic!("{}", wedge.reason());
+            }
 
-        observe();
-        self.apply_queued_for_test(&registry);
+            observe();
+            assert!(self.apply_queued_for_test(&registry), "the awaited command stays queued under the apply guard");
+        });
     }
 
     #[cfg(test)]
@@ -328,31 +331,54 @@ impl RegistryOwnerLease {
     /// for the next command spelled out.
     #[cfg(test)]
     pub(crate) fn apply_once_then_close_within(&self, round_budget: Duration, cumulative_cap: Duration) {
-        let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         let registry = self.slot.registry.upgrade().expect("test registry remains live");
-        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
-        let commands = queue.commands.drain(..).collect::<Vec<_>>();
-        self.slot.meter.drained_to_empty();
-        drop(queue);
-        let route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
-        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
-        queue.route_generation = queue.route_generation.max(route_generation);
-        drop(queue);
+        let closing = self.under_apply_guard(|| {
+            let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+            let commands = queue.commands.drain(..).collect::<Vec<_>>();
+            self.slot.meter.drained_to_empty();
+            drop(queue);
+            let route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
+            let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+            queue.route_generation = queue.route_generation.max(route_generation);
+            drop(queue);
 
-        // Released before the panic for the reason given in
-        // `apply_once_then_observe_within`.
-        if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
-            drop(apply);
-            panic!("{}", wedge.reason());
-        }
+            if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
+                panic!("{}", wedge.reason());
+            }
 
-        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
-        queue.accepting = false;
-        let commands = queue.commands.drain(..).collect::<Vec<_>>();
-        self.slot.meter.drained_to_empty();
-        drop(queue);
+            let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+            queue.accepting = false;
+            let commands = queue.commands.drain(..).collect::<Vec<_>>();
+            self.slot.meter.drained_to_empty();
+            drop(queue);
+
+            commands
+        });
+
+        // The close joins each discarded birth at its scheduler home, so it
+        // runs with the apply guard released, as the lease's `Drop` runs it.
+        registry.close_owner_commands(closing, &self.slot.mailer);
+    }
+
+    /// Run one test owner step with the apply guard held, and release the
+    /// guard before a panic from `step` continues.
+    ///
+    /// A guard dropped by a panicking thread poisons its lock, and the
+    /// lease's `Drop`, which runs during that same unwind and expects a clean
+    /// lock, would panic a second time and abort the process, taking every
+    /// other test's result with it. Catching the panic first means the guard
+    /// is dropped by a thread that is no longer panicking, so the lock stays
+    /// clean and the one test fails with the payload `step` raised.
+    #[cfg(test)]
+    fn under_apply_guard<T>(&self, step: impl FnOnce() -> T) -> T {
+        let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
+        let outcome = panic::catch_unwind(AssertUnwindSafe(step));
         drop(apply);
-        registry.close_owner_commands(commands, &self.slot.mailer);
+
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => panic::resume_unwind(payload),
+        }
     }
 
     /// Block until the owner queue holds a command, on the admission itself
@@ -384,16 +410,25 @@ impl RegistryOwnerLease {
         )
     }
 
+    /// Apply everything queued and report whether there was anything to
+    /// apply. The queue lock is released before this returns, so a caller
+    /// that panics on `false` does not poison it.
     #[cfg(test)]
-    fn apply_queued_for_test(&self, registry: &Registry) {
+    fn apply_queued_for_test(&self, registry: &Registry) -> bool {
         let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         let commands = queue.commands.drain(..).collect::<Vec<_>>();
-        assert!(!commands.is_empty(), "test owner step requires one queued prefix");
         self.slot.meter.drained_to_empty();
         drop(queue);
+        if commands.is_empty() {
+            return false;
+        }
+
         let route_generation = registry.apply_owner_commands(commands, &self.slot.mailer);
         let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
         queue.route_generation = queue.route_generation.max(route_generation);
+        drop(queue);
+
+        true
     }
 }
 

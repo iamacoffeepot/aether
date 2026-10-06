@@ -18,7 +18,8 @@
 //! A test that owns a pumped actor drives it through [`PumpedDriver`],
 //! which waits the way a pumped chassis driver does (ADR-0161 §Decision 2);
 //! a test that waits on a pooled actor's chain uses [`await_settled`], and
-//! one that waits on a detached effect uses [`await_signal`].
+//! one that waits on a detached effect uses [`await_signal`], or
+//! [`await_event`] when the effect carries a value the test asserts on.
 //!
 //! A replace test that needs its guest's own code under a new content hash
 //! takes it from [`successor_wasm`].
@@ -61,7 +62,7 @@ use crate::runtime::lifecycle::FatalAborter;
 mod pumped;
 mod successor;
 
-pub use pumped::{PumpedDriver, await_settled, await_signal};
+pub use pumped::{PumpedDriver, await_event, await_settled, await_signal};
 pub use successor::successor_wasm;
 
 /// Canonical test chassis. `build()` is unreachable — every consumer

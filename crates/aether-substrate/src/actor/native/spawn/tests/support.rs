@@ -4,27 +4,26 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, Addressable, HandlesKind, Many};
-use aether_data::{ActorId, RequestId};
+use aether_data::{ActorId, Kind as _, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnOutcome, Spawner, Subname};
-use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskCompletionWake, TaskDone};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::PreparedSpawnCommit;
-use crate::mail::registry::{MailDispatch, Registry};
+use crate::mail::registry::{MailDispatch, OwnedDispatch, Registry};
 use crate::mail::{KindId, MailId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
-use crate::testing::boot_authority;
+use crate::testing::{await_event, boot_authority};
 
 #[aether_data::kind(name = "test.activation.poke", copy)]
 pub(super) struct ActivationPoke;
@@ -211,16 +210,50 @@ pub(super) fn finalized_probe(
     (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)
 }
 
+/// A parent binding whose own mailbox is registered as `name`, beside the
+/// channel its completion wakes arrive on.
+///
+/// A finalized birth tells its parent the outcome the way any staged task
+/// does: it fills the parent's ledger and then pushes one
+/// [`TaskCompletionWake`] to the parent's mailbox. The route registered here
+/// forwards each wake's [`DispatchId`], so [`await_spawn_done`] waits on the
+/// wake a parent actor would be woken by.
+pub(super) fn activation_parent(
+    registry: &Registry,
+    mailer: &Arc<Mailer>,
+    name: &str,
+) -> (Arc<NativeBinding>, crossbeam_channel::Receiver<DispatchId>) {
+    let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+    let mailbox = registry.register_inbox(
+        &boot_authority(),
+        name,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // ADR-0094: terminal test consumer.
+            dispatch.discharge();
+            let wake = TaskCompletionWake::decode_from_bytes(dispatch.payload.bytes())
+                .expect("only a completion wake reaches the activation parent");
+            let _ = wake_tx.send(DispatchId(wake.dispatch_id));
+        }),
+    );
+
+    (Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), mailbox)), wake_rx)
+}
+
+/// Take the outcome `dispatch_id` names, waiting for a completion wake when
+/// the ledger does not hold it yet.
+///
+/// The finalizer fills the ledger before it pushes the wake, so an outcome
+/// that is missing has not sent its wake: the wait always has one coming,
+/// and a wake for another birth only sends the loop round to look again.
 pub(super) fn await_spawn_done(
     parent: &NativeBinding,
+    wakes: &crossbeam_channel::Receiver<DispatchId>,
     dispatch_id: DispatchId,
 ) -> TaskDone<SpawnOutcome<ActivationProbe>, ()> {
-    let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         if let Some(done) = parent.dispatch_take(dispatch_id) {
             return done;
         }
-        assert!(Instant::now() < deadline, "native finalizer filled its typed deferred result");
-        thread::yield_now();
+        await_event(wakes, "test.activation.spawn_done");
     }
 }
