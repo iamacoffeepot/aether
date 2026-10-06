@@ -6,10 +6,10 @@
 //! ([`NativeInitCtx::memory_gauge`](crate::NativeInitCtx::memory_gauge)), and
 //! dropping it removes the row, so a departed actor leaves none behind. An
 //! owner whose bytes are one number sets the gauge to it
-//! ([`MemoryGauge::set`]); an owner whose bytes are many resources hands each
-//! a [`MemoryCharge`], which adds on creation, can be resized, and subtracts
-//! when dropped, so the bytes leave the count wherever the resource is
-//! dropped.
+//! ([`MemoryGauge::set`]); an owner whose bytes are many resources keeps each
+//! as a [`Charged`] value ([`MemoryGauge::charged`]), which adds the
+//! resource's bytes on creation, can be resized, and subtracts them when
+//! dropped, so the bytes leave the count wherever the resource is dropped.
 //!
 //! The ledger is held by the [`Mailer`](crate::Mailer) beside the cost table
 //! and the blob store, so it is reached through a ctx and is never a global.
@@ -48,6 +48,7 @@
 //! report with no lock and no mail, beside an index behind a lock.
 
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -153,16 +154,17 @@ impl MemoryGauge {
 
     /// Set this gauge to `bytes`. For an owner whose memory is one number it
     /// learns whole, as a wasm linear memory's size is; it is never mixed
-    /// with [`Self::charge`] on one gauge.
+    /// with [`Self::charged`] on one gauge.
     pub fn set(&self, bytes: usize) {
         self.bytes.store(bytes, Ordering::Relaxed);
     }
 
-    /// Add `bytes` to this gauge for as long as the returned charge lives.
+    /// Take ownership of `value` and count `bytes` for it on this gauge for
+    /// as long as the returned value lives.
     #[must_use]
-    pub fn charge(&self, bytes: usize) -> MemoryCharge {
+    pub fn charged<T>(&self, bytes: usize, value: T) -> Charged<T> {
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
-        MemoryCharge { gauge: Arc::clone(&self.bytes), bytes }
+        Charged { value, gauge: Arc::clone(&self.bytes), bytes }
     }
 
     /// The bytes this gauge counts now.
@@ -188,33 +190,51 @@ impl Drop for MemoryGauge {
     }
 }
 
-/// Some bytes counted on a [`MemoryGauge`] for as long as this value lives.
-/// The resource that occupies the bytes holds it as a field, so the count
-/// falls wherever the resource is dropped.
-pub struct MemoryCharge {
+/// A resource whose bytes are counted on a [`MemoryGauge`] for exactly as
+/// long as the resource lives. It is for an owner that keeps many resources
+/// under one gauge: each is stored as a `Charged` value, which reads and
+/// writes as the resource itself, so no resource can be kept uncounted and
+/// the count falls wherever the resource is dropped, with nothing for the
+/// owner to remember at each place it removes one.
+///
+/// Made by [`MemoryGauge::charged`]. It holds the gauge's count and not the
+/// gauge, so it may outlive the gauge it was made from.
+pub struct Charged<T> {
+    value: T,
     gauge: Arc<AtomicUsize>,
     bytes: usize,
 }
 
-impl MemoryCharge {
-    /// Change this charge to `bytes`, moving its gauge by the difference.
-    pub fn resize(&mut self, bytes: usize) {
-        if bytes >= self.bytes {
-            self.gauge.fetch_add(bytes - self.bytes, Ordering::Relaxed);
+impl<T> Charged<T> {
+    /// Count `bytes` for `this` from now on, moving its gauge by the
+    /// difference. For a resource whose size changes while it lives. An
+    /// associated function, as a smart pointer's are, so it never hides a
+    /// method of the resource.
+    pub fn resize(this: &mut Self, bytes: usize) {
+        if bytes >= this.bytes {
+            this.gauge.fetch_add(bytes - this.bytes, Ordering::Relaxed);
         } else {
-            self.gauge.fetch_sub(self.bytes - bytes, Ordering::Relaxed);
+            this.gauge.fetch_sub(this.bytes - bytes, Ordering::Relaxed);
         }
-        self.bytes = bytes;
-    }
-
-    /// The bytes this charge counts.
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.bytes
+        this.bytes = bytes;
     }
 }
 
-impl Drop for MemoryCharge {
+impl<T> Deref for Charged<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Charged<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T> Drop for Charged<T> {
     fn drop(&mut self) {
         self.gauge.fetch_sub(self.bytes, Ordering::Relaxed);
     }

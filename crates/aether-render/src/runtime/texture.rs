@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use aether_data::Blob;
-use aether_substrate::memory::{MemoryCharge, MemoryGauge};
+use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::render::{
     RealizedTexture, TextureBindings, TextureSpec, realize_texture, realize_writable_texture, upload_texture_full,
 };
@@ -36,11 +36,6 @@ pub struct StagedTexture {
     pub pixels: TexturePixels,
     pub realized: Option<RealizedTexture>,
     pub dirty: bool,
-    /// The texture's declared pixel bytes on the render capability's
-    /// `textures` memory gauge: what it occupies once realized on the
-    /// device, sampled or writable. Held only to be dropped: the bytes are
-    /// subtracted when the entry drops.
-    pub _charge: MemoryCharge,
 }
 
 /// The staged pixels of a texture. A created texture holds the received
@@ -170,9 +165,13 @@ pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 /// volume id as unknown.
 pub struct TextureRegistry {
     pub ids: SessionIds<u32>,
-    pub entries: HashMap<u32, StagedTexture>,
-    pub arrays: HashMap<u32, StagedTextureArray>,
-    pub volumes: HashMap<u32, StagedTextureVolume>,
+    /// Each texture counted at its declared pixel bytes: what it occupies
+    /// once realized on the device, sampled or writable.
+    pub entries: HashMap<u32, Charged<StagedTexture>>,
+    /// Each array counted at every layer's bytes, written or not.
+    pub arrays: HashMap<u32, Charged<StagedTextureArray>>,
+    /// Each volume counted at the bytes it was created from.
+    pub volumes: HashMap<u32, Charged<StagedTextureVolume>>,
     /// What every staged texture, array, and volume charges its bytes to.
     pub(super) memory: MemoryGauge,
 }
@@ -240,10 +239,10 @@ impl TextureRegistry {
 
     /// What `texture_id` names, or `None` for an id in none of the maps.
     pub fn resolve(&self, texture_id: u32) -> Option<BoundTexture<'_>> {
-        let plain = self.entries.get(&texture_id).map(BoundTexture::Plain);
+        let plain = self.entries.get(&texture_id).map(|entry| BoundTexture::Plain(entry));
         plain
-            .or_else(|| self.arrays.get(&texture_id).map(BoundTexture::Array))
-            .or_else(|| self.volumes.get(&texture_id).map(BoundTexture::Volume))
+            .or_else(|| self.arrays.get(&texture_id).map(|array| BoundTexture::Array(array)))
+            .or_else(|| self.volumes.get(&texture_id).map(|volume| BoundTexture::Volume(volume)))
     }
 
     /// A view of a realized texture for a program binding: the default
@@ -357,20 +356,17 @@ impl TextureRegistry {
             };
         };
 
-        self.entries.insert(
-            texture_id,
-            StagedTexture {
-                width: mail.width,
-                height: mail.height,
-                format: mail.format,
-                sampling: mail.sampling,
-                usage: mail.usage,
-                pixels: TexturePixels::Received(mail.pixels),
-                realized: None,
-                dirty: mail.usage == TextureUsage::Sampled,
-                _charge: self.memory.charge(expected),
-            },
-        );
+        let texture = StagedTexture {
+            width: mail.width,
+            height: mail.height,
+            format: mail.format,
+            sampling: mail.sampling,
+            usage: mail.usage,
+            pixels: TexturePixels::Received(mail.pixels),
+            realized: None,
+            dirty: mail.usage == TextureUsage::Sampled,
+        };
+        self.entries.insert(texture_id, self.memory.charged(expected, texture));
         CreateTextureResult::Ok { texture_id }
     }
 
@@ -445,16 +441,20 @@ impl TextureRegistry {
     pub fn ensure_white(&mut self) {
         let white = vec![255, 255, 255, 255];
         let memory = &self.memory;
-        self.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
-            width: 1,
-            height: 1,
-            format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
-            usage: TextureUsage::Sampled,
-            _charge: memory.charge(white.len()),
-            pixels: TexturePixels::Received(Blob::from(white)),
-            realized: None,
-            dirty: true,
+        self.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| {
+            let bytes = white.len();
+            let texture = StagedTexture {
+                width: 1,
+                height: 1,
+                format: TextureFormat::Rgba8,
+                sampling: TextureSampling::Linear,
+                usage: TextureUsage::Sampled,
+                pixels: TexturePixels::Received(Blob::from(white)),
+                realized: None,
+                dirty: true,
+            };
+
+            memory.charged(bytes, texture)
         });
     }
 }
@@ -527,7 +527,6 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 16])),
             realized: None,
             dirty: false,
-            _charge: MemoryGauge::detached().charge(16),
         };
         // Overwrite the bottom-right pixel (1, 1) with 0xAA bytes.
         assert!(texture.apply_subrect(1, 1, 1, 1, &[0xAA, 0xAA, 0xAA, 0xAA]));
@@ -557,7 +556,6 @@ mod tests {
             pixels: TexturePixels::Received(Blob::from(vec![0u8; 8])),
             realized: None,
             dirty: false,
-            _charge: MemoryGauge::detached().charge(8),
         };
 
         assert!(texture.apply_subrect(1, 0, 2, 2, &[10, 20, 30, 40]));

@@ -1599,7 +1599,7 @@ mod tests {
     use aether_math::Rgba;
     use aether_substrate::chassis::builder::ReplyTarget;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::memory::MemoryGauge;
+    use aether_substrate::memory::{Charged, MemoryGauge};
     use aether_substrate::testing::{
         PumpedDriver, boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx,
     };
@@ -1609,18 +1609,20 @@ mod tests {
         ErasedActorPath::new(&format!("aether.window/aether.window.instance:{name}")).expect("fixture window path")
     }
 
-    fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
-        StagedTexture {
+    fn test_staged_texture(pixels: Vec<u8>) -> Charged<StagedTexture> {
+        let bytes = pixels.len();
+        let texture = StagedTexture {
             width: 2,
             height: 2,
             format: TextureFormat::Rgba8,
             sampling: TextureSampling::Linear,
             usage: TextureUsage::Sampled,
-            _charge: MemoryGauge::detached().charge(pixels.len()),
             pixels: TexturePixels::Received(Blob::from(pixels)),
             realized: None,
             dirty: true,
-        }
+        };
+
+        MemoryGauge::detached().charged(bytes, texture)
     }
 
     /// A minimal headless state for the state tests — no window, no GPU

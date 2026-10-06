@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use aether_data::Blob;
-use aether_substrate::memory::{MemoryCharge, MemoryGauge};
+use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
@@ -91,12 +91,6 @@ pub struct StagedGeometry {
     /// compute bind groups key on it so an in-place geometry update
     /// cannot keep binding the superseded buffers.
     pub revision: u64,
-    /// The staged vertex plus index bytes on the render capability's
-    /// `geometry` memory gauge, resized when an update replaces them. The
-    /// entry owns it, so the bytes leave the count wherever the entry
-    /// drops: at `destroy`, or at the last release of a geometry destroyed
-    /// under a draw set.
-    pub charge: MemoryCharge,
 }
 
 impl StagedGeometry {
@@ -223,8 +217,12 @@ fn staged_buffer(
 #[derive(Default)]
 pub struct GeometryRegistry {
     pub ids: SessionIds<u32>,
-    pub entries: HashMap<u32, StagedGeometry>,
-    holds: Holds<StagedGeometry>,
+    /// Each geometry counted at its staged vertex plus index bytes, resized
+    /// when an update replaces them. An entry moves whole into `holds` when
+    /// it is destroyed under a draw set, so its bytes stay counted until
+    /// the last release drops it.
+    pub entries: HashMap<u32, Charged<StagedGeometry>>,
+    holds: Holds<Charged<StagedGeometry>>,
     /// What every staged geometry charges its bytes to.
     memory: MemoryGauge,
 }
@@ -323,19 +321,16 @@ impl GeometryRegistry {
             };
         };
 
-        let charge = self.memory.charge(vertices.len() + indices.len());
-        self.entries.insert(
-            geometry_id,
-            StagedGeometry {
-                layout: mail.layout,
-                vertices: mail.vertices,
-                indices: mail.indices,
-                realized: None,
-                dirty: false,
-                revision: 0,
-                charge,
-            },
-        );
+        let bytes = vertices.len() + indices.len();
+        let geometry = StagedGeometry {
+            layout: mail.layout,
+            vertices: mail.vertices,
+            indices: mail.indices,
+            realized: None,
+            dirty: false,
+            revision: 0,
+        };
+        self.entries.insert(geometry_id, self.memory.charged(bytes, geometry));
         CreateGeometryResult::Ok { geometry_id }
     }
 
@@ -394,7 +389,7 @@ impl GeometryRegistry {
             return;
         }
 
-        entry.charge.resize(vertices.len() + indices.len());
+        Charged::resize(entry, vertices.len() + indices.len());
         entry.vertices = mail.vertices;
         entry.indices = mail.indices;
         entry.dirty = true;

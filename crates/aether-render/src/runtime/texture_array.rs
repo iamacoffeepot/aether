@@ -10,7 +10,6 @@
 //! record time and rebuilt from the blobs on a replacement device.
 
 use aether_data::Blob;
-use aether_substrate::memory::MemoryCharge;
 
 use super::surface::render_limits;
 use super::texture::{TextureRegistry, wgpu_texture_format};
@@ -30,11 +29,6 @@ pub struct StagedTextureArray {
     pub written: Vec<Option<Blob>>,
     pub dirty: Vec<bool>,
     pub realized: Option<wgpu::Texture>,
-    /// Every layer's bytes on the render capability's `textures` memory
-    /// gauge, written or not: what the array occupies once realized on the
-    /// device. Held only to be dropped: the bytes are subtracted when the
-    /// entry drops.
-    pub _charge: MemoryCharge,
 }
 
 /// How many levels an array of `side` has: one for `Mips::Base`, and
@@ -176,19 +170,18 @@ impl TextureRegistry {
         };
 
         let layers = mail.layers as usize;
-        self.arrays.insert(
-            texture_id,
-            StagedTextureArray {
-                format: mail.format,
-                side: mail.side,
-                layers: mail.layers,
-                mips: mail.mips,
-                written: vec![None; layers],
-                dirty: vec![false; layers],
-                realized: None,
-                _charge: self.memory.charge(bytes_per_layer.saturating_mul(layers)),
-            },
-        );
+        let array = StagedTextureArray {
+            format: mail.format,
+            side: mail.side,
+            layers: mail.layers,
+            mips: mail.mips,
+            written: vec![None; layers],
+            dirty: vec![false; layers],
+            realized: None,
+        };
+        // Every layer is counted, written or not: the realized array holds
+        // them all on the device.
+        self.arrays.insert(texture_id, self.memory.charged(bytes_per_layer.saturating_mul(layers), array));
         CreateTextureArrayResult::Ok { texture_id }
     }
 

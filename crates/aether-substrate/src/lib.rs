@@ -107,5 +107,5 @@ pub use mail::registry::{
     InlineHandler, MailboxEntry, OwnedDispatch, Registry, ResolvedAddress,
 };
 pub use mail::{KindId, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
-pub use memory::{BlobStoreMemory, MemoryCharge, MemoryGauge, MemoryReport, OwnerMemory};
+pub use memory::{BlobStoreMemory, Charged, MemoryGauge, MemoryReport, OwnerMemory};
 pub use runtime::panic_hook::init_panic_hook;
