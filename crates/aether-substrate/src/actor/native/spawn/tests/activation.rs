@@ -270,7 +270,7 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");
 
     // Close-done fires after the close sequence that releases the key, so
-    // one read after it is the read the old deadline loop polled for.
+    // one read of the key after it sees the release.
     let (closed_tx, closed_rx) = crossbeam_channel::bounded(1);
     spawner
         .instanced_slots
