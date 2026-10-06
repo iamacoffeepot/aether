@@ -8,7 +8,18 @@
 //! budget. For each entry the loader sends one `Publish` of its wasm, then
 //! one `Spawn` per instance key in order, one in flight at a time; it
 //! reports the entry `Ok` only after its publish and every one of its
-//! spawns has answered. The loader holds nothing else: the chassis thread
+//! spawns has answered.
+//!
+//! Each spawn brings the entry's code for its instance's load window
+//! (ADR-0163 §4), so a boot component reads its module's assets in `init`
+//! and `wire` as a loaded one does. The loader checks the entry's bytes into
+//! the engine blob store once and sends that one blob in the publish and in
+//! every spawn; in-process mail carries a blob as its hash, so no instance
+//! costs a copy of the module. The loader lets go of the blob when the entry
+//! ends, and each window lets go when `wire` returns, so nothing keeps the
+//! module's bytes after the boot.
+//!
+//! The loader holds nothing else: the chassis thread
 //! keeps the entries' labels and the RPC bind gate, names any failure or
 //! timeout, and opens the gate only after every entry has answered `Ok`.
 
@@ -17,6 +28,7 @@ use std::sync::mpsc::Sender;
 
 use aether_actor::{DependsOn, actor};
 use aether_component::ComponentHostCapability;
+use aether_data::Blob;
 use aether_kinds::{Publish, PublishResult, PublishedType, Spawn, SpawnResult};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::actor::wasm::kind_manifest;
@@ -40,10 +52,12 @@ pub struct AutoloaderParams {
 /// One entry's publish resolving into its spawns: the namespace it spawns
 /// from (the entry's own, until the publish reply resolves its bound name)
 /// and the instance keys not yet spawned, in order, plus the config every one
-/// of them spawns with.
+/// of them spawns with and the module's checked-in bytes every one of them
+/// brings for its load window.
 struct CurrentEntry {
     namespace: String,
     config: Vec<u8>,
+    code: Blob,
     keys: VecDeque<Option<String>>,
 }
 
@@ -124,12 +138,15 @@ impl Autoloader {
                 return;
             }
         };
-        self.current = Some(CurrentEntry { namespace, config, keys: keys.into() });
-        ctx.send::<ComponentHostCapability>(&Publish { code: wasm.into(), configs: Vec::new() });
+        // One check-in per entry: the publish and every spawn send this blob.
+        let code = ctx.check_in(wasm.into_boxed_slice());
+        self.current = Some(CurrentEntry { namespace, config, code: code.clone(), keys: keys.into() });
+        ctx.send::<ComponentHostCapability>(&Publish { code, configs: Vec::new() });
     }
 
-    /// Send the current entry's next key's `Spawn`, or, once every key has
-    /// spawned, report it `Ok` and advance to the next entry.
+    /// Send the current entry's next key's `Spawn`, bringing the entry's
+    /// code for that instance's load window, or, once every key has spawned,
+    /// let go of the code, report the entry `Ok`, and advance to the next.
     fn send_next_spawn<A: DependsOn<ComponentHostCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         let current = self.current.as_mut().expect("a spawn is sent only while an entry is current");
         let Some(key) = current.keys.pop_front() else {
@@ -140,7 +157,8 @@ impl Autoloader {
         };
         let namespace = current.namespace.clone();
         let config = current.config.clone();
-        ctx.send::<ComponentHostCapability>(&Spawn { namespace, key, parent: None, config });
+        let code = Some(current.code.clone());
+        ctx.send::<ComponentHostCapability>(&Spawn { namespace, key, parent: None, config, code });
     }
 
     /// Report the current entry `Err`, and stop: nothing after it in

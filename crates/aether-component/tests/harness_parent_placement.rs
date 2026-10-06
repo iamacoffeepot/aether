@@ -41,6 +41,7 @@ fn spawn_under(harness: &mut SubstrateHarness, label: &str, parent: &str) -> Spa
         key: Some("k".to_owned()),
         parent: Some(ErasedActorPath::new(parent).expect("a valid parent path")),
         config: Vec::new(),
+        code: None,
     };
     let host = harness.actor_ref::<ComponentHostCapability>();
     let result =

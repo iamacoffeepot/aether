@@ -295,7 +295,13 @@ fn a_reactor_root_already_live_under_the_unit_key_is_adopted() -> Result<(), Box
         .map(|published| published.namespace)
         .find(|namespace| namespace.strip_prefix(&prefix).is_some_and(|hash| !hash.contains('.')))
         .expect("the reactor bundle publishes its root type");
-    let spawn = Spawn { namespace: namespace.clone(), key: Some(UNIT.to_owned()), parent: None, config: Vec::new() };
+    let spawn = Spawn {
+        namespace: namespace.clone(),
+        key: Some(UNIT.to_owned()),
+        parent: None,
+        config: Vec::new(),
+        code: None,
+    };
     let spawned = harness.spawn(&spawn);
     let SpawnResult::Spawned { path, .. } = spawned else {
         panic!("the test stands the reactor root up before the driver loads it: {spawned:?}");

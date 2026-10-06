@@ -612,8 +612,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // backed by a loud runtime failure for a hand-rolled guest, never a
     // silent empty. Not-found vs closed is thus a returned sentinel vs a
     // trap — two unambiguous outcomes. A catalogued asset fetched by an
-    // instance spawned from its publication, whose window holds no code to
-    // read it from, also traps, naming `load_component` (ADR-0163 §4).
+    // instance spawned without its module's bytes, whose window holds no
+    // code to read it from, also traps, naming the two doors that bring
+    // them: a spawn with its code, and a load (ADR-0163 §4).
     linker.func_wrap(
         "aether",
         "asset_fetch_p32",
@@ -645,8 +646,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // by that name.
     //
     // The window rules are the fetch's: a call with no window, after the
-    // window closed, or for a catalogued asset on a window spawned from its
-    // publication traps, as does a `hash_out_ptr` outside guest memory.
+    // window closed, or for a catalogued asset on a window spawned without
+    // its module's bytes traps, as does a `hash_out_ptr` outside guest memory.
     linker.func_wrap(
         "aether",
         "asset_blob_p32",

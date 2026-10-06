@@ -16,6 +16,7 @@
 //! the fs-demux pair: its private child declares dependencies the host checks
 //! at every load of its module, so it lives in `aether-test-fixtures-fs-demux`.
 
+mod asset_instance;
 mod contract_replace;
 mod correlation_carry;
 mod cube;
@@ -38,6 +39,7 @@ mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
 
+pub use asset_instance::AssetInstance;
 pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended, ContractFallback};
 pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
@@ -75,6 +77,7 @@ aether_actor::export!(
         KeyProbe,
         PaintProbe,
         QuietProbe,
+        AssetInstance,
         RootManager,
         Panel,
         ParentPeerCaller,

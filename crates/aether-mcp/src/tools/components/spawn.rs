@@ -71,8 +71,13 @@ pub(in crate::tools) async fn spawn_instances(
     let mut instances = Vec::with_capacity(count as usize);
     let mut shared_caps: Option<ComponentCapabilities> = None;
     for index in 0..count {
-        let spawn =
-            Spawn { namespace: namespace.clone(), key: key.clone(), parent: parent.clone(), config: config.clone() };
+        let spawn = Spawn {
+            namespace: namespace.clone(),
+            key: key.clone(),
+            parent: parent.clone(),
+            config: config.clone(),
+            code: None,
+        };
         let reply = mcp
             .session
             .call_one(engine_envelope(engine, COMPONENT_CAP, &spawn))

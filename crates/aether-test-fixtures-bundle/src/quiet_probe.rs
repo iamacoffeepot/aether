@@ -47,7 +47,7 @@ impl WasmActor for QuietProbe {
     /// Pull the bundle's asset through the load window (open during `wire`).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
         // The blob verb goes first, so it is the call that traps for an
-        // instance spawned from its publication, whose window has no code.
+        // instance spawned without its module's bytes, whose window has no code.
         self.asset_blob = ctx.asset_blob("asset_fixture.txt");
 
         // ADR-0163 §3 (#3984): stash a content fingerprint — length + a
