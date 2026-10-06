@@ -3,11 +3,14 @@
 mod attr;
 mod emit;
 mod guard;
+mod leaf;
 
 use proc_macro2::TokenStream as TokenStream2;
 use syn::DeriveInput;
 
 use crate::parse_optional_kind_attr;
+
+pub use leaf::expand_storage_leaf;
 
 pub fn expand_storage(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let kind = parse_optional_kind_attr(&input.attrs)?;

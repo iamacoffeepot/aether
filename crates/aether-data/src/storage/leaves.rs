@@ -1,8 +1,10 @@
 //! Per-type value walk that flattens nested structs and enums into
 //! TLV leaves (ADR-0059).
 //!
-//! Blanket impls cover the closed vocabulary: scalars, `bool`, owned
-//! strings, `Bytes`, and the typed-id newtypes. The containers `Vec`,
+//! Blanket impls cover the built-in vocabulary: scalars, `bool`, owned
+//! strings, `Bytes`, and the typed-id newtypes. A fixed-layout value
+//! type joins it by deriving `StorageLeaf` beside `Schema`: one record
+//! whose body is the type's positional wire bytes. The containers `Vec`,
 //! `Map`, and `Array` are one record each whose body encoding the
 //! element type selects through [`StorageElement`]. User structs and
 //! enums get a derive-emitted impl. `Option<T>` is the two-variant
@@ -56,7 +58,10 @@ fn take_required<T: LeafBody>(hash: u64, name: &'static str, source: &mut Record
     decode_leaf(&body)
 }
 
-fn contribute_opaque<T: LeafBody + Schema>(
+/// One opaque leaf: a single record tagged by the field path and the
+/// type's schema, whose body is the value's positional wire bytes. The
+/// scalar vocabulary and `#[derive(StorageLeaf)]` both land here.
+pub fn contribute_opaque<T: LeafBody + Schema>(
     value: &T,
     carry: u64,
     depth: u32,
@@ -66,12 +71,20 @@ fn contribute_opaque<T: LeafBody + Schema>(
     emit_leaf(terminate_field_hash(carry, &T::SCHEMA), value, sink)
 }
 
-fn assemble_opaque<T: LeafBody + Schema>(carry: u64, depth: u32, source: &mut RecordReader) -> Result<T, StorageError> {
+/// Inverse of [`contribute_opaque`]; an absent record is
+/// [`StorageError::MissingRequiredField`].
+pub fn assemble_opaque<T: LeafBody + Schema>(
+    carry: u64,
+    depth: u32,
+    source: &mut RecordReader,
+) -> Result<T, StorageError> {
     check_depth(depth)?;
     take_required(terminate_field_hash(carry, &T::SCHEMA), "", source)
 }
 
-fn opaque_absent<T: Schema>(carry: u64, source: &RecordReader) -> bool {
+/// Absence probe matching [`contribute_opaque`].
+#[must_use]
+pub fn opaque_absent<T: Schema>(carry: u64, source: &RecordReader) -> bool {
     !source.contains(terminate_field_hash(carry, &T::SCHEMA))
 }
 

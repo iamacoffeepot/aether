@@ -1,7 +1,7 @@
 # ADR-0059: Content-hashed field tags for upgradable storage
 
 - **Status:** Accepted
-- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped) · **Revised:** 2026-08-28 (container elements decode by the element's derive; #5496) · **Revised:** 2026-09-16 (kindless nested Storage; validated newtypes)
+- **Date:** 2026-04-27 · **Revised:** 2026-08-26 (accepted; storage TLV shipped) · **Revised:** 2026-08-28 (container elements decode by the element's derive; #5496) · **Revised:** 2026-09-16 (kindless nested Storage; validated newtypes) · **Revised:** 2026-10-05 (fixed-layout value types opt in as leaves; #7453)
 - **Revision note:** the 2026-04 draft targeted the handle store and predates three decisions this revision resolves against: ADR-0118 (the structured wire body is `aether_data::wire`; postcard is gone), ADR-0187 (persisted rows record their writing schema), and ADR-0188 (the wire codec derives from `Schema`). The consumer that takes this ADR out of ADR-0113's parking is the coordinator's own persistence — the journal's views and projections. The draft's `Mail`-trait fork and `Envelope` rename are superseded by a lighter mapping onto today's `Kind`; renames gain a declared alias (`#[storage(was = "…")]`) instead of the draft's no-remap stance. The wire format itself — TLV records, content-hashed tags, flattening, the unknown bucket, the required/`Option` discipline — stands as resolved in 2026-04. Implementation settled four points recorded in the Decision section: the field-hash preimage is a NUL-separated fold, the TLV length is a fixed 32-bit count, the decoded payload type is `StorageData` throughout, and anonymous record names are already provided by nameless canonical schema bytes.
 
 ## Context
@@ -66,7 +66,7 @@ A struct payload is a sequence of `[field_hash][length][bytes]` records, concate
 
 Length is a fixed 32-bit little-endian count, matching every other count in the ADR-0118 format. The 2026-04 draft drew a varint; ADR-0118 removed variable-length integers from the format, so the envelope follows the rest of the crate.
 
-Field bodies are encoded against the field's declared type by the same owned, `Schema`-derived codec ADR-0188 gives the positional wire — varint scalars, length-prefixed strings, the closed vocabulary `Schema` already enforces. The TLV layer adds only the `(field_hash, length)` envelope; primitive bytes inside don't carry their own type tags. Receivers that don't know a field id skip `length` bytes and continue. One codec family drives both wire shapes, so TLV bodies and positional bodies can never disagree about how a leaf value is spelled.
+Field bodies are encoded against the field's declared type by the same owned, `Schema`-derived codec ADR-0188 gives the positional wire — fixed-width scalars, length-prefixed strings, the closed vocabulary `Schema` already enforces. The TLV layer adds only the `(field_hash, length)` envelope; primitive bytes inside don't carry their own type tags. Receivers that don't know a field id skip `length` bytes and continue. One codec family drives both wire shapes, so TLV bodies and positional bodies can never disagree about how a leaf value is spelled.
 
 ### Field hash
 
@@ -106,6 +106,7 @@ Plain nested structs and enums flatten into the top-level field set so recursive
 | shape | flattens? | rationale |
 |---|---|---|
 | Plain nested struct | yes | depth-recursive `path.field` leaves; recursive evolution survives the same rules |
+| Fixed-layout value type (`#[derive(Schema, StorageLeaf)]`) | no — one record, positional body | a vector, matrix or colour is one value, not a record that grows fields; it must stay a mail field, so it keeps the positional codec |
 | Enum (incl. `Option<T>`) | yes | `__variant` discriminant leaf + variant-prefixed leaves (only the active variant emits) |
 | `Vec<T>`, `Map<K, V>`, fixed `Array` | one record, element-encoded body | dynamic cardinality; flattening to `path[i].*` would leak runtime counts into the field-hash space, and that rejection stands |
 
@@ -115,6 +116,10 @@ A container is one TLV record whose **body encoding the element type selects** t
 - A `#[derive(Storage)]` element contributes a **`u32`-length-framed record stream rooted at the element type**. Element tags are the element type's own compile-time root hashes, so cardinality never enters the hash space. The container's record tag folds the reserved `__elements` segment and terminates against the `Bytes` schema instead of the container schema, so evolving the element type never moves the container's own tag: element drift inside a container decodes the way root-level drift does — unknown fields skip, missing `Option`s default, missing required fields refuse by name.
 
 Composite elements propagate the class: `Vec<T>` / `[T; N]` / `Option<T>` are tagged when `T` is, `Map<K, V>` when either side is; an all-positional composite reproduces the ordinary wire layout byte for byte (maps keep canonical ascending encoded-key order).
+
+**Leaf vocabulary.** A leaf is one record tagged by its field path and its type's schema, whose body is the type's positional wire bytes. The built-in leaves are the scalars, `bool`, `()`, `String`, `Bytes`, and the typed ids. A fixed-layout value type joins them by deriving `StorageLeaf` beside `Schema`: `aether-math`'s `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat4`, `Aabb`, `Rect2`, `Rgb`, `Rgba` and `Hsl` do, so a storage type holds a `Vec3` as it holds an `f32`, and a validated newtype over one carries an invariant such as "finite and not negative". The derive emits `StorageLeaves` as that single record and an empty `Cites`; `#[derive(Schema)]` already supplies the positional codec and the positional container element.
+
+The opt-in is per type and deliberate. Such a type cannot derive `Storage` instead: the two derives collide on `StorageElement` by design, and a storage type has no positional mail body, so it could no longer be a kind's field or `pod`. There is no blanket leaf impl over every `Schema` type either: it would collide with the nested impl the `Storage` derive emits and turn every nested struct into an opaque record. A leaf carries no tolerance promise. Its tag folds the type's whole schema, so changing the type's shape moves the tag and the reader refuses the old row for a missing required field; that is an ordinary breaking change owing an upcast (ADR-0187). The static leaf-uniqueness walk reads schemas alone and cannot tell a leaf struct from a nested one, so for a leaf field it hashes the component paths the struct would have flattened to instead of the one tag written; no declared field can sit beneath a leaf's path, so the check still refuses every collision a name can cause, and the tag actually written is as collision-resistant as any other 64-bit leaf tag.
 
 **Elements shed their unknowns on rewrite.** A container of tagged elements assembles plain values; element-level unknown fields have no side-channel, so a rewrite by an older binary sheds fields a newer writer added inside elements. Reads stay tolerant; rewrites shed. Stated and accepted while the coordinator is a row's only writer; the upgrade, if a multi-writer consumer arrives, is a derive-required unknown-fields member on storage types — recorded here so the door stays visibly open, not built now. The root-level `StorageData` bucket still round-trips.
 
@@ -261,7 +266,7 @@ The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Ve
 
 ### Required fields and `Option<T>`
 
-Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate version-skew absence and decode missing as `None`. Wire shape per type follows the flattening rule above (primitive/String → single leaf; nested struct → multiple leaves under a dotted path; enum including `Option<T>` → `__variant` + variant-prefixed leaves; container → single leaf with an opaque `aether_data::wire` body).
+Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate version-skew absence and decode missing as `None`. Wire shape per type follows the flattening rule above (primitive/String/fixed-layout value type → single leaf; nested struct → multiple leaves under a dotted path; enum including `Option<T>` → `__variant` + variant-prefixed leaves; container → single leaf with an opaque `aether_data::wire` body).
 
 ```rust
 struct Record {

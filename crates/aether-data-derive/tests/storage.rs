@@ -5,6 +5,7 @@
 
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::hash::storage_kind_id_from_name;
+use aether_data::storage::{RecordReader, field_hash};
 use aether_data::wire::WireEncode;
 use aether_data::{Kind, Schema, Storage};
 
@@ -268,4 +269,91 @@ fn positional_container_body_is_the_wire_encoding() {
     let mut expected = Vec::new();
     WireEncode::encode(&vec![Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], &mut expected).unwrap();
     assert_eq!(body, expected.as_slice());
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, aether_data::Schema, aether_data::StorageLeaf)]
+struct Offset {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+struct ZeroLength;
+
+impl aether_data::Invariant for ZeroLength {
+    fn reason(&self) -> &'static str {
+        "zero-length"
+    }
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[storage(validate)]
+struct Heading(Offset);
+
+impl Heading {
+    fn check(inner: &Offset) -> Result<(), ZeroLength> {
+        let zero = inner.x == 0.0 && inner.y == 0.0 && inner.z == 0.0;
+        if zero {
+            Err(ZeroLength)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.marker")]
+struct Marker {
+    id: u64,
+    at: Offset,
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[kind(name = "persist.marker")]
+struct HeadedMarker {
+    id: u64,
+    at: Heading,
+}
+
+#[test]
+fn leaf_struct_is_one_record_under_its_own_schema() {
+    // Catches a leaf that flattens into per-component records, or that
+    // hashes under a schema other than the struct's: the field is exactly
+    // one record, tagged by its name and the struct schema, whose body is
+    // the struct's positional wire bytes.
+    let at = Offset { x: 1.5, y: -2.0, z: 0.25 };
+    let bytes = Marker::encode_storage(&aether_data::StorageData::from_value(Marker { id: 9, at })).unwrap();
+    let decoded = Marker::decode_storage(&bytes).unwrap();
+    assert_eq!(decoded.value, Marker { id: 9, at });
+
+    let records = RecordReader::parse(&bytes).unwrap().into_unknown();
+    let tags: Vec<u64> = records.iter().map(|record| record.hash).collect();
+    let id_tag = field_hash("id", &<u64 as Schema>::SCHEMA);
+    let at_tag = field_hash("at", &Offset::SCHEMA);
+    assert_eq!(tags.len(), 2);
+    assert!(tags.contains(&id_tag));
+    assert!(tags.contains(&at_tag));
+
+    let (_, body) = decoded.get_raw::<Offset>("at").unwrap();
+    let mut expected = Vec::new();
+    WireEncode::encode(&at, &mut expected).unwrap();
+    assert_eq!(body, expected.as_slice());
+}
+
+#[test]
+fn validated_leaf_struct_refuses_at_decode() {
+    // Catches a validate path that skips `check` when its field is a leaf
+    // struct: a row an unchecked writer produced must not decode into the
+    // validated type.
+    let zero = Marker { id: 1, at: Offset { x: 0.0, y: 0.0, z: 0.0 } };
+    let err =
+        HeadedMarker::decode_storage(&Marker::encode_storage(&aether_data::StorageData::from_value(zero)).unwrap())
+            .unwrap_err();
+    assert!(matches!(err, aether_data::StorageError::Invariant { kind: "Heading", reason: "zero-length" }));
+
+    let moved = Marker { id: 1, at: Offset { x: 0.0, y: 3.0, z: 0.0 } };
+    let read =
+        HeadedMarker::decode_storage(&Marker::encode_storage(&aether_data::StorageData::from_value(moved)).unwrap())
+            .unwrap();
+    assert_eq!(read.value.at, Heading(Offset { x: 0.0, y: 3.0, z: 0.0 }));
 }

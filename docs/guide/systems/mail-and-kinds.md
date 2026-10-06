@@ -109,6 +109,31 @@ wire bytes against the kind's schema; the recipient decodes those bytes back
 into the kind per-kind. The bytes stay opaque until the addressed handler
 decodes them — nothing in the middle needs to understand the payload.
 
+**A kind says `Vec3` where it means a vector.** The `aether-math` value types
+are schema types, so a kind field is spelled `Vec2`, `Vec3`, `Vec4`, `Quat`,
+`Mat4`, `Aabb` or `Rect2` (and `Rgb`, `Rgba`, `Hsl` for a colour), never a bare
+`[f32; 3]`. A `pod` kind may hold them too: each is `#[repr(C)]` and all `f32`.
+On the wire a math field is its `f32` components in declaration order, four
+little-endian bytes each, with no tag or length, so a `Vec3` is 12 bytes and a
+`Mat4` is 64, column by column. In `params` JSON it is an object of the
+component names:
+
+| Type | JSON form |
+|---|---|
+| `Vec2` / `Vec3` / `Vec4` | `{"x": 1.0, "y": 2.0}`, plus `"z"`, plus `"w"` |
+| `Quat` | `{"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}` |
+| `Mat4` | `{"cols": [<Vec4>, <Vec4>, <Vec4>, <Vec4>]}`, column-major |
+| `Aabb` / `Rect2` | `{"min": <Vec3>, "max": <Vec3>}` / `{"min": <Vec2>, "max": <Vec2>}` |
+| `Rgb` / `Rgba` | `{"r": 1.0, "g": 0.5, "b": 0.0}`, plus `"a"` |
+| `Hsl` | `{"h": 0.0, "s": 1.0, "l": 0.5}` |
+
+The same types are fields of a stored type
+([ADR-0059](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0059-content-hashed-field-tags-for-component-storage.md)):
+each derives `aether_data::StorageLeaf`, so it is stored as one record, and a
+`#[storage(validate)]` newtype over one (`struct Radiance(Rgb)`) is how a kind
+carries an invariant such as "finite and not negative". A value type of your
+own opts in the same way, with `#[derive(Schema, StorageLeaf)]`.
+
 **Mail is fire-and-forget by default.** A handler promises *nothing* about a
 reply. If a reply matters, that's a separate, explicit contract between the two
 kinds — never an implicit "every kind has a response." Don't write a caller

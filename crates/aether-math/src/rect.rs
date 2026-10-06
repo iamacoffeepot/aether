@@ -1,3 +1,6 @@
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
+
 use crate::vec::Vec2;
 
 /// Axis-aligned rectangle in `f32` coordinates — [`Aabb`](crate::Aabb)
@@ -15,7 +18,9 @@ use crate::vec::Vec2;
 /// that assumes a frame: framebuffer pixels with the origin at the
 /// target's top-left.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Rect2 {
     pub min: Vec2,
     pub max: Vec2,
