@@ -33,7 +33,6 @@ use crate::scheduler::WakeSink;
 use crate::testing::{boot_authority, token_root};
 use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
 
 mod address;
 mod blob;
@@ -1710,10 +1709,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
         ))]))
         .expect("owner accepts the alias batch");
     owner.run_once();
-    completion
-        .wait_timeout(Duration::from_millis(100))
-        .expect("alias completion arrives")
-        .expect("alias route publishes");
+    completion.try_take().expect("alias completion arrives").expect("alias route publishes");
 
     // Name resolution (the wire `Call` path) resolves the alias.
     assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id");

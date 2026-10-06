@@ -723,6 +723,16 @@ impl<T> RegistryCompletion<T> {
         self.receiver.recv_timeout(timeout)
     }
 
+    /// Take the result the owner has already retired, without waiting.
+    ///
+    /// For a test that ran the owner step on its own thread: the batch is
+    /// retired before that step returns, so an empty channel is a failure
+    /// the caller reports at once, never something to wait for.
+    #[cfg(test)]
+    pub(crate) fn try_take(self) -> Result<Result<T, RegistryEffectError>, crossbeam_channel::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
     /// Block until the owner retires the batch.
     ///
     /// The post-seal external-spawn path (ADR-0165) waits here: its caller is

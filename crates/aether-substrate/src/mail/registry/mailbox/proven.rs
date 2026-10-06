@@ -369,7 +369,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use aether_actor::{Addressable, Many, Resolve};
 
@@ -423,7 +422,7 @@ mod tests {
             )]))
             .expect("owner accepts the Starting reservation");
         owner.run_once();
-        let reserved = completion.wait_timeout(Duration::from_millis(100)).expect("reservation completes");
+        let reserved = completion.try_take().expect("reservation completes");
         assert!(matches!(reserved.as_deref(), Ok([RegistryApplied::Starting { .. }])));
 
         let parent_ref = registry.resolve_live(parent).expect("the parent route is live");
