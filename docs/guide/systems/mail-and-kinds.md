@@ -276,7 +276,7 @@ aether.<family>.config                     capability boot config
 - **The family segment is mandatory.** A name is at least
   `<root>.<family>.<leaf>`. `aether.render.destroy_texture` is a kind;
   `aether.draw_triangle` is a family with no room to grow a sibling.
-- **Commands lead with the verb.** `create_texture`, `load_font`,
+- **Commands lead with the verb.** `create_texture`, `create_font`,
   `set_master_gain`. A bare verb leaf is fine where the family already supplies
   the noun — `aether.fs.read`, `aether.fs.write` — but the verb still leads.
 - **Events read `<noun>_<past participle>`**: `aether.tcp.session_closed`,

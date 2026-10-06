@@ -11,7 +11,7 @@ Two gaps met in one case: a debug overlay over a scene. The overlay must always 
 
 **Input goes to every subscriber.** Both window backends publish through one line, `ctx.fanout(self.subscribers.recipients::<K>(window), event)` (`crates/aether-window/src/runtime/desktop/mod.rs`, `crates/aether-window/src/runtime/synthetic/mod.rs`), and `recipients` is the whole subscriber set for that window. With a camera controller live, typing into a console also moves the camera, and a wheel over a scrolling panel also zooms the scene behind it.
 
-**Text is filed under the wrong actor.** `aether.text` turns a text draw into glyph quads and sends them to the renderer itself (`emit_draw` in `crates/aether-text/src/runtime/layout.rs` calls `ctx.send::<RenderCapability>`), so every glyph batch arrives as mail from `aether.text`.
+**Text was filed under the wrong actor.** When this ADR was first written, text was drawn by a capability of its own: `aether.text` turned a text draw into glyph quads and sent them to the renderer itself, so every glyph batch arrived as mail from `aether.text`, one hop after the shapes the same actor sent. §10 removes that capability.
 
 **The actor tree has no order.** A route record is a name and a lifecycle (`RouteRecord` in `crates/aether-substrate/src/mail/registry/mailbox/route.rs`). The registry keeps nothing that says which of two siblings came first.
 
@@ -264,17 +264,27 @@ ctx.fanout(self.subscribers.recipients::<K>(window).filter(|subscriber| self.key
 
 Whether `admits` reads paths on every key event or keeps the admitted set, rebuilt on a take, a release and a subscribe, is an implementation choice; the set is the cheaper read.
 
-### 10. Text is filed with its owner's shapes
+### 10. The renderer draws text
 
-`aether.text` sends its glyph quads with `NativeCtx::forward_to` (`crates/aether-substrate/src/actor/native/ctx/send.rs`), which keeps the inbound mail's sender as the forwarded mail's sender. The renderer then files each glyph batch under the actor that asked for the text. Atlas `CreateTexture` and `UpdateTexture` sends stay the text capability's own.
+There is no text capability. The text kinds are render kinds, sent to `aether.render`:
+
+- `aether.render.create_font { bytes }` registers a font from the bytes of a font file, carried as a blob, and replies `aether.render.create_font_result` with a session-scoped `font_id`. The caller gets the bytes however it likes; the renderer reads no file and depends on no other capability. The parse runs on a blocking worker, off the renderer's turn.
+- `aether.render.font_metrics { font_id }` replies the font's size-independent metrics table.
+- `aether.render.draw_text { clip, space, runs }` lays its runs out on the renderer's turn and becomes one textured overlay batch, pushed where `draw_shapes` pushes.
+
+A text draw is therefore mail from the actor that asked for the text, and it is filed under that actor with the other three overlay verbs. Nothing is forwarded. Inside one actor, text and shapes reach one recipient through one queue, so they keep the order that actor sent them: a plate sent after a label covers it.
+
+The glyph atlas is a texture the renderer keeps for itself under a reserved id, the next one below the reserved white texture. It is registered in the call that first draws text, so that draw shows, and each new glyph is written straight into its staged pixels. A caller can sample it and cannot update or destroy it.
 
 ```rust
-// main
-ctx.send::<RenderCapability>(&draw);
+// before: the text capability laid the string out and mailed the renderer
+ctx.send::<RenderCapability>(&draw_textured_quads);
 
-// plan
-ctx.forward_to(render, &draw);
+// now: the asking actor mails the renderer, which lays the string out itself
+ctx.send::<RenderCapability>(&DrawText { clip, space, runs });
 ```
+
+The renderer's turn now pays for layout and for rasterising a glyph it has not seen. That cost is measured where the change is implemented.
 
 ## Consequences
 
@@ -282,8 +292,9 @@ ctx.forward_to(render, &draw);
 - **Nobody declares an order.** Existing drawers (`aether-widget`'s `emit_layer`, the kit bundle tile, the fixtures) change nothing to be ordered. They change only if they must stand somewhere other than where creation put them, and then they move beneath a layer.
 - **ADR-0117 is completed in part.** Order between roots, and between an actor and a child that draws for itself, is built, with no key and no edges. A widget subtree still reaches the renderer through one sender.
 - **Keys can be kept from the scene.** The console takes key focus while it is open and the camera controller stops hearing keys, with no change to the camera controller.
-- **ADR-0164 §4 changes for pointer, key and text events**, and **ADR-0105** for the sender of glyph quads. The lines are written on those ADRs when this is implemented.
-- **Guides.** `rendering.md`, `window.md`, `input.md`, `text.md`, `widgets.md` and `foundations/actor-model.md` change with the implementation.
+- **ADR-0164 §4 changes for pointer, key and text events.** The lines are written on that ADR when this is implemented.
+- **ADR-0105's capability split is superseded.** ADR-0105 decided that text is a separate capability composing the render surface by mail. §10 replaces that: the renderer draws text. ADR-0105's render surface (textures and textured quads in two projections) stands.
+- **Guides.** `rendering.md`, `window.md`, `input.md`, `text.md` and `foundations/actor-model.md` change with the implementation.
 
 ### What is given up
 
@@ -300,7 +311,6 @@ ctx.forward_to(render, &draw);
 - **One sequence per application.** The render scene is application-scoped: `on_frame` commits one scene and records it for every dirty window, and no draw kind names a window. A member's region is read in each window's pixels.
 - **No bubbling.** A parent cannot decide per event after its child looked.
 - **Hover.** A member that highlights under the cursor keeps its highlight when the cursor enters a region in front of it, because moves stop arriving and nothing tells it.
-- **Text and shapes inside one actor.** A plate that must cover text the same actor sent earlier is an order between two batches of one group that reach the renderer through two recipients. Position does not solve it. Until text has a shape that does, the plate is a child, which is over its parent's whole group.
 
 ## Open questions
 

@@ -58,6 +58,9 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.write_texture_layer` | `{ texture_id, layer, pixels }` | replace every level of one layer of a texture array, in place; fire-and-forget |
 | `aether.render.create_texture_volume` | `{ format, width, height, depth, pixels }` → `create_texture_volume_result` | register a volume texture with its whole contents; reply carries the `texture_id` |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.create_font` | `{ bytes }` → `create_font_result` | register a font from a blob of its file's bytes; reply carries the `font_id` ([Text](text.md)) |
+| `aether.render.font_metrics` | `{ font_id }` → `font_metrics_result` | a registered font's size-independent metrics table |
+| `aether.render.draw_text` | `{ clip, space, runs }` | per-tick strings laid out into one textured batch over the reserved glyph atlas; accumulates into the frame |
 | `aether.render.draw_screen_triangles` | `{ space, clip, triangles }` | per-tick pixel-space triangles at any orientation; accumulates into the frame |
 | `aether.render.draw_shapes` | `{ space, clip, shapes }` | per-tick rounded, stroked, shadowed, optionally textured boxes evaluated as a distance field; accumulates into the frame |
 | `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
@@ -149,9 +152,10 @@ contract matches `draw_triangle`: resend the batch every frame it should appear.
 The batch's `space` selects the projection — `Screen` rects are window pixels
 drawn under an ortho derived from the surface size; `World` anchors the quad in
 the scene through the camera's `view_proj` and reads its coordinates as pixel
-offsets from the projected anchor. All three overlay verbs carry the same
-field with the same meaning. Sprites, HUD images, and the `aether.text`
-capability all compose this surface.
+offsets from the projected anchor. Every overlay verb carries the same
+field with the same meaning. Sprites and HUD images compose this surface, and
+so does the renderer's own text: a `draw_text` becomes one textured batch
+over the glyph atlas ([Text](text.md)).
 
 **Screen triangles are the overlay's free-form primitive.**
 `draw_screen_triangles` takes triangles whose three corners are pixels — one
@@ -184,9 +188,10 @@ through its own pipeline: one more overlay draw, not a pass and not a layer.
 The vocabulary is fixed and substrate-owned — callers supply parameters, never
 WGSL — so the overlay lane stays a closed contract a caller can reason
 about. A `corner_radius` of `0.0` with a `fill` alone is a
-flat rectangle, which is why there is no separate flat-quad verb: the overlay's
-three verbs are one per fragment stage — sample a texture, evaluate a distance
-field, rasterize caller geometry.
+flat rectangle, which is why there is no separate flat-quad verb: the overlay
+has one verb per fragment stage — sample a texture, evaluate a distance
+field, rasterize caller geometry — and `draw_text`, which lays strings out
+into the first.
 
 A shape's optional `texture { texture_id, u0, v0, u1, v1, blend }` draws an
 image *inside* the fill's coverage, so the corner radius, the circle, and the

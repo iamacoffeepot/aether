@@ -68,7 +68,7 @@ agree with each other:
   unconverted),
 - `WindowSize.width` / `height`,
 - `QuadSpace::Screen` — the space solid quads, textured quads, and
-  `aether.text.draw` address.
+  `aether.render.draw_text` address.
 
 So pointer-against-screen-space math is a direct comparison:
 

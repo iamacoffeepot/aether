@@ -328,7 +328,6 @@ dependencies = [
  "aether-lifecycle",
  "aether-render",
  "aether-substrate",
- "aether-text",
  "aether-window",
  "clap",
  "confique",
@@ -805,6 +804,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "confique",
+ "fontdue",
  "inventory",
  "naga",
  "pollster",
@@ -1116,25 +1116,6 @@ dependencies = [
  "aether-data",
  "aether-test-fixtures-kinds",
  "serde",
-]
-
-[[package]]
-name = "aether-text"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-math",
- "aether-render",
- "aether-substrate",
- "fontdue",
- "inventory",
- "serde",
- "tracing",
 ]
 
 [[package]]

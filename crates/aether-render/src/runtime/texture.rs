@@ -13,6 +13,7 @@ use aether_substrate::render::{
 };
 use aether_substrate::session_ids::SessionIds;
 
+use super::text::ATLAS_SIZE;
 use super::texture_array::StagedTextureArray;
 use super::texture_volume::StagedTextureVolume;
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
@@ -76,6 +77,28 @@ impl TexturePixels {
 }
 
 impl StagedTexture {
+    /// A sampled, linear-filtered `Rgba8` texture the renderer registers for
+    /// itself under a reserved id, staged and awaiting its first upload.
+    fn reserved(width: u32, height: u32, pixels: TexturePixels) -> Self {
+        Self {
+            width,
+            height,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels,
+            realized: None,
+            dirty: true,
+        }
+    }
+
+    /// Zero every staged pixel and dirty the texture, so the next record
+    /// uploads the cleared image.
+    pub fn clear(&mut self) {
+        self.pixels.edit().fill(0);
+        self.dirty = true;
+    }
+
     /// Overwrite the `(x, y, width, height)` sub-rect of the staged
     /// pixels with `pixels` (texture-format row-major) and dirty the texture.
     /// Returns `false` without touching the buffer if the rect is
@@ -153,6 +176,20 @@ pub(super) fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat 
 /// or destroy it and it never collides with a user-created texture.
 pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 
+/// Reserved `texture_id` of the glyph atlas every `draw_text` batch samples
+/// (ADR-0248 §10): the next reserved id below [`WHITE_TEXTURE_ID`], outside
+/// the range `create_texture` allocates from. The renderer registers it on
+/// the first text draw and writes glyphs into its staged pixels itself;
+/// callers cannot allocate, update, or destroy it. Typed `SubstrateHarness`
+/// observations expose it so a text batch remains identifiable.
+pub const GLYPH_ATLAS_TEXTURE_ID: u32 = WHITE_TEXTURE_ID - 1;
+
+/// Whether `texture_id` is one the renderer keeps for itself: the white
+/// texture or the glyph atlas. `update` and `destroy` refuse such an id.
+fn is_reserved(texture_id: u32) -> bool {
+    texture_id >= GLYPH_ATLAS_TEXTURE_ID
+}
+
 /// Session-scoped texture registry. `ids` hands out the `texture_id` a
 /// `create_texture` reply carries — assigned in sequence the same way
 /// ADR-0103 assigns instrument ids, so ids are stable for the session
@@ -226,10 +263,11 @@ impl TextureRegistry {
 
     /// A registry whose textures charge their bytes to `memory`.
     pub fn with_memory(memory: MemoryGauge) -> Self {
-        // The window stops one below `WHITE_TEXTURE_ID` so the reserved
-        // sentinel is structurally unreachable rather than merely far away.
+        // The window stops one below `GLYPH_ATLAS_TEXTURE_ID`, the lowest
+        // reserved id, so the reserved ids are structurally unreachable
+        // rather than merely far away.
         Self {
-            ids: SessionIds::range(0, WHITE_TEXTURE_ID - 1),
+            ids: SessionIds::range(0, GLYPH_ATLAS_TEXTURE_ID - 1),
             entries: HashMap::new(),
             arrays: HashMap::new(),
             volumes: HashMap::new(),
@@ -371,10 +409,10 @@ impl TextureRegistry {
     }
 
     /// Overwrite a sub-rect of an existing texture. Fire-and-forget, so every
-    /// rejection warns and drops rather than replying — the reserved white
-    /// texture is not writable, and neither is an id that was never created.
+    /// rejection warns and drops rather than replying — a reserved texture
+    /// is not writable, and neither is an id that was never created.
     pub fn update(&mut self, mail: UpdateTexture) {
-        if mail.texture_id == WHITE_TEXTURE_ID {
+        if is_reserved(mail.texture_id) {
             tracing::warn!(
                 target: "aether_render",
                 texture_id = mail.texture_id,
@@ -413,7 +451,7 @@ impl TextureRegistry {
     /// fire-and-forget
     /// disposition as [`Self::update`].
     pub fn destroy(&mut self, mail: DestroyTexture) {
-        if mail.texture_id == WHITE_TEXTURE_ID {
+        if is_reserved(mail.texture_id) {
             tracing::warn!(
                 target: "aether_render",
                 texture_id = mail.texture_id,
@@ -443,19 +481,26 @@ impl TextureRegistry {
         let memory = &self.memory;
         self.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| {
             let bytes = white.len();
-            let texture = StagedTexture {
-                width: 1,
-                height: 1,
-                format: TextureFormat::Rgba8,
-                sampling: TextureSampling::Linear,
-                usage: TextureUsage::Sampled,
-                pixels: TexturePixels::Received(Blob::from(white)),
-                realized: None,
-                dirty: true,
-            };
+            let texture = StagedTexture::reserved(1, 1, TexturePixels::Received(Blob::from(white)));
 
             memory.charged(bytes, texture)
         });
+    }
+
+    /// The reserved glyph-atlas texture, registered zeroed (fully
+    /// transparent) if it is not present. Like the white texture it is
+    /// created on first use, so a runtime that never draws text never
+    /// allocates it, and it is counted on the registry's gauge at its pixel
+    /// bytes once, however many draws follow. Its staged pixels are the one
+    /// copy of the atlas: the text layout writes each new glyph into them.
+    pub fn ensure_glyph_atlas(&mut self) -> &mut StagedTexture {
+        let memory = &self.memory;
+        self.entries.entry(GLYPH_ATLAS_TEXTURE_ID).or_insert_with(|| {
+            let bytes = ATLAS_SIZE as usize * ATLAS_SIZE as usize * TextureFormat::Rgba8.bytes_per_pixel();
+            let texture = StagedTexture::reserved(ATLAS_SIZE, ATLAS_SIZE, TexturePixels::Edited(vec![0; bytes]));
+
+            memory.charged(bytes, texture)
+        })
     }
 }
 

@@ -439,7 +439,7 @@ fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
 /// context under the routed mail's correlation, which the answering actor's
 /// real reply turn takes back. A body copied from `send_detached` with no
 /// lineage, a wrong recipient, or a context stored under another correlation
-/// fails here rather than only in the audio and text caps' fs round trips.
+/// fails here rather than only in the audio cap's fs round trips.
 #[test]
 fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers_chain() {
     let mut rig = Rig::boot();

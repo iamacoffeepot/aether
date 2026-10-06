@@ -456,7 +456,7 @@ impl SubstrateHarnessBuilder {
     /// its basics (trace dispatch, inventory, the harness cap, lifecycle, synthetic
     /// window) and each scenario composes exactly the caps it
     /// needs on top (issue #3764); this is the generic surface for any
-    /// cap without boot-internal wiring — `harness.with_actor::<TextCapability>(())`,
+    /// cap without boot-internal wiring — `harness.with_actor::<AudioCapability>(())`,
     /// a scenario-local `NativeActor`, and so on. Applied to the chassis builder
     /// in push order, between the harness basics and lifecycle.
     ///
