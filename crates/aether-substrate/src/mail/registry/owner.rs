@@ -2,8 +2,6 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
 #[cfg(test)]
-use std::thread;
-#[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 
@@ -18,7 +16,13 @@ use super::effect::{
 use super::mailbox::Registry;
 use super::metrics::{INITIAL_QUEUE_RESERVE, QueueMeter, RegistryQueueMetrics};
 use crate::actor::native::offload::blocking::DeferredCompletion;
+#[cfg(test)]
+use crate::chassis::frame_loop;
+#[cfg(test)]
+use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::config::RegistryQueueCapacities;
+#[cfg(test)]
+use crate::config::SettlementConfig;
 use crate::mail::mailer::Mailer;
 use crate::mail::{Mail, MailboxId};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState, WakeHandle, WakeSink};
@@ -109,6 +113,11 @@ struct OwnerQueue {
     saturated: bool,
     route_generation: u64,
     commands: VecDeque<OwnerCommand>,
+    /// One-shot signal a test owner step installs while the queue is empty;
+    /// the next admission fires and clears it. See
+    /// [`RegistryOwnerLease::await_next_command`].
+    #[cfg(test)]
+    next_admission: Option<crossbeam_channel::Sender<()>>,
 }
 
 impl OwnerQueue {
@@ -129,6 +138,12 @@ impl OwnerQueue {
         }
         self.commands.push_back(command);
         meter.admit(self.commands.len());
+        // The waiting step may already have given up and dropped its
+        // receiver, so a failed send is not an error.
+        #[cfg(test)]
+        if let Some(next_admission) = self.next_admission.take() {
+            let _ = next_admission.send(());
+        }
         None
     }
 }
@@ -242,6 +257,8 @@ impl RegistryOwnerLease {
             saturated: false,
             route_generation: registry.current_route_generation(),
             commands: VecDeque::with_capacity(capacity.min(INITIAL_QUEUE_RESERVE)),
+            #[cfg(test)]
+            next_admission: None,
         }));
         let meter = Arc::new(QueueMeter::new(capacity));
         let slot = Arc::new(RegistryOwnerSlot {
@@ -271,24 +288,30 @@ impl RegistryOwnerLease {
     /// owner drainable from racing this test-only two-step proof.
     #[cfg(test)]
     pub(crate) fn apply_once_then_observe_before_next_apply_for_test(&self, observe: impl FnOnce()) {
-        let _apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
+        let cap = SettlementConfig::from_env().to_cap();
+        self.apply_once_then_observe_within(frame_loop::DRAIN_BUDGET, cap, observe);
+    }
+
+    /// [`Self::apply_once_then_observe_before_next_apply_for_test`] with the
+    /// patience for the next command spelled out, so a test can drive the
+    /// wedge in milliseconds.
+    #[cfg(test)]
+    pub(crate) fn apply_once_then_observe_within(
+        &self,
+        round_budget: Duration,
+        cumulative_cap: Duration,
+        observe: impl FnOnce(),
+    ) {
+        let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         let registry = self.slot.registry.upgrade().expect("test registry remains live");
         self.apply_queued_for_test(&registry);
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if !self
-                .slot
-                .queue
-                .lock()
-                .expect("registry owner queue lock poisoned; fail-fast per ADR-0063")
-                .commands
-                .is_empty()
-            {
-                break;
-            }
-            assert!(Instant::now() < deadline, "runtime activation barrier reached the owner queue");
-            thread::yield_now();
+        // A panic with the apply guard held poisons the lock, and the lease's
+        // `Drop` then panics a second time during the unwind and aborts the
+        // process. Release the guard before reporting the wedge.
+        if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
+            drop(apply);
+            panic!("{}", wedge.reason());
         }
 
         observe();
@@ -297,6 +320,14 @@ impl RegistryOwnerLease {
 
     #[cfg(test)]
     pub(crate) fn apply_once_then_close_after_next_command(&self) {
+        let cap = SettlementConfig::from_env().to_cap();
+        self.apply_once_then_close_within(frame_loop::DRAIN_BUDGET, cap);
+    }
+
+    /// [`Self::apply_once_then_close_after_next_command`] with the patience
+    /// for the next command spelled out.
+    #[cfg(test)]
+    pub(crate) fn apply_once_then_close_within(&self, round_budget: Duration, cumulative_cap: Duration) {
         let apply = self.slot.apply_lock.lock().expect("registry owner apply lock poisoned; fail-fast per ADR-0063");
         let registry = self.slot.registry.upgrade().expect("test registry remains live");
         let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
@@ -308,21 +339,49 @@ impl RegistryOwnerLease {
         queue.route_generation = queue.route_generation.max(route_generation);
         drop(queue);
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let commands = loop {
-            let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
-            if !queue.commands.is_empty() {
-                queue.accepting = false;
-                let commands = queue.commands.drain(..).collect::<Vec<_>>();
-                self.slot.meter.drained_to_empty();
-                break commands;
-            }
-            drop(queue);
-            assert!(Instant::now() < deadline, "runtime activation barrier reached the owner queue");
-            thread::yield_now();
-        };
+        // Released before the panic for the reason given in
+        // `apply_once_then_observe_within`.
+        if let WaitOutcome::Wedged(wedge) = self.await_next_command(round_budget, cumulative_cap) {
+            drop(apply);
+            panic!("{}", wedge.reason());
+        }
+
+        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        queue.accepting = false;
+        let commands = queue.commands.drain(..).collect::<Vec<_>>();
+        self.slot.meter.drained_to_empty();
+        drop(queue);
         drop(apply);
         registry.close_owner_commands(commands, &self.slot.mailer);
+    }
+
+    /// Block until the owner queue holds a command, on the admission itself
+    /// and with no deadline of its own: the wait gives up only at
+    /// `cumulative_cap`, and returns the wedge instead of panicking so the
+    /// caller can release the apply guard first.
+    ///
+    /// The check and the install share one hold of the queue lock, which
+    /// [`OwnerQueue::admit`] also runs under, so an admission cannot fall
+    /// between them. Nothing drains the queue while the caller holds the
+    /// apply guard, so a fired signal means the command is still queued.
+    #[cfg(test)]
+    fn await_next_command(&self, round_budget: Duration, cumulative_cap: Duration) -> WaitOutcome {
+        let mut queue = self.slot.queue.lock().expect("registry owner queue lock poisoned; fail-fast per ADR-0063");
+        if !queue.commands.is_empty() {
+            return WaitOutcome::Settled;
+        }
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        queue.next_admission = Some(sender);
+        drop(queue);
+
+        await_internal_signal(
+            &receiver,
+            "registry.owner.next_command",
+            round_budget,
+            cumulative_cap,
+            TerminalDisposition::Proceed,
+            None,
+        )
     }
 
     #[cfg(test)]

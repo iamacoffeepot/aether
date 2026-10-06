@@ -28,7 +28,7 @@ use crate::mail::registry::{
 use crate::mail::{KindId, Mail, MailId};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, WakeSink};
-use crate::testing::boot_authority as auth;
+use crate::testing::{await_signal, boot_authority as auth};
 
 use super::support::{activation_barrier, prepared_test_spawn, starting_token, traced_unknown_mail};
 
@@ -327,6 +327,36 @@ fn owner_registers_a_kind_batch_atomically_with_one_publication() {
     assert_eq!(registry.kind_generation(), 1, "the complete kind batch publishes exactly once");
 }
 
+/// The bug: an owner step that panics while it holds the apply lock poisons
+/// it, and the lease's `Drop`, which runs during that unwind and expects a
+/// clean lock, panics a second time and aborts the process, taking every
+/// other test's result with it. That only shows when the step's wait wedges,
+/// so no green run would reveal it coming back.
+///
+/// The step is given a prefix and no second command, so its wait for the
+/// next admission wedges at the injected cap (20 ms). The lease drops while
+/// the step's panic unwinds: with the guard released first the test panics
+/// once, on the gate name; with it held the test binary aborts.
+#[test]
+#[should_panic(expected = "registry.owner.next_command")]
+fn owner_step_wedge_fails_the_test_without_poisoning_the_apply_lock() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let owner = RegistryOwnerLease::attach(
+        auth(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let kind = KindDescriptor { name: "test.owner.step.wedge".to_owned(), schema: SchemaType::Bytes };
+    let _completion = registry
+        .submit(RegistryBatch::register_kinds(vec![kind]).into_effects())
+        .expect("attached owner reserves a prepared kind batch");
+
+    owner.apply_once_then_observe_within(Duration::from_millis(1), Duration::from_millis(20), || {});
+}
+
 #[test]
 fn owner_admission_catches_up_after_transitional_direct_publication() {
     let registry = Arc::new(Registry::new());
@@ -349,7 +379,9 @@ fn owner_admission_catches_up_after_transitional_direct_publication() {
         let _ = done_tx.send(());
     });
 
-    done_rx.recv_timeout(Duration::from_millis(100)).expect("generation catch-up retries once instead of spinning");
+    // A push that answers `Retry` forever never returns, so this wedges at
+    // the settlement cap rather than hanging the test thread.
+    await_signal(&done_rx, "test.registry.owner_admission_catch_up");
     thread.join().unwrap();
     owner.run_once();
 }
