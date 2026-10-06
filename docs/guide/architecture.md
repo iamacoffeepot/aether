@@ -70,7 +70,7 @@ project replies.
 | Guest SDK | `aether-actor` and its derive crate | actor authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition; the shippable package depot comes from `cargo xtask package` |
+| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/bloomery composition; the shippable package depot comes from `cargo xtask package` |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Test harnesses | `aether-harness-*` | in-process substrate, real-process fleet, capture, and perf drivers |
 | Build tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, package depots, compatibility fixtures, fuzz targets |
@@ -84,7 +84,8 @@ with their own capability crate, not in a universal central kind catalog
 ## Chassis composition
 
 Four checked-in chassis profiles reuse the substrate but install different
-drivers and capabilities: desktop, headless, hub, and substrate harness.
+drivers and capabilities: desktop, headless, hub, and bloomery. The in-process
+substrate harness is a library chassis in `aether-harness-substrate`.
 
 Every chassis, and the in-process `SubstrateHarness`, composes `aether.trace`
 and `aether.inventory` from the shared base, ahead of the capabilities each one

@@ -1,16 +1,10 @@
 //! `SubstrateHarness` — the in-process harness harness (ADR-0067, issue #3765).
 //!
-//! Two driver modes share [`chassis::SubstrateHarnessChassis`]:
-//!
-//! - **Binary (`aether-chassis-harness`'s `src/bin/substrate-harness.rs`)**
-//!   — runs the chassis events loop on the main thread blocking on
-//!   `events_rx.recv()`. Driven by the `aether-mcp` harness through the
-//!   forward-model RPC (the substrate hosts `RpcServerCapability`).
-//! - **In-process ([`SubstrateHarness`] struct)** — substrate state is owned
-//!   by the test thread; mail goes through the same sinks + control
-//!   plane but replies route to a `RecordingBackend` loopback instead
-//!   of a socket. Rust integration tests link this directly via
-//!   `aether_harness_substrate::SubstrateHarness`.
+//! The [`SubstrateHarness`] struct drives [`chassis::SubstrateHarnessChassis`]
+//! in-process: substrate state is owned by the test thread; mail goes through
+//! the same sinks + control plane but replies route to a `RecordingBackend`
+//! loopback instead of a socket. Rust integration tests link this directly via
+//! `aether_harness_substrate::SubstrateHarness`.
 //!
 //! The harness boots basics only — trace dispatch, inventory, the harness cap,
 //! lifecycle, the deterministic synthetic window, the observer mailbox — and

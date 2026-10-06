@@ -8,8 +8,7 @@
 //! as [`EgressEvent`]s so the test thread can correlate them to its
 //! requests by `correlation_id`.
 //!
-//! The chassis-control handler is the same one the binary uses — it pushes
-//! `Advance` events onto the events channel. `SubstrateHarness::advance`
+//! The chassis-control handler pushes `Advance` events onto the events channel. `SubstrateHarness::advance`
 //! drains the queue (which lets the handler run), pumps any pending events
 //! through `run_frame` synchronously, then drains the loopback for the
 //! matching reply. Capture is mail-driven inside the pumped render actor;
@@ -698,7 +697,7 @@ impl SubstrateHarness {
         // the loopback recorder and the render slot each fire it after they
         // enqueue.
         let (wake_tx, wake_rx) = crossbeam_channel::unbounded::<PumpWake>();
-        let (events_tx, events_rx) = event_channel(Some(mail_wake(&wake_tx)));
+        let (events_tx, events_rx) = event_channel(mail_wake(&wake_tx));
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
         // ADR-0161 slice R4: the pumped render slot is booted in the build's
@@ -710,8 +709,7 @@ impl SubstrateHarness {
         let render_assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
 
         // ADR-0071 phase 6: substrate boot + every cap goes through
-        // `SubstrateHarnessChassis::build_passive` — the same path the
-        // binary uses. Io is part of the chain when
+        // `SubstrateHarnessChassis::build_passive`. Io is part of the chain when
         // `namespace_roots` is supplied and pre-validation passes;
         // the chassis warns and skips Io otherwise. Tests that care
         // about io supply tempdir roots through
@@ -1636,8 +1634,7 @@ impl SubstrateHarness {
         }
     }
 
-    /// Run one chassis event. Mirrors what the binary's events loop
-    /// does — but inline on the test thread instead of on a worker.
+    /// Run one chassis event. Runs inline on the test thread.
     ///
     /// Returns the error `run_frame`'s per-tick advance produces if the
     /// chain never settles: a `Timeout` waiting on the driver's
@@ -1651,29 +1648,15 @@ impl SubstrateHarness {
     /// in a stuck state and the test should fail loudly. On success the
     /// reply goes through that guard, which answers every sender kind and
     /// holds the request's chain open until the ticks complete.
-    // `event` is owned because the match destructures it; clippy
-    // doesn't track the partial-move via the `Advance { reply, .. }`
-    // pattern.
-    #[allow(clippy::needless_pass_by_value)]
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), SubstrateHarnessError> {
-        match event {
-            ChassisEvent::Advance { reply, ticks, delta_micros } => {
-                for _ in 0..ticks {
-                    self.frame += 1;
-                    self.run_frame(delta_micros)?;
-                }
-                reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
-            }
-            ChassisEvent::RenderMail => {
-                // In-process the pump loop in `pump_until_event` drains the
-                // slot every iteration, so this wake variant is never sent to
-                // the in-process harness (only the standalone binary installs
-                // the render wake). Draining here is harmless and honest.
-                if let Some(hook) = self.hook.as_mut() {
-                    hook.pump();
-                }
-            }
+        let ChassisEvent::Advance { reply, ticks, delta_micros } = event;
+
+        for _ in 0..ticks {
+            self.frame += 1;
+            self.run_frame(delta_micros)?;
         }
+        reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
+
         Ok(())
     }
 

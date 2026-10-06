@@ -62,7 +62,7 @@ pub struct ClipboardCapabilityState {
 impl NativeActor for ClipboardCapability {
     type State = ClipboardCapabilityState;
     // ADR-0156 §3: the backend mode is a composer choice (desktop picks
-    // `System`, the substrate-harness `InMemory`), not an operator-resolvable
+    // `System`, a harness scenario `InMemory`), not an operator-resolvable
     // knob — so it rides the `Params` channel and `Config` is `()`.
     type Config = ();
     type Params = ClipboardParams;

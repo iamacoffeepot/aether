@@ -364,7 +364,7 @@ impl<C: Chassis> PassiveChassis<C> {
     /// [`install_pump_wake`](crate::chassis::settlement::install_pump_wake)
     /// for a wait that only drains, as the test-support
     /// `testing::PumpedDriver` does, or a hook that also turns the embedder's
-    /// own loop, as the desktop driver and the harness chassis binary install.
+    /// own loop, as the desktop driver installs.
     /// A slot with no wake drains only when its owner calls
     /// [`PumpedSlot::drain_available`], so no wait on it can be woken by mail.
     ///

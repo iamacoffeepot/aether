@@ -57,8 +57,8 @@ compares this with native capabilities.
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet` | hub fleet supervision and the content-addressed artifact store |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
-| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries |
-| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox the harness chassis drives ticks through; no other chassis composes it |
+| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-bloomery` | the four checked-in chassis binaries |
+| `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox the in-process substrate harness advances ticks through; no chassis binary composes it |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |

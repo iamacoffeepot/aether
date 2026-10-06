@@ -58,7 +58,7 @@ counts.
 
 On a harness built with render, `send_and_settle` drains the pumped
 `aether.render` slot on its mail wake while it waits, through the same
-`await_settlement_pumped` the desktop and harness-binary drivers use (ADR-0161
+`await_settlement_pumped` the desktop driver uses (ADR-0161
 §Decision 2): a chain that reaches the render actor settles because each render
 mail arrival triggers a drain, and there is no fixed drain round. The heartbeat
 only logs; it never drains.
