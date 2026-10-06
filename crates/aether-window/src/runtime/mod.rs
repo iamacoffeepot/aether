@@ -15,8 +15,9 @@ use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindow, FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SubscribeWindowResult, SubscribeWindowSelf,
-    UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability, WindowInstance,
+    SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult, SubscribeWindow,
+    SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability,
+    WindowInstance,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -175,7 +176,9 @@ impl NativeActor for WindowCapability {
     /// Apply one per-window command a live window child forwarded, at the
     /// window that child is. The answer rides the child's held reply: at once
     /// for every command the backend applies on this turn, later for a
-    /// desktop close, which is answered once its native window is detached.
+    /// desktop close, which is answered once its native window is detached,
+    /// and a desktop presentation change, answered once render has taken or
+    /// refused it.
     #[handler::request]
     fn on_apply_command(
         state: &mut Self::State,
@@ -262,6 +265,18 @@ impl NativeActor for WindowCapability {
     fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowMode) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowModeResult::Err { error });
+        }
+    }
+
+    /// Change how the sole window presents its frames.
+    #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
+    fn on_set_presentation(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Erased, Unchecked>,
+        mail: SetWindowPresentation,
+    ) {
+        if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
+            ctx.reply(&SetWindowPresentationResult::Err { error });
         }
     }
 

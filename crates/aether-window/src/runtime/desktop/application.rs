@@ -14,8 +14,9 @@ use winit::window::{Window, WindowId as WinitWindowId};
 
 use aether_data::ErasedActorPath;
 
-use crate::{WindowMode, WindowSpec};
+use crate::{WindowMode, WindowPresentation, WindowSpec};
 
+use super::pacing::{FramePacing, FrameSchedule};
 use super::{
     DesktopWindowLifecycle, DesktopWindowSlot, DesktopWindows, WindowHostAction, WindowHostEffect, menu,
     resolve_fullscreen,
@@ -25,7 +26,19 @@ use crate::WindowCapability;
 /// Semantic seam between the window application and chassis-owned render,
 /// settlement, and process-lifecycle integration.
 pub trait DesktopWindowIntegration {
-    fn attach_window(&mut self, path: ErasedActorPath, window: Arc<Window>) -> Result<(), String>;
+    /// Attach `window` as a render target whose surface presents as
+    /// `presentation` asks. An `Err` fails the window's creation.
+    fn attach_window(
+        &mut self,
+        path: ErasedActorPath,
+        window: Arc<Window>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String>;
+
+    /// Reconfigure the attached window's surface for `presentation`. An
+    /// `Err` names why the surface cannot serve it, and leaves the surface
+    /// as it was.
+    fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String>;
 
     fn detach_window(&mut self, path: &ErasedActorPath);
 
@@ -66,6 +79,8 @@ pub struct DesktopWindowApplication<I> {
     /// the chassis does after its passives (ADR-0160 §3).
     window_slot: DesktopWindowSlot,
     pending_dirty: BTreeSet<ErasedActorPath>,
+    /// The instant each capped window's next frame is due.
+    pacing: FramePacing,
     shutdown_requested: bool,
 }
 
@@ -76,7 +91,13 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                 state.pending_host_effects.push(WindowHostEffect::LastWindowClosed);
             }
         });
-        Self { window_slot, integration, pending_dirty: BTreeSet::new(), shutdown_requested: false }
+        Self {
+            window_slot,
+            integration,
+            pending_dirty: BTreeSet::new(),
+            pacing: FramePacing::default(),
+            shutdown_requested: false,
+        }
     }
 
     /// Install the event-loop wake for one pumped mailbox.
@@ -146,6 +167,12 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                         .unwrap_or_default();
                     self.apply_effects(effects, &mut dirty, &mut should_shutdown);
                 }
+                WindowHostAction::SetPresentation { path, presentation } => {
+                    let outcome = self.integration.set_presentation(&path, presentation);
+                    let _ = self
+                        .window_slot
+                        .host_turn(|state, ctx| state.finish_window_presentation(&path, presentation, outcome, ctx));
+                }
             }
         }
 
@@ -161,8 +188,8 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         let mut effects = VecDeque::from(effects);
         while let Some(effect) = effects.pop_front() {
             match effect {
-                WindowHostEffect::Created { path, window } => {
-                    let attachment = self.integration.attach_window(path.clone(), Arc::clone(&window));
+                WindowHostEffect::Created { path, window, presentation } => {
+                    let attachment = self.integration.attach_window(path.clone(), Arc::clone(&window), presentation);
                     let follow_up = self
                         .window_slot
                         .host_turn(|state, ctx| state.finish_window_attachment(&path, attachment, ctx))
@@ -223,22 +250,29 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         }
 
         let snapshot = self.window_slot.host_turn(|state, _ctx| state.application_snapshot()).unwrap_or_default();
+        let visible = snapshot.visible_presentations();
         if flush_frame {
             let now = Instant::now();
             let capture_expired = self.integration.capture_deadline().is_some_and(|deadline| deadline <= now);
             let dirty = mem::take(&mut self.pending_dirty);
-            let frame_windows = snapshot.frame_windows(&dirty, self.shutdown_requested || capture_expired);
-            if !frame_windows.is_empty() || self.shutdown_requested || capture_expired {
+            let force = self.shutdown_requested || capture_expired;
+            let frame_windows = snapshot.frame_windows(&dirty, &self.pacing.schedule(&visible, now).due, force);
+            if !frame_windows.is_empty() || force {
                 self.integration.windows_dirty(&frame_windows);
+                self.pacing.frame_drawn(&snapshot.live, &frame_windows, now);
             }
         }
 
+        // Read again after the frame: a display-paced present has just
+        // waited, so a capped window may have come due meanwhile.
+        let now = Instant::now();
+        let schedule = self.pacing.schedule(&visible, now);
         let disposition = loop_disposition(
             self.integration.should_exit(),
             self.shutdown_requested,
-            !snapshot.visible.is_empty(),
+            &schedule,
             self.integration.capture_deadline(),
-            Instant::now(),
+            now,
         );
         match disposition {
             LoopDisposition::Exit => event_loop.exit(),
@@ -248,8 +282,10 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         }
 
         if disposition != LoopDisposition::Exit {
-            for (_, window) in snapshot.visible {
-                window.request_redraw();
+            for shown in snapshot.visible {
+                if schedule.due.contains(&shown.path) {
+                    shown.window.request_redraw();
+                }
             }
         }
     }
@@ -273,18 +309,45 @@ impl<I: DesktopWindowIntegration> ApplicationHandler<DesktopWindowUserEvent> for
     }
 }
 
+/// One live, unoccluded window: the handle the loop asks to redraw and the
+/// presentation that paces it.
+struct VisibleWindow {
+    path: ErasedActorPath,
+    window: Arc<Window>,
+    presentation: WindowPresentation,
+}
+
 #[derive(Default)]
 struct WindowSnapshot {
-    live: Vec<ErasedActorPath>,
-    visible: Vec<(ErasedActorPath, Arc<Window>)>,
+    live: Vec<(ErasedActorPath, WindowPresentation)>,
+    visible: Vec<VisibleWindow>,
 }
 
 impl WindowSnapshot {
-    fn frame_windows(&self, dirty: &BTreeSet<ErasedActorPath>, force: bool) -> Vec<ErasedActorPath> {
+    /// The visible windows as the pacing schedule reads them.
+    fn visible_presentations(&self) -> Vec<(ErasedActorPath, WindowPresentation)> {
+        self.visible.iter().map(|visible| (visible.path.clone(), visible.presentation)).collect()
+    }
+
+    /// The windows one frame draws: every visible window that asked for a
+    /// redraw and is `due` one, or every live window when the frame is
+    /// forced.
+    fn frame_windows(
+        &self,
+        dirty: &BTreeSet<ErasedActorPath>,
+        due: &BTreeSet<ErasedActorPath>,
+        force: bool,
+    ) -> Vec<ErasedActorPath> {
         if force {
-            return self.live.clone();
+            return self.live.iter().map(|(path, _)| path.clone()).collect();
         }
-        self.visible.iter().map(|(path, _)| path).filter(|path| dirty.contains(path)).cloned().collect()
+        self.visible
+            .iter()
+            .map(|visible| &visible.path)
+            .filter(|path| dirty.contains(path))
+            .filter(|path| due.contains(path))
+            .cloned()
+            .collect()
     }
 }
 
@@ -295,11 +358,15 @@ impl DesktopWindows {
             if state.lifecycle != DesktopWindowLifecycle::Live {
                 continue;
             }
-            snapshot.live.push(path.clone());
+            snapshot.live.push((path.clone(), state.presentation));
             if !state.occluded
                 && let Some(window) = self.native_windows.get(path)
             {
-                snapshot.visible.push((path.clone(), Arc::clone(window)));
+                snapshot.visible.push(VisibleWindow {
+                    path: path.clone(),
+                    window: Arc::clone(window),
+                    presentation: state.presentation,
+                });
             }
         }
         snapshot
@@ -314,21 +381,28 @@ enum LoopDisposition {
     WaitUntil(Instant),
 }
 
+/// How the event loop waits for its next turn. It polls while a frame is
+/// due: any visible display-paced or uncapped window, or a capped one whose
+/// instant has passed. Otherwise it sleeps until the earlier of the next
+/// capped window's due instant and a pending capture's deadline, or until an
+/// event when there is neither.
 fn loop_disposition(
     should_exit: bool,
     shutdown_requested: bool,
-    has_visible_windows: bool,
+    schedule: &FrameSchedule,
     capture_deadline: Option<Instant>,
     now: Instant,
 ) -> LoopDisposition {
+    let frame_due = !schedule.due.is_empty();
+    let capture_pending = capture_deadline.filter(|deadline| *deadline > now);
+    let wake = [schedule.wake, capture_pending].into_iter().flatten().min();
+
     if should_exit {
         LoopDisposition::Exit
-    } else if shutdown_requested || has_visible_windows {
+    } else if shutdown_requested || frame_due {
         LoopDisposition::Poll
-    } else if let Some(deadline) = capture_deadline
-        && deadline > now
-    {
-        LoopDisposition::WaitUntil(deadline)
+    } else if let Some(wake) = wake {
+        LoopDisposition::WaitUntil(wake)
     } else {
         LoopDisposition::Wait
     }
@@ -386,10 +460,18 @@ fn apply_simple_effect<I: DesktopWindowIntegration>(
 mod tests {
     use std::time::Duration;
 
+    use aether_data::LoadName;
+
+    use super::super::tests::insert_window;
     use super::*;
+    use crate::runtime::subscribers::fixture::Rig;
+    use crate::{
+        CreateWindow, ListWindows, ListWindowsResult, SetWindowPresentation, SetWindowPresentationResult,
+        WindowInstance,
+    };
 
     fn window(name: &str) -> ErasedActorPath {
-        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+        crate::window_path(&LoadName::new(name).expect("fixture window name"))
     }
 
     /// The window name a spy records: the key after the path's last `:`.
@@ -400,12 +482,24 @@ mod tests {
     #[derive(Default)]
     struct SpyIntegration {
         calls: Vec<String>,
+        /// The error every `set_presentation` is refused with, when set.
+        refuses_presentation: Option<String>,
     }
 
     impl DesktopWindowIntegration for SpyIntegration {
-        fn attach_window(&mut self, path: ErasedActorPath, _window: Arc<Window>) -> Result<(), String> {
+        fn attach_window(
+            &mut self,
+            path: ErasedActorPath,
+            _window: Arc<Window>,
+            _presentation: WindowPresentation,
+        ) -> Result<(), String> {
             self.calls.push(format!("attach:{}", name(&path)));
             Ok(())
+        }
+
+        fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String> {
+            self.calls.push(format!("present:{}:{presentation:?}", name(path)));
+            self.refuses_presentation.clone().map_or(Ok(()), Err)
         }
 
         fn detach_window(&mut self, path: &ErasedActorPath) {
@@ -437,6 +531,71 @@ mod tests {
         fn pump_while_settling(&mut self, _settlement: MailId) -> WaitOutcome {
             panic!("the simple-effect test never enters settlement")
         }
+    }
+
+    /// A presentation the surface refuses is answered `Err` with the
+    /// surface's own message, and the window still lists the presentation it
+    /// had. The window's child is born through the manager's own staged
+    /// birth, so the request travels the forward a live window's does. Fails
+    /// if the manager records the asked value before the integration has
+    /// answered, or answers `Ok` whatever the surface said.
+    #[test]
+    fn a_refused_presentation_answers_err_and_the_window_keeps_its_own() {
+        let mut rig = Rig::desktop();
+        let game = window("game");
+        let spec = WindowSpec {
+            name: "game".to_owned(),
+            title: "Game".to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        };
+        rig.push(&CreateWindow { spec });
+        rig.pump_desktop_until("the create's reservation", |state| state.pending_creates.contains_key(&game));
+        rig.desktop_turn(|state, ctx| {
+            let _ = state.take_host_work();
+            let staged = insert_window(state, "game", false);
+            state.windows.get_mut(&staged).expect("the staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+            state.finish_window_attachment(&staged, Ok(()), ctx)
+        })
+        .expect("the desktop manager is live");
+        rig.pump_desktop_until("the window child's birth", |state| state.children.contains_key(&game));
+        let child = rig
+            .chassis()
+            .child::<WindowCapability, WindowInstance>(rig.manager(), LoadName::new("game").expect("fixture name"))
+            .expect("the window child is live");
+
+        let request = rig.push_to(child, &SetWindowPresentation { presentation: WindowPresentation::Uncapped });
+        rig.pump_desktop_until("the queued presentation change", |state| !state.presentation_helds.is_empty());
+        let mut integration =
+            SpyIntegration { refuses_presentation: Some("the surface offers [Fifo]".to_owned()), ..Default::default() };
+        rig.desktop_turn(|state, ctx| {
+            let (actions, _) = state.take_host_work();
+            for action in actions {
+                let WindowHostAction::SetPresentation { path, presentation } = action else {
+                    panic!("the only queued host action is the presentation change, got {action:?}");
+                };
+                let outcome = integration.set_presentation(&path, presentation);
+                state.finish_window_presentation(&path, presentation, outcome, ctx);
+            }
+        })
+        .expect("the desktop manager is live");
+        rig.driver.settle(&[request]);
+
+        assert_eq!(integration.calls, ["present:game:Uncapped"], "the surface was asked once");
+        let SetWindowPresentationResult::Err { error } = rig.reply() else {
+            panic!("a presentation the surface refuses is answered Err");
+        };
+        assert!(error.contains("the surface offers [Fifo]"), "the reply carries the surface's message: {error}");
+        rig.send(&ListWindows);
+        let ListWindowsResult::Ok { windows } = rig.reply() else {
+            panic!("desktop manager list succeeds");
+        };
+        assert_eq!(
+            windows.into_iter().map(|listed| listed.presentation).collect::<Vec<_>>(),
+            [WindowPresentation::Display],
+            "the refused value is not what the window reports",
+        );
     }
 
     #[test]
@@ -496,12 +655,44 @@ mod tests {
     fn terminal_disposition_exits_without_a_native_window() {
         let now = Instant::now();
 
-        assert_eq!(loop_disposition(true, true, false, None, now), LoopDisposition::Exit);
-        assert_eq!(loop_disposition(false, true, false, None, now), LoopDisposition::Poll);
-        assert_eq!(loop_disposition(false, false, false, None, now), LoopDisposition::Wait);
+        let idle = FrameSchedule::default();
+
+        assert_eq!(loop_disposition(true, true, &idle, None, now), LoopDisposition::Exit);
+        assert_eq!(loop_disposition(false, true, &idle, None, now), LoopDisposition::Poll);
+        assert_eq!(loop_disposition(false, false, &idle, None, now), LoopDisposition::Wait);
         assert_eq!(
-            loop_disposition(false, false, false, Some(now + Duration::from_secs(1)), now),
+            loop_disposition(false, false, &idle, Some(now + Duration::from_secs(1)), now),
             LoopDisposition::WaitUntil(now + Duration::from_secs(1)),
         );
+    }
+
+    /// A loop whose only visible window is capped and waiting sleeps until
+    /// that window's instant, or a capture deadline that comes sooner, and an
+    /// uncapped window beside it keeps the loop polling. Fails if a capped
+    /// window alone is polled at full speed, or if its wait parks a window
+    /// that is not capped.
+    #[test]
+    fn a_capped_only_loop_waits_until_the_next_due_instant() {
+        let start = Instant::now();
+        let capped = WindowPresentation::Capped {
+            frames_per_second: crate::FrameRate::new(10).expect("a rate inside the range"),
+        };
+        let due = start + Duration::from_millis(100);
+        let now = start + Duration::from_millis(1);
+        let mut pacing = FramePacing::default();
+        pacing.frame_drawn(&[(window("game"), capped)], &[window("game")], start);
+
+        let capped_only = pacing.schedule(&[(window("game"), capped)], now);
+        assert_eq!(loop_disposition(false, false, &capped_only, None, now), LoopDisposition::WaitUntil(due));
+        let capture = start + Duration::from_millis(40);
+        assert_eq!(
+            loop_disposition(false, false, &capped_only, Some(capture), now),
+            LoopDisposition::WaitUntil(capture),
+            "a capture deadline before the due instant wakes the loop first",
+        );
+
+        let with_uncapped =
+            pacing.schedule(&[(window("game"), capped), (window("tools"), WindowPresentation::Uncapped)], now);
+        assert_eq!(loop_disposition(false, false, &with_uncapped, None, now), LoopDisposition::Poll);
     }
 }

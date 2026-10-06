@@ -173,8 +173,8 @@ pub use kinds::InjectWindowEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseWindow, FocusWindow, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode, SetWindowTitle,
-        WindowCapability, WindowInstance,
+        CloseWindow, FocusWindow, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode,
+        SetWindowPresentation, SetWindowTitle, WindowCapability, WindowInstance,
     };
     use aether_actor::{Addressable, HandlesKind};
 
@@ -189,6 +189,7 @@ mod tests {
     fn neutral_window_instance_has_the_exact_control_handler_facts() {
         assert_handles::<CloseWindow>();
         assert_handles::<SetWindowMode>();
+        assert_handles::<SetWindowPresentation>();
         assert_handles::<SetWindowTitle>();
         assert_handles::<SetWindowMenu>();
         assert_handles::<SetWindowCursor>();

@@ -273,6 +273,28 @@ preserving each window path and occlusion flag together with the shared GPU and
 wireframe overlay. If any later surface fails, none of the staged surfaces or
 device state becomes live and the whole render capability becomes unusable.
 
+**A window surface's present mode is chosen from what the surface offers,
+never fallen back to.** The window's owner tells render one of two things
+about a surface (`SurfacePresent`), on `attach_window` and again on
+`set_window_present`, and render maps it over the present modes the surface
+reports:
+
+| Asked | wgpu mode chosen | When the surface lacks it |
+|---|---|---|
+| `InStep`: the present waits for the display | `Fifo` | `Err` naming the modes the surface offers |
+| `Unsynced`: the present returns at once | `Immediate`, else `Mailbox` | `Err` naming the modes the surface offers |
+
+A refusal leaves the surface configured as it was. wgpu's `AutoVsync` and
+`AutoNoVsync` are not used, because each is a fallback chain and the second
+ends in `Fifo`: a window asked to run unsynced would be paced by the display
+with no word to its owner. `FifoRelaxed` is not used either: it is `Fifo`
+that tears when a frame is late. The chosen mode is logged at info under
+`aether_substrate::render`, since `Unsynced` is served by `Immediate` (which
+may tear) on one platform and `Mailbox` (which does not) on another. Render
+knows nothing of window kinds or frame rates: the desktop driver maps a
+window's [presentation](window.md#presentation) onto these two values, and a
+device replacement asks each rebuilt surface for the value it last had.
+
 Public ids do not change across a successful replacement. Sampled textures
 upload again from their retained CPU pixels, texture arrays from the retained
 blob of each written layer, volume textures from the blob they were created

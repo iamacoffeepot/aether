@@ -117,6 +117,10 @@ mod view_source;
 // wiring channel.
 pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::RenderGpu;
+// How a window surface presents, which the desktop driver names on
+// `attach_window` and `set_window_present`.
+#[cfg(feature = "desktop")]
+pub use self::surface::SurfacePresent;
 
 use self::pipeline::{OverlayObservation, record_material_batches, record_overlay_batches};
 use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_offscreen};
@@ -340,15 +344,18 @@ impl RenderCapabilityState {
     /// selects the adapter/device and builds shared pipelines; later
     /// attachments must support the same copy-compatible color format.
     /// Every fallible operation completes before insertion, so failure leaves
-    /// both the target map and shared GPU state unchanged. `ctx` is the
-    /// render actor's own: the first attachment installs the device, which
-    /// answers every request that was waiting for one.
+    /// both the target map and shared GPU state unchanged. `present` is how
+    /// the window's surface presents, and a surface that cannot serve it
+    /// fails the attachment naming the modes it offers. `ctx` is the render
+    /// actor's own: the first attachment installs the device, which answers
+    /// every request that was waiting for one.
     #[cfg(feature = "desktop")]
     pub fn attach_window<M: ReplyMode, A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         path: ErasedActorPath,
         window: Arc<Window>,
+        present: SurfacePresent,
     ) -> Result<(), String> {
         if self.offscreen_size.is_some() {
             return Err("cannot attach a window target to an explicitly surfaceless render runtime".to_owned());
@@ -361,11 +368,17 @@ impl RenderCapabilityState {
             let device = Arc::clone(&gpu.device);
             let format = gpu.color_format;
             self.targets.attach_with(path, || {
-                RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format)
+                RenderTarget::attach_to_booted_gpu(context, &device, window, (size.width, size.height), format, present)
             })?
         } else if self.gpu.is_none() && self.desktop_gpu.is_none() {
             self.targets.attach_with(path, || {
-                RenderTarget::boot_first(window, (size.width, size.height), wireframe.as_deref(), vertex_buffer_bytes)
+                RenderTarget::boot_first(
+                    window,
+                    (size.width, size.height),
+                    wireframe.as_deref(),
+                    vertex_buffer_bytes,
+                    present,
+                )
             })?
         } else {
             return Err("render GPU boot state cannot accept desktop window targets".to_owned());
@@ -376,6 +389,19 @@ impl RenderCapabilityState {
             self.install_first_device(ctx, gpu, wire_pipeline);
         }
         Ok(())
+    }
+
+    /// Reconfigure one attached window's surface to present as `present`
+    /// asks. An unknown window is an `Err`, as is a surface that cannot
+    /// serve `present`, which names the modes it offers and stays configured
+    /// as it was.
+    #[cfg(feature = "desktop")]
+    pub fn set_window_present(&mut self, path: &ErasedActorPath, present: SurfacePresent) -> Result<(), String> {
+        let (Some(gpu), Some(context)) = (self.gpu.as_ref(), self.desktop_gpu.as_ref()) else {
+            return Err(format!("no render device is booted to present window {path}"));
+        };
+        let target = self.targets.get_mut(path).ok_or_else(|| format!("unknown window target {path}"))?;
+        target.set_present(context, &gpu.device, present)
     }
 
     /// Detach one window surface. A capture selected for that target fails

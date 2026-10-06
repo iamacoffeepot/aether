@@ -13,10 +13,11 @@ use aether_data::LoadName;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_window::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult,
-    CursorIcon, FocusWindow, FocusWindowResult, ListWindows, ListWindowsResult, RequestWindowRedraw,
+    CursorIcon, FocusWindow, FocusWindowResult, FrameRate, ListWindows, ListWindowsResult, RequestWindowRedraw,
     RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowCapability, WindowCommand,
-    WindowInstance, WindowMenu, WindowMode, WindowSpec, window_path,
+    SetWindowMode, SetWindowModeResult, SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle,
+    SetWindowTitleResult, WindowCapability, WindowCommand, WindowInstance, WindowMenu, WindowMode, WindowPresentation,
+    WindowSpec, window_path,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -36,7 +37,13 @@ trait WindowRetire {
 }
 
 fn spec(name: &str, title: &str) -> WindowSpec {
-    WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+    WindowSpec {
+        name: name.to_owned(),
+        title: title.to_owned(),
+        mode: WindowMode::Windowed,
+        size: None,
+        presentation: WindowPresentation::Display,
+    }
 }
 
 fn window_key(name: &str) -> LoadName {
@@ -159,6 +166,38 @@ fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous
         BTreeMap::from([("main", "Routed"), ("palette", "Tools")]),
         "the routed command applied to the sole window and the refused one applied to nothing",
     );
+}
+
+/// A synthetic window has no surface to refuse a presentation, so the value
+/// it is set to is the value `aether.window.list` reports. Fails if the
+/// backend answers `Ok` without storing the value, which would leave a
+/// harness reading the creation-time presentation after a change.
+#[test]
+fn a_set_presentation_is_what_list_reports() {
+    let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+    let manager = harness.actor_ref::<WindowCapability>();
+    let capped = WindowPresentation::Capped { frames_per_second: FrameRate::new(30).expect("a rate inside the range") };
+    let report = harness
+        .execute(vec![
+            ("created", HarnessOp::send_and_await_reply(&manager, &CreateWindow { spec: spec("main", "Main") })),
+            ("set", HarnessOp::send_and_await_reply(&manager, &SetWindowPresentation { presentation: capped })),
+            ("listed", HarnessOp::send_and_await_reply(&manager, &ListWindows)),
+        ])
+        .expect("the presentation change settles");
+
+    let Ok(CreateWindowResult::Ok { window }) = report.reply::<CreateWindowResult>("created") else {
+        panic!("staged create succeeds");
+    };
+    assert_eq!(window.presentation, WindowPresentation::Display, "a window opens with its spec's presentation");
+    assert!(matches!(
+        report.reply::<SetWindowPresentationResult>("set"),
+        Ok(SetWindowPresentationResult::Ok { presentation }) if presentation == capped
+    ));
+
+    let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
+        panic!("synthetic list succeeds");
+    };
+    assert_eq!(windows.into_iter().map(|listed| listed.presentation).collect::<Vec<_>>(), [capped]);
 }
 
 #[test]

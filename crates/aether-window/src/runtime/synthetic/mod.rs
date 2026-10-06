@@ -12,8 +12,9 @@ use super::manager::{RoutableWindow, WindowCommands};
 use super::subscribers::{Published, WindowSubscribers};
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
-    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult,
-    WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMode, WindowOpened, WindowSpec,
+    RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowPresentationResult,
+    SetWindowTitleResult, WindowCapability, WindowClosed, WindowCommand, WindowInfo, WindowInstance, WindowMode,
+    WindowOpened, WindowSpec,
 };
 
 const DEFAULT_WIDTH: u32 = 800;
@@ -90,6 +91,7 @@ impl SyntheticWindows {
             height,
             focused: false,
             occluded: width == 0 || height == 0,
+            presentation: spec.presentation,
         }
     }
 
@@ -158,6 +160,19 @@ impl SyntheticWindows {
                     width: info.width,
                     height: info.height,
                 })
+            }
+            // No surface and no clock stand behind a synthetic window, so
+            // every value is accepted for a live window and stored for
+            // `aether.window.list`; frames stay driven by explicit advances.
+            WindowCommand::SetPresentation { presentation } => {
+                let info = match self.window_mut(window) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Err { error });
+                    }
+                };
+                info.presentation = presentation;
+                ApplyWindowCommandResult::SetPresentation(SetWindowPresentationResult::Ok { presentation })
             }
             WindowCommand::SetTitle { title } => {
                 let info = match self.window_mut(window) {
@@ -309,7 +324,10 @@ mod tests {
 
     use super::*;
     use crate::runtime::subscribers::fixture::{Rig, receivers, recipients, watcher};
-    use crate::{InjectWindowEvent, SubscribeWindow, SubscribeWindowResult, WindowSelector, WindowSubscription};
+    use crate::{
+        InjectWindowEvent, SubscribeWindow, SubscribeWindowResult, WindowPresentation, WindowSelector,
+        WindowSubscription,
+    };
 
     fn test_state() -> SyntheticWindows {
         SyntheticWindows::new()
@@ -324,7 +342,13 @@ mod tests {
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {
-        WindowSpec { name: name.to_owned(), title: title.to_owned(), mode: WindowMode::Windowed, size: None }
+        WindowSpec {
+            name: name.to_owned(),
+            title: title.to_owned(),
+            mode: WindowMode::Windowed,
+            size: None,
+            presentation: WindowPresentation::Display,
+        }
     }
 
     /// An explicit subscribe carries a subscriber path its decode proves

@@ -8,7 +8,7 @@ use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, UnsubscribeWindow, WindowCapability, WindowInstance,
-    WindowMode, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
+    WindowMode, WindowPresentation, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
 };
 
 /// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
@@ -79,6 +79,7 @@ fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
         title: title.to_owned(),
         mode: WindowMode::Windowed,
         size: Some(WindowSizeRequest { width, height }),
+        presentation: WindowPresentation::Display,
     }
 }
 
