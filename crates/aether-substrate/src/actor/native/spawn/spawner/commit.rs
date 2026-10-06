@@ -254,7 +254,7 @@ impl Spawner {
             // `Live` leaves nothing to undo. The actor itself (init
             // succeeded) drops naturally as `actor` falls out of scope,
             // and so does the binding: this function holds no sender, so
-            // its inbox's closing drain returns at once.
+            // its inbox's closing drain waits on nothing here.
             let _ = self.registry.withdraw_claim(authority, id);
             return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }

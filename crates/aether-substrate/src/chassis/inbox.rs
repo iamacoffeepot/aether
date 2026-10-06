@@ -117,7 +117,9 @@ pub(crate) fn inbox_channel() -> (InboxReceiver, InboxFeed) {
 /// it into a [`SettlingInbox`] before it returns. The fields are private
 /// and have no accessor, so the sender cannot leave this module. An
 /// `InboxReceiver` dropped unbound has no mailer to settle queued mail
-/// through, so a caller binds it before the feed's handler is published.
+/// through, so every path that publishes the feed's handler goes on to
+/// bind it; one is dropped unbound only when its handler was never
+/// published.
 pub(crate) struct InboxReceiver {
     sender: Arc<mpsc::Sender<Envelope>>,
     receiver: mpsc::Receiver<Envelope>,
