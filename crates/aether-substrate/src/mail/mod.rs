@@ -11,6 +11,7 @@ pub(crate) mod attachments;
 pub mod boundary;
 pub mod capability;
 pub mod cost;
+pub mod log_tap;
 pub mod mail_ref;
 pub mod mailer;
 pub mod outbound;

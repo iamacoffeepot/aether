@@ -227,6 +227,62 @@ pub fn dispatch_cost_tail_if_matching<A>(
     true
 }
 
+/// Spike (log-stream-scale): the post-handler log gather. With the tap closed
+/// this is one relaxed load and a branch.
+#[inline]
+pub fn gather_log_lines(binding: &NativeBinding) {
+    let tap = binding.mailer().log_tap();
+    let mode = tap.mode();
+    if mode == crate::mail::log_tap::TAP_CLOSED {
+        return;
+    }
+    gather_open_tap(binding, tap, mode);
+}
+
+/// The open-tap arm of [`gather_log_lines`]: take the stamped ring's new
+/// lines and hand them to the tap by the open design. The sink's own lines
+/// stay in its ring.
+#[cold]
+#[inline(never)]
+fn gather_open_tap(binding: &NativeBinding, tap: &crate::mail::log_tap::LogTap, mode: u8) {
+    let sink = tap.sink();
+    if binding.self_mailbox() == sink {
+        return;
+    }
+    let opening = tap.opening();
+    let Some(ungathered) = ActorLogRing::try_with_mut(|ring| ring.take_ungathered(opening)).flatten() else {
+        return;
+    };
+    if mode == crate::mail::log_tap::TAP_BUFFER {
+        tap.push(binding.self_mailbox(), ungathered.entries, ungathered.lost);
+        return;
+    }
+    let next_since = ungathered.entries.last().map_or(0, |entry| entry.sequence);
+    let first = ungathered.entries.first().map(|entry| entry.sequence);
+    let truncated_before = first.filter(|_| ungathered.lost > 0);
+    let slice = LogTailResult::Ok { entries: ungathered.entries, next_since, truncated_before };
+    let encoded = crate::mail::attachments::encode_envelope(binding.mailer().blob_store(), &slice);
+    tap.count_slice();
+    if mode == crate::mail::log_tap::TAP_MAIL {
+        // No lineage: the slice is not a settlement root, so a backlog of
+        // them at the sink does not occupy the settlement table.
+        let sender =
+            crate::mail::Source::with_correlation(crate::mail::SourceAddr::Component(binding.self_mailbox()), 0);
+        let mail = crate::mail::Mail::new(sink, <LogTailResult as Kind>::ID, encoded.bytes, 1).with_reply_to(sender);
+        binding.mailer().push(mail);
+        return;
+    }
+    binding.push_envelope_buffered(crate::actor::native::binding::OutboundSend {
+        recipient: sink.0,
+        kind: <LogTailResult as Kind>::ID.0,
+        bytes: &encoded.bytes,
+        attachments: encoded.attachments.as_deref().unwrap_or_default(),
+        count: 1,
+        parent_mail: None,
+        inherited_root: None,
+    });
+}
+
 /// iamacoffeepot/aether#1128 dark-instrumentation fold. Folds one
 /// handler-execution sample — `finished − t_received`, the existing
 /// `(Finished.t − Received.t)` trace bracket with no new clock read on

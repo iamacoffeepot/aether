@@ -124,6 +124,8 @@ pub struct Mailer {
     /// fold (that runs lock-free through the per-actor cache). Allocated
     /// empty by [`Self::new`] (like `trace_handle`).
     cost_table: Arc<CostTable>,
+    /// Spike (log-stream-scale): the log tap, beside the cost table.
+    log_tap: Arc<crate::mail::log_tap::LogTap>,
     /// ADR-0080 §6: the engine's one chassis-root correlation counter. Every
     /// chassis-root push mints `MailId(CHASSIS_MAILBOX_ID, n)` from here, so no
     /// two senders can mint the same root. Starts at 1; 0 is the sentinel.
@@ -177,6 +179,7 @@ impl Mailer {
             route_relay: OnceLock::new(),
             capability_registry: Arc::new(CapabilityRegistry::new()),
             cost_table: Arc::new(CostTable::new()),
+            log_tap: Arc::default(),
             chassis_roots: AtomicU64::new(1),
             blob_store: BlobStore::new().expect("spawn the blob reclaim thread"),
         }
@@ -510,6 +513,11 @@ impl Mailer {
     /// recipient-group cells from it at flush.
     pub fn cost_table(&self) -> &Arc<CostTable> {
         &self.cost_table
+    }
+
+    /// Spike (log-stream-scale): the engine's log tap.
+    pub fn log_tap(&self) -> &Arc<crate::mail::log_tap::LogTap> {
+        &self.log_tap
     }
 
     /// Hand `mail` to the substrate for dispatch. `Inbox`-bound

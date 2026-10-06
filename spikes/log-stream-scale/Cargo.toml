@@ -1,0 +1,24 @@
+[package]
+name = "log-stream-scale"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Measurement spike for issue 7515: does gathering every actor's log lines into
+# one stream scale. Lives only on the spike branch.
+
+[features]
+# Compile the post-handler gather out of the dispatch loop: main's dispatch path.
+no-hook = ["aether-substrate/spike-no-log-hook"]
+
+[dependencies]
+aether-actor = { path = "../../crates/aether-actor" }
+aether-data = { path = "../../crates/aether-data" }
+aether-kinds = { path = "../../crates/aether-kinds" }
+aether-lifecycle = { path = "../../crates/aether-lifecycle" }
+aether-substrate = { path = "../../crates/aether-substrate" }
+aether-harness-substrate = { path = "../../crates/aether-harness-substrate" }
+bytemuck = { workspace = true, features = ["derive"] }
+inventory = { workspace = true }
+serde = { workspace = true, features = ["derive", "std"] }
+tracing = { workspace = true, features = ["std"] }

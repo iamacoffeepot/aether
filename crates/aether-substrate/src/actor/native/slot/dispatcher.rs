@@ -633,6 +633,11 @@ where
         // *inside* the ctx — that would trip the ADR-0094 guard. `None`
         // means a handler retained it via `take_inbound`.
         let inbound = ctx.take_raw_inbound();
+        // Spike (log-stream-scale): hand this handler's new log lines to the
+        // tap before the ctx drops, so a mailed slice rides the handler's own
+        // flush. Closed, this is one relaxed load.
+        #[cfg(not(feature = "spike-no-log-hook"))]
+        super::dispatch::gather_log_lines(binding);
         // iamacoffeepot/aether#1150: flush before `Finished` so a child
         // `Sent` (stamped at flush-begin on `ctx` drop) precedes its
         // parent's `Finished`.

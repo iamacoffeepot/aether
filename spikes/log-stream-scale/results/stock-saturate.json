@@ -1,0 +1,124 @@
+{
+  "trials": 12,
+  "sections": [
+    {
+      "status": "throughput_compared",
+      "name": "throughput",
+      "improved": 0,
+      "stable": 10,
+      "regressed": 0,
+      "cells": [
+        {
+          "workers": 2,
+          "topo": "depth-1",
+          "base_median": 2400524.6024497063,
+          "base_iqr": 174984.85642026505,
+          "cand_median": 2318650.432343477,
+          "cand_iqr": 367773.7182149836,
+          "delta_median": -38712.09642066574,
+          "delta_pct": -1.612651517137567,
+          "verdict": "stable"
+        },
+        {
+          "workers": 2,
+          "topo": "depth-8",
+          "base_median": 1785599.5049564275,
+          "base_iqr": 347386.19719770434,
+          "cand_median": 1813961.0811827823,
+          "cand_iqr": 336338.6387191182,
+          "delta_median": -3162.6263200785033,
+          "delta_pct": -0.17711845860730557,
+          "verdict": "stable"
+        },
+        {
+          "workers": 2,
+          "topo": "fanout-4",
+          "base_median": 1225757.9140090125,
+          "base_iqr": 296290.4569732223,
+          "cand_median": 1351255.948858129,
+          "cand_iqr": 153325.5646021641,
+          "delta_median": 48498.486643556505,
+          "delta_pct": 3.9566121572028385,
+          "verdict": "stable"
+        },
+        {
+          "workers": 2,
+          "topo": "fanout-8",
+          "base_median": 1401806.8790876118,
+          "base_iqr": 429125.8113958065,
+          "cand_median": 1424785.3629791895,
+          "cand_iqr": 608134.0595145063,
+          "delta_median": 47286.5102124908,
+          "delta_pct": 3.3732542561974,
+          "verdict": "stable"
+        },
+        {
+          "workers": 2,
+          "topo": "tree-A-BC-DEEF",
+          "base_median": 1837804.170046868,
+          "base_iqr": 502482.69214981305,
+          "cand_median": 1949969.812182824,
+          "cand_iqr": 407753.6333340544,
+          "delta_median": 25497.951544647804,
+          "delta_pct": 1.3874139562975063,
+          "verdict": "stable"
+        },
+        {
+          "workers": 31,
+          "topo": "depth-1",
+          "base_median": 2370216.2099664705,
+          "base_iqr": 678284.2705339149,
+          "cand_median": 2218470.66207822,
+          "cand_iqr": 635405.3581176298,
+          "delta_median": -57453.45262417104,
+          "delta_pct": -2.423975179251001,
+          "verdict": "stable"
+        },
+        {
+          "workers": 31,
+          "topo": "depth-8",
+          "base_median": 2291391.135853351,
+          "base_iqr": 392918.6509637276,
+          "cand_median": 2596338.9877762967,
+          "cand_iqr": 664154.6819251212,
+          "delta_median": 156023.0591896677,
+          "delta_pct": 6.809097615347202,
+          "verdict": "stable"
+        },
+        {
+          "workers": 31,
+          "topo": "fanout-4",
+          "base_median": 1155724.9013570738,
+          "base_iqr": 99556.53321852582,
+          "cand_median": 1218256.4774899157,
+          "cand_iqr": 208309.18865657924,
+          "delta_median": 62183.10377146071,
+          "delta_pct": 5.380441634375459,
+          "verdict": "stable"
+        },
+        {
+          "workers": 31,
+          "topo": "fanout-8",
+          "base_median": 1266805.061714269,
+          "base_iqr": 180034.8349541081,
+          "cand_median": 1256137.2648794684,
+          "cand_iqr": 219884.11985757458,
+          "delta_median": -6307.579908503452,
+          "delta_pct": -0.4979124333437611,
+          "verdict": "stable"
+        },
+        {
+          "workers": 31,
+          "topo": "tree-A-BC-DEEF",
+          "base_median": 1831346.2885545325,
+          "base_iqr": 591392.3974805335,
+          "cand_median": 1771840.3416167486,
+          "cand_iqr": 393743.420172872,
+          "delta_median": 18855.35228680144,
+          "delta_pct": 1.029589674254552,
+          "verdict": "stable"
+        }
+      ]
+    }
+  ]
+}

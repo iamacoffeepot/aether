@@ -10,6 +10,8 @@ members = [
     "crates/aether-chassis-bloomery",
     "crates/aether-harness-substrate",
     "crates/aether-harness-substrate-capture",
+    # Spike branch only (issue 7515); not a default member.
+    "spikes/log-stream-scale",
     "crates/aether-substrate-harness-cap",
     "crates/aether-codec",
     "crates/aether-data",

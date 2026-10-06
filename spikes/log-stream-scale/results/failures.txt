@@ -1,0 +1,16 @@
+exit=hung-killed-after-275s scenario=steady mode=mailroot actors=100 handlers=10000 frames=300 (rep 1)
+exit=101 scenario=steady mode=mailroot actors=100 handlers=10000 frames=300
+exit=101 scenario=steady mode=mailroot actors=1000 handlers=10000 pace=0 frames=300
+exit=101 scenario=steady mode=mailroot actors=100 handlers=10000 pace=0 frames=300
+exit=hung-killed-after-300s scenario=steady mode=mailroot actors=1000 handlers=10000 pace=0 frames=300 (rep 2)
+exit=124 scenario=steady mode=mailroot actors=100 handlers=10000 pace=0 frames=300
+exit=124 scenario=steady mode=mailroot actors=1000 handlers=10000 pace=0 frames=300
+exit=124 scenario=steady mode=mailroot actors=1000 handlers=10000 pace=0 frames=300
+exit=124 scenario=steady mode=mailroot actors=100 handlers=10000 pace=0 frames=300
+exit=124 scenario=steady mode=mailroot actors=1000 handlers=10000 pace=0 frames=300
+exit=124 scenario=overload mode=mailroot actors=1000 loopers=4 secs=30
+exit=124 scenario=overload mode=mailroot actors=1000 loopers=4 secs=30
+exit=124 scenario=overload mode=mailroot actors=1000 loopers=1000 secs=30
+exit=124 scenario=overload mode=mailroot actors=1000 loopers=1000 secs=30
+exit=124 scenario=overload mode=mailroot actors=1000 loopers=1000 secs=30
+overload1000 stopped early on request: reps 4-5 incomplete

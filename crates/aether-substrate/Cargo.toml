@@ -14,6 +14,9 @@ publish = false
 # compile entirely.
 
 [features]
+# Spike (log-stream-scale): compile the post-handler log gather out of the
+# dispatch loop, which leaves main's dispatch path.
+spike-no-log-hook = []
 default = ["wasm"]
 # iamacoffeepot/aether#1275: `wasm` pulls in the wasmtime host + the
 # wasm-component module surface. Default-on so every existing consumer

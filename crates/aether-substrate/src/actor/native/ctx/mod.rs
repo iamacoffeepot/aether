@@ -57,6 +57,7 @@ mod handles;
 mod inbound;
 mod init;
 mod lifecycle;
+mod log_tap;
 mod offload;
 mod registry;
 mod send;

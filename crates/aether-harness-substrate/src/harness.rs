@@ -994,7 +994,7 @@ impl SubstrateHarness {
         self.await_settlement(kind, root, &rx)
     }
 
-    pub(crate) fn settle_bytes<K: Kind, I>(
+    pub fn settle_bytes<K: Kind, I>(
         &mut self,
         to: impl ChassisTarget<K, I>,
         mail: &K,
@@ -1082,7 +1082,7 @@ impl SubstrateHarness {
     /// harness ([`crate::perf::harness::run_sweep`], #1077) which the
     /// `perf-trial` bin drives. `pub(crate)` — the public `execute`
     /// driver doesn't model spawning.
-    pub(crate) fn spawn_actor<'a, A>(
+    pub fn spawn_actor<'a, A>(
         &'a self,
         subname: aether_substrate::Subname<'a>,
         config: A::Config,
@@ -1196,7 +1196,7 @@ impl SubstrateHarness {
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
     }
 
-    pub(crate) fn request_bytes<K: Kind, I>(
+    pub fn request_bytes<K: Kind, I>(
         &mut self,
         to: impl ChassisTarget<K, I>,
         mail: &K,
@@ -1350,7 +1350,7 @@ impl SubstrateHarness {
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
     /// `AdvanceResult::Ok`.
-    pub(crate) fn advance(&mut self, ticks: u32, delta_micros: u32) -> Result<u32, SubstrateHarnessError> {
+    pub fn advance(&mut self, ticks: u32, delta_micros: u32) -> Result<u32, SubstrateHarnessError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 4: advance migrated from `aether.control`
         // (chassis_handler closure) onto `aether.substrate_harness`

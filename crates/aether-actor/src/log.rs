@@ -97,6 +97,25 @@ pub struct ActorLogRing {
     /// meaningful even after eviction (it just resolves into a
     /// `truncated_before` gap signal).
     sequence: u64,
+    /// Spike (log-stream-scale): sequence of the last entry the log tap took.
+    gathered: u64,
+    /// Spike: the tap epoch this ring last gathered under; 0 before any.
+    gathered_epoch: u64,
+}
+
+/// Spike (log-stream-scale): the entries a ring had not yet handed to the log
+/// tap, and how many more were evicted before the tap could take them.
+pub struct Ungathered {
+    pub entries: Vec<LogEntry>,
+    pub lost: u64,
+}
+
+/// Spike (log-stream-scale): how the tap is open, as the ring needs it.
+#[derive(Clone, Copy)]
+pub struct TapOpening {
+    pub epoch: u64,
+    pub backfill: bool,
+    pub opened_unix_millis: u64,
 }
 
 impl Default for ActorLogRing {
@@ -117,7 +136,7 @@ impl ActorLogRing {
     #[must_use]
     pub fn with_capacity(ring_cap: usize) -> Self {
         let ring_cap = ring_cap.max(1);
-        Self { ring: VecDeque::with_capacity(ring_cap), ring_cap, sequence: 1 }
+        Self { ring: VecDeque::with_capacity(ring_cap), ring_cap, sequence: 1, gathered: 0, gathered_epoch: 0 }
     }
 
     /// Push one event onto the ring, stamping it with the next-
@@ -134,6 +153,36 @@ impl ActorLogRing {
             self.ring.pop_front();
         }
         self.ring.push_back(entry);
+    }
+
+    /// Spike (log-stream-scale): take every entry past the gathered cursor and
+    /// advance it. `None` when nothing is new, which is one compare.
+    ///
+    /// The first call under a new tap epoch places the cursor: with backfill
+    /// it stays where it was (zero on a ring never gathered), so the retained
+    /// ring leaves; without, it skips every entry stamped before the tap
+    /// opened. The stamp is in wall milliseconds, so a line logged in the
+    /// millisecond the tap opened is taken.
+    pub fn take_ungathered(&mut self, opening: TapOpening) -> Option<Ungathered> {
+        if self.gathered_epoch != opening.epoch {
+            self.gathered_epoch = opening.epoch;
+            if !opening.backfill {
+                let first_kept =
+                    self.ring.partition_point(|entry| entry.timestamp_unix_ms < opening.opened_unix_millis);
+                let skipped_to = self.ring.get(first_kept).map_or(self.sequence - 1, |entry| entry.sequence - 1);
+                self.gathered = self.gathered.max(skipped_to);
+            }
+        }
+        let last = self.sequence - 1;
+        if last == self.gathered {
+            return None;
+        }
+        let earliest = self.ring.front().map_or(last + 1, |entry| entry.sequence);
+        let lost = earliest.saturating_sub(self.gathered + 1);
+        let fresh = usize::try_from(last - self.gathered.max(earliest - 1)).unwrap_or(usize::MAX).min(self.ring.len());
+        let entries = self.ring.range(self.ring.len() - fresh..).cloned().collect();
+        self.gathered = last;
+        Some(Ungathered { entries, lost })
     }
 
     /// Pure read-side: filter on `min_level` + `since` + `contains`, cap at `max`
