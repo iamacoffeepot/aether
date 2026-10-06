@@ -103,6 +103,9 @@ pub(super) fn record_dispatch(gpu: &RenderGpu, encoder: &mut wgpu::CommandEncode
         if let Some(array) = textures.arrays.get_mut(&texture_id) {
             array.ensure_realized(&gpu.device, &gpu.queue);
         }
+        if let Some(volume) = textures.volumes.get_mut(&texture_id) {
+            volume.ensure_realized(&gpu.device, &gpu.queue);
+        }
     }
     for pass_plan in &plan.passes {
         if let Some(draw) = pass_plan.stage.draw()
@@ -248,6 +251,18 @@ fn report_pass_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch, pass: u
     failed
 }
 
+/// Whether a binding declared `shape` takes `bound`: a `Target` or a
+/// `Texture` takes a plain texture, a `TextureArray` an array, and a
+/// `TextureVolume` a volume. Nothing else binds, in either direction: the
+/// view a pass's layout was built for is the view of exactly one kind.
+fn shape_takes(shape: SlotShape, bound: BoundTexture<'_>) -> bool {
+    match shape {
+        SlotShape::Target(_) | SlotShape::Texture => matches!(bound, BoundTexture::Plain(_)),
+        SlotShape::TextureArray => matches!(bound, BoundTexture::Array(_)),
+        SlotShape::TextureVolume => matches!(bound, BoundTexture::Volume(_)),
+    }
+}
+
 /// Run every dispatch-time check, warn-dropping on the first mismatch.
 /// Returns the program's reference extent (the output binding texture's
 /// size) on success.
@@ -288,8 +303,7 @@ fn check_dispatch(
     }
 
     // Each binding id is resolved against the map its declared shape
-    // requires before anything reads the entry behind it: a `Target` or
-    // a `Texture` takes a plain texture and a `TextureArray` an array.
+    // requires before anything reads the entry behind it.
     for (binding, &texture_id) in dispatch.bindings.iter().enumerate() {
         let spec = plan.bindings[binding];
         let Some(bound) = textures.resolve(texture_id) else {
@@ -302,32 +316,18 @@ fn check_dispatch(
             );
             return None;
         };
-        match (spec.shape, bound) {
-            (SlotShape::Target(_) | SlotShape::Texture, BoundTexture::Plain(_))
-            | (SlotShape::TextureArray, BoundTexture::Array(_)) => {}
-            (SlotShape::TextureArray, BoundTexture::Plain(_)) => {
-                tracing::warn!(
-                    target: "aether_render",
-                    program_id,
-                    binding,
-                    texture_id,
-                    "program dispatch binds a texture that is not an array at a TextureArray binding; \
-                     dropping the dispatch",
-                );
-                return None;
-            }
-            (SlotShape::Target(_) | SlotShape::Texture, BoundTexture::Array(_)) => {
-                tracing::warn!(
-                    target: "aether_render",
-                    program_id,
-                    binding,
-                    texture_id,
-                    declared = ?spec.shape,
-                    "program dispatch binds a texture array at a binding that takes a plain texture; \
-                     dropping the dispatch",
-                );
-                return None;
-            }
+        if !shape_takes(spec.shape, bound) {
+            tracing::warn!(
+                target: "aether_render",
+                program_id,
+                binding,
+                texture_id,
+                declared = ?spec.shape,
+                bound = bound.kind_name(),
+                "program dispatch binds a texture of a kind its binding's shape does not take; \
+                 dropping the dispatch",
+            );
+            return None;
         }
         if bound.format() != spec.format {
             tracing::warn!(

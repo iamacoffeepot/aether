@@ -5,6 +5,7 @@
 use core::ops::Mul;
 
 use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
 use crate::quat::Quat;
 use crate::vec::{Vec3, Vec4};
@@ -15,7 +16,9 @@ use crate::vec::{Vec3, Vec4};
 /// transpose. `M * v` applies `M` to `v` in standard left-multiply
 /// convention.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable, aether_data::Schema)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Mat4 {
     pub cols: [Vec4; 4],
 }
@@ -165,7 +168,8 @@ impl Mat4 {
     /// Inverse of a rigid transform (rotation + translation only, no
     /// scale or skew): transpose the 3×3 rotation block and apply to
     /// the negated translation. Produces garbage on a non-rigid
-    /// matrix; use only on view matrices and similar.
+    /// matrix; use only on view matrices and similar. For a matrix that
+    /// is not rigid, use [`Self::inverse`].
     #[inline]
     #[must_use]
     pub fn inverse_rigid(self) -> Self {
@@ -176,6 +180,70 @@ impl Mat4 {
         let row2 = Vec3::new(r2.x, r2.y, r2.z);
         let translation = Vec3::new(-row0.dot(t_xyz), -row1.dot(t_xyz), -row2.dot(t_xyz));
         Self::from_basis_rows_and_translation(row0, row1, row2, translation)
+    }
+
+    /// General inverse of the whole 4×4, with no assumption about the
+    /// bottom row, so a projection, a view-projection product, and a
+    /// transform with scale or shear are all in range. Under the crate's
+    /// column-major, `M * v` convention it returns `Some(inverse)` with
+    /// `self * inverse == inverse * self == IDENTITY` up to rounding.
+    ///
+    /// It returns `None` exactly when the determinant is zero or not finite,
+    /// or its reciprocal is not finite. There is no tolerance: the
+    /// determinant scales with the product of the column lengths, so no
+    /// fixed threshold is sound, and a caller that wants to treat a nearly
+    /// singular matrix as singular knows its own scale.
+    #[must_use]
+    pub fn inverse(self) -> Option<Self> {
+        let m = self.to_cols_array();
+        let (a00, a10, a20, a30) = (m[0], m[1], m[2], m[3]);
+        let (a01, a11, a21, a31) = (m[4], m[5], m[6], m[7]);
+        let (a02, a12, a22, a32) = (m[8], m[9], m[10], m[11]);
+        let (a03, a13, a23, a33) = (m[12], m[13], m[14], m[15]);
+
+        let s0 = a00 * a11 - a10 * a01;
+        let s1 = a00 * a12 - a10 * a02;
+        let s2 = a00 * a13 - a10 * a03;
+        let s3 = a01 * a12 - a11 * a02;
+        let s4 = a01 * a13 - a11 * a03;
+        let s5 = a02 * a13 - a12 * a03;
+        let c5 = a22 * a33 - a32 * a23;
+        let c4 = a21 * a33 - a31 * a23;
+        let c3 = a21 * a32 - a31 * a22;
+        let c2 = a20 * a33 - a30 * a23;
+        let c1 = a20 * a32 - a30 * a22;
+        let c0 = a20 * a31 - a30 * a21;
+
+        let determinant = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+        let reciprocal = 1.0 / determinant;
+        let invertible = determinant.is_finite() && reciprocal.is_finite();
+        if !invertible {
+            return None;
+        }
+
+        let b00 = (a11 * c5 - a12 * c4 + a13 * c3) * reciprocal;
+        let b01 = (-a01 * c5 + a02 * c4 - a03 * c3) * reciprocal;
+        let b02 = (a31 * s5 - a32 * s4 + a33 * s3) * reciprocal;
+        let b03 = (-a21 * s5 + a22 * s4 - a23 * s3) * reciprocal;
+        let b10 = (-a10 * c5 + a12 * c2 - a13 * c1) * reciprocal;
+        let b11 = (a00 * c5 - a02 * c2 + a03 * c1) * reciprocal;
+        let b12 = (-a30 * s5 + a32 * s2 - a33 * s1) * reciprocal;
+        let b13 = (a20 * s5 - a22 * s2 + a23 * s1) * reciprocal;
+        let b20 = (a10 * c4 - a11 * c2 + a13 * c0) * reciprocal;
+        let b21 = (-a00 * c4 + a01 * c2 - a03 * c0) * reciprocal;
+        let b22 = (a30 * s4 - a31 * s2 + a33 * s0) * reciprocal;
+        let b23 = (-a20 * s4 + a21 * s2 - a23 * s0) * reciprocal;
+        let b30 = (-a10 * c3 + a11 * c1 - a12 * c0) * reciprocal;
+        let b31 = (a00 * c3 - a01 * c1 + a02 * c0) * reciprocal;
+        let b32 = (-a30 * s3 + a31 * s1 - a32 * s0) * reciprocal;
+        let b33 = (a20 * s3 - a21 * s1 + a22 * s0) * reciprocal;
+
+        Some(Self::from_cols(
+            Vec4::new(b00, b10, b20, b30),
+            Vec4::new(b01, b11, b21, b31),
+            Vec4::new(b02, b12, b22, b32),
+            Vec4::new(b03, b13, b23, b33),
+        ))
     }
 
     /// Right-handed look-at view matrix. Camera at `eye`, looking
@@ -313,6 +381,56 @@ mod tests {
         let v = Vec4::new(1.0, 2.0, 3.0, 1.0);
         let round = inv * (m * v);
         assert!(approx_eq_vec4(round, v));
+    }
+
+    #[test]
+    fn inverse_of_view_projection_matches_closed_form() {
+        // Catches a transposed adjugate, a wrong cofactor sign, and a bottom row
+        // assumed to be (0, 0, 0, 1): the expected value is composed from the
+        // rigid inverse and the closed-form perspective inverse, not from `inverse`.
+        let projection = Mat4::perspective_rh(PI * 0.4, 1.6, 0.5, 40.0);
+        let view = Mat4::look_at_rh(Vec3::new(3.0, 4.0, 7.0), Vec3::new(-1.0, 0.5, 0.0), Vec3::Y);
+        let [sx, sy, a, b] = [projection.cols[0].x, projection.cols[1].y, projection.cols[2].z, projection.cols[3].z];
+        let projection_inverse = Mat4::from_cols(
+            Vec4::new(1.0 / sx, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 1.0 / sy, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, 0.0, 1.0 / b),
+            Vec4::new(0.0, 0.0, -1.0, a / b),
+        );
+
+        let expected = (view.inverse_rigid() * projection_inverse).to_cols_array();
+        let actual = (projection * view).inverse().expect("a view-projection is invertible").to_cols_array();
+
+        for (index, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
+            let tolerance = 1e-4 * want.abs().max(1.0);
+            assert!((got - want).abs() <= tolerance, "element {index}: got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn inverse_of_singular_matrix_is_none() {
+        // Catches a division by a zero determinant whose infinities reach a caller as a matrix.
+        let flat = Mat4::from_scale(Vec3::new(2.0, 0.0, 3.0));
+        let repeated = Mat4::from_cols(Vec4::new(1.0, 2.0, 3.0, 0.0), Vec4::new(1.0, 2.0, 3.0, 0.0), Vec4::Z, Vec4::W);
+        let mut poisoned = Mat4::IDENTITY;
+        poisoned.cols[1].y = f32::NAN;
+
+        assert_eq!(flat.inverse(), None);
+        assert_eq!(repeated.inverse(), None);
+        assert_eq!(poisoned.inverse(), None);
+    }
+
+    #[test]
+    fn inverse_of_small_uniform_scale_is_some() {
+        // Catches an absolute epsilon on the determinant (1e-12 here) added later.
+        let small = Mat4::from_scale(Vec3::new(1e-4, 1e-4, 1e-4));
+
+        let inverse = small.inverse().expect("a small uniform scale is invertible");
+
+        let expected = Mat4::from_scale(Vec3::new(1e4, 1e4, 1e4)).to_cols_array();
+        for (got, want) in inverse.to_cols_array().iter().zip(expected.iter()) {
+            assert!((got - want).abs() <= 1e-4 * want.abs().max(1.0), "got {got}, want {want}");
+        }
     }
 
     #[test]

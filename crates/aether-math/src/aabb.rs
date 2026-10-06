@@ -1,3 +1,6 @@
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
+
 use crate::vec::Vec3;
 
 /// A named world axis, used to select which component an operation acts on.
@@ -14,7 +17,9 @@ pub enum Axis {
 /// [`Aabb::EMPTY`] uses `+∞` / `-∞` so unioning anything with it
 /// returns the other operand unchanged — convenient as an accumulator.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Aabb {
     pub min: Vec3,
     pub max: Vec3,

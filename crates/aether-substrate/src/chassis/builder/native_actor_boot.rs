@@ -15,7 +15,7 @@ use crate::actor::native::local;
 use crate::actor::native::slot::close::close;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
-use crate::chassis::ctx::{ChassisCtx, DropOnShutdownClaim, MailboxWakeSlot};
+use crate::chassis::ctx::{ChassisCtx, MailboxClaim, MailboxWakeSlot};
 use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::cost::CostCells;
@@ -72,7 +72,7 @@ enum BootState<A: Root + NativeActor> {
 /// macro emits.
 ///
 /// ADR-0082 retired the frame-bound claim variant: every cap takes the
-/// drop-on-shutdown claim, and settlement gating on the
+/// one mailbox claim, and settlement gating on the
 /// `LifecycleAdvance` chain root (not a per-mailbox pending counter) is
 /// the frame-integration gate now.
 pub(super) struct NativeActorBoot<A: Root + NativeActor> {
@@ -123,14 +123,14 @@ where
         // cleanup_after_failure sees that and does nothing.
         ctx.registry().hold_native::<A>().map_err(|refusal| BootError::Other(Box::new(refusal)))?;
 
-        // ADR-0082: every cap takes the drop-on-shutdown claim. The
+        // ADR-0082: every cap takes the one claim. The
         // FRAME_BARRIER frame-bound claim variant retired with the
         // per-frame drain barrier — settlement gating on the
         // LifecycleAdvance chain root is the frame-integration gate
         // now.
         // A refused claim leaves the state `Transitioning` — no further
         // cleanup for the rollback loop to do.
-        let DropOnShutdownClaim { id: mailbox_id, inbox, wake_slot } = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
+        let MailboxClaim { id: mailbox_id, inbox, wake_slot, .. } = ctx.claim_mailbox::<A>()?;
 
         // Per-cap transport. `NativeBinding::from_ctx` pulls the
         // chassis's aborter + spawner. The claim's inbox moves onto the

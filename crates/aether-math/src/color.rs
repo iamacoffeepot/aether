@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
     Deserialize,
     aether_data::Kind,
     aether_data::Schema,
+    aether_data::StorageLeaf,
 )]
 #[kind(name = "aether.color.rgb")]
 pub struct Rgb {
@@ -42,6 +43,7 @@ pub struct Rgb {
     Deserialize,
     aether_data::Kind,
     aether_data::Schema,
+    aether_data::StorageLeaf,
 )]
 #[kind(name = "aether.color.rgba")]
 pub struct Rgba {
@@ -64,6 +66,7 @@ pub struct Rgba {
     Deserialize,
     aether_data::Kind,
     aether_data::Schema,
+    aether_data::StorageLeaf,
 )]
 #[kind(name = "aether.color.hsl")]
 pub struct Hsl {

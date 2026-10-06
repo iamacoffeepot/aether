@@ -131,6 +131,7 @@ pub enum SlotShape {
     Target(SlotExtent),   // sized from the output; a pass may write it
     Texture,              // any size, read only
     TextureArray,         // any size and layer count, read only
+    TextureVolume,        // any width, height and depth, read only
 }
 pub enum Sampling { Filtered { wrap: Wrap, mips: Mips }, Texel }
 pub enum Wrap { Clamp, Repeat }
@@ -139,13 +140,13 @@ pub enum Mips { Base, Chain }
 
 A read-only binding is visible to the vertex stage as well as the fragment stage, and `Texel` reads exact values, so a table of data is an ordinary texture. This is the whole of issue 7401.
 
-`Wrap` is the sampler's address mode: `Clamp` extends the edge texel and `Repeat` tiles. `Mips::Base` reads the base level only and `Mips::Chain` filters across the whole mip chain. `Sampling` carries no filter: linear or nearest stays a property of the bound texture, which the quad and material paths draw under the same setting.
+`Wrap` is the sampler's address mode: `Clamp` extends the edge texel and `Repeat` tiles. A `TextureVolume` binding takes a volume texture (decision 6) and nothing else, the shader declares it `texture_3d<f32>`, and `Wrap` addresses all three of its axes. `Mips::Base` reads the base level only and `Mips::Chain` filters across the whole mip chain. `Sampling` carries no filter: linear or nearest stays a property of the bound texture, which the quad and material paths draw under the same setting.
 
 A `Texel` input binds a texture and no sampler. Input `n` of a pass keeps its numbering whatever its sampling: its texture is `@binding(2 * n)`, and for a `Texel` input `@binding(2 * n + 1)` is left out of the layout, so the inputs after it do not shift. The texture entry is declared unfilterable, so a texture of any format binds there, and the shader reads it with `textureLoad`.
 
 Among bindings only a `Target` has an extent, so every binding a pass writes is a `Target`, and the final pass's binding is `Target(SlotExtent::Full)`. A transient declares no shape: it carries its own extent (decision 7), and a pass may write it or read it.
 
-**6. Texture arrays are a resource.**
+**6. Texture arrays and volume textures are resources.**
 
 ```rust
 #[aether_data::kind(name = "aether.render.create_texture_array")]
@@ -154,13 +155,19 @@ pub struct CreateTextureArray { pub format: TextureFormat, pub side: u32, pub la
 pub enum CreateTextureArrayResult { Ok { texture_id: u32 }, Err { error: String } }
 #[aether_data::kind(name = "aether.render.write_texture_layer")]
 pub struct WriteTextureLayer { pub texture_id: u32, pub layer: u32, pub pixels: Blob }
+#[aether_data::kind(name = "aether.render.create_texture_volume")]
+pub struct CreateTextureVolume { pub format: TextureFormat, pub width: u32, pub height: u32, pub depth: u32, pub pixels: Blob }
+#[aether_data::kind(name = "aether.render.create_texture_volume_result")]
+pub enum CreateTextureVolumeResult { Ok { texture_id: u32 }, Err { error: String } }
 ```
 
 Side and layer capacity are fixed at creation and a layer's contents are written in place. The device requests the adapter's array-layer and buffer-size limits rather than the defaults of 256 layers and 256 MiB, which the measurements hit first.
 
-Creation replies `CreateTextureArrayResult`, and a refused creation consumes no id. A write carries no reply; a refused write is logged and leaves the layer as it was. An array's id comes from the sequence a plain texture's does, so one id names a texture or an array and never both, and `aether.render.destroy_texture` is the destroy path of both.
+Creation replies `CreateTextureArrayResult`, and a refused creation consumes no id. A write carries no reply; a refused write is logged and leaves the layer as it was. An array's id and a volume's come from the sequence a plain texture's does, so one id names a texture, an array or a volume and never two of them, and `aether.render.destroy_texture` is the destroy path of all three.
 
 Mips are supplied, not generated. A `Mips::Base` array has one level. A `Mips::Chain` array has `floor(log2(side)) + 1` levels, level `n` having side `max(1, side >> n)`, and `WriteTextureLayer.pixels` carries every level of the layer, base level first. A write is all of a layer's levels or none of them. A layer that was never written reads as zero in every channel. The engine keeps the pixels of each written layer, so they survive a render device replacement under the same id.
+
+A volume is `width` by `height` by `depth` texels and is given whole at creation: `pixels` holds `depth` slices, slice 0 first, each row-major and top-down. It is immutable, so there is no write kind and new contents are a new volume, and it has one level. It is read linear when its format can be filtered, which interpolates between slices as between texels. Each dimension is checked against the default three-dimensional limit every render device is requested at, so creation reads no device: it replies `CreateTextureVolumeResult` at once, before the first device exists as after, and a refused creation consumes no id. The engine keeps the pixels, so a volume survives a render device replacement under the same id.
 
 **7. Targets gain samples and passes gain blend.**
 

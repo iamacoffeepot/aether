@@ -95,11 +95,11 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost. Only the
-/// data-layer derives (`Kind`, `Schema`, `Storage`) are re-exported here; the
+/// data-layer derives (`Kind`, `Schema`, `Storage`, `StorageLeaf`) are re-exported here; the
 /// actor-SDK attribute macros (`actor`, `capability`, `fallback`,
 /// `handler`, `local`) are exported from `aether-actor` directly.
 #[cfg(feature = "derive")]
-pub use aether_data_derive::{Kind, Schema, Storage};
+pub use aether_data_derive::{Kind, Schema, Storage, StorageLeaf};
 
 /// Re-exported `#[transform]` attribute macro from `aether-data-derive`
 /// (ADR-0048 §1). A transform is a pure `Kind -> Kind` data-layer
@@ -654,8 +654,8 @@ pub mod __inventory {
     inventory::collect!(DescriptorEntry);
 }
 
-/// Internal re-exports the `#[derive(Schema)]`, `#[derive(Kind)]`, and
-/// `#[derive(Storage)]` macros point at so their output compiles in
+/// Internal re-exports the `#[derive(Schema)]`, `#[derive(Kind)]`,
+/// `#[derive(Storage)]`, and `#[derive(StorageLeaf)]` macros point at so their output compiles in
 /// no_std + alloc consumer crates without those consumers needing
 /// `extern crate alloc;` or a direct `aether-data` dep at the site.
 /// Not part of the public API; the macros are the only intended
@@ -669,10 +669,10 @@ pub mod __derive_runtime {
     pub use crate::storage::{
         BYTES_SCHEMA, Citations, Cites, RecordReader, RecordWriter, Storage, StorageData, StorageElement, StorageError,
         StorageLeaves, U64_SCHEMA, UNIT_SCHEMA, UnknownField, VARIANT_LEAF, assemble_bytes,
-        assemble_bytes_with_aliases, assemble_positional_element, assemble_tagged_element, assemble_with_aliases,
-        assert_unique_storage_leaves, bytes_absent, contribute_bytes, contribute_positional_element,
-        contribute_tagged_element, decode_derived, encode_derived, field_path_root, fold_index_segment,
-        fold_path_segment, terminate_field_hash, variant_hash,
+        assemble_bytes_with_aliases, assemble_opaque, assemble_positional_element, assemble_tagged_element,
+        assemble_with_aliases, assert_unique_storage_leaves, bytes_absent, contribute_bytes, contribute_opaque,
+        contribute_positional_element, contribute_tagged_element, decode_derived, encode_derived, field_path_root,
+        fold_index_segment, fold_path_segment, opaque_absent, terminate_field_hash, variant_hash,
     };
     use crate::wire;
     pub use crate::wire::{DecodeCtx, Decoder, Encoder, WireDecode, WireEncode, decode_bytes, encode_bytes};

@@ -5,7 +5,7 @@
 #![allow(clippy::option_if_let_else)]
 
 //! Proc macros for `aether-data`: the `#[kind]` attribute, the `Kind`,
-//! `Schema`, and `Storage` derives, and `#[transform]`. `aether-data`
+//! `Schema`, `Storage`, and `StorageLeaf` derives, and `#[transform]`. `aether-data`
 //! re-exports all of them behind its `derive` feature, so a consumer depends
 //! on that crate and not on this one. They live apart because Rust forbids a
 //! `proc-macro = true` crate from exporting runtime items.
@@ -53,6 +53,10 @@
 //! tagged element, leaves, and cites — and not a root. `#[storage(validate)]`
 //! on a single-field tuple struct emits a validated newtype that encodes as
 //! its inner type and re-runs `check` on every decode path.
+//!
+//! `StorageLeaf` goes beside `Schema` on a fixed-layout value type so a
+//! `Storage` type can hold it as a field: one record whose body is the
+//! type's positional wire bytes, as a scalar is stored.
 //!
 //! `#[transform]` marks a pure `Kind -> Kind` function with no dependence on
 //! the actor framework; its runtime types live in `aether-data`. The macro
@@ -151,6 +155,18 @@ pub fn derive_kind(input: TokenStream) -> TokenStream {
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_schema(&input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `#[derive(StorageLeaf)]` — a fixed-layout value type, already
+/// `#[derive(Schema)]`, as the field of a `Storage` type: one record
+/// whose body is the type's positional wire bytes (ADR-0059).
+#[proc_macro_derive(StorageLeaf)]
+pub fn derive_storage_leaf(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match storage::expand_storage_leaf(&input) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }

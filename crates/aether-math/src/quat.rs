@@ -1,9 +1,14 @@
 use core::ops::Mul;
 
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
+
 use crate::vec::Vec3;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize, aether_data::Schema, aether_data::StorageLeaf,
+)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,

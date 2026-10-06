@@ -95,6 +95,7 @@ Every kind below addresses the `aether.render` mailbox.
 | `aether.render.destroy_draw_set` | `DestroyDrawSet { draw_set_id }` | fire-and-forget release of the set and what it holds |
 | `aether.render.create_texture_array` | `CreateTextureArray { format, side, layers, mips }` | validate against the device's limits; reply `aether.render.create_texture_array_result` / `CreateTextureArrayResult` (`Ok { texture_id }` / `Err { error }`) |
 | `aether.render.write_texture_layer` | `WriteTextureLayer { texture_id, layer, pixels }` | fire-and-forget in-place write of every level of one layer |
+| `aether.render.create_texture_volume` | `CreateTextureVolume { format, width, height, depth, pixels }` | validate + stage the whole volume, with no device needed; reply `aether.render.create_texture_volume_result` / `CreateTextureVolumeResult` (`Ok { texture_id }` / `Err { error }`) |
 
 `program_id` and `geometry_id` are session-scoped and assigned like texture and
 instrument identifiers. A rejected register or create consumes no id, so
@@ -265,8 +266,9 @@ of a chain. A `Filtered` binding reads past the base level only when it
 declares `Mips::Chain`.
 
 An array's id comes from the sequence `create_texture` draws from. One
-`texture_id` names a texture or an array and never both, and
-`destroy_texture` releases either; there is no second destroy kind. Every
+`texture_id` names a texture, an array or a
+[volume](#the-volume-texture-resource) and never two of them, and
+`destroy_texture` releases any of the three; there is no second destroy kind. Every
 path that takes a plain texture (`update_texture`, the quad, shape and
 material draws) treats an array's id as unknown and warn-drops.
 
@@ -289,7 +291,7 @@ class replies its own reason:
 | Byte size | `a F layer of side N overflows the addressable byte count` |
 
 `write_texture_layer` is fire-and-forget. An unknown id, an id that names a
-plain texture, a layer at or past the layer count, bytes that are not
+plain texture or a volume, a layer at or past the layer count, bytes that are not
 resident in this process, or a length that is not every level of one layer
 logs a warning under the `aether_render` target and leaves the layer as it
 was. An accepted write replaces the layer in place: the id does not change,
@@ -300,6 +302,63 @@ source of truth. Writes are accepted at any time after creation; the GPU
 texture is created at the first dispatch that binds the array. After a render
 device replacement the array comes back under the same id with every written
 layer as it was.
+
+## The volume texture resource
+
+A volume texture is `width` by `height` by `depth` texels in one `format`,
+bound at a `SlotShape::TextureVolume` binding and read at a three-component
+coordinate ([ADR-0246](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0246-retained-draw-sets.md)
+decision 6). It is how a program reads a value interpolated along a third
+axis with one sample: a small repeating float volume whose third axis is
+time, for example, read at a fractional coordinate so the sampler blends
+between slices and wraps from the last slice back to the first.
+
+`create_texture_volume` carries the whole contents. `pixels` is `depth`
+slices, slice 0 first, each slice row-major and top-down, with nothing
+between slices: exactly `width * height * depth * format.bytes_per_pixel()`
+bytes. Texture coordinate `w = 0` is the near face of slice 0, so **slice `k`
+is centred at `w = (k + 0.5) / depth`**, as a texel is centred half a texel in
+on the other two axes.
+
+A volume is immutable. No kind writes it after creation; new contents are a
+new volume and a `destroy_texture` of the old one. It has one mip level, so a
+binding that declares `Mips::Chain` reads it as `Mips::Base` does.
+
+It has no sampling setting of its own, as an array has none: it is read
+linear when its format can be filtered and nearest when it cannot
+(`R32Float`). All five texture formats are accepted. A linear read
+interpolates on all three axes, and a `Filtered` binding's `Wrap` is the
+address mode on all three: under `Repeat` a coordinate half a slice before
+the first slice's centre reads the even blend of the last slice and the
+first.
+
+A volume's id comes from the sequence `create_texture` draws from, shared
+with plain textures and arrays, and `destroy_texture` releases it. Every path
+that takes a plain texture (`update_texture`, the quad, shape and material
+draws) treats a volume's id as unknown and warn-drops, and
+`write_texture_layer` naming a volume warn-drops as it does for a plain
+texture.
+
+Each dimension is checked against `max_texture_dimension_3d` at its default,
+2048, which is the limit every render device is requested at. The check
+therefore reads no device, and **a create is answered inside the call, before
+the render device exists as after**: on desktop a component may create a
+volume from `wire`, before the first window attaches, and has its id when the
+response arrives. `create_texture_volume` validates before it assigns an id,
+and each failure class replies its own reason:
+
+| Class | Reason shape |
+|---|---|
+| Bytes not resident | `pixel bytes are not resident in this process` |
+| Zero dimension | `texture volume dimensions WxHxD have a zero dimension` |
+| Dimension limit | `texture volume dimensions WxHxD exceed the device limit max_texture_dimension_3d = M` |
+| Byte size | `a F volume WxHxD overflows the addressable byte count` |
+| Length | `pixels length N does not match WxHxD F = M` |
+
+The substrate keeps the blob it was given, and that blob is the source of
+truth. The GPU texture is created, and the blob uploaded, at the first
+dispatch that binds the volume. After a render device replacement the volume
+comes back under the same id with its contents as they were.
 
 ## The draw set resource
 
@@ -450,6 +509,11 @@ A binding's `shape` says what it takes and whether a pass may write it:
   `texture_2d_array<f32>`. The kind of texture has to match in both
   directions: a dispatch that binds a plain texture here is dropped, and so is
   one that binds an array at a `Target` or `Texture` binding.
+- `SlotShape::TextureVolume` — a [volume texture](#the-volume-texture-resource)
+  of any width, height and depth, read only. The shader declares it
+  `texture_3d<f32>` and reads it with a `vec3<f32>` coordinate, or with
+  `textureLoad` and a `vec3<i32>` under `Texel`. Only a volume binds here,
+  and a volume binds nowhere else.
 
 A `Target` binding, a transient and a `DepthExtent::Output` depth transient
 each carry one of two extents:
@@ -463,8 +527,8 @@ The **reference extent** is the size of the texture bound at the program's
 output binding — the dispatch binding the final pass writes, which must be
 declared `Target(Full)`. Every other extent scales from it, which is what
 lets one registered program dispatch at any canvas size: the graph carries no
-pixel dimensions, only ratios. A `Texture` or `TextureArray` binding stands
-outside that rule and keeps the size it was created with, and so does a
+pixel dimensions, only ratios. A `Texture`, `TextureArray` or `TextureVolume`
+binding stands outside that rule and keeps the size it was created with, and so does a
 `DepthExtent::Fixed { side }` depth transient: it is `side` texels square
 whatever the reference extent is, and it keeps that size when the output is
 resized. `side` is at least 1 and at most the device's
@@ -636,8 +700,8 @@ Bindings inside the shader, identical for both pass classes:
 - Group 1 — the pass's input slots, in declaration order. Input `n` is the
   texture at `@binding(2 * n)` and, for a transient or a `Filtered` binding,
   the `sampler` at `@binding(2 * n + 1)`. The texture is `texture_2d<f32>` for
-  a transient or a `Target` or `Texture` binding and `texture_2d_array<f32>`
-  for a `TextureArray`.
+  a transient or a `Target` or `Texture` binding, `texture_2d_array<f32>`
+  for a `TextureArray` and `texture_3d<f32>` for a `TextureVolume`.
 
 A `Texel` binding has no sampler. Its input still takes the texture at
 `@binding(2 * n)` and leaves `@binding(2 * n + 1)` unused, so the inputs after
@@ -1179,8 +1243,9 @@ drop classes:
 - a binding whose format disagrees with the declared `SlotSpec`;
 - a `Target` binding whose size disagrees with its extent resolved against the
   reference (a `Texture` binding takes any size);
-- a `TextureArray` binding whose texture is not an array;
-- a `Target` or `Texture` binding whose texture is an array;
+- a binding whose texture is not the kind its shape takes: a plain texture
+  for `Target` and `Texture`, an array for `TextureArray`, a volume for
+  `TextureVolume`;
 - a non-`Writable` texture bound where the graph writes;
 - a geometry slot naming an unknown geometry id;
 - a geometry whose created layout disagrees with the slot's declared layout;

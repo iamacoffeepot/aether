@@ -482,3 +482,10 @@ pub struct WindowOpened {
 pub struct WindowClosed {
     pub window: ErasedActorPath,
 }
+
+/// Published when a window gains or loses input focus.
+#[aether_data::kind(name = "aether.window.focus_changed", eq)]
+pub struct WindowFocus {
+    pub window: ErasedActorPath,
+    pub focused: bool,
+}

@@ -45,6 +45,7 @@ macro_rules! published_window_kinds {
             Modifiers modifiers,
             WindowOpened window_opened,
             WindowClosed window_closed,
+            WindowFocus window_focus,
             WindowMenuActivated window_menu_activated,
         }
     };

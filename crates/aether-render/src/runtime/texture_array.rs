@@ -2,8 +2,9 @@
 //! decision 6): a fixed number of square layers, each written in place.
 //!
 //! An array shares the registry's id sequence with the plain textures
-//! and lives in its own map, so an id names one or the other and every
-//! reader of the plain map already treats an array id as unknown. The
+//! and the volumes and lives in its own map, so an id names one of them
+//! and every reader of the plain map already treats an array id as
+//! unknown. The
 //! received blob of each written layer is the source of truth, as staged
 //! pixels are for a plain texture: the wgpu texture is realized lazily at
 //! record time and rebuilt from the blobs on a replacement device.
@@ -191,7 +192,9 @@ impl TextureRegistry {
     pub fn write_layer(&mut self, mail: WriteTextureLayer) {
         let WriteTextureLayer { texture_id, layer, pixels } = mail;
         let Some(array) = self.arrays.get_mut(&texture_id) else {
-            if self.entries.contains_key(&texture_id) {
+            let plain = self.entries.contains_key(&texture_id);
+            let volume = self.volumes.contains_key(&texture_id);
+            if plain || volume {
                 tracing::warn!(
                     target: "aether_render",
                     texture_id,

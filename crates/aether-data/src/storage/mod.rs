@@ -32,7 +32,8 @@ pub use hash::{
 pub use invariant::Invariant;
 pub use leaf::{LeafBody, decode_stream_leaf};
 pub use leaves::{
-    StorageLeaves, assemble_bytes, assemble_bytes_with_aliases, assemble_with_aliases, bytes_absent, contribute_bytes,
+    StorageLeaves, assemble_bytes, assemble_bytes_with_aliases, assemble_opaque, assemble_with_aliases, bytes_absent,
+    contribute_bytes, contribute_opaque, opaque_absent,
 };
 pub use record::{RecordReader, RecordWriter, StorageError, UnknownField};
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,27 +1,23 @@
 //! Boot machinery shared by the chassis builder (`chassis::builder::Builder`,
-//! ADR-0071): mailbox claim helpers, the per-cap [`MailboxClaim`] /
-//! [`DropOnShutdownClaim`] result shapes, and the [`ChassisCtx`]
-//! threaded through every cap's boot. Sibling modules: error types
-//! live in `chassis::error`; the cross-flavour [`Envelope`] shape lives
-//! in `actor::native::envelope`.
+//! ADR-0071): the mailbox claim, its [`MailboxClaim`] result shape, and
+//! the [`ChassisCtx`] threaded through every cap's boot. Sibling modules:
+//! error types live in `chassis::error`; the cross-flavour [`Envelope`]
+//! shape lives in `actor::native::envelope`; the inbox channel and the
+//! relay a claim registers live in `chassis::inbox`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use aether_actor::local::ActorSlots;
 use aether_actor::{ActorRef, Addressable};
 
-use aether_data::KindId;
-
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::ComposedReferences;
 use crate::chassis::error::BootError;
-use crate::chassis::inbox::{FeedOutcome, InboxFeed, InboxReceiver, SettlingInbox, inbox_channel};
+use crate::chassis::inbox::{SettlingInbox, inbox_channel};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::BootAuthority;
-use crate::mail::registry::InboxHandler;
-use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::WakeSink;
@@ -63,14 +59,13 @@ pub struct MailboxClaim {
     pub inbox: SettlingInbox,
     pub actor_slots: SharedActorSlots,
     /// Optional wake hook fired by the registry sink after each
-    /// accepted send (iamacoffeepot/aether#1318). The plain claim path
-    /// — unlike `claim_mailbox_drop_on_shutdown` — drains on a cadence
-    /// the claimer controls (the desktop window driver drains in
-    /// `about_to_wait`), so it needs a way to nudge that cadence when
-    /// mail arrives while the loop is parked. Defaults to an unset
-    /// slot; the desktop window driver installs an `EventLoopProxy`
-    /// wake so `aether.window` mail wakes the winit loop even under
-    /// `ControlFlow::Wait`. Empty for every other plain-claim consumer.
+    /// accepted send (iamacoffeepot/aether#1318). Unset when the claim
+    /// returns; whoever drains the inbox installs the hook that nudges
+    /// its drain. A composed root's boot installs the pool wake that
+    /// re-queues the actor's slot, and the desktop window driver, which
+    /// drains in `about_to_wait`, installs an `EventLoopProxy` wake so
+    /// `aether.window` mail wakes the winit loop even under
+    /// `ControlFlow::Wait`.
     pub wake_slot: Arc<MailboxWakeSlot>,
 }
 
@@ -129,36 +124,10 @@ impl SharedActorSlots {
     }
 }
 
-/// Result returned from [`ChassisCtx::claim_mailbox_drop_on_shutdown`].
-///
-/// The claim every composed root actor takes. Its inbox owns the channel's
-/// only strong sender; the registry's inbox handler holds a weak feed. The
-/// root shutdown frees the actor's binding and with it the inbox: the
-/// inbox's drop settles whatever was already queued or in the middle of
-/// being sent, and a later delivery is settled and warn-logged at the relay.
-#[derive(Debug)]
-pub struct DropOnShutdownClaim {
-    pub(crate) id: MailboxId,
-    /// ADR-0106: the standard-dispatcher inbox, bound to the claimed
-    /// mailbox. The builder re-lineages it onto the actor's binding and
-    /// installs it there, so no raw receiver leaves the claim.
-    pub(crate) inbox: SettlingInbox,
-    /// Issue 635 PR C: the pool wake hook. The mailbox closure invokes
-    /// it after a successful inbox push so the chassis worker pool
-    /// re-queues the actor's [`crate::scheduler::Drainable`] slot. Every
-    /// actor is pool-dispatched (issue 1187), so this is always
-    /// populated post-slot-construction; the [`OnceLock`] shape lets the
-    /// closure's `get()` stay a single relaxed atomic load while the
-    /// slot is still being built.
-    ///
-    /// Populated post-claim by `make_native_actor_boot` /
-    /// `Spawner::spawn_actor` after the slot exists.
-    pub wake_slot: Arc<MailboxWakeSlot>,
-}
-
 /// Cell holding the optional wake hook a `Pooled` mailbox fires after
-/// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
-/// at registration time; the spawn path populates it once the
+/// each accepted send. The mailbox's inbox relay holds the
+/// `Arc<MailboxWakeSlot>` from the moment its channel is opened; the spawn
+/// path populates it once the
 /// [`crate::scheduler::Drainable`] slot exists.
 #[derive(Default)]
 pub struct MailboxWakeSlot {
@@ -190,168 +159,6 @@ impl MailboxWakeSlot {
     pub(crate) fn get(&self) -> Option<&MailboxWakeFn> {
         self.inner.get()
     }
-}
-
-/// Outcome of [`relay_or_transfer`]. Each abandonment variant carries
-/// the discarded mail's kind id (copied out of the transferred
-/// dispatch) so the caller can render its own site-specific
-/// `tracing::warn!` — the `target:` literal
-/// and message differ per relay seam, which is why the log stays at the
-/// call site while the obligation-settling core does not.
-#[derive(Debug)]
-pub(crate) enum RelayOutcome {
-    /// The envelope was moved onto the actor's channel and the wake hook
-    /// (if installed) fired. The obligation rides the value; the actor's
-    /// dispatcher discharges it on drain.
-    Delivered,
-    /// The feed refused the mail as closed: the inbox was dropped, which
-    /// released its strong sender. The mail was settled
-    /// (not dropped armed) before returning.
-    SenderGone { kind: KindId },
-    /// The sender upgraded but the receiver had disconnected, so the
-    /// `mpsc::send` failed. The returned envelope was settled before
-    /// returning.
-    ReceiverGone { kind: KindId },
-}
-
-/// The shared inbox-relay core (ADR-0094): move the [`OwnedDispatch`] onto
-/// the actor's channel through its [`InboxFeed`] and fire the wake hook —
-/// settling the discarded mail at the two abandonment seams in exactly one
-/// place.
-///
-/// The wake hook runs after [`InboxFeed::send`] has returned, so no sender
-/// is held across it: a slot whose last reference the wake path releases
-/// can drop its inbox on this thread, and that inbox's blocking drain does
-/// not wait on this relay.
-///
-/// Both the sender-gone and receiver-gone branches settle the mail before
-/// returning: they record its `Finished` (ADR-0080 §2) and then discharge
-/// the ADR-0094 guard, the same tail [`InboundMail`]'s drop and the
-/// dispatcher run. A send racing teardown therefore ends its chain at the
-/// relay seam rather than dropping an armed dispatch (#1564) or leaving its
-/// root's `in_flight` count raised forever (#7116). The production inbox
-/// closures — the relay and drop-on-shutdown claims here and the
-/// instanced and activated actor closures in
-/// [`crate::actor::native::spawn`] — route through this function so the
-/// discard contract has a single home. Per-site concerns (each site's
-/// `tracing::warn!` target + message) stay at the call site, driven by the
-/// returned [`RelayOutcome`].
-///
-/// `mailer` is `Weak` because every caller is a registry inbox handler and
-/// the [`Mailer`] holds the registry; a strong capture would be a cycle. It
-/// is upgraded only on a discard arm, so delivery pays nothing for it.
-///
-/// [`InboundMail`]: crate::chassis::inbox::InboundMail
-pub(crate) fn relay_or_transfer(
-    dispatch: OwnedDispatch,
-    feed: &InboxFeed,
-    wake: &MailboxWakeSlot,
-    mailer: &Weak<Mailer>,
-) -> RelayOutcome {
-    match feed.send(dispatch) {
-        FeedOutcome::Queued => {}
-        // ADR-0094: the inbox is gone — the mail ends at this relay seam,
-        // so settle it, then copy the kind id out for the caller's log
-        // (the rest of the envelope drops here).
-        FeedOutcome::Closed(env) => {
-            settle_discarded(&env, mailer);
-            return RelayOutcome::SenderGone { kind: env.kind };
-        }
-        // ADR-0094: receiver disconnected — the mail ends here; settle it.
-        FeedOutcome::ReceiverGone(env) => {
-            settle_discarded(&env, mailer);
-            return RelayOutcome::ReceiverGone { kind: env.kind };
-        }
-    }
-    if let Some(wake) = wake.get() {
-        wake();
-    }
-    RelayOutcome::Delivered
-}
-
-/// Settle mail discarded at a relay seam: record its `Finished` so its
-/// root's `in_flight` count falls, then discharge the guard. A gone
-/// `Mailer` means its trace table is gone too, so there is nothing to
-/// settle; `record_finished` no-ops on an absent mail id, so lineage-less
-/// mail settles nothing.
-fn settle_discarded(env: &Envelope, mailer: &Weak<Mailer>) {
-    if let Some(mailer) = mailer.upgrade() {
-        mailer.record_finished(env.mail_id, env.root);
-    }
-    env.discharge();
-}
-
-/// Register a plain relay mailbox inbox under `name` and return its derived
-/// [`MailboxId`], the receiver half, and a fresh [`MailboxWakeSlot`]. The
-/// registered closure holds an [`InboxFeed`] and routes each delivery
-/// through [`relay_or_transfer`] (the shared send → wake core with both
-/// ADR-0094 settle seams), so a delivery after the claimer dropped its
-/// inbox is settled and warn-logged at the relay.
-///
-/// The registration core of [`ChassisCtx::claim_mailbox_with_override`],
-/// factored so a caller without a live [`ChassisCtx`] can claim a fresh
-/// relay mailbox. The caller binds the receiver into a [`SettlingInbox`]
-/// before it returns and owns whatever bookkeeping
-/// (`claimed_actor_mailboxes`, the ctx-bound `MailboxClaim`) it needs.
-pub(crate) fn register_relay_inbox(
-    authority: &BootAuthority,
-    registry: &Arc<Registry>,
-    mailer: &Arc<Mailer>,
-    name: &str,
-) -> Result<(MailboxId, InboxReceiver, Arc<MailboxWakeSlot>), BootError> {
-    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox(mailer);
-    let id = registry.try_register_inbox(authority, name.to_owned(), handler)?;
-    Ok((id, receiver, wake_slot))
-}
-
-/// The receiver, wake slot, and inbox handler of a relay mailbox, built but
-/// not yet bound to a route.
-///
-/// Splitting construction from registration is what lets the post-seal pumped
-/// boot (ADR-0165, [`crate::chassis::builder::PassiveChassis::boot_pumped_actor`])
-/// reserve its route as `Starting` through the registry owner, run `init` /
-/// `wire` at its caller-thread execution home, and only then hand this
-/// `handler` back to the owner as the endpoint to publish.
-pub(crate) struct RelayInbox {
-    pub(crate) receiver: InboxReceiver,
-    pub(crate) wake_slot: Arc<MailboxWakeSlot>,
-    pub(crate) handler: Arc<dyn InboxHandler>,
-}
-
-/// Build a relay mailbox's channel, wake slot, and inbox handler without
-/// touching the registry. See [`register_relay_inbox`] for the semantics of
-/// the handler body.
-pub(crate) fn prepare_relay_inbox(mailer: &Arc<Mailer>) -> RelayInbox {
-    let (receiver, feed) = inbox_channel();
-    // iamacoffeepot/aether#1318: optional wake hook fired after each accepted
-    // send. Unset by default (a single relaxed atomic load on the hot path);
-    // the desktop window driver installs an `EventLoopProxy` wake so
-    // `aether.window` mail nudges the winit loop under `ControlFlow::Wait`.
-    let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
-    let wake_for_handler = Arc::clone(&wake_slot);
-    let mailer = Arc::downgrade(mailer);
-    let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
-        match relay_or_transfer(dispatch, &feed, &wake_for_handler, &mailer) {
-            RelayOutcome::Delivered => {}
-            // The claimer dropped its inbox while the registry still routes
-            // to it.
-            RelayOutcome::SenderGone { kind } => {
-                tracing::warn!(
-                    target: "aether_substrate::capability",
-                    kind = %kind,
-                    "capability mailbox closed — mail discarded"
-                );
-            }
-            RelayOutcome::ReceiverGone { kind } => {
-                tracing::warn!(
-                    target: "aether_substrate::capability",
-                    kind = %kind,
-                    "capability mailbox receiver dropped — mail discarded"
-                );
-            }
-        }
-    });
-    RelayInbox { receiver, wake_slot, handler }
 }
 
 /// Generic fallback-router handler: a substrate-dispatch hook for a
@@ -504,13 +311,18 @@ impl<'a> ChassisCtx<'a> {
     /// production caps go through [`Self::claim_mailbox`] so the
     /// cap's own `NAMESPACE` is authoritative.
     ///
-    /// The closure registered with the registry forwards every
-    /// delivery through a weak feed into the claim's inbox, which the
-    /// capability drains. The inbox owns the channel's only strong
-    /// sender, so once the capability drops it a later delivery is
-    /// settled and warn-logged at the relay.
+    /// This is the one claim: a composed root actor, a pumped root and a
+    /// driver-as-actor mailbox all take it, and differ only in who drains
+    /// the inbox afterwards. The relay registered with the registry moves
+    /// every delivery onto the claim's inbox. The inbox owns the channel's
+    /// only strong sender, so once its owner drops it (a root's shutdown
+    /// frees the actor's binding and with it the inbox) whatever was
+    /// queued or in the middle of being sent is settled by the inbox's
+    /// drop, and a later delivery is settled and warn-logged at the relay.
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
-        let (id, receiver, wake_slot) = register_relay_inbox(&self.authority, self.registry, self.mailer, name)?;
+        let (receiver, relay) = inbox_channel(self.mailer);
+        let wake_slot = Arc::clone(relay.wake_slot());
+        let id = self.registry.try_register_inbox(&self.authority, name.to_owned(), relay)?;
         self.claimed_actor_mailboxes.push(id);
         // iamacoffeepot/aether#1272: every claim returns its
         // per-actor [`ActorSlots`] wrapped in [`SharedActorSlots`]. The
@@ -561,64 +373,6 @@ impl<'a> ChassisCtx<'a> {
     /// stash, so this always returns `None` there.
     pub(crate) fn take_claimed_mailbox(&mut self, name: &str) -> Option<MailboxClaim> {
         self.reserved_driver_mailboxes.remove(name)
-    }
-
-    /// Variant of [`Self::claim_mailbox`] for a composed root actor, whose
-    /// inbox the builder installs on the actor's binding. Claims under
-    /// `C::NAMESPACE`. See
-    /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
-    /// arbitrary-name escape hatch.
-    pub fn claim_mailbox_drop_on_shutdown<C: Addressable>(&mut self) -> Result<DropOnShutdownClaim, BootError> {
-        self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)
-    }
-
-    /// Variant of [`Self::claim_mailbox_with_override`] for a composed
-    /// root actor. The registry handler holds a weak `InboxFeed` and the
-    /// returned claim's [`SettlingInbox`] owns the channel's only strong
-    /// sender, so once the root shutdown has freed that inbox a delivery
-    /// is settled and warn-logged at the relay (the channel-close shutdown
-    /// lifecycle, ADR-0074 §Decision).
-    pub fn claim_mailbox_drop_on_shutdown_with_override(
-        &mut self,
-        name: &str,
-    ) -> Result<DropOnShutdownClaim, BootError> {
-        let (receiver, feed) = inbox_channel();
-        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
-        let wake_for_handler = Arc::clone(&wake_slot);
-        let mailer = Arc::downgrade(self.mailer);
-        let id = self.registry.try_register_inbox(
-            &self.authority,
-            name.to_owned(),
-            // iamacoffeepot/aether#848 PR 3: routes through
-            // [`relay_or_transfer`] (the shared send → wake core with both
-            // ADR-0094 settle seams). The feed refuses once the root
-            // shutdown has freed the inbox, so the sender-gone arm is
-            // reachable and warns. #1564: settling the obligation in the
-            // helper is what keeps a send racing teardown from dropping an
-            // armed dispatch.
-            Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &feed, &wake_for_handler, &mailer) {
-                    RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind } => {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = %kind,
-                            "capability mailbox sender dropped — mail discarded"
-                        );
-                    }
-                    RelayOutcome::ReceiverGone { kind } => {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = %kind,
-                            "capability mailbox receiver dropped — mail discarded"
-                        );
-                    }
-                }
-            }),
-        )?;
-        self.claimed_actor_mailboxes.push(id);
-        let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(self.mailer));
-        Ok(DropOnShutdownClaim { id, inbox, wake_slot })
     }
 
     /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call whose
@@ -732,7 +486,7 @@ mod tests {
 
     use crate::actor::registry::ActorRegistry;
     use crate::config::RingCapacities;
-    use crate::mail::registry::{DispatchParts, MailboxEntry};
+    use crate::mail::registry::{DispatchParts, InboxHandler, MailboxEntry, OwnedDispatch};
     use crate::mail::{KindId, MailId, MailRef};
     use crate::runtime::lifecycle::PanicAborter;
     use crate::scheduler::{Pool, PoolConfig, PoolHandle};
@@ -897,24 +651,22 @@ mod tests {
         )
     }
 
-    /// ADR-0094 / #1564: the `claim_mailbox_drop_on_shutdown` inbox
-    /// closure registers a weak feed, so once the root's teardown drops the
-    /// claim's inbox the feed refuses. A mail arriving in that window (e.g.
+    /// ADR-0094 / #1564: a claim registers a relay that holds only a weak
+    /// sender, so once the root's teardown drops the
+    /// claim's inbox the relay refuses. A mail arriving in that window (e.g.
     /// a loaded component's `subscribe_self` racing the lifecycle cap's
     /// teardown) must be settled at the seam, not dropped armed — which
     /// would trip the obligation guard and fatally abort the substrate.
     #[test]
-    fn drop_on_shutdown_inbox_transfers_obligation_when_sender_gone() {
+    fn claimed_inbox_settles_the_obligation_when_sender_gone() {
         let (registry, mailer, spawner, aborter, _pool) = test_infra();
         let mut claimed = None;
         with_test_ctx(&registry, &mailer, &spawner, &aborter, |ctx| {
-            claimed = Some(
-                ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone").expect("claim succeeds"),
-            );
+            claimed = Some(ctx.claim_mailbox_with_override("test.1564.sender_gone").expect("claim succeeds"));
         });
-        let DropOnShutdownClaim { id, inbox, .. } = claimed.expect("the claim was taken");
+        let MailboxClaim { id, inbox, .. } = claimed.expect("the claim was taken");
         // Drop the inbox the way a root's teardown does when it frees the
-        // actor's binding: the registry's feed no longer upgrades.
+        // actor's binding: the registry's relay no longer upgrades.
         drop(inbox);
 
         let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry_at(id) else {
@@ -924,31 +676,27 @@ mod tests {
         handler.enqueue(armed_subscribe_self(id));
     }
 
-    /// The happy path: [`relay_or_transfer`] moves the envelope onto the
+    /// The happy path: the relay moves the envelope onto the
     /// channel and fires the wake hook. The delivered (armed) dispatch is
     /// settled by draining the inbox — the dispatcher's job in production —
     /// so the obligation guard is satisfied.
     #[test]
-    fn relay_or_transfer_delivers_and_wakes() {
+    fn the_relay_delivers_and_wakes() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let id = MailboxId(0x1565);
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(registry));
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
         let inbox = SettlingInbox::new_at(id, receiver, Arc::clone(&mailer));
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_for_hook = Arc::clone(&fired);
-        let wake = MailboxWakeSlot::default();
-        wake.set(Arc::new(move || {
+        relay.wake_slot().set(Arc::new(move || {
             fired_for_hook.store(true, Ordering::SeqCst);
         }));
 
-        match relay_or_transfer(armed_subscribe_self(id), &feed, &wake, &Arc::downgrade(&mailer)) {
-            RelayOutcome::Delivered => {}
-            other => panic!("expected Delivered, got {other:?}"),
-        }
+        relay.enqueue(armed_subscribe_self(id));
         assert!(fired.load(Ordering::SeqCst), "wake hook fired on delivery");
         assert!(inbox.try_next().is_some(), "delivered envelope is on the channel");
     }

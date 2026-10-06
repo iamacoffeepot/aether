@@ -16,8 +16,7 @@ use crate::actor::native::binding::{NativeBinding, OutboundSend};
 use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::registry::ActorRegistry;
-use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
-use crate::chassis::inbox::InboxFeed;
+use crate::chassis::inbox::InboxRelay;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation, PreparedMail,
     PreparedSpawnActivation, PreparedSpawnFailure,
@@ -35,7 +34,7 @@ use super::Spawner;
 pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     spawner: Arc<Spawner>,
     id: MailboxId,
-    feed: InboxFeed,
+    relay: Arc<InboxRelay>,
     binding: Arc<NativeBinding>,
     slots: Box<ActorSlots>,
     state: A::State,
@@ -227,13 +226,13 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
     pub(super) fn new(
         spawner: Arc<Spawner>,
         id: MailboxId,
-        feed: InboxFeed,
+        relay: Arc<InboxRelay>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         state: A::State,
         chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, feed, binding, slots, state, finalizer: None, chain, guest: None, wire_root: None }
+        Self { spawner, id, relay, binding, slots, state, finalizer: None, chain, guest: None, wire_root: None }
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<dyn SpawnFinalizer>) -> Self {
@@ -543,7 +542,7 @@ struct LegacyLiveActivation<A: NativeActor> {
     spawner: Arc<Spawner>,
     id: MailboxId,
     token: ActivationToken,
-    feed: InboxFeed,
+    relay: Arc<InboxRelay>,
     binding: Arc<NativeBinding>,
     slot: Arc<DispatcherSlot<A>>,
     finalizer: Option<Arc<dyn SpawnFinalizer>>,
@@ -563,7 +562,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         let LegacyPreparedActivation {
             spawner,
             id,
-            feed,
+            relay,
             binding,
             slots,
             state,
@@ -577,7 +576,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         binding.hold_outbound_for_activation();
         slot.wire_activation(chain, wire_root.as_ref().map(WireRoot::root));
 
-        Self { spawner, id, token, feed, binding, slot, finalizer, failure, wire_root }
+        Self { spawner, id, token, relay, binding, slot, finalizer, failure, wire_root }
     }
 
     fn cancel_here(self) {
@@ -603,7 +602,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
-        let Self { spawner, id, token, feed, binding, slot, finalizer, failure: _, wire_root } = *self;
+        let Self { spawner, id, token, relay, binding, slot, finalizer, failure: _, wire_root } = *self;
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -637,21 +636,9 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             binding.preload_inbox(envelope);
         }
 
-        let wake_slot = Arc::new(MailboxWakeSlot::default());
+        let wake_slot = Arc::clone(relay.wake_slot());
         let seize_cell = SeizeCell::default();
-        let handler_wake = Arc::clone(&wake_slot);
-        let handler_mailer = Arc::downgrade(spawner.mailer());
-        let entry = MailboxEntry::Inbox {
-            handler: Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &feed, &handler_wake, &handler_mailer) {
-                    RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind } | RelayOutcome::ReceiverGone { kind } => {
-                        tracing::warn!(target: "aether_substrate::spawn", kind = %kind, "activating actor discarded mail");
-                    }
-                }
-            }),
-            seize: Arc::clone(&seize_cell),
-        };
+        let entry = MailboxEntry::Inbox { handler: relay, seize: Arc::clone(&seize_cell) };
 
         spawner.actor_registry().promote_starting(id, token, TypeId::of::<A>());
         let slot_dyn: Arc<dyn Drainable> = slot.clone();

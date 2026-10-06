@@ -49,8 +49,12 @@ Every event below carries its source window's actor path in `window`:
 | `ImePreedit` | in-flight composition text and optional byte-offset span |
 | `Modifiers` | Shift, Ctrl, Alt, and Meta state |
 
-The window actor also publishes `WindowOpened` and `WindowClosed` through the
-same selector machinery. Lifecycle/control events and user input therefore
+The window actor also publishes `WindowOpened`, `WindowClosed`, and
+`WindowFocus` (`aether.window.focus_changed`: the window's path and whether it
+now has focus, once per change) through the same selector machinery. A
+component that tracks held keys or buttons subscribes to `WindowFocus` and
+releases them when `focused` is `false`, because the release the operating
+system delivers to another window never reaches this one. Lifecycle/control events and user input therefore
 share one source identity without pretending they are all one generic
 peripheral.
 

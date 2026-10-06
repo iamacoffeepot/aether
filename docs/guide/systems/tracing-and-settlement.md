@@ -128,8 +128,8 @@ the reply joins the chain before the drop closes it.
 Underneath, every owned dispatch still ends one of two ways —
 **discharged** (*the obligation ends here; I am recording `Finished`*) or
 **transferred** (*the obligation moves with the work onto a downstream envelope*).
-The framework drain does the discharge; the relay closures that move a dispatch
-onward to a pool actor do the transfer. An owned dispatch dropped while still armed
+The framework drain does the discharge; one relay type, built where an inbox
+channel is opened, moves a dispatch onto an actor's inbox and does the transfer. An owned dispatch dropped while still armed
 panics at the leaking seam in debug builds, naming the `mail_id`, kind, and mailbox
 ([ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md)); release builds carry no field and no check, so the guard
 costs nothing. The guard now backs the in-crate relay and park seams rather than

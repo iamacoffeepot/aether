@@ -104,7 +104,7 @@ impl NativeBinding {
     /// [`crate::DriverCapability::boot`] body:
     ///
     /// ```ignore
-    /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
+    /// let claim = ctx.claim_mailbox::<A>()?;
     /// let transport = NativeBinding::from_ctx(ctx, claim.id, canonical_name);
     /// ```
     ///
@@ -538,7 +538,7 @@ impl NativeBinding {
 mod tests {
     use super::*;
     use crate::chassis::inbox::inbox_channel;
-    use crate::mail::registry::{DispatchParts, OwnedDispatch};
+    use crate::mail::registry::{DispatchParts, InboxHandler, OwnedDispatch};
     use crate::mail::{KindId, MailId, MailRef};
     use crate::testing::bare_substrate;
 
@@ -547,9 +547,9 @@ mod tests {
     #[should_panic(expected = "install_inbox called twice")]
     fn install_inbox_twice_panics() {
         let (_registry, mailer) = bare_substrate();
+        let (first, _first_relay) = inbox_channel(&mailer);
+        let (second, _second_relay) = inbox_channel(&mailer);
         let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
-        let (first, _first_feed) = inbox_channel();
-        let (second, _second_feed) = inbox_channel();
         transport.install_inbox(first);
         transport.install_inbox(second);
     }
@@ -569,7 +569,7 @@ mod tests {
         mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         let id = MailboxId(0x1756);
-        let (receiver, feed) = inbox_channel();
+        let (receiver, relay) = inbox_channel(&mailer);
 
         let root = MailId::new(id, 1);
         mailer.record_sent_inflight(root);
@@ -588,7 +588,8 @@ mod tests {
             },
             id,
         );
-        assert!(feed.send(armed).is_queued(), "the open inbox accepts the mail");
+        relay.enqueue(armed);
+        assert!(settle.try_recv().is_err(), "the open inbox accepts the mail: a refused one settles at the relay");
 
         // Drop the transport; the SettlingInbox inside settles the queued mail.
         drop(transport);
