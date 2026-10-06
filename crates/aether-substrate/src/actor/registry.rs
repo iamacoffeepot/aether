@@ -45,9 +45,11 @@ use crate::mail::registry::effect::ActivationToken;
 ///
 /// The entry holds no part of the actor's inbox channel: the inbox owns
 /// its channel's only strong sender
-/// ([`SettlingInbox`](crate::chassis::inbox::SettlingInbox)), and the close
-/// tail closes it before this entry goes `Dead`, which is what makes mail
-/// addressed to a dead instanced mailbox warn-drop.
+/// ([`SettlingInbox`](crate::chassis::inbox::SettlingInbox)). Mail
+/// addressed to a dead instanced mailbox is discarded at its `Dropped`
+/// route, or, once the closed actor's slot and inbox are freed, refused
+/// and settled at the relay; mail that slips in between is settled by the
+/// inbox's drop.
 #[derive(Clone)]
 pub enum ActorEntry {
     Starting { token: ActivationToken },

@@ -344,9 +344,7 @@ where
 /// 1. Sets the binding's `should_shutdown` flag so the next
 ///    [`crate::scheduler::Drainable::run_cycle`] observes the
 ///    signal and runs `unwire` + registry finalize.
-/// 2. Closes the binding's inbox so subsequent sends are settled and
-///    warn-logged at the relay.
-/// 3. Drops the slot Arc — the chassis-held strong ref. The pool
+/// 2. Drops the slot Arc — the chassis-held strong ref. The pool
 ///    worker's strong ref (via the ready queue) drops at end of the
 ///    final cycle. The pool's `Drop` joins workers, so any in-flight
 ///    cycle finishes before chassis shutdown returns.
@@ -366,13 +364,13 @@ where
     A: NativeActor,
 {
     fn shutdown_dyn(mut self: Box<Self>) {
-        // Close the inbox before the slot is released, so a later send is
-        // refused at the relay; subsequent wakes silently no-op via
-        // WakeHandle's Weak failing to upgrade. A send already in progress
-        // lands in the queue and the inbox's drop settles it.
+        // Releasing the slot frees the binding and its inbox once no worker
+        // holds the slot: the inbox's drop settles what is queued or in
+        // the middle of being sent, a later send is refused at the relay,
+        // and subsequent wakes silently no-op via WakeHandle's Weak
+        // failing to upgrade.
         if let Some(slot) = &self.slot {
             slot.binding().signal_engine_teardown();
-            slot.binding().close_inbox();
         }
         drop(self.slot.take());
     }

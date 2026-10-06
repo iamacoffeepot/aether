@@ -206,20 +206,6 @@ impl NativeBinding {
             .unwrap_or_else(|_| panic!("NativeBinding::install_settling_inbox called after the inbox was installed"));
     }
 
-    /// Close the installed inbox ([`SettlingInbox::close`]): a later send
-    /// to this actor is refused at the relay and settled there. Called by
-    /// the root shutdown and by the shared close tail, before the actor's
-    /// registry entry goes `Dead`. A binding with no inbox installed has
-    /// nothing to close. Idempotent.
-    ///
-    /// # Panics
-    /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063.
-    pub(crate) fn close_inbox(&self) {
-        if let Some(inbox) = self.inbox.get() {
-            inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").close();
-        }
-    }
-
     /// Queue `env` on the installed inbox through the inbox's own sender
     /// ([`SettlingInbox::preload`]): mail that must be queued before the
     /// actor is live.

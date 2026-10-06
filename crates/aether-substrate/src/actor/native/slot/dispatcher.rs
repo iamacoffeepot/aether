@@ -762,10 +762,6 @@ pub fn finalize_close_and_fan_out(
     } else {
         binding.answer_held_for_actor_close();
     }
-    // Close the inbox before the actor goes `Dead`, so mail sent from here
-    // on is refused and settled at the relay; mail a send had already begun
-    // is settled when the inbox drops.
-    binding.close_inbox();
     let watchers = actor_registry.close_actor(self_id);
     binding.mailer().registry().submit_logged(EffectBatch::new(vec![RegistryEffect::DropMailbox(self_id)]));
     binding.release_parent_child_reservation();

@@ -179,10 +179,10 @@ impl Spawner {
         // MailboxId which already passed the tombstone check).
         //
         // The channel's only strong sender lives in the binding's inbox.
-        // The sink handler's feed is accepted only while that inbox is
-        // open — i.e. until the actor's close tail closes it, just before
-        // the slot goes `Dead` — after which external mail addressed to
-        // the dead mailbox is settled and warn-drops at the relay.
+        // The sink handler's feed is accepted for as long as that inbox
+        // lives — i.e. until the closed actor's slot and binding are
+        // freed — after which external mail addressed to the dead mailbox
+        // is settled and warn-drops at the relay.
         // Issue 635 PR C: pool wake hook. Populated post-init below
         // (every actor is pool-dispatched since issue 1187); empty until
         // then so the closure's `get()` is a single relaxed atomic load.
