@@ -21,10 +21,9 @@ use crate::actor::native::local;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::{NativeActor, NativeCtx};
-use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::mail::cost::CostCells;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
-use crate::mail::registry::{BootAuthority, NameConflict, OwnedDispatch};
+use crate::mail::registry::{BootAuthority, NameConflict};
 use crate::mail::{KindId, MailboxId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::wire_root::WireRoot;
@@ -166,7 +165,7 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
-        let StagedActor { identity, feed, transport, slots, state, after_init } = staged;
+        let StagedActor { identity, relay, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name: full_name, .. } = identity;
 
         // Register sink + Live entry + pre-load mail. The actor
@@ -179,19 +178,14 @@ impl Spawner {
         // MailboxId which already passed the tombstone check).
         //
         // The channel's only strong sender lives in the binding's inbox.
-        // The sink handler's feed is accepted for as long as that inbox
+        // The relay's mail is accepted for as long as that inbox
         // lives — i.e. until the closed actor's slot and binding are
         // freed — after which external mail addressed to the dead mailbox
         // is settled and warn-drops at the relay.
         // Issue 635 PR C: pool wake hook. Populated post-init below
         // (every actor is pool-dispatched since issue 1187); empty until
-        // then so the closure's `get()` is a single relaxed atomic load.
-        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
-        let wake_for_handler = Arc::clone(&wake_slot);
-        let mailer_for_handler = Arc::downgrade(&self.mailer);
-        // iamacoffeepot/aether#848 PR 3: closure takes `OwnedDispatch`
-        // and routes it through [`relay_or_transfer`] — the shared
-        // upgrade → send → wake core with both ADR-0094 transfer seams.
+        // then so the relay's `get()` is a single relaxed atomic load.
+        let wake_slot = Arc::clone(relay.wake_slot());
         // ADR-0099 §3: register under the lineage-folded `id`, not
         // `hash(full_name)` — the rendered name is display / reverse-map
         // only and no longer derives the id.
@@ -201,30 +195,7 @@ impl Spawner {
         // own framework arms first would make the guest's rows a shrink the
         // registry refuses. This is pre-seal boot, on the calling thread,
         // before the dispatcher runs.
-        let registered = self.registry.try_register_inbox_with_id(
-            authority,
-            id,
-            full_name.to_string(),
-            Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &feed, &wake_for_handler, &mailer_for_handler) {
-                    RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind } => {
-                        tracing::warn!(
-                            target: "aether_substrate::spawn",
-                            kind = %kind,
-                            "instanced actor sender dropped — mail discarded"
-                        );
-                    }
-                    RelayOutcome::ReceiverGone { kind } => {
-                        tracing::warn!(
-                            target: "aether_substrate::spawn",
-                            kind = %kind,
-                            "instanced actor receiver dropped — mail discarded"
-                        );
-                    }
-                }
-            }),
-        );
+        let registered = self.registry.try_register_inbox_with_id(authority, id, full_name.to_string(), relay);
         match registered {
             Ok(returned_id) => debug_assert_eq!(returned_id, id),
             Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),

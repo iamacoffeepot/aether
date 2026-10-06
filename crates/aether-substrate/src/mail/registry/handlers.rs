@@ -95,7 +95,8 @@ pub trait InlineHandler: Send + Sync + 'static {
 /// `Finished` + disarms on scope exit, so every arm settles by
 /// construction. Hand-rolling an `impl InboxHandler` and pairing
 /// `record_finished` with `discharge` per arm is the move-onward relay
-/// shape (the three production closures route through `relay_or_transfer`)
+/// shape, and production has one of those: every actor inbox registers the
+/// crate's `InboxRelay`, built where the inbox channel is opened
 /// — reach for it only when forwarding the dispatch onward, not when
 /// consuming it.
 ///

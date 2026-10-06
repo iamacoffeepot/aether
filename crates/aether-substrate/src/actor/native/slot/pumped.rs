@@ -271,7 +271,6 @@ mod tests {
     use crate::actor::native::local::with_stamped;
     use crate::actor::native::{Dispatch, Held, Pending};
     use crate::actor::registry::ActorRegistry;
-    use crate::chassis::ctx::{MailboxWakeSlot, relay_or_transfer};
     use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox, inbox_channel};
     use crate::chassis::settlement::{
         GateFailure, PumpWake, SettlementRegistry, TerminalDisposition, WaitOutcome, await_settlement_pumped,
@@ -491,7 +490,7 @@ mod tests {
     }
 
     /// Register the pumped mailbox (relaying armed envelopes through the
-    /// inbox's feed, exactly as `claim_mailbox` does), build a
+    /// inbox's relay, exactly as `claim_mailbox` does), build a
     /// spawner-backed binding, install a seeded slots box, and assemble the
     /// `PumpedSlot`. `settling` chooses the install path — `false` builds a
     /// fresh inbox via `install_inbox`, `true` installs a claim-shaped
@@ -509,19 +508,14 @@ mod tests {
         settling: bool,
         wake_tx: Option<crossbeam_channel::Sender<PumpWake>>,
     ) -> PumpedSlot<PumpProbe> {
-        let (receiver, feed) = inbox_channel();
-        let wake_slot = MailboxWakeSlot::default();
+        let (receiver, relay) = inbox_channel(&fx.mailer);
         if let Some(wake_tx) = wake_tx {
-            wake_slot.set(Arc::new(move || {
+            relay.wake_slot().set(Arc::new(move || {
                 let _ = wake_tx.send(PumpWake::Mail);
             }));
         }
-        let handler_mailer = Arc::downgrade(&fx.mailer);
-        let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
-            let _ = relay_or_transfer(d, &feed, &wake_slot, &handler_mailer);
-        });
         fx.registry
-            .try_register_inbox_with_id(&boot_authority(), self_id, "test.pumped.probe", handler)
+            .try_register_inbox_with_id(&boot_authority(), self_id, "test.pumped.probe", relay)
             .expect("register the pumped mailbox");
 
         let binding = Arc::new(NativeBinding::new(

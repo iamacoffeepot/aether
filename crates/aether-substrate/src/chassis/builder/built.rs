@@ -18,9 +18,9 @@ use super::target::ChassisTarget;
 use crate::actor::native::NativeActor;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{MailboxClaim, MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
+use crate::chassis::ctx::{MailboxClaim, MailboxWakeSlot};
 use crate::chassis::error::BootError;
-use crate::chassis::inbox::SettlingInbox;
+use crate::chassis::inbox::{SettlingInbox, inbox_channel};
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::boundary::{self, BoundaryMail};
 use crate::mail::registry::effect::RegistryEffectError;
@@ -419,14 +419,15 @@ impl<C: Chassis> PassiveChassis<C> {
             let registry = mailer.registry();
             registry.reserve_starting_through_owner(A::NAMESPACE).map_err(|error| owner_boot_error(&error)).and_then(
                 |(mailbox_id, token)| {
-                    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox(mailer);
+                    let (receiver, relay) = inbox_channel(mailer);
+                    let wake_slot = Arc::clone(relay.wake_slot());
                     let inbox = SettlingInbox::new_at(mailbox_id, receiver, Arc::clone(mailer));
                     match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)
                     {
                         Ok(slot) => match registry.promote_starting_through_owner(
                             mailbox_id,
                             token,
-                            handler,
+                            relay,
                             RouteContract::of::<A>(),
                         ) {
                             // ADR-0230: the owner has published the route
