@@ -8,7 +8,7 @@
 #
 # Refused in any subagent:
 #   - a gate wait: `wave-status.sh --wait`, `gh run watch`, `gh pr checks --watch`;
-#   - an `until` / `while` loop whose body sleeps;
+#   - an `until` / `while` / `for` loop whose body sleeps;
 #   - a single `sleep` of 240 seconds or more.
 # Refused unless the agent type is `implementer`, whose cache lasts an hour:
 #   - a foreground call with a `timeout` above 270000 milliseconds.
@@ -87,7 +87,7 @@ while IFS= read -r segment; do
     fi
 done < <(printf '%s\n' "$command" | tr ';&|()' '\n\n\n\n\n')
 
-sleeping_loop_re='(^|[^[:alnum:]_.-])(until|while)[[:space:]].*[^[:alnum:]_.-]sleep[[:space:]].*[^[:alnum:]_.-]done([^[:alnum:]_.-]|$)'
+sleeping_loop_re='(^|[^[:alnum:]_.-])(until|while|for)[[:space:]].*[^[:alnum:]_.-]sleep[[:space:]].*[^[:alnum:]_.-]done([^[:alnum:]_.-]|$)'
 loops_on_sleep=0
 [[ "$command" =~ $sleeping_loop_re ]] && loops_on_sleep=1
 

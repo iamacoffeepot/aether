@@ -353,6 +353,9 @@ expect "subagent: gh pr checks without --watch -> allow" check-agent-wait.sh \
 expect "subagent: grep for the wait command text -> allow" check-agent-wait.sh \
     "$(agentbash general-purpose 'grep -n "wave-status.sh --wait" CLAUDE.md')" 0
 expect "subagent: short sleep -> allow" check-agent-wait.sh "$(agentbash general-purpose 'sleep 30')" 0
+# A counted `for` loop that sleeps is the same poll under another keyword.
+expect "subagent: counted for loop that sleeps -> block" check-agent-wait.sh \
+    "$(agentbash general-purpose 'for i in $(seq 1 118); do pgrep -f job >/dev/null || break; sleep 5; done')" 2 "polls in a loop"
 expect "subagent: read loop, then a short sleep after it -> allow" check-agent-wait.sh \
     "$(agentbash general-purpose 'while read -r l; do echo "$l"; done < f; sleep 2')" 0
 expect "general-purpose: foreground timeout over the cache -> block" check-agent-wait.sh \
