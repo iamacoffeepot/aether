@@ -56,6 +56,14 @@ impl TrackVoice {
         self.sender == sender && self.lane.as_ref() == lane && self.namespace == namespace && self.path == path
     }
 
+    /// True when this track belongs to `sender`, regardless of its
+    /// lane, namespace, or path. The departure purge stops every track
+    /// of a closed sender through this predicate, leaving the per-key
+    /// `stop_track` path untouched.
+    pub fn matches_sender(&self, sender: ErasedActorRef) -> bool {
+        self.sender == Some(sender)
+    }
+
     /// Arm the fade-out. Idempotent — a second `stop` while already
     /// fading keeps the first fade's progress.
     pub fn stop(&mut self, fade_samples: u32) {

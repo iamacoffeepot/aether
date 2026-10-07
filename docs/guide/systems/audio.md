@@ -158,6 +158,9 @@ and
 - The handler-to-callback queue holds 1,024 `AudioEvent`s. Immediate notes,
   stops, and several callback registration/control events warn-drop on
   overflow. `Schedule` is the exception that reports queue overflow as `Err`.
+  A sender-forget event warn-drops on a full queue like the other control
+  events; the cap-side in-flight load purge still runs, so no new sound
+  starts even when the forget never reaches the callback.
 - The current gain-control handlers ignore a failed queue push and still
   return the clamped `Ok` value. Track start and instrument registration can
   likewise log a full-queue drop after their deferred request later resolves
@@ -174,6 +177,29 @@ and
 - The callback owns voice, schedule, gain, bank, track, and reverb state. Do
   not add blocking work, allocation-heavy transforms, or capability calls to
   its per-sample path.
+
+### Sender lifetime
+
+A sender's close deterministically ends its sound (ADR-0079 §8). The cap
+watches one monitor per sender on its first state-creating mail (`note_on`,
+`schedule`, `set_sender_gain`, `play_track`) and forgets the sender on its
+`MonitorNotice`:
+
+- sounding voices release through their envelopes, never cut;
+- every track of that sender fades through the same short fade, looping or
+  not, and retires;
+- the whole sender's scheduled entries drop, `On` and `Off` alike, so no
+  post-close note spawns a voice up to ten minutes later;
+- the gain row prunes once nothing still references the sender — a voice, a
+  track, or a scheduled entry keeps it alive through the release tail, so no
+  fading voice jumps to unity — while live senders' idle rows are never
+  touched;
+- an in-flight `play_track` load never starts: its cap-side entry is purged
+  and answered `Err`.
+
+The shared sender-less key has no actor to depart and is never watched or
+pruned. Replace fires no notice, so a republished actor keeps its sound;
+tombstoned ids are never reused, so there is no ABA.
 
 ## Chassis and boot behavior
 

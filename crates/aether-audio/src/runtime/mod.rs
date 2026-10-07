@@ -59,12 +59,15 @@ use super::kinds::{
     SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
     StopTrack,
 };
+use aether_actor::ErasedActorRef;
+use aether_kinds::MonitorNotice;
 
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
 // reaches through `use runtime::*`. Gated once here so a marker-only build
 // never names any of it.
 pub use std::collections::HashMap;
 
+pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -108,6 +111,11 @@ pub struct AudioCapabilityState {
     /// `load_instrument` replies `Err` rather than aliasing a resident
     /// bank.
     pub instrument_ids: SessionIds<u8>,
+    /// One monitor per sender that owns audio state (ADR-0079 §8),
+    /// registered on its first state-creating mail and released when its
+    /// `MonitorNotice` forgets it. The handle's `Drop` deregisters, so
+    /// the map is both the dedup guard and the RAII anchor.
+    pub monitors: HashMap<ErasedActorRef, MonitorHandle>,
     pub thread: Option<JoinHandle<()>>,
     pub shutdown: Option<mpsc::Sender<()>>,
 }
@@ -122,6 +130,7 @@ impl AudioCapabilityState {
             track_loads: HashMap::new(),
             track_load_ids: SessionIds::new(),
             instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
+            monitors: HashMap::new(),
             thread: None,
             shutdown: None,
         }
@@ -177,6 +186,7 @@ impl NativeActor for AudioCapability {
                 track_loads: HashMap::new(),
                 track_load_ids: SessionIds::new(),
                 instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
+                monitors: HashMap::new(),
                 thread: Some(thread),
                 shutdown: Some(shutdown),
             }),
@@ -277,6 +287,22 @@ impl NativeActor for AudioCapability {
     #[handler::tell]
     fn on_stop_track(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
         state.handle_stop_track(ctx, mail);
+    }
+
+    /// Forget a departed sender (ADR-0079 §8). The substrate fires one
+    /// notice per watched sender when it closes, so the sender's tracks
+    /// fade, its voices release, its scheduled notes never fire, its
+    /// in-flight track loads never start, and its gain row retires once
+    /// nothing references it. Releasing the handle keeps the monitor map
+    /// bounded by live senders.
+    ///
+    /// The host stamps the departed sender as the notice's sender, so
+    /// `ctx.sender()` is the same proven reference the monitor map and
+    /// the sender-keyed state are keyed by (ADR-0230). A notice with no
+    /// sender names nothing and changes nothing.
+    #[handler::event]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        state.handle_monitor_notice(ctx);
     }
 
     /// Load a sampled instrument bank from an `.sfz` file (ADR-0103 §4/§5).

@@ -86,6 +86,16 @@ pub enum AudioEvent {
         namespace: String,
         path: String,
     },
+    /// Forget a departed sender (ADR-0079 §8). The cap pushes one per
+    /// `MonitorNotice` whose sender it holds state under; the synth
+    /// releases that sender's voices, fades its tracks, drops its
+    /// scheduled entries, and prunes its gain row once nothing
+    /// references it. Carries the proven sender key, never `None` —
+    /// the shared sender-less key has no actor to depart. Best-effort
+    /// under a full queue like the other control events.
+    SenderDeparted {
+        sender: ErasedActorRef,
+    },
     /// Append a loaded sampled-instrument bank to the synth's registry
     /// (ADR-0103 §4). The cap assigns `id` from `BUILTINS.len()` upward
     /// in load order and the synth pushes the bank in receipt order, so
