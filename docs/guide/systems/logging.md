@@ -54,6 +54,12 @@ the substrate installs routes each event by where it fired:
   panic hook — hits **stderr only** through the registered formatting layer. It
   enters no ring and surfaces in no query.
 
+A component's line is printed on stderr under the host target
+`aether_substrate::guest`, with the component's own target as the `guest.target`
+field. Its ring entry carries the component's own target, and an
+`AETHER_LOG_FILTER` directive matches a component by the target the component
+used.
+
 That split is the page's main gotcha and the first thing to reach for when a line
 is missing: a host-side log is real, it's on stderr, and it was never going to
 appear in a ring.
