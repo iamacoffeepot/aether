@@ -10,11 +10,6 @@
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
 //! hard panic there.
 
-// Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
-// entries are present in this test binary.
-#[allow(unused_imports)]
-use aether_test_fixtures_kinds as _;
-
 use std::fmt::Write as _;
 use std::fs;
 
