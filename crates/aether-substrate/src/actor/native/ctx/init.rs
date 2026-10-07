@@ -16,6 +16,8 @@ use crate::actor::native::offload::self_wake::SelfWake;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 #[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
+#[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
 use crate::memory::MemoryGauge;
 
@@ -53,11 +55,11 @@ impl<'a> NativeInitCtx<'a> {
     /// binding's own mailer routes through, so the two cannot disagree.
     ///
     /// Consumer: the wasm trampoline's `init`, which instantiates its guest
-    /// against the ctx this builds.
+    /// against the ctx this builds. `module` is the module that guest runs.
     #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        self.binding.guest_ctx(outbound)
+    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>, module: Module) -> ComponentCtx {
+        self.binding.guest_ctx(outbound, module)
     }
 
     /// A [`SelfWake<K>`] for a thread this cap spawns during `init` — an

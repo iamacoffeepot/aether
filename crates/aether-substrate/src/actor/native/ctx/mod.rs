@@ -44,6 +44,8 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::mail::Source;
 #[cfg(feature = "wasm")]
 use crate::mail::outbound::HubOutbound;
@@ -339,11 +341,12 @@ impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// binding's own mailer routes through, so the two cannot disagree.
     ///
     /// Consumer: the wasm trampoline's replacement path, which rebuilds the
-    /// guest ctx behind the same binding.
+    /// guest ctx behind the same binding. `module` is the module the guest
+    /// runs.
     #[cfg(feature = "wasm")]
     #[must_use]
-    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        self.binding.guest_ctx(outbound)
+    pub fn guest_ctx(&self, outbound: Arc<HubOutbound>, module: Module) -> ComponentCtx {
+        self.binding.guest_ctx(outbound, module)
     }
 }
 

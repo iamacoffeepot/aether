@@ -3,8 +3,8 @@
 //! `asset_fixture.txt`) selecting its `QuietProbe` export, which in `wire`
 //! pulls the asset through `Assets::asset` and stashes a fingerprint, then
 //! sends `AssetProbe` over the wire and asserts the reply carries the exact
-//! bytes' length and content checksum — proving the guest-side
-//! `asset_fetch_p32` transport round-tripped the payload.
+//! bytes' length and content checksum — proving the asset's blob, read whole
+//! through the ordinary blob read, round-tripped the payload.
 //!
 //! The same `wire` takes the asset as a blob through `Assets::asset_blob`
 //! and keeps it; `AssetBlobProbe` is answered with that blob, which reaches

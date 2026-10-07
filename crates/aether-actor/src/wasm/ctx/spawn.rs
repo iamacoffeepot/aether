@@ -488,7 +488,7 @@ where
     // the erased child. For an un-split component `State = Self`.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    let mut ctx = WasmInitCtx::__new();
+    let mut ctx = WasmInitCtx::__new(registry);
     // ADR-0156 §2: inline children resolve `Params` to the compiled default
     // (empty params for now), mirroring the `()`-config round-trip.
     let params = <A::Params as Default>::default();

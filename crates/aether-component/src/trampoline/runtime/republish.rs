@@ -207,12 +207,11 @@ impl WasmTrampolineState {
         config: &[u8],
         type_tag: Option<u64>,
     ) -> Result<Component, String> {
-        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&self.outbound));
+        // ADR-0250: the ctx is built with the candidate's module so the
+        // candidate's `init`, `on_rehydrate` and `wire` read assets from it.
+        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&self.outbound), module.clone());
         // ADR-0241 §7: nothing the candidate sends leaves before commit.
         substrate_ctx.hold_outbox();
-        // ADR-0250: install the candidate's module before instantiate so the
-        // candidate's `init`, `on_rehydrate` and `wire` read assets from it.
-        substrate_ctx.install_module(module.clone());
         // ADR-0231 §4: an inline child the candidate spawns publishes its
         // own namespace and rows, read from the candidate's module.
         substrate_ctx.install_inline_children(contract::inline_children(module.manifest()));

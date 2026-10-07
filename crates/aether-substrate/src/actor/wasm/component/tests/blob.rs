@@ -17,8 +17,8 @@ use aether_data::{Blob, BlobReader, Kind, KindDescriptor, KindId, MAX_READ_BYTES
 use wasmtime::{Engine, Instance, Linker, Memory, Module, Store};
 
 use super::{
-    Component, DISPATCH_DROPPED_OVERSIZE, MAX_DELIVERABLE_MAIL_BYTES, WAT_HOOKS, WAT_REALLOC, ctx, ctx_at, inbound,
-    instantiate, instantiate_with_ctx,
+    Component, DISPATCH_DROPPED_OVERSIZE, MAX_DELIVERABLE_MAIL_BYTES, WAT_HOOKS, WAT_REALLOC, ctx, ctx_at,
+    ctx_at_with_module, inbound, instantiate, instantiate_with_ctx,
 };
 use crate::actor::native::BlobCheckIn;
 use crate::actor::native::envelope::Envelope;
@@ -737,8 +737,7 @@ impl AssetGuest {
         let code = blobs.check_in(wat::parse_str(&wat).expect("compile WAT").into_boxed_slice());
         let module =
             ModuleCache::new(Arc::new(Engine::default())).check_in(&blobs, &code).expect("check the module in");
-        let mut ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None);
-        ctx.install_module(module.clone());
+        let ctx = ctx_at_with_module(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None, module.clone());
 
         Self { guest: instantiate_with_ctx(&wat, ctx), received, module, store }
     }
@@ -786,6 +785,70 @@ fn a_guest_forwarding_an_asset_blob_attaches_the_module_asset_blob() {
     drop(guest);
 
     assert_eq!(store.resident_bytes(), asset_len, "the module still holds its asset after the instance goes");
+}
+
+/// Where [`asset_reading_guest`] writes the hash its lookup answers.
+const READ_HASH_AT: usize = 740;
+
+/// Where [`asset_reading_guest`] lands the asset's bytes.
+const READ_DST_AT: usize = 800;
+
+/// A guest carrying [`ASSET`] in an `aether.asset.tile` section. On receive
+/// it does what the SDK's `Assets::asset` does: `asset_blob_p32`, then
+/// `blob_read_p32` into its memory, then `blob_drop_p32`.
+fn asset_reading_guest() -> String {
+    format!(
+        r#"
+        (module
+            (@custom "aether.asset.tile" "{asset}")
+            (import "aether" "asset_blob_p32" (func $asset_blob (param i32 i32 i32) (result i64)))
+            (import "aether" "blob_read_p32" (func $read (param i32 i64 i32 i32) (result i64)))
+            (import "aether" "blob_drop_p32" (func $drop (param i32)))
+            (memory (export "memory") 1)
+            (data (i32.const {NAME_AT}) "tile")
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                (i64.store (i32.const {ASSET_LEN_AT}) (call $asset_blob
+                    (i32.const {NAME_AT})
+                    (i32.const 4)
+                    (i32.const {READ_HASH_AT})))
+                (drop (call $read
+                    (i32.const {READ_HASH_AT})
+                    (i64.const 0)
+                    (i32.const {READ_DST_AT})
+                    (i32.const {len})))
+                (call $drop (i32.const {READ_HASH_AT}))
+                i32.const 0))
+        "#,
+        asset = str::from_utf8(ASSET).expect("the asset is text"),
+        len = ASSET.len(),
+    )
+}
+
+/// An asset read the way the SDK reads one, lookup then whole-blob read then
+/// the one drop, leaves the guest's bytes equal to the asset's and its blob
+/// table empty, with the store's resident bytes where they were. Catches a
+/// lookup whose hold the one drop does not release (a double hold, or a pin
+/// left behind), which would keep every asset an instance ever read resident
+/// in its table.
+#[test]
+fn an_asset_read_through_its_blob_leaves_the_table_empty() {
+    let registry = carrier_registry();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let store = mailer.blob_store().clone();
+    let blobs = BlobCheckIn::new(store.clone());
+    let wat = asset_reading_guest();
+    let code = blobs.check_in(wat::parse_str(&wat).expect("compile WAT").into_boxed_slice());
+    let module = ModuleCache::new(Arc::new(Engine::default())).check_in(&blobs, &code).expect("check the module in");
+    let ctx = ctx_at_with_module(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None, module);
+    let mut guest = instantiate_with_ctx(&wat, ctx);
+    let resident = store.resident_bytes();
+
+    guest.deliver(&inbound(MailboxId(0), KindId(0), Vec::new(), Source::NONE)).expect("deliver");
+
+    assert_eq!(guest.read_bytes(READ_DST_AT, ASSET.len()), ASSET);
+    assert!(guest.store.data().blob_table.is_empty(), "the one drop gave the lookup's hold back");
+    assert_eq!(store.resident_bytes(), resident, "the read copied nothing into the store");
 }
 
 /// A name the module carries no asset under answers the sentinel and holds

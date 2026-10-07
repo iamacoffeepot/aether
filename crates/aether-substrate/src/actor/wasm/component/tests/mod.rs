@@ -15,6 +15,7 @@ use super::*;
 use crate::actor::native::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::host_fns;
+use crate::actor::wasm::module::Module as WasmModule;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::attachments::EncodedMail;
 use crate::mail::mailer::Mailer;
@@ -84,8 +85,22 @@ fn ctx_at(
     sender: MailboxId,
     parent: Option<MailboxId>,
 ) -> ComponentCtx {
+    let module = WasmModule::bare_for_test(mailer.blob_store());
+    ctx_at_with_module(registry, mailer, outbound, sender, parent, module)
+}
+
+/// [`ctx_at`] over a given module, for a test whose guest reads that module's
+/// assets.
+fn ctx_at_with_module(
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    outbound: Arc<HubOutbound>,
+    sender: MailboxId,
+    parent: Option<MailboxId>,
+    module: WasmModule,
+) -> ComponentCtx {
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent));
-    ComponentCtx::new(binding, registry, outbound)
+    ComponentCtx::new(binding, registry, outbound, module)
 }
 
 /// `bytes` as a guest send's payload with nothing attached: what the
@@ -140,7 +155,9 @@ fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, 
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, Some(parent)));
-    let build = || ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), HubOutbound::disconnected());
+    let module = WasmModule::bare_for_test(mailer.blob_store());
+    let build =
+        || ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), HubOutbound::disconnected(), module.clone());
     (build(), build())
 }
 

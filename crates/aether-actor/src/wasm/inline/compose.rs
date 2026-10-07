@@ -404,7 +404,7 @@ where
     // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
     // default, mirroring the real-config decode above.
     let params = <A::Params as Default>::default();
-    let mut child = A::init(config, params, &mut WasmInitCtx::__new()).map_err(|error| {
+    let mut child = A::init(config, params, &mut WasmInitCtx::__new(registry)).map_err(|error| {
         ActorInitError::from(format!("inline child `{subname}` was not rebuilt: init failed: {error}"))
     })?;
 

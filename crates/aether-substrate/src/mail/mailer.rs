@@ -28,6 +28,8 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::ResolvePathError;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::attachments::{EncodedMail, encode_envelope, inline_payload, plain_payload};
 use crate::mail::capability::CapabilityRegistry;
@@ -504,9 +506,15 @@ impl Mailer {
     /// crate-private builder behind
     /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
     /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    /// `module` is the module the guest runs.
     #[cfg(feature = "wasm")]
-    pub(crate) fn guest_ctx(&self, binding: Arc<NativeBinding>, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        ComponentCtx::new(binding, Arc::clone(&self.registry), outbound)
+    pub(crate) fn guest_ctx(
+        &self,
+        binding: Arc<NativeBinding>,
+        outbound: Arc<HubOutbound>,
+        module: Module,
+    ) -> ComponentCtx {
+        ComponentCtx::new(binding, Arc::clone(&self.registry), outbound, module)
     }
 
     /// Subscribe `target` to the registry's inventory changes, as
