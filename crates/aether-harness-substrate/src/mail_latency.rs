@@ -668,7 +668,6 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
 /// Catches: a partial tree returned with no mark, and a mark on a whole
 /// tree.
 #[test]
-#[allow(clippy::print_stderr)]
 fn a_lapped_chain_reports_the_ring_that_cut_it() {
     const CAP: usize = 6;
     // Two relay-ring slots per settled mail: three further roots drop A's
@@ -677,7 +676,7 @@ fn a_lapped_chain_reports_the_ring_that_cut_it() {
     let Ok(mut tb) =
         SubstrateHarness::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
     else {
-        eprintln!("skipping a_lapped_chain_reports_the_ring_that_cut_it: no wgpu adapter");
+        // No wgpu adapter on this host: the harness cannot boot, so there is nothing to walk.
         return;
     };
 
