@@ -8,10 +8,9 @@ use std::fmt::Display;
 use std::mem;
 use std::sync::Arc;
 
-use aether_data::{ActorId, Blob};
+use aether_data::ActorId;
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::native::NativeCtx;
-use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, HookFault, StateBundle};
 use aether_substrate::actor::wasm::module::Module;
 use aether_substrate::mail::KindId;
@@ -66,10 +65,8 @@ impl WasmTrampolineState {
     }
 
     /// Build a candidate of `candidate` beside the running guest and hold it
-    /// for a commit or an abort. `code` is the bytes the candidate's module
-    /// was checked in from, which its load window reads assets from until
-    /// it closes; `config` is the candidate's init config, or `None` for the
-    /// stored one; `target` names this actor in a refusal.
+    /// for a commit or an abort. `config` is the candidate's init config, or
+    /// `None` for the stored one; `target` names this actor in a refusal.
     ///
     /// The candidate instantiates first, with its outbox held, while the
     /// running guest is still wired: `init` cannot send mail, so a failed
@@ -85,7 +82,6 @@ impl WasmTrampolineState {
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
         target: &impl Display,
         candidate: CandidateType,
-        code: Blob,
         config: Option<Vec<u8>>,
     ) -> Prepared {
         let mut old = match mem::replace(&mut self.slot, Slot::Released) {
@@ -102,7 +98,7 @@ impl WasmTrampolineState {
         let CandidateType { module, type_tag, capabilities } = candidate;
         let config = config.unwrap_or_else(|| self.config.clone());
 
-        let mut new_component = match self.instantiate(ctx, &module, code, &config, type_tag) {
+        let mut new_component = match self.instantiate(ctx, &module, &config, type_tag) {
             Ok(component) => component,
             Err(error) => {
                 self.slot = Slot::Live(Box::new(old));
@@ -202,18 +198,15 @@ impl WasmTrampolineState {
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
         module: &Module,
-        code: Blob,
         config: &[u8],
         type_tag: Option<u64>,
     ) -> Result<Component, String> {
         let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&self.outbound));
         // ADR-0241 §7: nothing the candidate sends leaves before commit.
         substrate_ctx.hold_outbox();
-        // ADR-0163 §3 (#3984): install the load window over the republish's
-        // code before instantiate so the candidate's `init` can pull assets;
-        // closed, letting go of the code, once it rehydrated (a republish
-        // re-runs `init`, not `wire`).
-        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(module, Some(code)));
+        // ADR-0250: install the candidate's module before instantiate so the
+        // candidate's `init` and `on_rehydrate` read assets from it.
+        substrate_ctx.install_module(module.clone());
         // ADR-0231 §4: an inline child the candidate spawns publishes its
         // own namespace and rows, read from the candidate's module.
         substrate_ctx.install_inline_children(contract::inline_children(module.manifest()));
@@ -290,7 +283,6 @@ impl WasmTrampolineState {
         // the saved bundle's request-context table, restored before its
         // `on_rehydrate` runs.
         candidate.resume_watches(old.take_watches());
-        candidate.close_load_window();
     }
 
     /// The part of [`Self::start_candidate`] after the hand-over: check the

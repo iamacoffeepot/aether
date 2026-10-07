@@ -155,7 +155,6 @@ impl SubstrateHarness {
             key: None,
             parent: None,
             config: Vec::new(),
-            code: None,
         })
     }
 
@@ -176,7 +175,6 @@ impl SubstrateHarness {
             key: Some(key.as_str().to_owned()),
             parent: None,
             config: Vec::new(),
-            code: None,
         })
     }
 
@@ -210,7 +208,6 @@ impl SubstrateHarness {
             key: Some(key.as_str().to_owned()),
             parent: Some(parent),
             config: Vec::new(),
-            code: None,
         })
     }
 

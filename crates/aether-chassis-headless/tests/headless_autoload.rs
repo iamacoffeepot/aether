@@ -5,8 +5,8 @@
 //! through the JSON boot-manifest path, **no hub and no RPC server**, and
 //! asserts the component's trampoline is live when `build` returns: a
 //! `BootManifest` of file paths → `boot_manifest_autoload` →
-//! `AutoloadComponent` → one `Publish` of its module and one `Spawn` per
-//! instance key, each bringing the module's code, awaited to `Ok` → live
+//! `AutoloadComponent` → one `Publish` of its module then one `Spawn` per
+//! instance key with no per-spawn bytes, awaited to `Ok` → live
 //! trampoline (issue #6413, issue #7155). This is the reader a `spawn_substrate` carrying a component list
 //! drives through `AETHER_BOOT_MANIFEST`. A boot component that fails to
 //! load fails the build, as does one whose `wire` returns an error, and so

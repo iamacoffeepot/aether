@@ -102,13 +102,7 @@ fn the_driver_loads_each_bundle_under_its_unit_name() -> Result<(), Box<dyn Erro
     assert!(matches!(outcome, CallOutcome::Transition { key: 1, .. }), "the call loads the bundle: {outcome:?}");
 
     let namespace = bundle_root(harness.publish_code(wasm));
-    let spawn = Spawn {
-        namespace: namespace.clone(),
-        key: Some(UNIT.to_owned()),
-        parent: None,
-        config: Vec::new(),
-        code: None,
-    };
+    let spawn = Spawn { namespace: namespace.clone(), key: Some(UNIT.to_owned()), parent: None, config: Vec::new() };
     let spawned = harness.spawn(&spawn);
     let SpawnResult::Live { path, .. } = spawned else {
         panic!("the driver's root already holds the unit's bundle name: {spawned:?}");

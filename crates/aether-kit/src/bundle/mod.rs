@@ -3,25 +3,25 @@
 // and hands it off, so callers can't see references.
 #![allow(clippy::needless_pass_by_value)]
 
-//! The reference asset bundle (ADR-0163 §4) — the pattern-setter every
+//! The reference asset bundle (ADR-0250) — the pattern-setter every
 //! future bundle actor is a copy of. It bakes the whole residency
 //! lifecycle into the smallest actor that still demonstrates all of it:
 //! a bundle carries payload bytes in a wasm custom section, transforms
-//! them into an engine resident inside the load window, keeps a handle
-//! (never the bytes), draws the resident every frame, and tears down
-//! symmetrically so the loaded-component census stays exact.
+//! them into an engine resident, keeps a handle (never the bytes), draws
+//! the resident every frame, and tears down symmetrically so the
+//! loaded-component census stays exact.
 //!
-//! # Residency lifecycle (ADR-0163 §4, the door-and-tiers model)
+//! # Residency lifecycle (ADR-0250, the module-and-tiers model)
 //!
 //! - **Cold** — the tile ships as raw RGBA8 bytes in the
 //!   `aether.asset.tile.rgba` custom section, emitted by
 //!   [`export_asset!`](aether_actor::export_asset). Never instantiated
-//!   into linear memory; addressable only host-side at load.
-//! - **The door** — `wire` is the load window. It pulls the bytes through
-//!   [`AssetWindow::asset`], hands them to `aether.render.create_texture`,
-//!   and keeps only the returned `texture_id` plus the fixed layout. When
-//!   `wire` returns the window closes and the payload path is gone; the
-//!   bytes were consumed, not retained.
+//!   into linear memory; addressable only host-side at publish.
+//! - **The door** — `wire` pulls the bytes through [`Assets::asset`],
+//!   hands them to `aether.render.create_texture`, and keeps only the
+//!   returned `texture_id` plus the fixed layout. The module holds the asset
+//!   for the instance's life, so the payload stays readable in every hook;
+//!   the bytes were consumed, not retained.
 //! - **Warm** — actor state holds a handle and a layout table (the
 //!   [`BundleComponent`]'s `tile` field), never payload bytes.
 //! - **Hot** — the engine-resident texture the `texture_id` names. The
@@ -49,7 +49,7 @@
 //! header — the reference pattern is bytes→engine-resident, not format
 //! parsing, so the actor never links an image decoder.
 
-use aether_actor::{ActorInitError, AssetWindow, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
+use aether_actor::{ActorInitError, Assets, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_data::Blob;
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -69,7 +69,7 @@ pub const TILE_HEIGHT: u32 = 16;
 
 /// The `aether.asset.<name>` section suffix the bundle pulls in `wire` —
 /// the exact string `export_asset!` keyed the section on, matched against
-/// the catalog by [`AssetWindow::asset`].
+/// the catalog by [`Assets::asset`].
 const TILE_ASSET_NAME: &str = "tile.rgba";
 
 /// On-screen size the tile draws at, in window pixels. Larger than the
@@ -83,7 +83,7 @@ const DRAW_SIZE_PIXELS: f32 = 128.0;
 // rlib build it reduces to a compile-checked `include_bytes!` const.
 aether_actor::export_asset!("tile.rgba");
 
-/// The warm-tier state a resident tile survives the load window as: the
+/// The warm-tier state a resident tile survives `wire` as: the
 /// engine handle plus the fixed layout it draws under. Payload bytes are
 /// deliberately absent — they were consumed in `wire` and never kept.
 #[derive(Debug, Clone, Copy)]
@@ -94,8 +94,7 @@ struct ResidentTile {
 }
 
 /// The reference asset bundle actor. Carries one tile asset, makes it an
-/// engine resident in the load window, draws it every frame, and destroys
-/// it on teardown.
+/// engine resident, draws it every frame, and destroys it on teardown.
 ///
 /// # Agent
 /// Loads with no config and needs no follow-up mail: `wire` pulls the
@@ -119,18 +118,16 @@ impl WasmActor for BundleComponent {
         Ok(BundleComponent { tile: None })
     }
 
-    /// The load window (ADR-0163 §4). Pulls the embedded tile through the
-    /// asset window — the only place the payload bytes are reachable —
-    /// and starts its transform into an engine resident by mailing
-    /// `aether.render.create_texture` with the raw pixels. The bytes are
-    /// consumed here and never stored; only the eventual `texture_id`
-    /// survives the window (captured in [`on_create_texture_result`]).
+    /// Asset pull (ADR-0250). Pulls the embedded tile from the instance's
+    /// own module and starts its transform into an engine resident by
+    /// mailing `aether.render.create_texture` with the raw pixels. The bytes
+    /// are consumed here and never stored; only the eventual `texture_id`
+    /// survives (captured in [`on_create_texture_result`]).
     /// Subscribes `Tick` so the draw loop runs every frame.
     ///
     /// A missing asset (the name doesn't match the catalog) or a byte
     /// length that doesn't match `TILE_WIDTH × TILE_HEIGHT × 4` warn-logs
-    /// and leaves the actor tile-less — a loud, load-time failure surface,
-    /// exactly where ADR-0163 wants asset failures to land.
+    /// and leaves the actor tile-less — a loud, load-time failure surface.
     ///
     /// [`on_create_texture_result`]: BundleComponent::on_create_texture_result
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
@@ -140,7 +137,7 @@ impl WasmActor for BundleComponent {
             tracing::warn!(
                 target: "aether_kit",
                 asset = TILE_ASSET_NAME,
-                "bundle: embedded tile asset not found in the load window; nothing to make resident",
+                "bundle: embedded tile asset not found in the module; nothing to make resident",
             );
             return Ok(());
         };
@@ -167,8 +164,8 @@ impl WasmActor for BundleComponent {
         Ok(())
     }
 
-    /// Symmetric teardown (ADR-0163 §4). Destroys exactly the resident
-    /// `wire` created — the fire-and-forget `aether.render.destroy_texture`
+    /// Symmetric teardown. Destroys exactly the resident `wire` created —
+    /// the fire-and-forget `aether.render.destroy_texture`
     /// counterpart to the `create_texture` above — so the resident dies
     /// with the component and the census stays exact. Taking the handle
     /// out of state makes the teardown idempotent. **Upholding this

@@ -11,7 +11,7 @@
 //!   gives it back (`blob_drop_p32`). Holds count live values, however many
 //!   times the guest decodes one mail. An entry leaves the table, and its
 //!   `Arc` drops, once it is neither pinned nor held. An asset the guest
-//!   takes from its load window as a blob (`asset_blob_p32`, ADR-0163 §3)
+//!   takes from its own module as a blob (`asset_blob_p32`, ADR-0250)
 //!   enters already held once, for the value the SDK builds over it.
 //! - **Resolving a hash.** The `blob_*_p32` host fns, and resolve on send for
 //!   the tag-1 fields of a guest's `send_mail_p32` / `reply_mail_p32` payload,

@@ -145,10 +145,10 @@ pub struct ConfigEcho {
 #[aether_data::kind(name = "aether.test_fixtures.config_query", default)]
 pub struct ConfigQuery;
 
-/// ADR-0163 §3 (#3984) driver kind: ask the `QuietProbe` fixture to report
-/// what it pulled from its asset load window during `wire`. No-payload
-/// query; the reply is an [`AssetProbeResult`]. Structured unit struct so
-/// it exercises the schema-driven dispatch path like [`ConfigQuery`].
+/// Driver kind: ask the `QuietProbe` fixture to report what it pulled from
+/// its module's assets during `wire`. No-payload query; the reply is an
+/// [`AssetProbeResult`]. Structured unit struct so it exercises the
+/// schema-driven dispatch path like [`ConfigQuery`].
 #[aether_data::kind(name = "aether.test_fixtures.asset_probe", default)]
 pub struct AssetProbe;
 
@@ -160,13 +160,11 @@ pub struct AssetProbe;
 pub struct LogMarker;
 
 /// Reply kind for [`AssetProbe`]: the length and a wrapping-sum checksum of
-/// the bytes the fixture pulled through `AssetWindow::asset` in `wire`,
-/// stashed in state and surfaced from a post-`wire` handler. Lets a test
-/// assert the guest-side asset pull round-tripped the exact bytes across
-/// the FFI (the checksum is content-sensitive) and that the value survived
-/// the window closing (the read happens after `wire`). `pulled` is `false`
-/// when the window returned no such asset — a loud negative rather than a
-/// silent zero.
+/// the bytes the fixture pulled through `Assets::asset` in `wire`,
+/// stashed in state and surfaced from a handler. Lets a test assert the
+/// guest-side asset pull round-tripped the exact bytes across the FFI (the
+/// checksum is content-sensitive). `pulled` is `false` when the module
+/// returned no such asset — a loud negative rather than a silent zero.
 #[aether_data::kind(name = "aether.test_fixtures.asset_probe_result", default, eq)]
 pub struct AssetProbeResult {
     pub pulled: bool,
@@ -181,7 +179,7 @@ pub struct AssetProbeResult {
 pub struct EmptyAssetProbe;
 
 /// Reply kind for [`EmptyAssetProbe`]: the length each verb returned for
-/// `asset_empty.bin` (`AssetWindow::asset` as `copied_len`, `asset_blob` as
+/// `asset_empty.bin` (`Assets::asset` as `copied_len`, `asset_blob` as
 /// `blob_len`), `None` where the verb answered `None`.
 #[aether_data::kind(name = "aether.test_fixtures.empty_asset_probe_result", eq)]
 pub struct EmptyAssetProbeResult {
@@ -190,16 +188,15 @@ pub struct EmptyAssetProbeResult {
 }
 
 /// Driver kind: ask the `QuietProbe` fixture for the asset it took from its
-/// load window as a blob during `wire` and kept in its state (ADR-0163 §3).
+/// module as a blob during `wire` and kept in its state (ADR-0250).
 /// No-payload query; the reply is an [`AssetBlobProbeResult`].
 #[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe", default)]
 pub struct AssetBlobProbe;
 
 /// Reply kind for [`AssetBlobProbe`]: the blob the fixture took through
-/// `AssetWindow::asset_blob` in `wire`, forwarded by handle from a
-/// post-`wire` handler, or `None` when its `wire` took none. Lets a test
-/// read the exact bytes of an asset that never entered the guest's memory,
-/// after the window that served it closed.
+/// `Assets::asset_blob` in `wire`, forwarded by handle from a handler, or
+/// `None` when its `wire` took none. Lets a test read the exact bytes of an
+/// asset that never entered the guest's memory.
 #[aether_data::kind(name = "aether.test_fixtures.asset_blob_probe_result")]
 pub struct AssetBlobProbeResult {
     pub blob: Option<Blob>,

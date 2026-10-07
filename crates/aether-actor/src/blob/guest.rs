@@ -29,7 +29,7 @@
 //! tag 0 and its bytes.
 //!
 //! One value is held without a delivery: an asset the guest takes from its
-//! load window as a blob ([`asset_blob`], ADR-0163 §3). The host places it in
+//! own module as a blob ([`asset_blob`], ADR-0250). The host places it in
 //! the blob table already held once and hands back its hash, and the SDK
 //! wraps that hold in the same `GuestHold` a decode builds, so it reads,
 //! forwards and drops as any held value does.
@@ -164,8 +164,8 @@ pub fn __mint_guest_blob(hash: BlobHash) -> Option<Blob> {
     Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
 }
 
-/// The asset named `name` in this instance's load window as a `Shared` value
-/// (ADR-0163 §3), or `None` when the component carries no such asset. The
+/// The asset named `name` in this instance's own module as a `Shared` value
+/// (ADR-0250), or `None` when the component carries no such asset. The
 /// host already took the hold the value owns, so this takes none: it only
 /// wraps the hash and length the host answered. No payload byte enters guest
 /// memory until the value is read.
@@ -176,7 +176,7 @@ pub fn asset_blob(name: &str) -> Option<Blob> {
     Some(aether_data::__mint_shared_blob(Arc::new(GuestHold { hash, len })))
 }
 
-/// The host build of the SDK has no load window to ask.
+/// The host build of the SDK has no module to ask.
 ///
 /// # Panics
 ///
