@@ -154,7 +154,7 @@ The successful reply is sent by the loaded component itself: the component host
 waits with the load's held reply until the guest's birth completes, then hands
 it off to the guest (as `aether.component.load_delivered`,
 [ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
-§9), and the guest answers the requester in its own name. An actor that loaded a component therefore takes `ctx.sender()`
+§9), and the guest answers the requester in its own name. An actor that loaded a component, native or guest, therefore takes `ctx.sender()`
 from the reply as its proven reference, and casts it once, there, to the
 protocol it will send the component, since an erased reference has no send
 verb (ADR-0231 §4); an embedder reads the stamped sender off the reply event
@@ -757,7 +757,7 @@ once, keep the `ProtocolRef<P>`, and send through it. A kind with no
 
 A guest can load a component itself. It declares the component host,
 `depends(ComponentHostCapability)`, sends it `aether.component.load`, and keeps the
-sender of `LoadResult::Ok`, which is the loaded actor, as its reference to the
+`ctx.sender()` of its response handler for `LoadResult::Ok`, which is the loaded actor, as its reference to the
 component, as
 [Publishing, spawning, loading, and dropping](#publishing-spawning-loading-and-dropping)
 describes. The loaded component has no door back to its loader;

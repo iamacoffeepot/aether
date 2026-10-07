@@ -19,9 +19,11 @@
 //!    forwarder sends `SourceQuery` through the reference it minted from that
 //!    declaration (component-origin mail). The observer replies its report to
 //!    the stamped origin, and the forwarder logs its arrival with the report's
-//!    `had_sender` verdict. After the chain settles, `log_tail` on the
-//!    forwarder confirms the report reached it with `had_sender=true` — so the
-//!    observer's sender was a proof of the forwarder.
+//!    `had_sender` verdict and whether its response handler's `ctx.sender()` is
+//!    the observer. After the chain settles, `log_tail` on the forwarder
+//!    confirms the report reached it with `had_sender=true` and
+//!    `replier_is_observer=true` — so the observer's sender was a proof of the
+//!    forwarder, and the forwarder read the replier as its own sender.
 //!
 //! This file is an integration test that requires a pre-built
 //! `source_observer.wasm` fixture. CI builds component wasm before invoking
@@ -105,7 +107,7 @@ fn component_source_returns_sender_mailbox() {
     let logs = harness.log_tail(&sender, None, None);
     let found = match &logs {
         LogTailResult::Ok { entries, .. } => {
-            entries.iter().any(|e| e.message == "source_report_received had_sender=true")
+            entries.iter().any(|e| e.message == "source_report_received had_sender=true replier_is_observer=true")
         }
         LogTailResult::Err { error } => panic!("log_tail on forwarder failed: {error}"),
     };

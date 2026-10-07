@@ -272,7 +272,8 @@ A cap spawns that thread from the handle `ctx.self_wake::<K>()` returns (on the
 `init` ctx as well as a handler's): `wake.spawn_sidecar(name, body)`. A panic in
 `body` fails the chassis fast, like a handler panic, even after the actor has
 closed. The thread wakes its actor through the same `SelfWake<K>`, never through
-a stored mailbox id plus a mailer. The handle names no position and sends nothing
+a stored mailbox id plus a mailer. The wake reaches its handler with the actor
+itself as `ctx.sender()`. The handle names no position and sends nothing
 but that one wake, and a wake after the actor has dropped does nothing
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 

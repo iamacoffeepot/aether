@@ -300,7 +300,8 @@ impl<A, S: SenderRequirement, M: ReplyMode> NativeCtx<'_, A, S, M> {
     /// *immediate* sender (one hop, the addressing layer's `Source`), not
     /// the chain origin — the origin lives in the tracing layer (`root` /
     /// `parent_mail`, ADR-0080). `None` for mail with no local sender
-    /// (broadcast, substrate-generated, hub-bubbled). One piece of
+    /// (broadcast, the task-completion wake, a driver's engine-only push,
+    /// hub-bubbled). A self-wake carries its own actor as the sender. One piece of
     /// host-generated mail does carry a sender: an
     /// [`aether_kinds::MonitorNotice`] is stamped with the departed actor, so
     /// a watcher reads which actor it lost from here. Needs no actor type,
