@@ -17,7 +17,6 @@ use std::io::{Read, Write};
 use std::mem;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
 use aether_actor::{ActorPath, ActorRef, Addressable, HeldReply, ProtocolPath, actor};
@@ -238,11 +237,9 @@ fn a_session_closes_when_its_consumer_closes() {
 /// capability that keeps no record of a dialed session, or that monitors the
 /// consumer and closes only its listeners.
 #[test]
-#[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
 fn a_dialed_session_closes_when_its_consumer_closes() {
     let server = TcpListener::bind("127.0.0.1:0").expect("bind the loopback server");
     let addr = server.local_addr().expect("the loopback server's address");
-    let accepted = thread::spawn(move || server.accept().expect("accept the dialed connection").0);
 
     let booted = boot_with_watcher();
     let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "dialing-consumer");
@@ -253,7 +250,9 @@ fn a_dialed_session_closes_when_its_consumer_closes() {
         &Connect { addr: addr.to_string(), name: Some("dialed".into()), consumer: consumer_path },
     );
     assert!(matches!(dialed, ConnectResult::Ok { .. }), "the dial is answered with its session: {dialed:?}");
-    let mut peer = accepted.join().expect("the loopback server accepts");
+    // The kernel completed the connection into the server's backlog when the
+    // dial was answered, so this accept returns it without waiting.
+    let (mut peer, _) = server.accept().expect("accept the dialed connection");
 
     send_and_settle(&booted.1, consumer, &ShutDown, None);
 
