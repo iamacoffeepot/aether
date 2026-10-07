@@ -87,6 +87,7 @@ mod mail_latency;
 pub mod perf;
 pub mod test_helpers;
 
+pub use aether_substrate::runtime::actor_clock::SteppedClock;
 pub use chassis::{
     CaptureOutcome, ComponentHostMode, ComposeFn, FrameCapture, FrameHook, RenderHookWiring,
     SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,

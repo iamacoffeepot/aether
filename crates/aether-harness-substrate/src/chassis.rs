@@ -24,6 +24,7 @@ use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, Pas
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::settlement::{PumpWake, SettlementRegistry, WaitOutcome, install_pump_wake};
 use aether_substrate::config::ConfigSources;
+use aether_substrate::runtime::actor_clock::ActorClock;
 use aether_substrate::{Chassis, PumpedSlot, RingCapacities, SchedulerTuning, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 use aether_window::{WindowCapability, WindowParams};
@@ -237,6 +238,10 @@ pub struct SubstrateHarnessEnv {
     /// keeps the built-in scheduler literals / adaptive knobs. Per-harness,
     /// no process env.
     pub scheduler_tuning: SchedulerTuning,
+    /// The clock this harness's engine is built with, the one every
+    /// `ctx.now()` in it reads: running unless the test supplied a
+    /// `SteppedClock`.
+    pub clock: ActorClock,
     /// Optional observation log: when `Some`, the chassis registers the
     /// observer inbox whose inline handler records the kind id of every
     /// report a fixture mails it. In-process API uses this to assert what
@@ -349,6 +354,7 @@ impl SubstrateHarnessChassis {
             pool_workers,
             ring_capacities,
             scheduler_tuning,
+            clock,
             observed_kinds,
             events_tx,
             namespace_roots,
@@ -361,7 +367,7 @@ impl SubstrateHarnessChassis {
             render_wake,
         } = env;
 
-        let mut boot = SubstrateBoot::build()?;
+        let mut boot = SubstrateBoot::build_with_clock(clock)?;
         let _ = workers;
 
         // Phase 4: advance lands on `SubstrateHarnessCapability` claiming

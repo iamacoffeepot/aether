@@ -25,6 +25,7 @@ APIs without a deprecation window.
 - `#[aether_data::kind(name = "…")]` declares a kind and its whole derive stack in one attribute.
 - `aether.inventory` answers manifest and resolve queries over mail, so tagged ids render as real names.
 - Chassis config is derived at compose time from the capabilities actually linked, resolved argv above env above default, and self-reported by the binary.
+- An actor measures elapsed time with `ctx.now()`, the same call on a guest ctx and a native one. It returns an `aether_actor::Instant` that stays in actor state, and a `SubstrateHarness` test steps the clock by hand through `SubstrateHarnessBuilder::clock`.
 
 ### Chassis and capabilities
 

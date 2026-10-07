@@ -13,6 +13,7 @@ use aether_data::{Blob, Kind, MailboxId, RequestId, Source};
 
 use crate::asset::{AssetInfo, Assets};
 use crate::blob::guest;
+use crate::instant::Instant;
 use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{ReplyMode, Single, Unchecked};
@@ -21,7 +22,7 @@ use crate::model::{
     SenderRequirement, Singleton,
 };
 use crate::reference::{ActorRef, ErasedActorRef};
-use crate::wasm::bridge::mail;
+use crate::wasm::bridge::{clock, mail};
 use crate::wasm::inline::Registry;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -313,6 +314,19 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     #[allow(clippy::needless_pass_by_value)]
     pub fn fatal_abort(&self, reason: String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
+    }
+
+    /// A reading of the engine's actor clock. Subtract an earlier reading
+    /// with [`Instant::since`] to measure how long work took: within one
+    /// engine a later reading is never less than an earlier one, and only
+    /// the difference means anything. An [`Instant`] has no codec, so one
+    /// that outlives the handler is kept in actor state.
+    ///
+    /// The native twin is `aether_substrate::actor::native::NativeCtx::now`,
+    /// which reads the same clock.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        Instant::new(clock::now_nanos())
     }
 }
 

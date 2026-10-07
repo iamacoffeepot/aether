@@ -22,6 +22,7 @@ use aether_bloomery_kinds::{Head, ProgramName};
 use aether_data::{Blob, ErasedActorPath, LoadName, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 /// Typed root marker for the substrate harness's observer mailbox, the
 /// sink the fixtures report to through
@@ -1179,4 +1180,30 @@ pub struct SenderGateHolderQuery;
 pub struct SenderGateHolderQueryResult {
     pub granted: Vec<u32>,
     pub dialed: Vec<SenderGateDialed>,
+}
+
+/// Issue 7627: tells a clock probe to take a new reading of the engine's
+/// actor clock and keep it as its mark, in place of the one it took at
+/// `init`.
+#[aether_data::kind(name = "aether.test_fixtures.clock.mark", copy)]
+pub struct ClockMark;
+
+/// Issue 7627: ask a clock probe how long ago it last marked, by the
+/// engine's actor clock.
+#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed", copy)]
+pub struct ClockElapsed;
+
+/// Issue 7627: the reply to [`ClockElapsed`].
+#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed_report", copy, eq)]
+pub struct ClockElapsedReport {
+    /// The duration since the last mark, in nanoseconds.
+    pub elapsed_nanos: u64,
+}
+
+impl ClockElapsedReport {
+    /// The report for a probe whose last mark was `elapsed` ago.
+    #[must_use]
+    pub fn of(elapsed: Duration) -> Self {
+        Self { elapsed_nanos: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX) }
+    }
 }
