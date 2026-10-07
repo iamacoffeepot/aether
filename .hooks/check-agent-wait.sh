@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # PreToolUse hook (matcher: Bash): an agent ends at a wait.
 #
-# A subagent's prompt cache lasts five minutes (the main session's lasts an
-# hour), so a subagent that waits longer rewrites its whole context on its next
-# call. This hook refuses the waits in a subagent and leaves the main session
-# alone. The harness puts `agent_id` on a subagent's hook input only.
+# Every subagent's prompt cache lasts five minutes (the main session's lasts an
+# hour), so a subagent that goes longer between calls rewrites its whole
+# context on its next one. This hook holds each subagent call under four
+# minutes and leaves the main session alone. The harness puts `agent_id` on a
+# subagent's hook input only.
 #
-# Refused in any subagent:
-#   - a gate wait: `wave-status.sh --wait`, `gh run watch`, `gh pr checks --watch`;
+# Refused in any subagent, whatever its agent type:
+#   - a gate wait: `wave-status.sh --wait`, `gh run watch`,
+#     `gh pr checks --watch`, `agent-job.sh wait <name> --until-done`;
 #   - an `until` / `while` / `for` loop whose body sleeps;
-#   - a single `sleep` of 240 seconds or more.
-# Refused unless the agent type is `implementer`, whose cache lasts an hour:
-#   - a foreground call with a `timeout` above 270000 milliseconds.
+#   - a single `sleep` of 240 seconds or more;
+#   - a foreground call with a `timeout` above 240000 milliseconds.
+#
+# The wait a subagent may make is `scripts/agent-job.sh wait <name>`, which
+# bounds itself under the limit and counts its own polls.
 
 set -u
 
@@ -26,12 +30,11 @@ field() {
 agent_id=$(field '.agent_id')
 [[ -n "$agent_id" ]] || exit 0
 
-agent_type=$(field '.agent_type')
 command=$(field '.tool_input.command')
 in_background=$(field '.tool_input.run_in_background')
 
 sleep_limit_secs=240
-timeout_limit_millis=270000
+timeout_limit_millis=240000
 
 refuse() {
     local rule="$1" what="$2"
@@ -39,7 +42,8 @@ refuse() {
     {
         printf 'agent-wait: refused — %s.\n' "$what"
         printf 'An agent ends at a wait: a subagent prompt cache lasts five minutes, so waiting here rewrites your whole context.\n'
-        printf 'End your turn and hand the handle (pull request number, log path, or job name) back in your report; the session that dispatched you waits.\n'
+        printf 'For a build or check you need to continue, run it with scripts/agent-job.sh start <name> -- <command> and poll scripts/agent-job.sh wait <name> (timeout 240000).\n'
+        printf 'Otherwise end your turn and hand the handle (pull request number, log path, or job name) back in your report; the session that dispatched you waits.\n'
     } >&2
     exit 2
 }
@@ -52,6 +56,7 @@ segment_is_gate_wait() {
     local run_watch_re='[[:space:]]run[[:space:]]+watch([[:space:]]|$)'
     local checks_re='[[:space:]]pr[[:space:]]+checks([[:space:]]|$)'
     local watch_flag_re='[[:space:]]--watch([[:space:]=]|$)'
+    local until_done_re='[[:space:]]--until-done([[:space:]]|$)'
     while :; do
         segment="${segment#"${segment%%[![:space:]\"\']*}"}"
         word="${segment%%[[:space:]]*}"
@@ -70,6 +75,9 @@ segment_is_gate_wait() {
     case "$word" in
         wave-status.sh|*/wave-status.sh)
             [[ "$segment" =~ $wait_flag_re ]] && return 0
+            ;;
+        agent-job.sh|*/agent-job.sh)
+            [[ "$segment" =~ $until_done_re ]] && return 0
             ;;
         gh)
             [[ "$segment" =~ $run_watch_re ]] && return 0
@@ -113,7 +121,7 @@ sleeps_long=0
 
 over_timeout=$(printf '%s' "$input" | jq -r --argjson limit "$timeout_limit_millis" '((.tool_input.timeout // 0) > $limit)' 2>/dev/null || true)
 blocks_long=0
-if [[ "$over_timeout" == "true" && "$in_background" != "true" && "$agent_type" != "implementer" ]]; then
+if [[ "$over_timeout" == "true" && "$in_background" != "true" ]]; then
     blocks_long=1
 fi
 
@@ -127,7 +135,7 @@ if (( sleeps_long )); then
     refuse long-sleep "this command sleeps ${longest_sleep_secs} seconds (limit: under ${sleep_limit_secs})"
 fi
 if (( blocks_long )); then
-    refuse long-timeout "a foreground timeout above ${timeout_limit_millis} milliseconds outlives your cache; only the implementer agent type may block that long"
+    refuse long-timeout "a foreground timeout above ${timeout_limit_millis} milliseconds outlives your cache"
 fi
 
 exit 0

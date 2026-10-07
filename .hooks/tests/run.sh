@@ -342,9 +342,17 @@ expect "subagent: timeout-wrapped gh run watch -> block" check-agent-wait.sh \
     "$(agentbash general-purpose 'timeout 600 gh run watch 123 --exit-status')" 2 "waits on a gate"
 expect "subagent: bash -c wave-status --wait -> block" check-agent-wait.sh \
     "$(agentbash general-purpose 'bash -c "scripts/wave-status.sh --wait 12"')" 2 "waits on a gate"
-# The implementer exemption covers a long build only, never a gate wait.
+# No agent type is exempt: the implementer has the same five-minute cache.
 expect "implementer: wave-status --wait -> block" check-agent-wait.sh \
     "$(agentbash implementer 'scripts/wave-status.sh --wait 12')" 2 "waits on a gate"
+# The bounded job wait is the wait a subagent makes; the unbounded one is the
+# dispatching session's.
+expect "subagent: agent-job wait -> allow" check-agent-wait.sh \
+    "$(agentbash implementer 'scripts/agent-job.sh wait issue-12-clippy' '{"timeout":240000}')" 0
+expect "subagent: agent-job wait --until-done -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cd /repo && scripts/agent-job.sh wait issue-12-clippy --until-done')" 2 "waits on a gate"
+expect "main session: agent-job wait --until-done -> allow" check-agent-wait.sh \
+    "$(agentbash "" 'scripts/agent-job.sh wait issue-12-clippy --until-done' '{"timeout":600000}')" 0
 # One-shot reads and short pauses are how a subagent finds the handle to hand back.
 expect "subagent: wave-status without --wait -> allow" check-agent-wait.sh \
     "$(agentbash general-purpose 'scripts/wave-status.sh 12')" 0
@@ -359,11 +367,13 @@ expect "subagent: counted for loop that sleeps -> block" check-agent-wait.sh \
 expect "subagent: read loop, then a short sleep after it -> allow" check-agent-wait.sh \
     "$(agentbash general-purpose 'while read -r l; do echo "$l"; done < f; sleep 2')" 0
 expect "general-purpose: foreground timeout over the cache -> block" check-agent-wait.sh \
-    "$(agentbash general-purpose 'cargo build' '{"timeout":600000}')" 2 "implementer"
-expect "implementer: foreground timeout over the cache -> allow" check-agent-wait.sh \
-    "$(agentbash implementer 'cargo build' '{"timeout":600000}')" 0
+    "$(agentbash general-purpose 'cargo build' '{"timeout":600000}')" 2 "outlives your cache"
+expect "implementer: foreground timeout over the cache -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cargo build' '{"timeout":600000}')" 2 "agent-job.sh start"
+expect "implementer: timeout just over the limit -> block" check-agent-wait.sh \
+    "$(agentbash implementer 'cargo build' '{"timeout":240001}')" 2 "outlives your cache"
 expect "general-purpose: timeout at the limit -> allow" check-agent-wait.sh \
-    "$(agentbash general-purpose 'cargo build' '{"timeout":270000}')" 0
+    "$(agentbash general-purpose 'cargo build' '{"timeout":240000}')" 0
 expect "general-purpose: long timeout in the background -> allow" check-agent-wait.sh \
     "$(agentbash general-purpose 'cargo build' '{"timeout":600000,"run_in_background":true}')" 0
 expect "main session: long foreground timeout -> allow" check-agent-wait.sh \
@@ -416,13 +426,9 @@ age_file "$AGENT_T" 60
 expect "resume: general-purpose idle 60s -> allow" check-agent-resume.sh "$(resumejson a1)" 0
 age_file "$AGENT_T" 600
 expect "resume: general-purpose idle 600s -> block" check-agent-resume.sh "$(resumejson a1)" 2 "fresh agent"
+# No agent type has a longer cache, so none has a longer limit.
 printf '{"agentType":"implementer"}\n' > "$META"
-expect "resume: implementer idle 600s -> allow" check-agent-resume.sh "$(resumejson a1)" 0
-age_file "$AGENT_T" 3400
-expect "resume: implementer idle 3400s -> block" check-agent-resume.sh "$(resumejson a1)" 2 "limit 3300"
-rm -f "$META"
-age_file "$AGENT_T" 600
-expect "resume: no meta file, idle 600s -> block at the short limit" check-agent-resume.sh "$(resumejson a1)" 2 "limit 300"
+expect "resume: implementer idle 600s -> block" check-agent-resume.sh "$(resumejson a1)" 2 "limit 300"
 # A teammate or a name with no subagent transcript is not this hook's business.
 expect "resume: target without a transcript -> allow" check-agent-resume.sh "$(resumejson nobody)" 0
 
