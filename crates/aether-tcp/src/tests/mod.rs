@@ -814,6 +814,52 @@ fn bind_port_in_use_returns_err() {
     }
 }
 
+/// A second bind of the same address string by the same consumer answers the
+/// standing listener instead of binding again: the reply quotes the standing
+/// name and port, the listener list is unchanged, and no second socket is
+/// bound.
+#[test]
+fn bind_same_address_by_same_consumer_answers_the_standing_listener() {
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "idempotent-consumer");
+
+    let first: BindListenerResult = drive_and_decode(
+        &chassis,
+        &rx,
+        tcp,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()), consumer: consumer.clone() },
+    );
+    let (listener_name, local_port) = match first {
+        BindListenerResult::Ok { listener_name, local_port } => (listener_name, local_port),
+        BindListenerResult::Err(error) => panic!("first bind failed: {error:?}"),
+    };
+
+    let second: BindListenerResult = drive_and_decode(
+        &chassis,
+        &rx,
+        tcp,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("second".into()), consumer },
+    );
+    match second {
+        BindListenerResult::Ok { listener_name: second_name, local_port: second_port } => {
+            assert_eq!(second_name, listener_name, "repeat bind answers the standing name");
+            assert_eq!(second_port, local_port, "repeat bind answers the standing port");
+        }
+        BindListenerResult::Err(error) => panic!("repeat bind failed: {error:?}"),
+    }
+
+    let listed: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());
+    assert_eq!(listed.listeners.len(), 1, "repeat bind stages no second listener: {:?}", listed.listeners);
+    let entry = &listed.listeners[0];
+    assert_eq!(entry.name, listener_name);
+    assert_eq!(entry.port, local_port);
+    assert_eq!(entry.addr, "127.0.0.1:0");
+
+    let live = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_port);
+    assert!(TcpListener::bind(live).is_err(), "the standing listener retains its socket");
+}
+
 /// Unbind on an unknown name surfaces an Err with the name
 /// echoed back.
 #[test]
@@ -1047,19 +1093,20 @@ fn session_reports_frame_rejection_to_bound_consumer() {
 fn list_enumerates_two_concurrent_listeners() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
-    let (consumer, _deliveries) = spawn_consumer(&chassis, "list-consumer");
+    let (consumer_admin, _deliveries_admin) = spawn_consumer(&chassis, "list-consumer-admin");
+    let (consumer_game, _deliveries_game) = spawn_consumer(&chassis, "list-consumer-game");
 
     let _: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: consumer.clone() },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: consumer_admin },
     );
     let _: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer: consumer_game },
     );
 
     let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());

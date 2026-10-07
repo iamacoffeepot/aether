@@ -44,6 +44,19 @@ fn bind_listener<S>(
     name: Option<String>,
     consumer: ProtocolRef<TcpConsumer>,
 ) {
+    let consumer_erased = consumer.erase();
+    let standing = state.listeners.values().find(|entry| {
+        let same_address = entry.addr == addr;
+        let same_consumer = entry.bound_to(consumer_erased);
+        let settled = matches!(entry.pending_unbind, UnbindState::Idle);
+        same_address && same_consumer && settled
+    });
+
+    if let Some(entry) = standing {
+        held.answer(ctx, &BindListenerResult::Ok { listener_name: entry.name.clone(), local_port: entry.port });
+        return;
+    }
+
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {

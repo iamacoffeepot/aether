@@ -32,7 +32,8 @@ explicit.
 Bind/connect results carry success or a bounded error. Readiness notifications
 separate actor creation from a socket being usable. A connect timeout or bind
 failure must resolve the initiating request; it must not leave a permanent
-settlement hold.
+settlement hold. Repeating a bind of the same address as the same consumer
+returns the standing listener rather than creating one.
 
 Connect, bind, and unbind answer later than the handler turn that receives
 them, through typed held replies (ADR-0243). Each handler holds its reply as a
