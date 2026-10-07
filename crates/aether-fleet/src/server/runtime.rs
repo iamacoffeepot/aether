@@ -14,7 +14,7 @@ use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyTarget};
 use crate::proxy::{describe_exit, read_reported_port, startup_exit_status, terminate_child_group};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
-pub use aether_actor::{ActorRef, Single};
+pub use aether_actor::{ActorRef, Anyone, Single};
 use aether_actor::{ReplyMode, runtime};
 pub use aether_data::{EngineId, Uuid};
 use aether_kinds::{
@@ -608,9 +608,9 @@ impl<P> FleetServerState<P> {
     /// reader on `ctx`: every chunk reaches the hub log as it would have
     /// inherited, and the redacted end of it rides out as
     /// [`PreparedFork::stderr`] for a failure detail.
-    fn prepare_fork<M: ReplyMode>(
+    fn prepare_fork<S, M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, FleetServer, M>,
+        ctx: &NativeCtx<'_, FleetServer, S, M>,
         exec_source: &Path,
         recipe: &SpawnRecipe,
     ) -> Result<PreparedFork, PrepareFailure> {
@@ -675,7 +675,7 @@ impl<P> FleetServerState<P> {
     /// the way it always has. What *is* continuous is `supervision` — the
     /// recipe and the spent restart budget ride across, so the burst
     /// limit binds over the lineage rather than resetting on every new id.
-    fn restart_engine(&mut self, ctx: &mut NativeCtx<'_, FleetServer, Single>, supervision: Supervision) {
+    fn restart_engine(&mut self, ctx: &mut NativeCtx<'_, FleetServer, Anyone, Single>, supervision: Supervision) {
         let hash = supervision.recipe.hash.clone();
 
         // Re-resolve rather than trusting a path captured at spawn time:
@@ -1160,7 +1160,7 @@ impl NativeActor for FleetServer {
     /// looks the token up and re-forks the filed recipe under a fresh
     /// engine id. A token with no pending entry is a silent no-op.
     #[handler::tell]
-    fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, mail: EngineRestartDue) {
+    fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Anyone, Single>, mail: EngineRestartDue) {
         if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
             state.restart_engine(ctx, supervision);
             // The filed restart is no longer pending: it either became a

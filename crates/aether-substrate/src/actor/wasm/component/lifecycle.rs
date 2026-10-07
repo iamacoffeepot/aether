@@ -204,7 +204,7 @@ impl Component {
     /// effect (ADR-0079 §8). A no-op for an outbox never held.
     ///
     /// The consumer is a republish committing its candidate.
-    pub fn flush_held_outbox<A, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, M>) {
+    pub fn flush_held_outbox<A, S, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, S, M>) {
         self.store.data_mut().flush_held(ctx.in_flight_mail_id(), ctx.in_flight_root());
     }
 

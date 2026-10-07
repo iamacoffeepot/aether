@@ -81,7 +81,7 @@ impl<C: Addressable> InlineChild<C> {
     /// Routes as [`WasmCtx::send_to`] does — through the inline
     /// registry's cluster router, in place through the membrane for a resident
     /// child, inheriting the handler's causal chain (ADR-0080 §7).
-    pub fn send<K: ActorMail + SentBy<A, C>, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
+    pub fn send<K: ActorMail + SentBy<A, C>, A, S, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, S, M>, payload: &K)
     where
         C: HandlesKind<K>,
     {
@@ -132,7 +132,7 @@ impl<C: Addressable> InlineChild<C> {
     }
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// This actor's inline child whose subname is `name`, as an [`InlineChild<C>`], or `None` when no such
     /// child resides **or** the resident one is not a `C`.
     ///

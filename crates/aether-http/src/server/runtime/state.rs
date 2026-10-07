@@ -5,7 +5,7 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
-use aether_actor::{ErasedActorRef, HandlesKind, Single};
+use aether_actor::{Anyone, ErasedActorRef, HandlesKind, Single};
 use aether_substrate::Subname;
 use std::collections::hash_map::Entry;
 
@@ -256,7 +256,7 @@ impl HttpSupervisorState {
 
     /// Wake this supervisor for its next private `HttpInboundReady` turn,
     /// which stages one shard per transactional owner batch.
-    fn schedule_shard_wake<A>(ctx: &NativeCtx<'_, A, Single>) {
+    fn schedule_shard_wake<A>(ctx: &NativeCtx<'_, A, Anyone, Single>) {
         ctx.self_wake::<HttpInboundReady>().wake(&HttpInboundReady::default());
     }
 
@@ -269,7 +269,7 @@ impl HttpSupervisorState {
     /// caller then ends the handler so its birth flushes as an independent
     /// batch. A follow-up wake is always scheduled: it stages the next index,
     /// or resumes ordinary accepted-peer draining after the last index.
-    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, HttpServerCapability, Single>) -> bool {
+    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, HttpServerCapability, Anyone, Single>) -> bool {
         let index = match &mut self.shard_startup {
             ShardStartup::Starting { next_to_stage, .. } => next_to_stage.take(),
             ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
@@ -394,9 +394,9 @@ impl HttpSupervisorState {
     /// the lifecycle authoritative. Ready drains retained sockets FIFO;
     /// Failed returns one controlled `503` per retained socket. Pending and
     /// stale attempts perform no side effect.
-    pub fn apply_shard_settlement<A, M: ReplyMode>(
+    pub fn apply_shard_settlement<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         settlement: ShardSettlement,
     ) {
         match settlement {
@@ -436,9 +436,9 @@ impl HttpSupervisorState {
         }
     }
 
-    fn dispatch_ready_peer<A, M: ReplyMode>(
+    fn dispatch_ready_peer<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         stream: TcpStream,
         peer: SocketAddr,
     ) {
@@ -460,7 +460,7 @@ impl HttpSupervisorState {
     /// sockets and supervisor-owned pending sockets. The first peer starts
     /// lazy staging; later peers stay FIFO in `Starting`; only `Ready` may
     /// post into a child sink.
-    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>, stream: TcpStream, peer: SocketAddr) {
+    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, stream: TcpStream, peer: SocketAddr) {
         let live = self.live_connections.load(Ordering::Acquire);
         let pending = self.pending_peer_count();
         if live.saturating_add(pending) >= self.config.max_connections {
@@ -541,7 +541,7 @@ impl HttpSupervisorState {
     /// handler returns, by which time the route is in the table, and purges
     /// it. Without that a closed holder's prefix would answer `502` for the
     /// rest of the process.
-    pub fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
+    pub fn watch<A, S, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, subscriber: ErasedActorRef) {
         if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
             slot.insert(ctx.monitor(subscriber));
         }

@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use aether_actor::{Root, Single};
+use aether_actor::{Anyone, Root, Single};
 use aether_data::{Kind, MailId};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
@@ -169,7 +169,10 @@ impl<A: Root + NativeActor> PumpedDriver<A> {
     }
 
     /// Run one host turn against the actor's state without draining.
-    pub fn host_turn<T>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> T) -> Option<T> {
+    pub fn host_turn<T>(
+        &mut self,
+        turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Anyone, Single>) -> T,
+    ) -> Option<T> {
         self.slot.host_turn(turn)
     }
 }

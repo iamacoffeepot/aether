@@ -65,7 +65,7 @@ pub struct RouteMember {
 impl RouteMember {
     /// Cast `router` to each data-phase protocol, three registry reads paid
     /// once per registration.
-    pub fn cast<A, M: ReplyMode>(ctx: &NativeCtx<'_, A, M>, router: ProtocolRef<HttpRouter>) -> Self {
+    pub fn cast<A, S, M: ReplyMode>(ctx: &NativeCtx<'_, A, S, M>, router: ProtocolRef<HttpRouter>) -> Self {
         let identity = router.erase();
         Self { router, credit: ctx.cast(identity), request_stream: ctx.cast(identity), websocket: ctx.cast(identity) }
     }

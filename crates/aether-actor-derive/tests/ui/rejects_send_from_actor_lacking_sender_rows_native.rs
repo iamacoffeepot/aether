@@ -11,8 +11,8 @@
 //! substrate-typed runtime impls out and only the always-on half compiles:
 //! the markers a send is checked against. The native verbs carry the same
 //! bound, shown by the `compile_fail` doctest on `NativeCtx::send`, and the
-//! native arm's cast is driven by `aether-substrate`'s
-//! `tests/sender_requirement.rs`.
+//! native arm's cast is driven by `aether-component`'s
+//! `tests/harness_sender_requirement.rs`.
 
 use aether_actor::{ActorInitError, PathRefused, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 
@@ -67,11 +67,10 @@ impl aether_substrate::actor::native::NativeActor for Dialer {
     #[handler::request]
     fn on_dial_self(
         _state: &mut Self::State,
-        ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
+        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, Self, Consumer>,
         _mail: DialSelf,
-        sender: aether_actor::ProtocolRef<Consumer>,
     ) -> Dialed {
-        ctx.send_to(sender, &Data);
+        ctx.send_to(ctx.sender(), &Data);
         Dialed::Ok
     }
 }

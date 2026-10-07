@@ -2,8 +2,9 @@
 //! handlers state what their sender must handle, and a guest that covers it.
 //!
 //! `SenderGate` takes a [`SenderGateTake`] and a [`SenderGateDial`] only from a sender
-//! that covers [`SenderGateGrantee`]. Each handler counts its run and mails the
-//! sender it was handed a [`SenderGateGranted`] through that reference, so a
+//! that covers [`SenderGateGrantee`], which each names as its ctx's sender.
+//! Each handler counts its run and mails `ctx.sender()`, the reference the
+//! engine proved, a [`SenderGateGranted`], so a
 //! scenario reads from the counts whether a handler ran and from the
 //! holder whether the reference reached the sender. A [`SenderGateQuery`] asks
 //! nothing of its sender.
@@ -12,7 +13,7 @@
 //! `ctx.send::<SenderGate>` of either kind builds. A [`SenderGateTrigger`] sends
 //! both, and a [`SenderGateHolderQuery`] reads back what the gate answered.
 
-use aether_actor::{ActorInitError, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
     SenderGateDial, SenderGateDialed, SenderGateGranted, SenderGateGrantee, SenderGateHolderQuery,
     SenderGateHolderQueryResult, SenderGateQuery, SenderGateQueryResult, SenderGateTake, SenderGateTrigger,
@@ -33,20 +34,15 @@ impl WasmActor for SenderGate {
     }
 
     #[handler::tell]
-    fn on_take(&mut self, ctx: &mut WasmCtx<'_>, take: SenderGateTake, sender: ProtocolRef<SenderGateGrantee>) {
+    fn on_take(&mut self, ctx: &mut WasmCtx<'_, Self, SenderGateGrantee>, take: SenderGateTake) {
         self.takes += 1;
-        ctx.send_to(sender, &SenderGateGranted { tag: take.tag });
+        ctx.send_to(ctx.sender(), &SenderGateGranted { tag: take.tag });
     }
 
     #[handler::request]
-    fn on_dial(
-        &mut self,
-        ctx: &mut WasmCtx<'_>,
-        dial: SenderGateDial,
-        sender: ProtocolRef<SenderGateGrantee>,
-    ) -> SenderGateDialed {
+    fn on_dial(&mut self, ctx: &mut WasmCtx<'_, Self, SenderGateGrantee>, dial: SenderGateDial) -> SenderGateDialed {
         self.dials += 1;
-        ctx.send_to(sender, &SenderGateGranted { tag: dial.tag });
+        ctx.send_to(ctx.sender(), &SenderGateGranted { tag: dial.tag });
 
         SenderGateDialed::Ok { tag: dial.tag }
     }

@@ -120,9 +120,9 @@ pub trait Contract<K: Kind>: Contracts + HandlesKind<K, Sender = <Self as Contra
     /// The reply kind, [`Silent`], or [`Undeclared`].
     type Reply: ReplyShape;
 
-    /// What the row's handler requires of its sender: the protocol its
-    /// `sender: ProtocolRef<P>` parameter names, or [`Anyone`](super::Anyone) when it takes
-    /// none. The supertrait bound holds it equal to
+    /// What the row's handler requires of its sender: the protocol its ctx
+    /// names as its sender, or [`Anyone`](super::Anyone) when it names none.
+    /// The supertrait bound holds it equal to
     /// [`HandlesKind::Sender`], which the typed sends read, so a row cannot
     /// state one requirement to a send and another to a protocol's coverage.
     /// Coverage reads it here, so a target that lacks a row is reported once.

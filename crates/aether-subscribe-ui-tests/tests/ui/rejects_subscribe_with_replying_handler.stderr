@@ -12,11 +12,11 @@ help: the following other types implement trait `SilentRow`
    | ^^^^^^^^^^^^^^^^^^^^^^^^^ `Silent`
    | impl SilentRow for Undeclared {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Undeclared`
-note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/subscribe.rs
    |
    |     pub fn subscribe<P, K: Kind>(&mut self)
    |            --------- required by a bound in this associated function
 ...
    |         <A as Contract<K>>::Reply: SilentRow,
-   |                                    ^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+   |                                    ^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`

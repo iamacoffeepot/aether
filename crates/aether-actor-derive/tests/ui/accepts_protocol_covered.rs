@@ -5,7 +5,7 @@
 //! and maps to `ReplyContract::Unchecked` in the same list the actor publishes.
 
 use aether_actor::{
-    ActorInitError, ActorPath, ActorRef, CastTarget, Contracts, CoveredBy, Mail, Protocol, ProtocolPath,
+    ActorInitError, ActorPath, ActorRef, Anyone, CastTarget, Contracts, CoveredBy, Mail, Protocol, ProtocolPath,
     ProtocolRef, RowSet, Unchecked, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
@@ -80,7 +80,7 @@ impl WasmActor for LoaderActor {
     fn on_extra(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Extra) {}
 
     #[handler::unchecked(reason = "test: an explicit unchecked protocol row")]
-    fn on_forward(&mut self, _ctx: &mut WasmCtx<'_, Self, Unchecked>, _mail: Forward) {}
+    fn on_forward(&mut self, _ctx: &mut WasmCtx<'_, Self, Anyone, Unchecked>, _mail: Forward) {}
 
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}

@@ -433,7 +433,7 @@ impl ShardSink {
     /// for it. The wake is a fresh-root detached send, flushed when the
     /// calling handler ends. Returns `false` when the shard's receiver is
     /// gone (teardown in progress).
-    pub fn post<A, M: ReplyMode>(&self, ctx: &mut NativeCtx<'_, A, M>, event: InboundEvent) -> bool {
+    pub fn post<A, S, M: ReplyMode>(&self, ctx: &mut NativeCtx<'_, A, S, M>, event: InboundEvent) -> bool {
         if self.inbound_tx.send(event).is_err() {
             return false;
         }

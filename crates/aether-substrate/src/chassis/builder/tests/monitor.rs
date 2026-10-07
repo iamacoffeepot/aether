@@ -117,7 +117,7 @@ impl NativeActor for LateWatcher {
 impl Dispatch<Self> for LateWatcher {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -349,7 +349,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl Dispatch<Self> for Watcher {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -473,7 +473,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl Dispatch<Self> for Target {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -520,7 +520,7 @@ fn watcher_close_prunes_targets_forward_index() {
     impl Dispatch<Self> for Watcher {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

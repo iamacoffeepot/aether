@@ -1074,22 +1074,26 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(
+            &mut self,
+            ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+            _mail: Mail<'_>,
+        ) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
             self.observed_source.set(ctx.sender().map(ErasedActorRef::id));
             CHILD_CODE
         }
         fn erased_wire(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
         ) -> Result<(), ActorInitError> {
             Ok(())
         }
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
         ) {
         }
@@ -1116,7 +1120,11 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(
+            &mut self,
+            ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+            _mail: Mail<'_>,
+        ) -> u32 {
             // Self-despawn mid-dispatch through the threaded registry: this
             // box is currently taken out (held on the membrane's stack), so
             // the ctx's despawn clears the empty slot and the membrane's
@@ -1126,15 +1134,15 @@ mod tests {
         }
         fn erased_wire(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
         ) -> Result<(), ActorInitError> {
             Ok(())
         }
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
         ) {
         }
@@ -1152,22 +1160,26 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.reply_probe_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(
+            &mut self,
+            ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+            _mail: Mail<'_>,
+        ) -> u32 {
             self.dispatched.set(true);
             self.observed_reply.set(ctx.in_reply_to());
             CHILD_CODE
         }
         fn erased_wire(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
         ) -> Result<(), ActorInitError> {
             Ok(())
         }
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
         fn erased_on_rehydrate(
             &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
         ) {
         }

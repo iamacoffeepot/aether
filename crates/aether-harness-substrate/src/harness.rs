@@ -470,7 +470,7 @@ impl SubstrateHarnessBuilder {
     /// use aether_actor::{Addressable, ChildOf, Lifecycle, Many, One};
     /// use aether_data::KindId;
     /// use aether_harness_substrate::SubstrateHarnessBuilder;
-    /// use aether_substrate::{BootError, Dispatch, Unchecked, NativeActor, NativeCtx, NativeInitCtx};
+    /// use aether_substrate::{Anyone, BootError, Dispatch, Unchecked, NativeActor, NativeCtx, NativeInitCtx};
     ///
     /// struct Parent;
     /// impl Addressable for Parent {
@@ -498,7 +498,7 @@ impl SubstrateHarnessBuilder {
     /// impl Dispatch<Self> for ChildOnly {
     ///     fn dispatch(
     ///         _: &mut Self,
-    ///         _: &mut NativeCtx<'_, Self, Unchecked>,
+    ///         _: &mut NativeCtx<'_, Self, Anyone, Unchecked>,
     ///         _: KindId,
     ///         _: &[u8],
     ///     ) -> Option<()> {
@@ -2089,7 +2089,7 @@ mod tests {
         impl Dispatch<Self> for Child {
             fn dispatch(
                 state: &mut Self,
-                _ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+                _ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {

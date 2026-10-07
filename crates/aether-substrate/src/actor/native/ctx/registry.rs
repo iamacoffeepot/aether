@@ -25,7 +25,7 @@ use crate::memory::MemoryReport;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// A kind's display label for log and diagnostic text: its registered
     /// name, or the tagged `knd-…` id's text when the kind is not registered
     /// (a component-defined kind the registry has not seen).

@@ -42,7 +42,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
         #[handler::unchecked(reason = "reads `reply_target()` so a cast does not fold state (#6961)")]
         fn on_warm(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
             warm: #reactor::kinds::Warm,
         ) {
             use ::aether_actor::OutboundReply;
@@ -58,7 +58,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
         #[handler::unchecked(reason = "reads `reply_target()` so a cast does not fold state (#6961)")]
         fn on_event(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
             event: #reactor::kinds::Event,
         ) {
             use ::aether_actor::OutboundReply;

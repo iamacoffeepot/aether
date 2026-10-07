@@ -55,8 +55,8 @@ help: the following other types implement trait `WatchTarget`
 ...
    | impl<P: Protocol + Watchable<Ref = Self>> WatchTarget for ProtocolRef<P> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ProtocolRef<P>`
-note: required by a bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, M>>::watch`
+note: required by a bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, S, M>>::watch`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/watch.rs
    |
    |     pub fn watch<T: WatchTarget>(&mut self, target: T, context: <A as Watches<T::Watched>>::Context) -> WatchId
-   |                     ^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, M>>::watch`
+   |                     ^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::watch::<impl WasmCtx<'_, A, S, M>>::watch`

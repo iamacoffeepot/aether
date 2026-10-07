@@ -1,8 +1,8 @@
 //! What a dispatch arm reports when its handler's sender requirement refuses
 //! the mail's sender (ADR-0231 §11).
 //!
-//! A handler that takes `sender: ProtocolRef<P>` runs only for a sender the
-//! engine casts to `P` first. When the cast answers nothing, the arm on
+//! A handler whose ctx names a protocol `P` as its sender runs only for a
+//! sender the engine casts to `P` first. When the cast answers nothing, the arm on
 //! either transport builds one [`SenderRefused`] from what it can read about
 //! the sender, logs it, and answers with it: a request through its reply's
 //! `From<PathRefused>`, a tell through the decode-refusal notice an opted-in

@@ -87,7 +87,7 @@ impl<A: Declared> InlineParent<'_, A> {
     }
 }
 
-impl<'a, A: HasParent, M: ReplyMode> WasmCtx<'a, A, M> {
+impl<'a, A: HasParent, S, M: ReplyMode> WasmCtx<'a, A, S, M> {
     /// ADR-0114 addressing amendment: this actor's parent in the cluster, in
     /// the form its placement fixes — an [`InlineParent`] for a child-only
     /// actor, an `Option` of one for an actor that is also `root` (`None`
