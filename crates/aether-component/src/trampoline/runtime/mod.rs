@@ -198,9 +198,9 @@ impl NativeActor for WasmTrampoline {
     /// §6), and is dropped. Every close of the trampoline runs this: a
     /// `DropComponent`, an engine teardown, and a birth cancelled after
     /// `wire`. Engine teardown answers nothing for the guest, and a prepared
-    /// candidate is discarded without wiring or unwiring the kept guest
-    /// again. A drop request the close was asked for is answered here, once
-    /// the guest is released (see `WasmTrampolineState::close_guest`).
+    /// slot unwires a candidate iff it wired and unwires the kept guest. A
+    /// drop request the close was asked for is answered here, once the guest
+    /// is released (see `WasmTrampolineState::close_guest`).
     fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         state.close_guest(ctx);
     }
@@ -269,9 +269,8 @@ impl NativeActor for WasmTrampoline {
     /// Prepare a candidate of this guest's type from `code` beside the
     /// running guest (ADR-0241 §7). Until a commit or an abort, mail for the
     /// guest waits at its inbox gate and nothing the candidate sends leaves.
-    /// A refusal leaves the running guest in place, wired again if its hooks
-    /// had run, or closes the instance when the guest refuses the state it
-    /// saved (ADR-0249 §4).
+    /// A refusal leaves the running guest in place, still wired, or closes
+    /// the instance when the guest refuses the state it saved (ADR-0249 §4).
     #[handler::request]
     fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
         let Prepare { code, config } = payload;
@@ -286,20 +285,21 @@ impl NativeActor for WasmTrampoline {
         state.prepare(ctx, &target, candidate, code, config)
     }
 
-    /// Install the prepared candidate (ADR-0241 §7): its held mail leaves on
-    /// this commit's chain, and the mail the gate queued is delivered to it
-    /// in order. A commit with nothing prepared is a host bug and aborts the
-    /// substrate.
+    /// Install the prepared candidate (ADR-0241 §7): the old guest unwires
+    /// first, then its held mail leaves on this commit's chain, and the mail
+    /// the gate queued is delivered to the candidate in order. A commit with
+    /// nothing prepared is a host bug and aborts the substrate.
     #[handler::request]
     fn on_commit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Commit) -> Committed {
         state.commit(ctx);
         Committed
     }
 
-    /// Discard the prepared candidate and its held mail, and reinstate the
-    /// running guest, wired again, with the mail the gate queued (ADR-0241
-    /// §7), or close the instance when the guest refuses the state it saved
-    /// (ADR-0249 §4). With nothing prepared it answers at once.
+    /// Discard the prepared candidate and its held mail, unwiring it exactly
+    /// when it wired, and reinstate the running guest, still wired, with the
+    /// mail the gate queued (ADR-0241 §7), or close the instance when the
+    /// guest refuses the state it saved (ADR-0249 §4). With nothing prepared
+    /// it answers at once.
     #[handler::request]
     fn on_abort(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Abort) -> Aborted {
         state.abort(ctx);

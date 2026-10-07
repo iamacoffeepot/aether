@@ -15,7 +15,7 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, GateConfig, GateQuery, GateQueryResult, PeerConfig, PeerState,
-    SubstrateHarnessObserver, WireCountQuery, WireObserved,
+    SubstrateHarnessObserver, UnwireObserved, WireCountQuery, WireObserved,
 };
 
 pub struct Gate {
@@ -70,6 +70,11 @@ impl WasmActor for Peer {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
         Ok(())
+    }
+
+    /// Report each run of the hook, so a commit/abort test can count it.
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.send::<SubstrateHarnessObserver>(&UnwireObserved);
     }
 
     fn dehydrate(&self) -> PeerState {

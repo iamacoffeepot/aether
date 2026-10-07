@@ -501,10 +501,11 @@ fn a_by_tag_spawn_of_a_resident_name_answers_the_resident_child() {
 }
 
 /// Issue 2746: a `replace_component` reconstruct runs `init` +
-/// `on_rehydrate`, never `wire` — the fresh-spawn-vs-reload distinction
-/// that keeps `wire` a genuine-first-attach signal. Guards against a
-/// future move of the `wire` call into the shared `insert_child`, which
-/// would wrongly fire it on every reload.
+/// `on_rehydrate` and never `wire` in itself — the fresh-spawn-vs-reload
+/// distinction. A rebuild leaves the child unwired; the `wire` export wires
+/// rebuilt children after the entry actor's `wire` (ADR-0249 §6). Guards
+/// against a future move of the `wire` call into the shared `insert_child`,
+/// which would wrongly fire it on every reload.
 #[test]
 fn reconstruct_does_not_run_wire() {
     let registry = Registry::new();
@@ -566,4 +567,122 @@ fn spawn_inline_accepts_any_recorded_parent_type() {
         matches!(result, Err(SpawnError::SubnameInvalid(_))),
         "the parent type is read, not named, so the spawn reaches subname validation, got {result:?}",
     );
+}
+
+/// ADR-0249 §6: a typed spawn of a resident name whose child never wired
+/// wires it before answering. The child was rebuilt through `init` and
+/// `on_rehydrate` without `wire`, so the spawn runs the step-1 helper and
+/// answers its alias with no second `init` and no host call. Catches a
+/// rebuilt child left permanently unwired when no `wire` body spawns it.
+#[test]
+fn a_typed_spawn_of_an_unwired_resident_wires_it_once() {
+    let registry = Registry::new();
+    let parent = 0x9700_u64;
+    registry.set_self_id(parent);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    STUB_INIT_COUNT.set(0);
+    STUB_WIRE_COUNT.set(0);
+    let alias = MailboxId(0x9701);
+    registry.insert_child(
+        alias,
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<StubChild>().0,
+            full_subname: String::from("kept"),
+            parent,
+            ..ChildRecord::default()
+        },
+        Box::new(StubChild { value: 7 }),
+    );
+
+    let mut erased: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(parent, &registry, NO_INBOUND_SOURCE);
+    let again = erased
+        .__for_actor::<NestingParent>()
+        .spawn_inline::<StubChild>(Subname::Named("kept"), &StubConfig { value: 9 })
+        .expect("a spawn of an unwired resident wires it and answers");
+
+    assert_eq!(again.id(), alias, "the spawn answered the resident child's alias");
+    assert_eq!(STUB_INIT_COUNT.get(), 0, "the spawn ran no init");
+    assert_eq!(STUB_WIRE_COUNT.get(), 1, "the spawn wired the unwired child once");
+    // SAFETY: a zero-length mail frame spans no memory, and the stub child's
+    // dispatch reads no payload.
+    let mail = unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, alias.0) };
+    let held = membrane_dispatch(parent, mail, &registry, NO_INBOUND_SOURCE, |_mail| {
+        panic!("the resident child handles its own mail")
+    });
+    assert_eq!(held, 7, "the resident child kept the state it was rebuilt with");
+}
+
+/// ADR-0249 §6: a by-tag spawn of a resident name whose child never wired
+/// wires it before answering, without running the resolver. Catches the
+/// tag-selected path leaving a rebuilt child unwired.
+#[test]
+fn a_by_tag_spawn_of_an_unwired_resident_wires_it_once() {
+    let registry = Registry::new();
+    let parent = 0x9800_u64;
+    registry.set_self_id(parent);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    registry.set_spawn_resolver(panicking_resolver);
+    STUB_INIT_COUNT.set(0);
+    STUB_WIRE_COUNT.set(0);
+    let alias = MailboxId(0x9801);
+    registry.insert_child(
+        alias,
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<StubChild>().0,
+            full_subname: String::from("kept"),
+            parent,
+            ..ChildRecord::default()
+        },
+        Box::new(StubChild { value: 7 }),
+    );
+
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(parent, &registry, NO_INBOUND_SOURCE);
+    let again = ctx
+        .spawn_inline_child_by_tag(
+            ActorTypeTag::of::<StubChild>(),
+            Subname::Named("kept"),
+            &StubConfig { value: 9 }.encode_into_bytes(),
+        )
+        .expect("a by-tag spawn of an unwired resident wires it and answers");
+
+    assert_eq!(again.id(), alias, "the repeated spawn answered the resident child's alias");
+    assert_eq!(STUB_INIT_COUNT.get(), 0, "the spawn ran no init");
+    assert_eq!(STUB_WIRE_COUNT.get(), 1, "the spawn wired the unwired child once");
+}
+
+/// ADR-0249 §6: a spawn of a resident name whose `wire` refuses comes back
+/// as [`SpawnError::WireFailed`]. Catches a refused `wire` installed as
+/// live.
+#[test]
+fn a_spawn_of_an_unwired_resident_whose_wire_fails_reports_wire_failed() {
+    let registry = Registry::new();
+    let parent = 0x9900_u64;
+    registry.set_self_id(parent);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    registry.set_spawn_resolver(panicking_resolver);
+    PROBE_WIRE_COUNT.set(0);
+    PROBE_UNWIRE_COUNT.set(0);
+    PROBE_WIRE_FAILS.set(true);
+    let alias = MailboxId(0x9901);
+    registry.insert_child(
+        alias,
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<LifecycleProbe>().0,
+            full_subname: String::from("probe"),
+            parent,
+            ..ChildRecord::default()
+        },
+        Box::new(LifecycleProbe),
+    );
+
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(parent, &registry, NO_INBOUND_SOURCE);
+    let result = ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<LifecycleProbe>(), Subname::Named("probe"), &[]);
+
+    PROBE_WIRE_FAILS.set(false);
+    assert!(
+        matches!(result, Err(SpawnError::WireFailed(ref error)) if error.message() == PROBE_WIRE_REFUSAL),
+        "a failing wire comes back as WireFailed, got {result:?}",
+    );
+    assert_eq!(PROBE_WIRE_COUNT.get(), 1, "the child's wire was entered once");
+    assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "a child that entered wire runs its unwire");
 }

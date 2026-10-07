@@ -50,9 +50,7 @@
 //! releases went to another window and will never arrive.
 //!
 //! A controller whose camera does not prove at `wire` fails its birth, so
-//! load the camera first. `unwire` unsubscribes from the view. A republish
-//! does not run `wire`, so `on_rehydrate` proves the camera and subscribes
-//! again; the replacement starts with nothing held.
+//! load the camera first. `unwire` unsubscribes from the view.
 //!
 //! # Config
 //!
@@ -63,9 +61,7 @@ mod gesture;
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{
-    ActorInitError, ActorPath, ActorRef, PriorState, ReplyMode, ResolveError, WasmActor, WasmCtx, WasmDropCtx,
-};
+use aether_actor::{ActorInitError, ActorPath, ActorRef, ReplyMode, ResolveError, WasmActor, WasmCtx};
 use aether_actor::{WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_kinds::Tick;
@@ -121,12 +117,6 @@ enum Gesture {
     /// camera was last sent.
     Driving { pose: Pose },
 }
-
-/// What a controller carries across a republish: nothing of its own, since
-/// the camera holds the pose. Saving it is what makes the replacement's
-/// `on_rehydrate` run.
-#[aether_data::kind(name = "aether.kit.camera-controller.state", copy, eq, no_serde)]
-struct ControllerState;
 
 /// Mouse and keyboard driver for one camera instance.
 pub struct CameraController {
@@ -186,23 +176,6 @@ impl WasmActor for CameraController {
             ctx.send_to(camera, &ViewUnsubscribe);
         }
         self.link = Link::Unlinked;
-    }
-
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
-        ctx.save_state_kind(0, &ControllerState)
-    }
-
-    /// Prove the camera and subscribe to its view again: a republish does
-    /// not run `wire`, the instance it replaced unsubscribed in `unwire`,
-    /// and a reference does not outlive the instance that proved it. The
-    /// input subscriptions are the mailbox's and carry over. A camera that no
-    /// longer proves is logged and input moves nothing: returning the error
-    /// would close an instance reinstated after an aborted republish.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
-        if let Err(error) = self.follow_camera(ctx) {
-            tracing::error!(target: "aether_kit", %error, "the controller's camera does not prove; input moves nothing");
-        }
-        Ok(())
     }
 
     /// A bound key went down: it is held until its release or a loss of
