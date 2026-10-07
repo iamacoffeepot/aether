@@ -314,22 +314,22 @@ impl WindowSubscribers {
         event: &K,
     ) {
         match event.route() {
-            Route::Everyone => self.fan_out(ctx, window, event, None),
+            Route::Everyone => self.fan_out(ctx, window, event, &Reach::Everyone),
             Route::KeyDown { code } => {
                 self.key_focus.press(window, code);
                 self.fan_out(ctx, window, event, self.key_focus.pressed_under(window, code));
             }
             Route::KeyUp { code } => {
                 let reach = self.key_focus.lift(window, code);
-                self.fan_out(ctx, window, event, reach.as_ref());
+                self.fan_out(ctx, window, event, &reach);
             }
             Route::Text => self.fan_out(ctx, window, event, self.key_focus.reach(window)),
             Route::Unfocused => {
-                self.fan_out(ctx, window, event, None);
+                self.fan_out(ctx, window, event, &Reach::Everyone);
                 self.key_focus.forget_keys(window);
             }
             Route::Closed => {
-                self.fan_out(ctx, window, event, None);
+                self.fan_out(ctx, window, event, &Reach::Everyone);
                 if let Some(holder) = self.key_focus.close(window) {
                     ctx.send_to(holder, &KeyFocusLost { window: window.clone() });
                 }
@@ -337,28 +337,30 @@ impl WindowSubscribers {
         }
     }
 
-    /// Send `event` to `window`'s subscribers of `K` that `reach` admits, or
-    /// to all of them when there is no reach: the kind is not narrowed by
-    /// key focus, or the key was pressed, or the text arrived, under an empty
-    /// slot.
+    /// Send `event` to `window`'s subscribers of `K` that `reach` admits.
+    /// [`Reach::Everyone`] admits them all: the kind is not narrowed by key
+    /// focus, or the key was pressed, or the text arrived, while nobody held
+    /// the slot.
     fn fan_out<K: Published, A, S, M: ReplyMode>(
         &self,
         ctx: &mut NativeCtx<'_, A, S, M>,
         window: &ErasedActorPath,
         event: &K,
-        reach: Option<&Reach>,
+        reach: &Reach,
     ) {
-        let admitted = self
-            .recipients::<K>(window)
-            .filter(|subscriber| reach.is_none_or(|reach| self.admitted(reach, subscriber.erase())));
+        let admitted = self.recipients::<K>(window).filter(|subscriber| self.admitted(reach, subscriber.erase()));
 
         ctx.fanout(admitted, event);
     }
 
     /// Whether `reach` admits the watched actor `subscriber`, by the path
-    /// its record keeps.
+    /// its record keeps. [`Reach::Everyone`] is answered without the lookup,
+    /// which keeps it off the path of every kind key focus does not narrow.
     fn admitted(&self, reach: &Reach, subscriber: ErasedActorRef) -> bool {
-        self.watched.get(&subscriber).is_some_and(|watched| reach.admits(&watched.path))
+        match reach {
+            Reach::Everyone => true,
+            Reach::Held { .. } => self.watched.get(&subscriber).is_some_and(|watched| reach.admits(&watched.path)),
+        }
     }
 
     /// Remove `key`'s row for `K` under `selector`.
