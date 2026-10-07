@@ -657,6 +657,59 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     assert!(truncated_before.is_some(), "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring");
 }
 
+/// A walked tree names the ring that cut it. Settle root A through a
+/// single relay on a small trace ring, then settle enough further roots
+/// that the relay's ring drops A's `Received` and `Finished` while the
+/// chassis-host ring still holds A's `Sent`: walking A yields a tree with
+/// a node missing `t_received` and `truncated` names the relay. Walking
+/// the last root yields a whole tree with an empty `truncated`, although
+/// the same relay ring has dropped entries.
+///
+/// Catches: a partial tree returned with no mark, and a mark on a whole
+/// tree.
+#[test]
+#[allow(clippy::print_stderr)]
+fn a_lapped_chain_reports_the_ring_that_cut_it() {
+    const CAP: usize = 6;
+    // Two relay-ring slots per settled mail: three further roots drop A's
+    // pair, and the chassis-host ring (one `Sent` per root) still holds A.
+    const FURTHER: usize = 4;
+    let Ok(mut tb) =
+        SubstrateHarness::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
+    else {
+        eprintln!("skipping a_lapped_chain_reports_the_ring_that_cut_it: no wgpu adapter");
+        return;
+    };
+
+    let relays = spawn_topology(&tb, &depth_chain(1));
+    let (first, rx) = tb.inject_root(relays[0], &Ping { seq: 0 });
+    assert_settled(&rx, "mlat.lapped_chain.first");
+    let mut last = first;
+    for seq in 1..=FURTHER {
+        let (root, rx) = tb.inject_root(relays[0], &Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) });
+        assert_settled(&rx, "mlat.lapped_chain.further");
+        last = root;
+    }
+
+    match tb.describe_tree_walked(last, &relays) {
+        DescribeTreeResult::Ok { mails, truncated, .. } => {
+            assert!(mails.iter().all(|n| n.t_received.is_some() && n.t_finished.is_some()), "the last root is whole");
+            assert!(truncated.is_empty(), "a whole tree names no ring: {truncated:?}");
+        }
+        DescribeTreeResult::Err { not_found } => panic!("walk lost the last root {not_found:?}"),
+    }
+
+    match tb.describe_tree_walked(first, &relays) {
+        DescribeTreeResult::Ok { mails, truncated, .. } => {
+            let node = mails.iter().find(|n| n.mail_id == first).expect("the first root's own node");
+            assert!(node.t_received.is_none(), "the relay's ring dropped the first root's Received");
+            let named: Vec<_> = truncated.iter().map(|ring| ring.mailbox).collect();
+            assert_eq!(named, vec![relays[0].id()], "the cut names the relay");
+        }
+        DescribeTreeResult::Err { not_found } => panic!("walk lost the first root {not_found:?}"),
+    }
+}
+
 /// ADR-0086 Phase 3: the decentralized guided walk reconstructs a
 /// causally-coherent tree for a settled root over the per-actor rings —
 /// the rings are the source of truth post-3c (the central observer this

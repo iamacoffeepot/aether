@@ -1211,14 +1211,30 @@ pub struct SendMailTracedResponse {
     pub node_count: Option<usize>,
     /// Root's `in_flight` count at describe time. `0` for a fully-
     /// settled batch; non-zero indicates the chain re-armed after the
-    /// initial settle (rare; reflects late-arriving descendants).
+    /// initial settle (rare; reflects late-arriving descendants), or that
+    /// a node's `Finished` was dropped from a trace ring, in which case
+    /// `truncated` says so.
     pub in_flight: Option<u32>,
+    /// Each actor whose trace ring dropped entries this tree needed.
+    /// Present only when a ring cut this tree; absent for a whole tree,
+    /// and on `timeout` and `dispatched`, which carry no tree.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub truncated: Vec<RingTruncationJson>,
     /// Correlated reply payloads the batch's shared `cid` collected, in
     /// arrival order — one flat list for the whole atomic batch (the
     /// batch is one wire `Call`, so there is no per-item correlation to
     /// group by). `null` on `dispatched` and `timeout`; an empty list on
     /// `settled` when no reply was emitted.
     pub replies: Option<Vec<ReplyEventJson>>,
+}
+
+/// One trace ring that cut a `send_mail_traced` tree.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RingTruncationJson {
+    /// Tagged mailbox id (`mbx-…`) of the actor whose ring dropped entries.
+    pub actor: String,
+    /// The lowest sequence the actor's ring still holds.
+    pub truncated_before: u64,
 }
 
 /// `MailId` rendered for MCP: the sender mailbox as a tagged-id

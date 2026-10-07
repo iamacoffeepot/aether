@@ -101,7 +101,8 @@ Use `send_mail_traced` when any of these are true:
 
 The default traced projection is a compact, indented `tree`. `trace: "nodes"`
 returns the complete per-node `mails` vector instead, omitting `tree` and
-carrying the same `node_count`. There is no separate public MCP `trace_tail`
+carrying the same `node_count`; a tree a trace ring cut also carries `truncated`,
+naming each actor whose ring dropped entries it needed. There is no separate public MCP `trace_tail`
 tool; `send_mail_traced` performs the guided ring walk internally.
 
 `trace` and `detail` select a render shape; `full` on the component tools
