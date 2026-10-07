@@ -350,7 +350,7 @@ pub struct Registry {
     /// a `Cell` suffices.
     spawn_resolver: Cell<Option<SpawnByTagFn>>,
     /// ADR-0250: the names and lengths of the assets this instance's module
-    /// carries, in indexed order. Set by the first [`Assets::assets`] call on
+    /// carries, in indexed order. Set by the first [`Assets::assets`](crate::Assets::assets) call on
     /// any ctx of the instance, from one `asset_catalog_p32` call, and never
     /// changed afterwards, because an instance's module never changes. Unset
     /// means only that no ctx has asked yet. A once-set cell because
