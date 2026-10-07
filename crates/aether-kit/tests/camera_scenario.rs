@@ -6,6 +6,20 @@
 //! `aether.kit.camera.*` kinds to move one, and a captured frame or a reply to
 //! see what came of it.
 //!
+//! The viewer scenarios compose three native actors beside the component
+//! host. [`Viewer`] subscribes to a camera, unsubscribes, and shuts itself
+//! down, each when told, and never unsubscribes on its own, so it is a viewer
+//! that closes without saying so. [`Bystander`] subscribes and stays.
+//! [`Watcher`] monitors the viewer the way a capability does. What a camera
+//! sends for one pose is read from the camera's own trace ring
+//! ([`views_sent_for`]).
+//!
+//! No viewer scenario waits on a clock. A departure's notices are posted to
+//! the watchers in the order they registered, and every scenario registers
+//! the [`Watcher`] after the camera's watch. So once the [`Watcher`] has
+//! handled its own notice, the camera's notice is already in the camera's
+//! inbox, and a pose sent after that is handled behind it.
+//!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
@@ -21,21 +35,26 @@
 use std::fs;
 use std::time::Duration;
 
-use aether_actor::{ActorPath, ActorRef};
+use aether_actor::{ActorPath, ActorRef, HeldReply, ProtocolPath, actor};
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{
     Image, background_top_left, bounding_box, coverage, decode_png, mean_absolute_error,
 };
-use aether_kinds::LoadComponent;
+use aether_kinds::trace::{TraceEvent, TraceTail, TraceTailResult};
+use aether_kinds::{LoadComponent, MonitorNotice};
 use aether_kit::camera::{
     CameraComponent, CameraConfig, CameraRay, CameraRayResult, Distance, Glide, Lens, Pitch, Pixels, Pose, Viewport,
     Where, Yaw,
 };
 use aether_math::{Rgb, Vec2, Vec3};
-use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
+use aether_render::{
+    DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewProjection, ViewSource, ViewSubscribe, ViewUnsubscribe,
+};
+use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
+use aether_substrate::{BootError, MonitorHandle};
 use aether_window::{CreateWindow, WindowCapability, WindowMode, WindowPresentation, WindowSizeRequest, WindowSpec};
 
 // Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
@@ -95,7 +114,7 @@ fn load_camera(
 /// subscription it sends the camera and the view the camera sends back ride
 /// the request's chain, so the view is applied when this returns.
 fn follow(harness: &mut SubstrateHarness, name: &str) {
-    let source = ActorPath::<CameraComponent>::instance(&key(name)).narrow::<ViewSource>();
+    let source = view_source(name);
 
     harness
         .execute(vec![(
@@ -103,6 +122,11 @@ fn follow(harness: &mut SubstrateHarness, name: &str) {
             HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &ViewFrom { source }),
         )])
         .expect("the renderer follows the camera");
+}
+
+/// Where the camera under `name` takes its viewers.
+fn view_source(name: &str) -> ProtocolPath<ViewSource> {
+    ActorPath::<CameraComponent>::instance(&key(name)).narrow()
 }
 
 /// Capture one frame drawing a world-space triangle centred on the origin,
@@ -289,4 +313,287 @@ fn a_glide_steps_by_elapsed_time_and_ends_on_its_destination() {
     assert!((halfway.target.x - 2.0).abs() < 1e-3, "halfway target = {:?}", halfway.target);
     assert!((halfway.distance.get() - 4.0).abs() < 1e-3, "halfway distance = {}", halfway.distance.get());
     assert_eq!(report.reply::<Pose>("arrived").expect("decode the final pose"), destination);
+}
+
+/// Subscribe the receiver to the camera at `camera`. The receiver sends the
+/// camera `ViewSubscribe` itself, so the camera sees it as the sender.
+#[aether_data::kind(name = "test.kit_camera.subscribe", no_serde)]
+struct Subscribe {
+    camera: ProtocolPath<ViewSource>,
+}
+
+/// Unsubscribe the receiver from the camera at `camera`, the same way.
+#[aether_data::kind(name = "test.kit_camera.unsubscribe", no_serde)]
+struct Unsubscribe {
+    camera: ProtocolPath<ViewSource>,
+}
+
+/// Tells the viewer to shut itself down.
+#[aether_data::kind(name = "test.kit_camera.shut_down", copy, no_serde)]
+struct ShutDown;
+
+/// A native viewer: it takes a camera's view silently, subscribes and
+/// unsubscribes when told, and closes when told. Closing unsubscribes from
+/// nothing.
+struct Viewer;
+
+#[actor(singleton, root)]
+impl NativeActor for Viewer {
+    const NAMESPACE: &'static str = "test.kit_camera.viewer";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::event]
+    fn on_view(&mut self, _ctx: &mut NativeCtx<'_>, _view: ViewProjection) {}
+
+    #[handler::tell]
+    fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, subscribe: Subscribe) {
+        let camera = ctx.resolve(&subscribe.camera).expect("the camera is live");
+        ctx.send_to(camera, &ViewSubscribe);
+    }
+
+    #[handler::tell]
+    fn on_unsubscribe(&mut self, ctx: &mut NativeCtx<'_>, unsubscribe: Unsubscribe) {
+        let camera = ctx.resolve(&unsubscribe.camera).expect("the camera is live");
+        ctx.send_to(camera, &ViewUnsubscribe);
+    }
+
+    #[handler::tell]
+    fn on_shut_down(&mut self, ctx: &mut NativeCtx<'_>, _shut_down: ShutDown) {
+        ctx.shutdown();
+    }
+}
+
+/// A second native viewer, which subscribes when told and stays.
+struct Bystander;
+
+#[actor(singleton, root)]
+impl NativeActor for Bystander {
+    const NAMESPACE: &'static str = "test.kit_camera.bystander";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::event]
+    fn on_view(&mut self, _ctx: &mut NativeCtx<'_>, _view: ViewProjection) {}
+
+    #[handler::tell]
+    fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, subscribe: Subscribe) {
+        let camera = ctx.resolve(&subscribe.camera).expect("the camera is live");
+        ctx.send_to(camera, &ViewSubscribe);
+    }
+}
+
+/// Monitor the [`Viewer`]; the reply confirms the watch stands.
+#[aether_data::kind(name = "test.kit_camera.watch", copy, no_serde)]
+struct Watch;
+
+#[aether_data::kind(name = "test.kit_camera.watching", copy, no_serde)]
+struct Watching;
+
+/// Answered once the viewer's `MonitorNotice` has arrived.
+#[aether_data::kind(name = "test.kit_camera.await_departure", copy, no_serde)]
+struct AwaitDeparture;
+
+#[aether_data::kind(name = "test.kit_camera.noticed", copy, partial_eq, no_serde)]
+struct Noticed {
+    notified: bool,
+}
+
+impl HeldReply for Noticed {
+    fn unanswered() -> Self {
+        Self { notified: false }
+    }
+}
+
+/// Watches the [`Viewer`] the way a capability watches a registrant, and
+/// holds an [`AwaitDeparture`] until the viewer's notice arrives.
+struct Watcher {
+    watch: Option<MonitorHandle>,
+    departed: bool,
+    waiting: Option<Held<Noticed>>,
+}
+
+#[actor(singleton, root)]
+impl NativeActor for Watcher {
+    const NAMESPACE: &'static str = "test.kit_camera.watcher";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { watch: None, departed: false, waiting: None })
+    }
+
+    #[handler::request]
+    fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, _watch: Watch) -> Watching {
+        let viewer = ctx.resolve_path(ActorPath::<Viewer>::root().as_erased()).expect("the viewer is live");
+        self.watch = Some(ctx.monitor(viewer));
+
+        Watching
+    }
+
+    #[handler::request]
+    fn on_await_departure(&mut self, ctx: &mut NativeCtx<'_>, _await: AwaitDeparture) -> Pending<Noticed> {
+        let (pending, held) = ctx.hold::<Noticed>();
+        if self.departed {
+            held.answer(ctx, &Noticed { notified: true });
+        } else {
+            self.waiting = Some(held);
+        }
+
+        pending
+    }
+
+    #[handler::event]
+    fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        drop(self.watch.take());
+        self.departed = true;
+        if let Some(held) = self.waiting.take() {
+            held.answer(ctx, &Noticed { notified: true });
+        }
+    }
+}
+
+/// A rendering harness with the component host and the three native test
+/// actors.
+fn with_viewers() -> SubstrateHarness {
+    SubstrateHarness::builder()
+        .size(64, 48)
+        .with_render()
+        .with_component_host()
+        .with_actor::<Viewer>(())
+        .with_actor::<Bystander>(())
+        .with_actor::<Watcher>(())
+        .build()
+        .expect("boot")
+}
+
+fn tell<K: Kind + Clone + 'static, I>(harness: &mut SubstrateHarness, to: impl SendTarget<K, I>, mail: &K) {
+    harness.execute(vec![("tell", HarnessOp::send_and_settle(to, mail))]).expect("the tell settles");
+}
+
+/// The viewer subscribes to the camera under `name`. The camera's answer,
+/// its current view, rides the tell's chain.
+fn subscribe_viewer(harness: &mut SubstrateHarness, name: &str) {
+    let viewer = harness.actor_ref::<Viewer>();
+
+    tell(harness, &viewer, &Subscribe { camera: view_source(name) });
+}
+
+/// Register the native watcher on the viewer, close the viewer, and wait for
+/// the watcher's notice. Called after the camera's watch, so the camera's
+/// notice is posted before the watcher's.
+fn close_viewer(harness: &mut SubstrateHarness) {
+    let watcher = harness.actor_ref::<Watcher>();
+    let viewer = harness.actor_ref::<Viewer>();
+    let report = harness
+        .execute(vec![
+            ("watch", HarnessOp::send_and_await_reply(&watcher, &Watch)),
+            ("shut_down", HarnessOp::send_and_settle(&viewer, &ShutDown)),
+            ("noticed", HarnessOp::send_and_await_reply(&watcher, &AwaitDeparture)),
+        ])
+        .expect("the viewer closes and the watcher is noticed");
+
+    let noticed = report.reply::<Noticed>("noticed").expect("decode Noticed");
+    assert_eq!(noticed, Noticed { notified: true }, "the native watcher was noticed");
+}
+
+/// Whether `event` is the camera sending a view.
+fn sends_a_view(event: &TraceEvent) -> bool {
+    matches!(event, TraceEvent::Sent { kind, .. } if *kind == ViewProjection::ID)
+}
+
+/// How many `ViewProjection`s `camera` sends for `pose`, read from the
+/// camera's own trace ring. The pose is pushed as a tracked root and the
+/// tail asks for that root's events; the camera handles the pose before the
+/// tail, so the count is settled when the reply arrives.
+fn views_sent_for(harness: &mut SubstrateHarness, camera: &ActorRef<CameraComponent>, pose: Pose) -> usize {
+    let root = harness.send_tracked(camera, &pose).expect("the pose is pushed");
+    let tail = TraceTail { max: 0, since: None, root: Some(root) };
+    let reply = harness
+        .execute(vec![("tail", HarnessOp::send_and_await_reply(camera, &tail))])
+        .expect("the camera's trace ring answers")
+        .reply::<TraceTailResult>("tail")
+        .expect("decode TraceTailResult");
+    let TraceTailResult::Ok { entries, .. } = reply else {
+        panic!("the camera's trace ring answers its tail; got {reply:?}");
+    };
+
+    entries.iter().filter(|entry| sends_a_view(&entry.event)).count()
+}
+
+/// A viewer that closes without unsubscribing is removed, and the camera
+/// sends it nothing afterwards. While the viewer is live a pose sends one
+/// view, which also shows the trace read sees a guest's sends; after the
+/// viewer has closed, a pose sends none. A camera that never watched its
+/// viewer, one that watched through a type its departure handler does not
+/// serve, or a handler that removed another key would still send one.
+#[test]
+fn a_viewer_that_closed_without_unsubscribing_is_sent_no_further_view() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
+    let mut harness = with_viewers();
+    let camera = load_camera(&mut harness, &wasm, "main", &fixed(64, 48, facing(Vec3::ZERO, 2.0)));
+    subscribe_viewer(&mut harness, "main");
+    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)), 1, "a live viewer is sent the view");
+
+    close_viewer(&mut harness);
+
+    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
+}
+
+/// A viewer that unsubscribed and later closes changes nothing for the
+/// viewers still held. The viewer subscribes and unsubscribes, a bystander
+/// subscribes and stays, and the viewer closes: a pose still sends exactly
+/// one view, the bystander's. An unsubscribe that left its row behind would
+/// send two, and a departure handler that cleared more than the departed
+/// viewer's row would send none.
+#[test]
+fn an_unsubscribed_viewer_that_later_closes_changes_nothing() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
+    let mut harness = with_viewers();
+    let camera = load_camera(&mut harness, &wasm, "main", &fixed(64, 48, facing(Vec3::ZERO, 2.0)));
+    let viewer = harness.actor_ref::<Viewer>();
+    let bystander = harness.actor_ref::<Bystander>();
+    subscribe_viewer(&mut harness, "main");
+    tell(&mut harness, &viewer, &Unsubscribe { camera: view_source("main") });
+    tell(&mut harness, &bystander, &Subscribe { camera: view_source("main") });
+
+    close_viewer(&mut harness);
+
+    assert_eq!(
+        views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)),
+        1,
+        "only the bystander is sent the view"
+    );
+}
+
+/// A viewer that subscribes twice is held once and removed by its one
+/// departure. After two subscribes a pose sends one view; after the viewer
+/// has closed, a pose sends none. A second subscribe that made a second row,
+/// or one whose row its departure does not remove, would send a view.
+#[test]
+fn a_viewer_that_subscribes_twice_is_removed_by_one_departure() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
+    let mut harness = with_viewers();
+    let camera = load_camera(&mut harness, &wasm, "main", &fixed(64, 48, facing(Vec3::ZERO, 2.0)));
+    subscribe_viewer(&mut harness, "main");
+    subscribe_viewer(&mut harness, "main");
+    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)), 1, "a viewer is held once");
+
+    close_viewer(&mut harness);
+
+    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
 }
