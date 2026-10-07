@@ -14,13 +14,13 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::LoadComponent;
-use aether_test_fixtures_kinds::{WIRE_REFUSAL, WireFaultConfig, WireMarker, WireOutcome};
+use aether_test_fixtures_kinds::{HookOutcome, WIRE_REFUSAL, WireFaultConfig, WireMarker};
 
 /// The fixture's published name: a root singleton, so every load of it names
 /// the same instance.
 const WIRE_FAULT: &str = "test.wire_fault";
 
-fn load(wasm: &[u8], outcome: WireOutcome) -> LoadComponent {
+fn load(wasm: &[u8], outcome: HookOutcome) -> LoadComponent {
     LoadComponent {
         wasm: wasm.to_vec(),
         name: None,
@@ -46,7 +46,7 @@ fn fixture() -> Option<(SubstrateHarness, Vec<u8>)> {
 /// refused as in use or as retired); and the failed instance left live at
 /// the name (the second load would answer with it, and no second `wire`
 /// would send the one marker counted at the end).
-fn fails_then_loads_fresh(outcome: WireOutcome) -> Option<String> {
+fn fails_then_loads_fresh(outcome: HookOutcome) -> Option<String> {
     let (mut harness, wasm) = fixture()?;
 
     let refused = harness.load_any(&load(&wasm, outcome));
@@ -56,7 +56,7 @@ fn fails_then_loads_fresh(outcome: WireOutcome) -> Option<String> {
     assert_eq!(harness.count_observed(WireMarker::NAME), 0, "a failed birth's wire mail never leaves");
 
     let (_, path) = harness
-        .load_any(&load(&wasm, WireOutcome::Succeeds))
+        .load_any(&load(&wasm, HookOutcome::Succeeds))
         .unwrap_or_else(|error| panic!("the name is free after a failed birth: {error}"));
     assert_eq!(path.to_string(), WIRE_FAULT);
     assert_eq!(harness.count_observed(WireMarker::NAME), 1, "the second load wired a fresh instance");
@@ -66,7 +66,7 @@ fn fails_then_loads_fresh(outcome: WireOutcome) -> Option<String> {
 
 #[test]
 fn a_guest_that_returns_an_error_from_wire_fails_its_load_with_the_message() {
-    let Some(error) = fails_then_loads_fresh(WireOutcome::Refuses) else {
+    let Some(error) = fails_then_loads_fresh(HookOutcome::Refuses) else {
         return;
     };
 
@@ -75,7 +75,7 @@ fn a_guest_that_returns_an_error_from_wire_fails_its_load_with_the_message() {
 
 #[test]
 fn a_guest_that_traps_in_wire_fails_its_load() {
-    let Some(error) = fails_then_loads_fresh(WireOutcome::Traps) else {
+    let Some(error) = fails_then_loads_fresh(HookOutcome::Traps) else {
         return;
     };
 

@@ -117,6 +117,12 @@ impl BootedPassives {
         &self.settlement_registry
     }
 
+    /// The record of the first fatal abort this chassis took (issue 4193),
+    /// for [`PassiveChassis`](super::PassiveChassis)'s read of it.
+    pub(super) fn abort_record(&self) -> &FatalAbortRecord {
+        &self.abort_record
+    }
+
     /// Install the ADR-0165 runtime seal (iamacoffeepot/aether#4167).
     ///
     /// Boot's claim / init / wire / spawn passes are done, so the last

@@ -1,6 +1,7 @@
-use aether_actor::{DEHYDRATE_HELD_UNSAVED, ReplyMode};
+use aether_actor::ReplyMode;
 use wasmtime::Store;
 
+use super::dispatch::HookFault;
 use super::instantiate::Placement;
 use super::{
     Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, SMALL_REGION_BYTES,
@@ -36,9 +37,8 @@ impl Component {
     /// it may replace, and the trampoline's close, which runs it on the live
     /// guest before the `Component` value drops, whichever exit closed the
     /// trampoline (a `DropComponent`, an engine teardown, a birth cancelled
-    /// after `wire`). Same trap containment as the other hooks: a guest
-    /// trap is logged here and the caller goes on, so it never stalls a
-    /// close.
+    /// after `wire`). It returns nothing its caller could act on, so a guest
+    /// trap is logged here and the caller goes on: it never stalls a close.
     pub fn unwire(&mut self) {
         if let Some(f) = self.unwire.clone()
             && let Err(e) = f.call(&mut self.store, self.self_mailbox_id)
@@ -47,34 +47,26 @@ impl Component {
         }
     }
 
-    /// Invoke the guest's `on_dehydrate` hook if it exports one.
-    /// Wasmtime traps (guest panics, unreachable) are caught and
-    /// logged rather than propagated — per ADR-0015, a panicking
-    /// hook must not stall teardown.
+    /// Invoke the guest's `on_dehydrate` hook if it exports one. `Ok` for a
+    /// guest with no export.
     ///
-    /// ADR-0243 §6: a guest that left a live held reply unsaved returns
-    /// `DEHYDRATE_HELD_UNSAVED`. That is recorded as a save error, so the
-    /// trampoline's replace takes its existing save-error rollback through
-    /// [`Self::take_save_error`] and reinstates this guest rather than
-    /// stranding the requester. The refusing hook still saved its state, so
-    /// [`Self::take_saved_state`] yields the bundle the reinstated guest gets
-    /// back (issue 7125). A save error the hook already recorded is kept.
-    pub fn on_dehydrate(&mut self) {
+    /// Whatever the hook returned, [`Self::take_saved_state`] then yields the
+    /// bundle it saved: a hook that refuses still saves what it captured, so
+    /// the reinstated guest gets it back (ADR-0249 §4, issue 7125).
+    ///
+    /// # Errors
+    /// [`HookFault::Returned`] when the hook returned a non-zero code, with
+    /// the message it staged: its own error, a child's, a save the host
+    /// refused, or a held reply left live and unsaved (ADR-0243 §6). The
+    /// guest is intact and the republish is refused. [`HookFault::Trapped`]
+    /// when it trapped: this is the live guest, so its caller aborts the
+    /// engine (ADR-0249 §2).
+    pub fn on_dehydrate(&mut self) -> Result<(), HookFault> {
         let Some(f) = self.on_dehydrate.clone() else {
-            return;
+            return Ok(());
         };
-        match f.call(&mut self.store, ()) {
-            Ok(DEHYDRATE_HELD_UNSAVED) => {
-                let error = &mut self.store.data_mut().save_state_error;
-                if error.is_none() {
-                    *error = Some("on_dehydrate refused: a held reply is live and was not saved".to_owned());
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
-            }
-        }
+        let code = f.call(&mut self.store, ()).map_err(HookFault::Trapped)?;
+        self.hook_outcome("on_dehydrate", code)
     }
 
     /// The next send correlation and the next reply-lineage id this guest
@@ -139,9 +131,10 @@ impl Component {
 
     /// Move out the guest's reply table — its pending handles and the next
     /// handle it would issue — when the guest leaves its slot. The consumer
-    /// is the component trampoline, which takes it after `unwire` and
-    /// `on_dehydrate` (both may still answer handles) and hands it to the
-    /// slot's next occupant through [`Self::resume_replies`] (#6409).
+    /// is the component trampoline, which takes it after `unwire`, which may
+    /// still answer handles, and `on_dehydrate`, which saves the ones it
+    /// carries, and hands it to the slot's next occupant through
+    /// [`Self::resume_replies`] (#6409).
     #[must_use]
     pub fn take_pending_replies(&mut self) -> PendingReplies {
         self.store.data_mut().take_pending_replies()
@@ -246,10 +239,13 @@ impl Component {
         self.store.data_mut().take_pending_alias_retirements()
     }
 
-    /// Extract a failure recorded by `save_state` (size cap, OOB).
-    /// `None` on clean saves and on components that didn't attempt a
-    /// save. Checked by the control plane to decide whether to abort
-    /// the replace (ADR-0016 §4).
+    /// Extract a failure the host recorded when it refused a `save_state`
+    /// (size cap, no memory, OOB). `None` on clean saves and on components
+    /// that didn't attempt a save. It is the host's own record, kept beside
+    /// the error the save now returns to the guest: a hook that discards
+    /// that error and returns `Ok(())` is still refused its replace through
+    /// this (ADR-0016 §4), and never replaced by a successor that starts
+    /// fresh.
     pub fn take_save_error(&mut self) -> Option<String> {
         self.store.data_mut().save_state_error.take()
     }
@@ -263,11 +259,13 @@ impl Component {
     /// `Ok(())` if the instance doesn't export `on_rehydrate` (ADR-0016 §3: the
     /// bundle is silently discarded when no handler claims it).
     ///
-    /// ADR-0016 §4 specifies that a trap here aborts the replace, so errors are
-    /// propagated rather than contained (unlike `on_dehydrate` / `unwire`). A
-    /// region that can't be allocated, or a bundle past the deliverable ceiling,
-    /// propagates as an `Err` too.
-    pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
+    /// # Errors
+    /// [`HookFault::Returned`] when the hook returned a non-zero code, with
+    /// the message it staged, or when the host could not place the bundle in
+    /// the guest (past the deliverable ceiling, or no allocator): no guest
+    /// code ran, so the guest is intact. [`HookFault::Trapped`] for a trap in
+    /// the allocator, the write or the hook.
+    pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> Result<(), HookFault> {
         let Some(f) = self.on_rehydrate.clone() else {
             return Ok(());
         };
@@ -276,29 +274,36 @@ impl Component {
         // bounded by guest memory size (well below `u32::MAX`).
         #[allow(clippy::cast_possible_truncation)]
         let byte_len = len as u32;
-        let ptr = match Self::place(
+        let placement = Self::place(
             &mut self.store,
             self.realloc.as_ref(),
             self.small_ptr,
             &mut self.large_ptr,
             &mut self.large_cap,
             len,
-        )? {
+        )
+        .map_err(HookFault::Trapped)?;
+        let ptr = match placement {
             Placement::At(ptr) => ptr,
             Placement::Oversize => {
-                return Err(wasmtime::Error::msg(format!(
+                return Err(HookFault::Returned(format!(
                     "rehydrate state of {len} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound"
                 )));
             }
             Placement::NoAllocator => {
-                return Err(wasmtime::Error::msg("cannot rehydrate state: guest exports no realloc_p32 allocator"));
+                return Err(HookFault::Returned(
+                    "cannot rehydrate state: guest exports no realloc_p32 allocator".to_owned(),
+                ));
             }
         };
         if !bundle.bytes.is_empty() {
-            self.memory.write(&mut self.store, ptr as usize, &bundle.bytes)?;
+            self.memory
+                .write(&mut self.store, ptr as usize, &bundle.bytes)
+                .map_err(|error| HookFault::Trapped(error.into()))?;
         }
-        f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
-        Ok(())
+
+        let code = f.call(&mut self.store, (bundle.version, ptr, byte_len)).map_err(HookFault::Trapped)?;
+        self.hook_outcome("on_rehydrate", code)
     }
 
     /// Read a `u32` from guest linear memory at `offset`. Test-only

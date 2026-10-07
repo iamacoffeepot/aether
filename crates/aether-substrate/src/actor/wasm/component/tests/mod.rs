@@ -424,8 +424,7 @@ const WAT_WIRE_TRAPS: &str = r#"
     "#;
 
 /// WAT whose `unwire` traps. Tests that `Component::unwire`
-/// contains the trap (logs but doesn't propagate), same pattern
-/// as `on_dehydrate`'s trap-is-contained behaviour.
+/// contains the trap (logs but doesn't propagate).
 const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -470,6 +469,44 @@ const WAT_SAVES_TOO_LARGE: &str = r#"
                     (i32.const 0x00200000))) ;; 2 MiB — over the cap
                 i32.const 0))
     "#;
+
+/// WAT whose replace hook `export`, declared with `params`, stages the
+/// 12-byte message at offset 16 through `init_failed_p32` and returns 1, as
+/// the `export!` shim does for a hook that returned an error. Exports
+/// `realloc_p32` so a rehydrate's bundle has a region to land in.
+fn wat_replace_hook_refuses(export: &str, params: &str) -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "init_failed_p32" (func $init_failed (param i32 i32)))
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (data (i32.const 16) "hook refused")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "{export}") {params} (result i32)
+                i32.const 16
+                i32.const 12
+                call $init_failed
+                i32.const 1))
+    "#
+    )
+}
+
+/// WAT whose replace hook `export`, declared with `params`, traps.
+fn wat_replace_hook_traps(export: &str, params: &str) -> String {
+    format!(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "{export}") {params} (result i32)
+                unreachable))
+    "#
+    )
+}
 
 /// ADR-0016 load-side: `on_rehydrate(version, ptr, len)` copies `len` bytes
 /// from `ptr` (the delivery region the host placed the state in) to offset
@@ -600,15 +637,15 @@ fn wat_sends(recipient: u64, kind_id: u64) -> String {
 fn on_dehydrate_invokes_export_and_writes_marker() {
     let mut component = instantiate(WAT_HOOKS);
     assert_eq!(component.read_u32(200), 0);
-    component.on_dehydrate();
+    component.on_dehydrate().expect("the hook returned zero");
     assert_eq!(component.read_u32(200), 0x11);
 }
 
 #[test]
 fn on_dehydrate_on_component_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    // Just needs to not panic. No marker to check.
-    component.on_dehydrate();
+    // No marker to check: a guest with no export has nothing to refuse.
+    component.on_dehydrate().expect("no export is success");
 }
 
 /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
@@ -778,7 +815,7 @@ fn instantiate_config_without_allocator_returns_clean_error() {
 fn on_dehydrate_save_state_populates_bundle() {
     let mut component = instantiate(WAT_SAVES_STATE);
     assert!(component.take_saved_state().is_none());
-    component.on_dehydrate();
+    component.on_dehydrate().expect("the hook returned zero");
     let bundle = component.take_saved_state().expect("bundle saved");
     assert_eq!(bundle.version, 7);
     assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
@@ -828,21 +865,62 @@ fn unwire_invokes_export_and_writes_marker() {
 #[test]
 fn wire_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
     let refused = instantiate(WAT_WIRE_REFUSES).wire(None);
-    let Err(WireFault::Returned(message)) = refused else {
+    let Err(HookFault::Returned(message)) = refused else {
         panic!("a wire that returned non-zero is a returned error: {refused:?}");
     };
     assert_eq!(message, "wire refused", "the returned error carries the message the guest staged");
 
     let trapped = instantiate(WAT_WIRE_TRAPS).wire(None);
-    let Err(fault @ WireFault::Trapped(_)) = trapped else {
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
         panic!("a wire that trapped is a trap: {trapped:?}");
     };
     assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
 }
 
-/// Issue 584 Phase 2b: `unwire` traps are contained the same way
-/// `on_dehydrate` traps are — logged but not propagated (per
-/// ADR-0015, panicking hooks must not stall teardown).
+/// Catches an `on_dehydrate` trap and a returned error merged into one fault,
+/// or its return code ignored (ADR-0249 §1, §2). The two decide abort against
+/// refuse: a guest that returned an error keeps running and its republish is
+/// refused with the message it staged, and a trap in the live guest aborts
+/// the engine.
+#[test]
+fn on_dehydrate_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let refused = instantiate(&wat_replace_hook_refuses("on_dehydrate", "")).on_dehydrate();
+    let Err(HookFault::Returned(message)) = refused else {
+        panic!("an on_dehydrate that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "hook refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(&wat_replace_hook_traps("on_dehydrate", "")).on_dehydrate();
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
+        panic!("an on_dehydrate that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
+}
+
+/// Catches `on_rehydrate`'s return code ignored, which reads a guest that
+/// refused its prior state as one that took it, and a trap merged with a
+/// returned error: a reinstated guest that returns an error closes, and one
+/// that traps aborts the engine (ADR-0249 §4).
+#[test]
+fn call_on_rehydrate_reports_a_returned_error_with_its_message_and_a_trap_as_a_trap() {
+    let bundle = StateBundle { version: 1, bytes: vec![9, 9, 9] };
+    let params = "(param i32 i32 i32)";
+
+    let refused = instantiate(&wat_replace_hook_refuses("on_rehydrate_p32", params)).call_on_rehydrate(&bundle);
+    let Err(HookFault::Returned(message)) = refused else {
+        panic!("an on_rehydrate that returned non-zero is a returned error: {refused:?}");
+    };
+    assert_eq!(message, "hook refused", "the returned error carries the message the guest staged");
+
+    let trapped = instantiate(&wat_replace_hook_traps("on_rehydrate_p32", params)).call_on_rehydrate(&bundle);
+    let Err(fault @ HookFault::Trapped(_)) = trapped else {
+        panic!("an on_rehydrate that trapped is a trap: {trapped:?}");
+    };
+    assert!(fault.is_trap(), "a trapped guest is reported as one that must not run again");
+}
+
+/// Issue 584 Phase 2b: an `unwire` trap is contained — logged but not
+/// propagated (per ADR-0015, a panicking `unwire` must not stall teardown).
 #[test]
 fn unwire_trap_is_contained() {
     let mut component = instantiate(WAT_UNWIRE_TRAPS);
@@ -923,7 +1001,7 @@ fn deliver_to_guest_without_allocator_dropped() {
 #[test]
 fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    component.on_dehydrate();
+    component.on_dehydrate().expect("no export is success");
     assert!(component.take_saved_state().is_none());
     assert!(component.take_save_error().is_none());
 }
@@ -931,7 +1009,9 @@ fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
 #[test]
 fn save_state_over_cap_records_error_and_no_bundle() {
     let mut component = instantiate(WAT_SAVES_TOO_LARGE);
-    component.on_dehydrate();
+    // The guest drops the save's status and returns zero, as a hook that
+    // discards the save's error does; the host's own record still refuses.
+    component.on_dehydrate().expect("the hook returned zero");
     let err = component.take_save_error().expect("error recorded");
     assert!(err.contains("exceeds"), "got: {err}");
     assert!(component.take_saved_state().is_none());

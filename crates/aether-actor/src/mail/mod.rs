@@ -406,7 +406,7 @@ impl<'a> PriorState<'a> {
     /// Id mismatch is how schema evolution manifests: changing the
     /// shape of `K` changes `K::ID`, so a replacement instance
     /// compiled against the new schema sees `None` from the old
-    /// instance's save and boots fresh. Components that want to
+    /// instance's save. Components that want to
     /// migrate across a schema change can reach for `bytes()` +
     /// `schema_version()` directly, or try `decode_kind::<OldShape>()`
     /// first and fall back if it returns `None`.

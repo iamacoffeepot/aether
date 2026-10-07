@@ -196,7 +196,27 @@ fn save_state_kind<K: Kind>(&mut self, version: u32, value: &K) -> Result<(), Ac
   skips what is already gone; the send verbs return nothing.
 - **The `type State` accessors keep their shapes.** `dehydrate(&self) -> State`
   and `rehydrate(&mut self, State)` do not fail. The hooks `#[actor]`
-  generates around them return the save's result and the decode's.
+  generates around them return the save's result and the decode's: `Ok`
+  when nothing was carried, and an error when bytes were carried and do not
+  decode.
+- **The erased hooks return the same result.**
+  `ErasedWasmActor::erased_on_dehydrate` and `erased_on_rehydrate`, which a
+  multi-actor module and every inline child are driven through, return
+  `Result<(), ActorInitError>` and forward the hook's.
+- **A dehydrate stops at the first hook that returns an error.** The parent's
+  hook runs, then each resident inline child's. A hook that said no ends the
+  step: running the remaining children would move more state out of a guest
+  that is about to keep running.
+- **The export saves what was captured, then returns the error.** The bundle
+  holds what the hooks that ran saved. A child the walk did not reach is
+  absent from it, and so is the refusing child when it saved nothing, so the
+  reinstated guest's rebuild leaves both resident. The export returns the
+  first error of the hooks, the host save and the held-unsaved check, in
+  that order.
+- **A rebuild returns its first failure.** `reconstruct_inline_children`
+  stops at the parent's `on_rehydrate` error, a child that cannot be rebuilt,
+  or a child whose recorded parent never became resident, and each child's
+  error names its subname and the cause.
 
 ### 2. A guest that traps runs no more code
 
@@ -215,6 +235,12 @@ Each case but one is today's behaviour, cited in the Context. The one that
 changes is the old guest's `on_dehydrate`: a trap there is a trap in the live
 guest, and it aborts the substrate where today it is logged and the republish
 goes on.
+
+The host reads one fault type for `wire`, `on_dehydrate` and `on_rehydrate`
+(`HookFault`): the hook returned an error and the guest is intact, or it
+trapped and runs no more code. A state bundle the host cannot place in the
+guest, one past the deliverable bound or one for a guest with no allocator,
+counts as a returned error: no guest code ran, so the guest is intact.
 
 A native actor differs in one way, and for a reason. A wasm guest lives in
 a store the engine can throw away, which is what makes the first case
@@ -714,6 +740,8 @@ definitions and the derive's source, fixtures and compile tests included.
 | `on_dehydrate` gains `-> Result<(), ActorInitError>` | 14 overrides in 13 files |
 | `on_rehydrate` gains `-> Result<(), ActorInitError>` | 14 overrides in 12 files |
 | `save_state` / `save_state_kind` return a result | 15 call sites |
+| `erased_on_dehydrate` / `erased_on_rehydrate` return a result | the trait, the macro's one impl, and 11 test impls in three files |
+| `Persistence::save_state` on the second implementor, `CaptureCtx` | one impl and its two calls, in `crates/aether-actor/tests/state_framing_roundtrip.rs` |
 | Generated hooks for `type State` | the one generator (`wasm_expand.rs`); the 24 files that declare the accessors change no source |
 | `WasmDropCtx` loses `MailSender` | no caller |
 | `wire` (wasm 68 overrides in 43 files; native 31 in 20) | no signature change |

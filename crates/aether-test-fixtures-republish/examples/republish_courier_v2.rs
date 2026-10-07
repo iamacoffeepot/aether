@@ -30,13 +30,13 @@ impl WasmActor for Courier {
         Ok(Courier { config, outcomes: Vec::new() })
     }
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<CourierState>(0, &CourierState::default());
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<CourierState>(0, &CourierState::default())
     }
 
     /// Mail the component host what the config names. Nothing leaves until
     /// the republish commits.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if !self.config.wasm.is_empty() {
             let load = LoadComponent {
                 wasm: self.config.wasm.clone(),
@@ -49,6 +49,7 @@ impl WasmActor for Courier {
         if let Some(target) = self.config.drop.clone() {
             ctx.send::<ComponentHostCapability>(&DropComponent { target });
         }
+        Ok(())
     }
 
     #[handler::response]

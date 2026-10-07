@@ -12,7 +12,7 @@ use aether_data::{ActorId, Blob};
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::native::NativeCtx;
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, StateBundle};
+use aether_substrate::actor::wasm::component::{Component, HookFault, StateBundle};
 use aether_substrate::actor::wasm::module::Module;
 use aether_substrate::mail::KindId;
 
@@ -76,9 +76,10 @@ impl WasmTrampolineState {
     /// `init` drops the candidate before the running guest runs any hook
     /// (#6134). The running guest then runs `unwire` and `on_dehydrate`, its
     /// correlation cursor, reply table and watches move to the candidate, and
-    /// the candidate rehydrates. A refusal after the hooks reinstates the running
-    /// guest with the state it saved. A slot that is not live has nothing to
-    /// prepare and refuses.
+    /// the candidate rehydrates. A refusal after the hooks, either guest's
+    /// replace hook returning an error among them (ADR-0249 §1), reinstates
+    /// the running guest with the state it saved. A slot that is not live has
+    /// nothing to prepare and refuses.
     pub(super) fn prepare(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -228,14 +229,19 @@ impl WasmTrampolineState {
     /// old guest, move its correlation cursor and reply table to the
     /// candidate, and rehydrate the candidate from the old guest's saved
     /// bundle. Issue 584 Phase 2b: `unwire` fires first so the old guest can
-    /// announce its retirement before the swap. A save error, a carried
-    /// context the replacement does not declare (#6429), or a failed
-    /// rehydrate refuses; the caller then reinstates the old guest.
+    /// announce its retirement before the swap. An `on_dehydrate` that
+    /// returned an error, a save the host refused, a carried context the
+    /// replacement does not declare (#6429), or a failed rehydrate refuses;
+    /// the caller then reinstates the old guest.
+    ///
+    /// A trap in the old guest's `on_dehydrate` aborts the substrate
+    /// (ADR-0063, ADR-0249 §2): it is the live guest, which would have to
+    /// keep running on a store left wherever the trap found it.
     ///
     /// Returns the bundle the old guest saved beside the outcome, on a
-    /// refusal too, so a reinstated old guest gets it back (issue 7125). A
-    /// held-unsaved refusal still saved its state; a `save_state` the host
-    /// rejected deposited none.
+    /// refusal too, so a reinstated old guest gets it back (issue 7125). An
+    /// `on_dehydrate` that returned an error still saved what its hooks
+    /// captured; a `save_state` the host rejected deposited none.
     fn start_candidate(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
@@ -245,30 +251,36 @@ impl WasmTrampolineState {
         replacement: &HashSet<KindId>,
     ) -> (Option<StateBundle>, Result<(), String>) {
         old.unwire();
-        old.on_dehydrate();
+        let dehydrated = match old.on_dehydrate() {
+            Ok(()) => Ok(()),
+            Err(HookFault::Returned(error)) => Err(error),
+            Err(HookFault::Trapped(trap)) => {
+                ctx.fatal_abort(format!("component {} trapped in on_dehydrate: {trap:#}", ctx.path()))
+            }
+        };
         let saved = old.take_saved_state();
-        let started = self.rehydrate_candidate(ctx, target, old, candidate, saved.as_ref(), replacement);
+        Self::hand_over(old, candidate);
+
+        // The host's own record of a save it refused comes first: it stands
+        // whether or not the hook passed the save's error on.
+        let started = match (old.take_save_error(), dehydrated) {
+            (Some(error), _) => Err(error),
+            (None, Err(error)) => Err(format!("on_dehydrate failed: {error}")),
+            (None, Ok(())) => self.rehydrate_candidate(ctx, target, candidate, saved.as_ref(), replacement),
+        };
         (saved, started)
     }
 
-    /// The part of [`Self::start_candidate`] after the old guest's hooks:
-    /// move its cursor, reply table and watches to the candidate, then refuse
-    /// or rehydrate the candidate from `saved`.
-    fn rehydrate_candidate(
-        &self,
-        ctx: &NativeCtx<'_, WasmTrampoline>,
-        target: &impl Display,
-        old: &mut Component,
-        candidate: &mut Component,
-        saved: Option<&StateBundle>,
-        replacement: &HashSet<KindId>,
-    ) -> Result<(), String> {
-        // ADR-0139 §3 (#6400, #6422, #6409): after `unwire` and
-        // `on_dehydrate`, which may still send or answer handles, the
-        // candidate continues the mailbox's correlation and reply-lineage
-        // sequences and takes over the reply table, so it reuses neither a
-        // request id nor a reply `MailId` and answers each held handle to its
-        // own requester. Both precede `on_rehydrate` and every delivery.
+    /// Move what belongs to the mailbox from the old guest to the candidate,
+    /// after the old guest's hooks and before the candidate's `on_rehydrate`
+    /// and every delivery. It moves on a refusal too: the reinstatement moves
+    /// it back.
+    fn hand_over(old: &mut Component, candidate: &mut Component) {
+        // ADR-0139 §3 (#6400, #6422, #6409): after `unwire`, which may still
+        // send or answer handles, and `on_dehydrate`, the candidate continues
+        // the mailbox's correlation and reply-lineage sequences and takes
+        // over the reply table, so it reuses neither a request id nor a reply
+        // `MailId` and answers each held handle to its own requester.
         candidate.resume_correlations(old.correlation_cursor());
         candidate.resume_replies(old.take_pending_replies());
         // ADR-0079 §8: the old guest's watches move with the mailbox, after
@@ -279,17 +291,27 @@ impl WasmTrampolineState {
         // `on_rehydrate` runs.
         candidate.resume_watches(old.take_watches());
         candidate.close_load_window();
+    }
 
-        if let Some(error) = old.take_save_error() {
-            return Err(error);
-        }
+    /// The part of [`Self::start_candidate`] after the hand-over: check the
+    /// contexts `saved` carries, then rehydrate the candidate from it. A
+    /// candidate whose `on_rehydrate` returned an error or trapped refuses
+    /// the same way (ADR-0249 §2): it is dropped either way.
+    fn rehydrate_candidate(
+        &self,
+        ctx: &NativeCtx<'_, WasmTrampoline>,
+        target: &impl Display,
+        candidate: &mut Component,
+        saved: Option<&StateBundle>,
+        replacement: &HashSet<KindId>,
+    ) -> Result<(), String> {
         // #6429: the carried contexts are checked against the replacement's
         // kind vocabulary once the old guest's `on_dehydrate` surfaced them.
         self.check_carried_contexts(ctx, target, saved, replacement)?;
 
         // ADR-0016 §4: a failed rehydrate refuses the prepare.
         saved.map_or(Ok(()), |bundle| {
-            candidate.call_on_rehydrate(bundle).map_err(|e| format!("on_rehydrate failed: {e}"))
+            candidate.call_on_rehydrate(bundle).map_err(|fault| format!("on_rehydrate failed: {fault}"))
         })
     }
 

@@ -421,6 +421,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_reference_narrow_to_uncovered_protocol",
     "rejects_repeated_actor_depends",
     "rejects_repeated_child_of",
+    "rejects_replace_hook_without_result",
     "rejects_replies_on_silent_handler",
     "rejects_replies_on_unchecked_handler",
     "rejects_reply_mode_as_ctx_sender",

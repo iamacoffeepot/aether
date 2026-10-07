@@ -28,21 +28,27 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// the native dispatcher still discharges settlement.
 pub const DISPATCH_DROPPED_OVERSIZE: u32 = 2;
 
-/// Why a guest's `wire` hook did not succeed (ADR-0247 rule 3). The two
-/// differ in whether the guest can run again, which decides whether its
-/// `unwire` may be called.
+/// Why a guest hook the engine waits on did not succeed: `wire` (ADR-0247
+/// rule 3), `on_dehydrate` or `on_rehydrate` (ADR-0249 §1, §2). The two cases
+/// differ in whether the guest can run again, which decides what its caller
+/// may do with it.
+///
+/// Its `Display` prints the detail only, the staged message or the trap. Each
+/// caller names the hook it ran.
 #[derive(Debug)]
-pub enum WireFault {
-    /// The hook returned an error. The guest is intact: it ran part of its
-    /// `wire`, and its `unwire` is the only code that knows what to release.
-    /// Carries the message the guest staged.
+pub enum HookFault {
+    /// The hook returned an error. The guest is intact and can run again: one
+    /// that ran part of its `wire` still has an `unwire` that knows what to
+    /// release, and one that refused a republish keeps running. Carries the
+    /// message the guest staged. A state bundle the host could not place in
+    /// the guest is reported this way too, since no guest code ran.
     Returned(String),
     /// The hook trapped. The guest's store is left wherever the trap found
     /// it, so no more of its code runs, as for a guest whose `init` trapped.
     Trapped(wasmtime::Error),
 }
 
-impl WireFault {
+impl HookFault {
     /// Whether the guest trapped, so it must be released without running
     /// any more of its code.
     #[must_use]
@@ -51,16 +57,16 @@ impl WireFault {
     }
 }
 
-impl fmt::Display for WireFault {
+impl fmt::Display for HookFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Returned(message) => write!(f, "guest wire failed: {message}"),
-            Self::Trapped(trap) => write!(f, "guest wire trapped: {trap:#}"),
+            Self::Returned(message) => f.write_str(message),
+            Self::Trapped(trap) => write!(f, "{trap:#}"),
         }
     }
 }
 
-impl Error for WireFault {}
+impl Error for HookFault {}
 
 impl Component {
     /// Run the guest's `wire` hook, if it exports one. The trampoline runs it
@@ -74,10 +80,10 @@ impl Component {
     /// after, as [`Self::deliver`] does with an inbound's lineage.
     ///
     /// # Errors
-    /// [`WireFault::Returned`] when the hook returned a non-zero code, with
+    /// [`HookFault::Returned`] when the hook returned a non-zero code, with
     /// the message it staged through `init_failed_p32`, and
-    /// [`WireFault::Trapped`] when it trapped.
-    pub fn wire(&mut self, root: Option<MailId>) -> Result<(), WireFault> {
+    /// [`HookFault::Trapped`] when it trapped.
+    pub fn wire(&mut self, root: Option<MailId>) -> Result<(), HookFault> {
         let Some(wire_fn) = self.wire.clone() else {
             return Ok(());
         };
@@ -85,7 +91,14 @@ impl Component {
         self.store.data().set_in_flight(None, root);
         let result = wire_fn.call(&mut self.store, mailbox_id);
         self.store.data().clear_in_flight();
-        let code = result.map_err(WireFault::Trapped)?;
+        self.hook_outcome("wire", result.map_err(HookFault::Trapped)?)
+    }
+
+    /// Read the return code of the hook export named `hook`: `0` is success,
+    /// and any other code is the hook's returned error, whose message the
+    /// guest staged through `init_failed_p32`. The one read `wire`,
+    /// `on_dehydrate` and `on_rehydrate` share.
+    pub(super) fn hook_outcome(&mut self, hook: &str, code: u32) -> Result<(), HookFault> {
         if code == 0 {
             return Ok(());
         }
@@ -94,8 +107,8 @@ impl Component {
             .data_mut()
             .init_failure
             .take()
-            .unwrap_or_else(|| format!("guest wire returned {code} without staging an error"));
-        Err(WireFault::Returned(message))
+            .unwrap_or_else(|| format!("guest {hook} returned {code} without staging an error"));
+        Err(HookFault::Returned(message))
     }
 
     /// ADR-0163 §3: close the asset load window on this component's store

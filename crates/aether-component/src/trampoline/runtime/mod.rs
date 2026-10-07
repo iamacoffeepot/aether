@@ -180,10 +180,16 @@ impl NativeActor for WasmTrampoline {
             return Ok(());
         };
 
-        if fault.is_trap() {
+        let trapped = fault.is_trap();
+        if trapped {
             state.slot = Slot::Released;
         }
-        Err(BootError::Other(io::Error::other(format!("wasm {fault}")).into()))
+        let outcome = if trapped {
+            "trapped"
+        } else {
+            "failed"
+        };
+        Err(BootError::Other(io::Error::other(format!("wasm guest wire {outcome}: {fault}")).into()))
     }
 
     /// The close hook: release the guest (ADR-0241 §8, ADR-0247 rule 5). A
@@ -264,7 +270,8 @@ impl NativeActor for WasmTrampoline {
     /// running guest (ADR-0241 §7). Until a commit or an abort, mail for the
     /// guest waits at its inbox gate and nothing the candidate sends leaves.
     /// A refusal leaves the running guest in place, wired again if its hooks
-    /// had run.
+    /// had run, or closes the instance when the guest refuses the state it
+    /// saved (ADR-0249 §4).
     #[handler::request]
     fn on_prepare(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: Prepare) -> Prepared {
         let Prepare { code, config } = payload;
@@ -291,7 +298,8 @@ impl NativeActor for WasmTrampoline {
 
     /// Discard the prepared candidate and its held mail, and reinstate the
     /// running guest, wired again, with the mail the gate queued (ADR-0241
-    /// §7). With nothing prepared it answers at once.
+    /// §7), or close the instance when the guest refuses the state it saved
+    /// (ADR-0249 §4). With nothing prepared it answers at once.
     #[handler::request]
     fn on_abort(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: Abort) -> Aborted {
         state.abort(ctx);
@@ -320,9 +328,10 @@ impl NativeActor for WasmTrampoline {
         match &mut state.slot {
             Slot::Live(component) => WasmTrampolineState::deliver_to_guest(ctx, component, env),
             Slot::Prepared(prepared) => prepared.gated.push_back(ctx.take_inbound()),
-            // The slot is empty only inside the close, after the residual
-            // drain, so no mail is forwarded to it; the arm keeps the match
-            // honest.
+            // The slot is empty inside the close, after the residual drain,
+            // and from a reinstatement whose guest refused its own state
+            // until the close that reinstatement asked for (ADR-0249 §4).
+            // Mail drained to it in between is discarded here.
             Slot::Released => tracing::warn!(
                 target: "aether_component",
                 actor = %ctx.path(),

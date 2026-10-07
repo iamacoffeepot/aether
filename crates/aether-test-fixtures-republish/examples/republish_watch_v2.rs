@@ -37,20 +37,21 @@ impl WasmActor for Peer {
 
     /// Hand-written, where v1 generates it from `type State`, because the
     /// rehydrate side must be able to trap.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.admits });
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.admits })
     }
 
     /// Restore v1's count, or, with `trap_on_rehydrate` set, trap: `abort`
     /// lowers to `unreachable`, which the host reports as an `on_rehydrate`
     /// failure.
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if self.config.trap_on_rehydrate {
             process::abort();
         }
         if let Some(saved) = prior.decode_kind::<CountReport>() {
             self.admits = saved.count;
         }
+        Ok(())
     }
 
     #[handler::tell]

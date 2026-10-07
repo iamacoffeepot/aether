@@ -139,15 +139,14 @@ held.answer(ctx, &WatchHeadResult { .. });
    - **The guard.** The guest's per-actor registry, the one that already
      holds its request-context table and is reached through the ctx, tracks
      each live ticket. After `on_dehydrate`, a ticket that is still live and
-     was not encoded makes the hook return a refusal status. The refusing
-     hook still saves what it encoded, so the tickets it moved into saved
-     state return with that state to the reinstated guest. The host maps
-     that status onto a refusal that aborts the whole group (ADR-0241 §7):
-     every member reinstates its old guest, so the requester is not
+     was not encoded makes the `on_dehydrate` export return an error, the
+     way a hook's own returned error is reported (ADR-0249 §1). The refusing
+     export still saves what the hooks encoded, so the tickets they moved
+     into saved state return with that state to the reinstated guest. The
+     host refuses with that error, which aborts the whole group (ADR-0241
+     §7): every member reinstates its old guest, so the requester is not
      stranded and a healthy member is not swapped out for another member's
-     dropped ticket. The hook refuses, not traps, because the host contains
-     `on_dehydrate` traps and lets the replace proceed (ADR-0015). That
-     long-standing behavior is out of scope here. A dropped guest `Held`
+     dropped ticket. A dropped guest `Held`
      checks only a flag on the value that a granted encoder sets, so no drop
      path reads global state.
    - **Limits.** A candidate whose `on_rehydrate` does not decode a saved

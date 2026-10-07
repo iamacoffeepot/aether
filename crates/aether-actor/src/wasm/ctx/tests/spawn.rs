@@ -434,8 +434,8 @@ fn reconstruct_does_not_run_wire() {
         state_bytes: &[],
         config_bytes: &[],
     };
-    let ok = reconstruct_one_child::<LifecycleProbe>(&registry, &to_reconstruct);
-    assert!(ok, "a ()-config probe reconstructs from empty bytes");
+    reconstruct_one_child::<LifecycleProbe>(&registry, &to_reconstruct)
+        .expect("a ()-config probe reconstructs from empty bytes");
     assert_eq!(PROBE_WIRE_COUNT.get(), 0, "a reconstruct runs init + on_rehydrate, never wire");
     assert!(registry.take(alias).is_some(), "the reconstructed child is resident under its alias");
 }

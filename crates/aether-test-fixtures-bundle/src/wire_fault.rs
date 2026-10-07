@@ -11,11 +11,11 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    LogMarker, SubstrateHarnessObserver, WIRE_REFUSAL, WireFaultConfig, WireMarker, WireOutcome,
+    HookOutcome, LogMarker, SubstrateHarnessObserver, WIRE_REFUSAL, WireFaultConfig, WireMarker,
 };
 
 pub struct WireFault {
-    outcome: WireOutcome,
+    outcome: HookOutcome,
 }
 
 #[actor(root, depends(SubstrateHarnessObserver))]
@@ -31,9 +31,9 @@ impl WasmActor for WireFault {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireMarker);
         match self.outcome {
-            WireOutcome::Succeeds => Ok(()),
-            WireOutcome::Refuses => Err(ActorInitError::new(WIRE_REFUSAL)),
-            WireOutcome::Traps => panic!("the fixture was told to trap in wire"),
+            HookOutcome::Succeeds => Ok(()),
+            HookOutcome::Refuses => Err(ActorInitError::new(WIRE_REFUSAL)),
+            HookOutcome::Traps => panic!("the fixture was told to trap in wire"),
         }
     }
 

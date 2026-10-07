@@ -185,20 +185,21 @@ impl WasmActor for CameraController {
         self.link = Link::Unlinked;
     }
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind(0, &ControllerState);
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind(0, &ControllerState)
     }
 
     /// Prove the camera and subscribe to its view again: a republish does
     /// not run `wire`, the instance it replaced unsubscribed in `unwire`,
     /// and a reference does not outlive the instance that proved it. The
-    /// input subscriptions are the mailbox's and carry over. A rehydrate
-    /// cannot refuse, so a camera that no longer proves is logged and input
-    /// moves nothing.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    /// input subscriptions are the mailbox's and carry over. A camera that no
+    /// longer proves is logged and input moves nothing: returning the error
+    /// would close an instance reinstated after an aborted republish.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Err(error) = self.follow_camera(ctx) {
             tracing::error!(target: "aether_kit", %error, "the controller's camera does not prove; input moves nothing");
         }
+        Ok(())
     }
 
     /// A bound key went down: it is held until its release or a loss of

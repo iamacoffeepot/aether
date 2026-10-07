@@ -175,18 +175,20 @@ impl WasmActor for MeshViewer {
         }
     }
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind(0, &MeshViewerState);
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind(0, &MeshViewerState)
     }
 
     /// Subscribe to the camera again: a republish does not run `wire`, and
     /// the instance it replaced unsubscribed in `unwire`.
-    /// A rehydrate cannot refuse, so a camera that no longer proves is
-    /// logged and the viewer draws without outlines.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    /// A camera that no longer proves is logged and the viewer draws without
+    /// outlines: returning the error would close an instance reinstated
+    /// after an aborted republish.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Err(error) = self.follow_camera(ctx) {
             tracing::error!(target: "aether_kit", %error, "the mesh viewer's camera does not prove; outlines are off");
         }
+        Ok(())
     }
 
     /// Emit the cached faces, and the DSL outline loops solved for the eye

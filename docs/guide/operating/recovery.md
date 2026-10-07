@@ -163,6 +163,14 @@ its `on_rehydrate`, and runs its `wire` again; only teardown outside that saved
 state and outside what `wire` rebuilds stays gone. Nothing the failed candidate
 sent leaves.
 
+One reinstatement ends differently (ADR-0249 §4). An old guest whose
+`on_rehydrate` returns an error for the state it saved has refused its own
+state, so that instance closes: each reply it held is answered `unanswered`,
+the mail queued for it is dropped, and its name is spent. Read its log for the
+error, and load the component again under a new name or key. A guest trap in
+`on_dehydrate` reinstates nothing: it aborts the engine, whose exit reason
+names the component and the hook.
+
 The phase table and stale-introspection limits are in
 [Replacement failure states](components/replacement-failure-states.md).
 
