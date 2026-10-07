@@ -36,7 +36,7 @@ pub fn unwire_child(registry: &Registry, id: MailboxId, child: Child) -> Child {
 /// before their parents, deepest first (ADR-0249 §6). The `export!` `unwire`
 /// shims call it before the entry actor's own hook.
 ///
-/// Each child is taken, unwired, and seated again as [`Child::Unwired`]. It
+/// Each child is taken, unwired, and seated again as `Child::Unwired`. It
 /// stays in the registry: a republish's prepare runs `on_dehydrate` after
 /// `unwire`, and that walk saves the children it finds. Nothing is retired,
 /// because a close tombstones the aliases itself.

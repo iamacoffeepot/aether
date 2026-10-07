@@ -19,7 +19,7 @@
 //! The registry is slot-shaped (take-out / dispatch / reinsert) so a
 //! running child can spawn or mutate siblings through `ctx` while it is
 //! itself dispatched — the registry borrow is never held across a child's
-//! `erased_dispatch`. A slot's life is one enum, [`slot::Seat`]: its child is
+//! `erased_dispatch`. A slot's life is one enum, `Seat`: its child is
 //! seated, wired or not, or out on the stack of the caller running it. The guest is single-threaded (ADR-0010 §5) and the
 //! substrate serializes delivery under the run token, so an `UnsafeCell`
 //! with a blanket `Sync` impl is sound — the same argument that licenses
