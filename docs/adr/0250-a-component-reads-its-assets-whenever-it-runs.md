@@ -5,10 +5,11 @@
 
 Replaces the load window of [ADR-0163](0163-content-addressed-packages-and-asset-bundles.md)
 §3 and §4, and the parts of [ADR-0241](0241-code-is-published-not-loaded.md)
-§2 and §9 that carry a module's bytes on a spawn. This ADR is text only; the
-engine change is its own issue. Until that change lands, ADR-0163 and ADR-0241
-keep describing the code as it is; the change that implements this ADR edits
-ADR-0241 §2 and §9 in place and marks ADR-0163 §3 and §4 amended.
+§2 and §9 that carry a module's bytes on a spawn. It also takes up the
+unpublish that ADR-0241 deferred. This ADR is text only; the engine change is
+its own issue. Until that change lands, ADR-0163 and ADR-0241 keep describing
+the code as it is; the change that implements this ADR edits ADR-0241 §2 and
+§9 in place and marks ADR-0163 §3 and §4 amended.
 
 Three terms are used throughout. A **module file** is the wasm bytes a publish
 brings, code and asset sections together. An **asset** is the payload of one
@@ -55,25 +56,34 @@ boot list (`Autoloader`, `crates/aether-chassis/src/autoload/loader.rs`).
 need has to be read before `wire` returns. A component that loads a large
 scene cannot spread the work over several turns or report progress.
 
-The reasons ADR-0163 gave no longer carry the decision. Its worry about a read
-failing at an arbitrary later time was about reading a file in the package
-store on disk; a module file is now an immutable `Blob` in the engine's memory
-(ADR-0238), and reading a range of it cannot fail. Its rule that nothing
-payload-sized outlives the window was already given up when `asset_blob` let a
-component keep the whole module file resident by holding one asset blob. What
-is left is the memory the module file takes.
+ADR-0241 already says where this should end up: its migration lists a module's
+"assets checked in as blobs", and its consequences say "a module's assets are
+blobs shared like any other". The implementation kept the load window in place
+of that.
 
 ## Decision
 
-### 1. A module keeps its file
+### 1. A publish checks each asset in as its own blob
 
-`Module` (`crates/aether-substrate/src/actor/wasm/module/mod.rs`) holds the
-`Blob` it was checked in from, beside its compiled code and manifest.
-ADR-0241 §2 already says how long a module lives: while a publication, a
-running instance, or a held `Module` holds it. The module file now lives
-exactly that long.
+When a module file is checked in, `ModuleCache` compiles the code and parses
+the manifest as today, and checks each asset in to the engine blob store
+(ADR-0238) as a blob of its own, keyed by the hash of its bytes. An asset
+whose hash is already resident reuses that entry and copies nothing. The
+module file is then let go, as it is today.
 
-### 2. The asset calls work in every hook
+The `Module` (`crates/aether-substrate/src/actor/wasm/module/mod.rs`) holds
+its assets: its `AssetIndex` maps each asset name to its `Blob`, where it maps
+a name to a byte range of the file today.
+
+### 2. A module's assets live as long as the module
+
+ADR-0241 §2 already says how long a `Module` lives: while a publication, a
+running instance, or a held `Module` holds it. Its asset blobs live exactly
+that long, and the blob store frees each one when its last holder goes. Two
+modules that carry the same asset hold one entry between them, and it is freed
+when the second lets go.
+
+### 3. The asset calls work in every hook
 
 A component reads its assets from `init`, `wire`, every handler,
 `on_rehydrate`, and `unwire`. The host serves the read from the instance's own
@@ -87,25 +97,38 @@ implemented by every wasm ctx:
 pub trait Assets {
     fn assets(&self) -> &[AssetInfo];                      // names and lengths
     fn asset(&mut self, name: &str) -> Option<Vec<u8>>;    // copied into guest memory
-    fn asset_blob(&mut self, name: &str) -> Option<Blob>;  // a view of the module file, no copy
+    fn asset_blob(&mut self, name: &str) -> Option<Blob>;  // the asset's own blob, no copy
 }
 ```
 
 This puts two verbs on the handler ctx that it does not have today. They are
 the existing host calls with their restriction removed, not new operations.
 
-### 3. A spawn brings no bytes
+A blob from `asset_blob` is the asset's own entry. A component that keeps it,
+or an actor it was sent to, holds that one asset and nothing else.
+
+### 4. A spawn brings no bytes
 
 `Spawn` is `{ namespace, key, parent, config }`. Its `code` field is removed,
 with the host's check that brought bytes match the publication. A spawn of a
 published type always builds an instance that can read its assets, whoever
 asks for it.
 
-A republish needs no special case: the successor reads the new module's file
-and the old guest reads the old module's file until it ends, because each
-instance holds its own module.
+A republish needs no special case: the successor reads the new module's assets
+and the old guest reads the old module's until it ends, because each instance
+holds its own module.
 
-### 4. What is removed
+### 5. Unpublish withdraws a publication
+
+`aether.component.unpublish` names a published namespace and withdraws its
+publication. It is refused while an instance of that namespace is live, with
+an error that names the instances. Once the publication and every instance are
+gone, nothing holds the `Module`, and its compiled code and asset blobs are
+freed, apart from an asset another module or actor still holds.
+
+Unloading a bundle is ending its instances and unpublishing it.
+
+### 6. What is removed
 
 - `LoadWindow`, its `open` flag and optional source, and
   `ComponentCtx::load_window`.
@@ -115,41 +138,49 @@ instance holds its own module.
 - The trap text that names "a spawn with its code, and a load" as the two
   doors.
 - From ADR-0163: the load window (§3), "one door between cold and resident"
-  (§4), and the absences "no runtime payload fetch" and "no instance-lifetime
-  store pin". Nothing here pins the package store: the bytes held are the
-  engine's own copy.
+  (§4), and the absence "no runtime payload fetch".
+- From ADR-0241: the deferral of unpublish.
 
 ## Consequences
 
-- A published module costs its file size in engine memory for as long as it is
-  published or any instance of it runs. A component that copies an asset with
-  `asset` holds that asset twice; one that takes `asset_blob` holds it once.
-- ADR-0241 defers unpublish until memory held by dead publications is a
-  measured cost. This decision raises that cost from compiled code alone to
-  compiled code plus the file, so a world that publishes map squares as it
-  moves needs unpublish. That is follow-on work this ADR creates.
+- A loaded bundle's assets are in engine memory for as long as it is published
+  or one of its instances runs, and are freed when it is unloaded. That is the
+  same memory the bundle's file takes during its load window today, held for
+  longer.
+- Assets shared between modules are held once. Bundles packed from a common
+  set of models and textures cost the sum of their distinct assets, not the
+  sum of their files.
+- A publish copies each asset that is not already resident out of the module
+  file once, and hashes every asset. Both are linear in the file's size.
 - "What assets are resident" is answered by the list of publications, where
   ADR-0163 answered it with the list of components.
 - A component may load its assets over several turns and report progress. The
   work no longer has to fit inside `wire`.
+- A component that copies an asset with `asset` holds it twice, once in the
+  store and once in its own memory; one that takes `asset_blob` holds it once.
 - The MCP `load_component` and `spawn` tools start a module with assets in a
-  running engine without any change to them.
-- `asset_blob` no longer changes how long a module file stays resident, so the
-  guidance on choosing between the two verbs reduces to copy or no copy.
-- Asset failures are no longer confined to load time, because there are none
-  left: after a publish succeeds, a read of a catalogued asset cannot fail.
+  running engine without any change to them. An `unpublish` tool is follow-on
+  work.
+- After a publish succeeds, a read of a catalogued asset cannot fail.
+- The store stays in memory only. Backing asset blobs with disk, so that an
+  unused asset costs no memory, would be a change to the blob store and is not
+  decided here.
 
 ## Alternatives considered
 
 - **Pass the module file from `load_component` to its spawn.** Fixes one
   harness tool and leaves the calls meaningless after `wire`, the nullable
   `Spawn.code`, and every in-engine spawner unable to bring the file.
-- **Keep the window and have the publication hold the file.** A spawn by name
-  works, and the calls still trap in a handler.
+- **Keep the whole module file for the module's life.** Makes the calls always
+  work, but holds every file whole: bundles that share assets hold a copy
+  each, and a kept asset blob holds its entire file.
+- **Keep the window and have the publication hold the assets.** A spawn by
+  name works, and the calls still trap in a handler.
 - **Make `Spawn.code` required.** Removes the nullable field and removes spawn
   by name with it.
-- **Keep the module's hash and read the file from a store at each spawn.**
-  Holds nothing while no instance runs, but an engine forked by the hub has no
-  store to read from, and a read at spawn time can fail.
-- **Have each instance hold the file and the publication hold none.** A type
-  with no running instance is back to a publication that cannot be built.
+- **Embed assets in the code as data segments.** Always readable with no host
+  call, but every asset sits in the instance's linear memory for its life and
+  is copied again on each republish (ADR-0163, Alternatives considered).
+- **Free a publication automatically when its last instance ends.** A
+  publication has no instances between its publish and its first spawn, so
+  this would withdraw it before it could be used.
