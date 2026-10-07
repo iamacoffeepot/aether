@@ -65,7 +65,7 @@ pub fn wire_seated(registry: &Registry, id: MailboxId) -> Result<(), ActorInitEr
 /// (ADR-0249 §6). The `export!` `wire` shims call it after the entry
 /// actor's own hook returns `Ok`.
 ///
-/// Each child goes through [`wire_seated`]. The first failure ends the
+/// Each child goes through `wire_seated`. The first failure ends the
 /// walk; the refused child is left unwired and resident.
 pub fn wire_rebuilt_children(registry: &Registry) -> Result<(), ActorInitError> {
     registry.child_metas().into_iter().try_for_each(|meta| wire_seated(registry, meta.id))
