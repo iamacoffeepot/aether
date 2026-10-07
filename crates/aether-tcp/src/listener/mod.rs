@@ -9,10 +9,11 @@
 //!
 //! Lifetime: a listener lives until `aether.tcp.unbind_listener` names
 //! it, until the consumer it was bound with closes, or until the engine
-//! tears down. It monitors that consumer from `wire` and shuts itself
-//! down on the consumer's `MonitorNotice`; a listener bound with no
-//! consumer monitors nothing. Its close does not close the sessions it
-//! accepted: each of those monitors the consumer itself.
+//! tears down. The cap monitors the consumer and mails the listener the
+//! same `Close` either way. The engine does not close an actor's children
+//! with it, so the listener keeps an entry for each session it accepted,
+//! with its monitor on that session, and its `unwire` mails each one
+//! `SessionClose`.
 //!
 //! Shutdown: `unwire` flips the accept thread's shutdown flag, then
 //! self-connects to the bound port to wake the blocked accept call.

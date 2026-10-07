@@ -7,6 +7,7 @@
 //! `#[actor] impl` reaches the state, ctx types, and config / session types
 //! through the single `use runtime::*` glob in the parent.
 
+pub use std::collections::HashMap;
 pub use std::net::{SocketAddr, TcpListener, TcpStream};
 pub use std::sync::Arc;
 pub use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,20 +15,19 @@ pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 pub use std::time::Duration;
 
+pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::{Anyone, Single, runtime};
+use aether_actor::{ActorRef, Anyone, ErasedActorRef, ProtocolRef, Single, runtime};
 // `MonitorNotice` is named by `on_monitor_notice`'s signature.
 use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::kinds::{Close, ConnectionReady};
-// The consumer and this listener's monitor on it, in the shape a session holds.
-use crate::session::BoundConsumer;
+use crate::kinds::{Close, ConnectionReady, SessionClose, TcpConsumer};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpListenerActor;
 
@@ -42,16 +42,55 @@ pub struct TcpListenerState {
     pub local_port: u16,
     /// The consumer the cap proved at `BindListener` or `BindListenerSelf`
     /// receipt (ADR-0230, ADR-0231 §3/§4), handed to every session this
-    /// listener accepts, together with this listener's monitor on it: the
-    /// consumer's close arrives as a `MonitorNotice` and closes this
-    /// listener. `None` is a listener bound with no consumer, and nothing
-    /// else.
-    pub consumer: Option<BoundConsumer>,
+    /// listener accepts. This listener does not watch it: the cap monitors
+    /// the consumer and mails `Close` here when it closes.
+    pub consumer: ProtocolRef<TcpConsumer>,
+    /// The live sessions this listener accepted, keyed by each session's
+    /// reference, which is the sender of its close notice. The engine does
+    /// not close an actor's children with it, so `unwire` mails each of
+    /// these `SessionClose`.
+    pub sessions: HashMap<ErasedActorRef, AcceptedSession>,
+    /// Whether this listener still accepts, and what a `Close` waits for.
+    pub accepting: Accepting,
     pub shutdown: Arc<AtomicBool>,
     pub accept_start: Option<mpsc::Sender<()>>,
     pub accept_thread: Option<JoinHandle<()>>,
     pub connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
     pub next_subname: u64,
+}
+
+/// One live session this listener accepted. Drops with the entry;
+/// `MonitorHandle::Drop` is idempotent with the close path's index drain.
+pub struct AcceptedSession {
+    /// The reference the session's spawn outcome proved; `unwire` mails
+    /// `SessionClose` through it. Its erased form keys this entry.
+    pub session: ActorRef<TcpSessionActor>,
+    // Held to keep this listener's monitor on the session registered until
+    // the entry is removed (in `on_monitor_notice`).
+    _monitor_handle: MonitorHandle,
+}
+
+/// Where a listener stands between accepting and closed. A session birth is
+/// staged in one handler and settles in a later one, and only a settled
+/// birth has an entry in `sessions` for `unwire` to close. So a `Close` that
+/// arrives while births are unsettled waits for them rather than shutting
+/// down past a session nothing would then close.
+pub enum Accepting {
+    /// Accepting connections, with `unsettled` session births staged and not
+    /// yet completed.
+    Open { unsettled: usize },
+    /// `Close` arrived with `unsettled` births outstanding: new connections
+    /// are dropped, and the listener shuts down when the last one settles.
+    Closing { unsettled: usize },
+}
+
+impl Accepting {
+    /// The staged session births whose completion has not arrived.
+    fn unsettled(&mut self) -> &mut usize {
+        match self {
+            Self::Open { unsettled } | Self::Closing { unsettled } => unsettled,
+        }
+    }
 }
 
 /// Completion context for a staged accepted-connection birth, taken from the
@@ -126,8 +165,8 @@ impl NativeActor for TcpListenerActor {
     type Config = TcpListenerConfig;
     const NAMESPACE: &'static str = "aether.tcp.listener";
 
-    fn init(mut config: TcpListenerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpListenerState, BootError> {
-        let listener = config.listener.take().expect("TcpListenerConfig::listener consumed exactly once");
+    fn init(config: TcpListenerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpListenerState, BootError> {
+        let listener = config.listener;
         let addr = config.addr;
         let port = config.port;
         // Stay blocking — the accept loop wakes via self-connect
@@ -171,7 +210,9 @@ impl NativeActor for TcpListenerActor {
 
         Ok(TcpListenerState {
             local_port: port,
-            consumer: config.consumer.map(BoundConsumer::Unwatched),
+            consumer: config.consumer,
+            sessions: HashMap::new(),
+            accepting: Accepting::Open { unsettled: 0 },
             shutdown,
             accept_start: Some(accept_start_tx),
             accept_thread: Some(thread),
@@ -180,19 +221,21 @@ impl NativeActor for TcpListenerActor {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        // `init` cannot take the monitor: `NativeInitCtx` has no `monitor`.
-        // A consumer that closed before this ran is noticed the same way,
-        // once this listener's birth promotes.
-        state.consumer = state.consumer.take().map(|consumer| consumer.watched(ctx));
-
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         if let Some(start) = state.accept_start.take() {
             let _ = start.send(());
         }
         Ok(())
     }
 
-    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        // The engine does not close a closing actor's children, so each
+        // accepted session is told to close here. An engine teardown reaches
+        // this too, where the sessions are closing anyway.
+        for accepted in state.sessions.values() {
+            ctx.send_to(accepted.session, &SessionClose::default());
+        }
+
         // Pre-wire rollback reaches the same helper through `Drop`. A live
         // listener self-connects to wake `accept`; a parked one cancels the
         // gate, and both paths join before the state is released.
@@ -204,46 +247,42 @@ impl NativeActor for TcpListenerActor {
         );
     }
 
-    /// Cooperative external close. The unbind path on
-    /// `TcpCapability` mails this; we shut down so the dispatcher
-    /// drains, runs `unwire`, and the close fan-out fires
-    /// `MonitorNotice` to the cap.
-    // Stateless close request: shutdown is requested through `ctx`, not
-    // through any state field, so `_state` is unused.
+    /// Cooperative external close. The cap mails this for an unbind and
+    /// when this listener's consumer closes; we shut down so the dispatcher
+    /// drains, runs `unwire`, and the close fan-out fires `MonitorNotice` to
+    /// the cap.
+    ///
+    /// With session births unsettled the shutdown waits for them
+    /// ([`Accepting`]): `on_session_spawn_done` requests it when the last
+    /// one settles.
     #[handler::tell]
-    fn on_close_request(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: Close) {
-        ctx.shutdown();
+    fn on_close_request(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: Close) {
+        let unsettled = *state.accepting.unsettled();
+        state.accepting = Accepting::Closing { unsettled };
+        if unsettled == 0 {
+            ctx.shutdown();
+        }
     }
 
-    /// The consumer closed, so nothing is left to deliver to: close this
-    /// listener. The close is the one an unbind causes: `unwire` stops the
-    /// accept thread, and the cap's monitor on this listener removes its
-    /// entry.
+    /// An accepted session tombstoned: drop its entry, and with it this
+    /// listener's monitor on it.
     ///
-    /// The host stamps the departed actor as the notice's sender. The
-    /// consumer is the only actor this listener monitors, and the sender is
-    /// compared to it all the same, so a notice with no sender, or one for a
-    /// listener bound with no consumer, closes nothing.
+    /// The host stamps the closed session as the notice's sender, so its
+    /// entry is the one keyed by `ctx.sender()`. Sessions are the only
+    /// actors this listener monitors, and a notice with no entry under its
+    /// sender, or with no sender, changes nothing.
     #[handler::event]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        let Some(departed) = ctx.sender() else {
-            return;
-        };
-        let Some(consumer) = &state.consumer else {
-            return;
-        };
-
-        let consumer_closed = departed == consumer.reference().erase();
-        if consumer_closed {
-            ctx.shutdown();
+        if let Some(departed) = ctx.sender() {
+            state.sessions.remove(&departed);
         }
     }
 
     /// Sidecar wake. Drain every pending accepted connection and
     /// spawn a `TcpSessionActor` per stream. Each session is a
-    /// child of this listener, and the listener does not monitor
-    /// it: a session's close is not reported here, and this
-    /// listener's close does not close its sessions.
+    /// child of this listener, entered in `sessions` when its birth
+    /// settles. A listener that is closing drops the streams instead,
+    /// which closes each connection.
     ///
     /// The accept thread fires one wake mail per accepted
     /// connection, but the handler drains until empty regardless
@@ -257,20 +296,24 @@ impl NativeActor for TcpListenerActor {
         _mail: ConnectionReady,
     ) {
         while let Ok((stream, peer)) = state.connection_rx.try_recv() {
+            let Accepting::Open { unsettled } = &mut state.accepting else {
+                continue;
+            };
+
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;
             let peer_str = peer.to_string();
             let session_config = TcpSessionConfig {
-                stream: Some(stream),
+                stream,
                 peer: peer_str.clone(),
                 session_name: subname.clone(),
-                consumer: state.consumer.as_ref().map(BoundConsumer::reference),
+                consumer: state.consumer,
             };
             match ctx
                 .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config, ())
                 .stage_with(AcceptedSessionContext { session_name: subname.clone(), peer: peer_str.clone() })
             {
-                Ok(_) => {}
+                Ok(_) => *unsettled += 1,
                 Err((e, _)) => {
                     tracing::warn!(
                         target: "aether_tcp",
@@ -284,16 +327,37 @@ impl NativeActor for TcpListenerActor {
         }
     }
 
+    /// Settle one staged session birth: enter the activated session in
+    /// `sessions` under this listener's monitor on it. A session that closed
+    /// before this ran is entered all the same, and its notice, which arrives
+    /// after this handler returns, removes the entry. A `Close` that was
+    /// waiting on this birth shuts the listener down here, and `unwire`
+    /// closes the session just entered.
     #[handler(task)]
     fn on_session_spawn_done(
-        _state: &mut Self::State,
+        state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         done: TaskDone<SpawnOutcome<TcpSessionActor>>,
     ) {
+        let born = done.into_output().result;
+        if let Ok(session) = &born {
+            let session = *session;
+            state.sessions.insert(session.erase(), AcceptedSession { session, _monitor_handle: ctx.monitor(session) });
+        }
+
+        let unsettled = state.accepting.unsettled();
+        *unsettled -= 1;
+        let settled = *unsettled == 0;
+        let closing = matches!(state.accepting, Accepting::Closing { .. });
+        let closes = closing && settled;
+        if closes {
+            ctx.shutdown();
+        }
+
         let Some(AcceptedSessionContext { session_name, peer }) = ctx.take_context() else {
             return;
         };
-        match done.into_output().result {
+        match born {
             Ok(_) => {
                 tracing::debug!(
                     target: "aether_tcp",

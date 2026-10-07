@@ -11,11 +11,13 @@
 //!
 //! `TcpCapability` is the supervisor of its listener fleet: it spawns
 //! listeners, monitors them, and replies to unbind requests on their
-//! close. It does not monitor consumers and keeps no record of sessions.
-//! Each listener and each session monitors the consumer it delivers to and
-//! closes itself when that consumer closes, so a listener that closes this
-//! way reaches the cap as the same listener notice an unbind produces. A
-//! listener's close does not close the sessions it accepted. The cap holds
+//! close. It keeps the same kind of entry for each session it dialed, and
+//! it monitors every consumer something of its own is bound to: when a
+//! consumer closes, the cap mails `Close` to each listener bound to it and
+//! `SessionClose` to each session dialed for it, so such a listener reaches
+//! the cap as the same listener notice an unbind produces. The engine does
+//! not close an actor's children with it, so a listener holds an entry for
+//! each session it accepted and closes them when it closes. The cap holds
 //! its own listener entries, each with the proof
 //! its spawn returned; it does NOT walk the chassis-wide actor registry
 //! to enumerate children. Cap handlers don't introspect the registry — the
@@ -26,10 +28,10 @@
 //! ## Mail surface
 //!
 //! Control plane (mailed to `aether.tcp`):
-//! - `Connect { addr, name?, consumer? }` → `ConnectResult`
+//! - `Connect { addr, name?, consumer }` → `ConnectResult`
 //! - `ConnectSelf { addr, name? }` → `ConnectResult` (the sender is the
 //!   consumer)
-//! - `BindListener { addr, name?, consumer? }` → `BindListenerResult`
+//! - `BindListener { addr, name?, consumer }` → `BindListenerResult`
 //! - `BindListenerSelf { addr, name? }` → `BindListenerResult` (the sender
 //!   is the consumer)
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
@@ -50,9 +52,9 @@
 //! Listener (mailed to `aether.tcp/aether.tcp.listener:<name>`):
 //! - `Close` → cooperative shutdown via `ctx.shutdown()`
 //!
-//! A listener also closes when the consumer it was bound with closes, and
-//! a session when its consumer closes; one bound with no consumer does
-//! neither.
+//! A consumer is required of every bind and connect. A listener also
+//! closes when the consumer it was bound for closes, and takes the sessions
+//! it accepted with it; a dialed session closes when its consumer closes.
 //!
 //! ## Threading
 //!

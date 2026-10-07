@@ -71,7 +71,9 @@ one peer read. Reassembly and full-write loops are native responsibilities.
 
 ## Consumer binding
 
-A consumer covers the `TcpConsumer` protocol (`aether_tcp::TcpConsumer`): it
+Every bind and connect names a consumer; there is no listener or session
+without one. A consumer covers the `TcpConsumer` protocol
+(`aether_tcp::TcpConsumer`): it
 handles `session_data` and `session_closed`, both silently. Each session holds
 its consumer as a `ProtocolRef<TcpConsumer>`, so its fan-out compiles only for
 those two kinds.
@@ -91,7 +93,7 @@ arrives another way, such as a call relayed from MCP, is answered
 is bound or dialed. Mail with no actor sender is refused with no reply.
 
 An agent, or a capability binding a different actor, names that actor in the
-`consumer` field of `bind_listener` or `connect`. The field is a
+`consumer` field of `bind_listener` or `connect`. The field is required, a
 `ProtocolPath<TcpConsumer>`: in code an `ActorPath<R>` narrowed with
 `.narrow::<TcpConsumer>()`, and over MCP the canonical `path` a component load
 returns. The path must be canonical; a short `root/:key` path is refused. Its decode proves that the route at the path, live or closed,
@@ -126,31 +128,40 @@ not guessed from hashes.
 
 ## Lifetimes
 
-A listener and a session each monitor the consumer they deliver to and close
-themselves when it closes (ADR-0079 §8). A consumer that closes, by whatever
-exit, therefore leaves nothing bound or connected on its behalf, and it need
-not unbind first.
+The capability monitors each consumer it has bound a listener or dialed a
+session for (ADR-0079 §8), once per consumer however many it holds for it.
+When the consumer closes, the capability mails `aether.tcp.close` to every
+listener bound to it, the mail an unbind sends, and
+`aether.tcp.session_close` to every session dialed for it. A consumer that
+closes, by whatever exit, therefore leaves nothing bound or connected on its
+behalf, and it need not unbind first.
+
+The engine does not close an actor's children when the actor closes. A
+listener therefore keeps an entry for each session it accepted and mails each
+one `aether.tcp.session_close` as it closes, whether an unbind or its
+consumer's close ended it.
 
 - A listener lives until `aether.tcp.unbind_listener` names it, until the
-  consumer it was bound with closes, or until the engine tears down. A
-  listener bound with no consumer ends only by the first or the last.
-- A session lives until its peer closes or a read fails, a frame is rejected,
-  a write fails, it is sent `aether.tcp.session_close`, or its consumer
-  closes. Accepted and outbound sessions follow the same rule.
-- A listener's close does not close the sessions it accepted. A session
-  accepted from an unbound listener keeps delivering until one of its own
-  ends above is reached.
+  consumer it was bound for closes, or until the engine tears down.
+- An accepted session lives until its peer closes or a read fails, a frame is
+  rejected, a write fails, it is sent `aether.tcp.session_close`, or its
+  listener closes.
+- A dialed session lives until one of the same ends, with its consumer's
+  close in the place of the listener's.
+- A listener told to close while a session birth is still settling waits for
+  that birth, so the session is closed with the rest. Connections that arrive
+  while it waits are dropped.
+- One consumer's close touches only what was bound to it: another consumer's
+  listeners and sessions stay.
 - A republish of the consumer keeps its mailbox, so it closes nothing: the
   listener and its sessions deliver to the successor.
-- A session closed because its consumer closed sends no `session_closed`,
-  since the consumer is the actor that closed. Its peer sees the connection
-  close.
+- A session closed by `aether.tcp.session_close`, whoever sent it, sends no
+  `session_closed`. Its peer sees the connection close.
 
 A listener that closes because its consumer closed leaves
 `aether.tcp.list_listeners` the way an unbound one does, and an unbind parked
-on it at that moment is answered `Ok`. The capability does not monitor
-consumers and keeps no record of sessions, so nothing lists sessions or closes
-them by name.
+on it at that moment is answered `Ok`. The capability keeps an entry for each
+dialed session, and no kind lists sessions or closes one by name.
 
 ## Concurrency boundary
 

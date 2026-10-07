@@ -18,16 +18,13 @@ pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 
-pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
-use aether_actor::{ProtocolRef, ReplyMode, runtime};
+use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
-// `MonitorNotice` is named by `on_monitor_notice`'s signature.
-use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
 use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite, TcpConsumer};
@@ -50,64 +47,23 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
-    /// The bound consumer, proven by the cap at receipt to cover
-    /// [`TcpConsumer`] (ADR-0230, ADR-0231 §3/§4), so a fan-out through it
-    /// compiles only for `SessionData` and `SessionClosed`. Every delivery
-    /// inherits the handler's causal chain; a proof rather than a runtime
-    /// name, because a name cannot reach a nested actor such as a component
-    /// loaded beneath a parent at `parent/NS:key`.
+    /// The consumer, proven by the cap at receipt to cover [`TcpConsumer`]
+    /// (ADR-0230, ADR-0231 §3/§4), so a send through it compiles only for
+    /// `SessionData` and `SessionClosed`. Every delivery inherits the
+    /// handler's causal chain; a proof rather than a runtime name, because a
+    /// name cannot reach a nested actor such as a component loaded beneath a
+    /// parent at `parent/NS:key`.
     ///
-    /// It is held with this session's monitor on it: the consumer's close
-    /// arrives as a `MonitorNotice` and closes this session. `None` is a
-    /// session with no consumer, and nothing else.
-    pub consumer: Option<BoundConsumer>,
+    /// This session does not watch it. The cap monitors the consumer and,
+    /// when it closes, closes each session it dialed and each listener it
+    /// bound, and a closing listener closes the sessions it accepted.
+    pub consumer: ProtocolRef<TcpConsumer>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
     pub read_start: Option<mpsc::Sender<()>>,
     pub read_thread: Option<JoinHandle<()>>,
     pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
-}
-
-/// The consumer a listener or session was bound with, and its holder's
-/// monitor on it. A listener and each session it accepts hold one each, so
-/// each hears the consumer's close itself.
-///
-/// `init` receives the reference in its config and cannot monitor, because
-/// `NativeInitCtx` has no `monitor`; `wire` is the first ctx that can. The
-/// two cases are that fact: the reference alone until `wire`, the reference
-/// with its monitor from then on.
-pub enum BoundConsumer {
-    /// Between `init` and `wire`: the reference the config carried.
-    Unwatched(ProtocolRef<TcpConsumer>),
-    /// From `wire` on. Dropping `_monitor` deregisters, so the watch ends
-    /// with the state that holds it.
-    Watched { reference: ProtocolRef<TcpConsumer>, _monitor: MonitorHandle },
-}
-
-impl BoundConsumer {
-    /// The consumer, in either case.
-    pub fn reference(&self) -> ProtocolRef<TcpConsumer> {
-        match self {
-            Self::Unwatched(reference) | Self::Watched { reference, .. } => *reference,
-        }
-    }
-
-    /// Monitor the consumer for the actor `ctx` runs. A consumer already
-    /// watched keeps the monitor it has.
-    pub fn watched<A, S, M: ReplyMode>(self, ctx: &NativeCtx<'_, A, S, M>) -> Self {
-        match self {
-            Self::Unwatched(reference) => Self::Watched { reference, _monitor: ctx.monitor(reference) },
-            watched @ Self::Watched { .. } => watched,
-        }
-    }
-}
-
-impl TcpSessionState {
-    /// The consumer deliveries go to, or `None` for a session without one.
-    fn consumer(&self) -> Option<ProtocolRef<TcpConsumer>> {
-        self.consumer.as_ref().map(BoundConsumer::reference)
-    }
 }
 
 #[runtime]
@@ -118,14 +74,13 @@ impl NativeActor for TcpSessionActor {
     type Config = TcpSessionConfig;
     const NAMESPACE: &'static str = "aether.tcp.session";
 
-    fn init(mut config: TcpSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpSessionState, BootError> {
-        let stream = config.stream.take().expect("TcpSessionConfig::stream consumed exactly once");
+    fn init(config: TcpSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpSessionState, BootError> {
         // Split read/write via try_clone — both halves point at
         // the same underlying socket, but each is independently
         // owned. Read sidecar uses one for blocking reads; the
         // dispatcher uses the other for writes + Shutdown.
-        let read_half = stream.try_clone().map_err(|e| BootError::Other(Box::new(e)))?;
-        let write_half = stream;
+        let read_half = config.stream.try_clone().map_err(|e| BootError::Other(Box::new(e)))?;
+        let write_half = config.stream;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
@@ -195,7 +150,7 @@ impl NativeActor for TcpSessionActor {
         Ok(TcpSessionState {
             peer: config.peer,
             session_name: config.session_name,
-            consumer: config.consumer.map(BoundConsumer::Unwatched),
+            consumer: config.consumer,
             read_buffer: Vec::new(),
             write_half,
             shutdown,
@@ -205,13 +160,7 @@ impl NativeActor for TcpSessionActor {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        // `init` cannot take the monitor: `NativeInitCtx` has no `monitor`.
-        // A consumer that closed before this ran, such as one that closed
-        // while the connection was being accepted or dialed, is noticed the
-        // same way, once this session's birth promotes.
-        state.consumer = state.consumer.take().map(|consumer| consumer.watched(ctx));
-
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         if let Some(start) = state.read_start.take() {
             let _ = start.send(());
         }
@@ -236,31 +185,6 @@ impl NativeActor for TcpSessionActor {
         );
     }
 
-    /// The consumer closed, so nothing is left to deliver to: close this
-    /// session. The close is the ordinary one: `unwire` shuts the socket
-    /// both ways and joins the read thread, so the peer reads end of stream.
-    /// No `SessionClosed` is sent, since the consumer is the actor that
-    /// closed.
-    ///
-    /// The host stamps the departed actor as the notice's sender. The
-    /// consumer is the only actor this session monitors, and the sender is
-    /// compared to it all the same, so a notice with no sender, or one for a
-    /// session with no consumer, closes nothing.
-    #[handler::event]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        let Some(departed) = ctx.sender() else {
-            return;
-        };
-        let Some(consumer) = state.consumer() else {
-            return;
-        };
-
-        let consumer_closed = departed == consumer.erase();
-        if consumer_closed {
-            ctx.shutdown();
-        }
-    }
-
     /// Sidecar read wake. Drain every pending chunk, append it to the
     /// reassembly buffer, and deliver each complete length-prefix
     /// frame to the bound consumer. `Err` delivers `SessionClosed`
@@ -276,8 +200,8 @@ impl NativeActor for TcpSessionActor {
                     loop {
                         match pop_frame(&mut state.read_buffer) {
                             Ok(Some(bytes)) => {
-                                ctx.fanout(
-                                    state.consumer(),
+                                ctx.send_to(
+                                    state.consumer,
                                     &SessionData {
                                         session_name: state.session_name.clone(),
                                         peer: state.peer.clone(),
@@ -294,8 +218,8 @@ impl NativeActor for TcpSessionActor {
                                     error = %error,
                                     "tcp session frame rejected",
                                 );
-                                ctx.fanout(
-                                    state.consumer(),
+                                ctx.send_to(
+                                    state.consumer,
                                     &SessionClosed {
                                         session_name: state.session_name.clone(),
                                         peer: state.peer.clone(),
@@ -314,8 +238,8 @@ impl NativeActor for TcpSessionActor {
                     } else {
                         format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
                     };
-                    ctx.fanout(
-                        state.consumer(),
+                    ctx.send_to(
+                        state.consumer,
                         &SessionClosed { session_name: state.session_name.clone(), peer: state.peer.clone(), reason },
                     );
                     ctx.shutdown();
@@ -343,9 +267,11 @@ impl NativeActor for TcpSessionActor {
         }
     }
 
-    /// Cooperative external close. Peer mails this, we call
-    /// `ctx.shutdown()`, the dispatcher drains remaining inbox
-    /// mail, runs `unwire` (which joins the read thread).
+    /// Cooperative external close. The consumer mails this to end one
+    /// session, the cap mails it to a session it dialed when that session's
+    /// consumer closes, and a closing listener mails it to each session it
+    /// accepted. We call `ctx.shutdown()`, the dispatcher drains remaining
+    /// inbox mail, runs `unwire` (which joins the read thread).
     // Stateless close-request handler: shutdown is via ctx, so `_state`
     // is unused.
     #[handler::tell]

@@ -1,6 +1,7 @@
-//! A listener and its sessions close when the consumer they deliver to
-//! closes (issue 7552), driven through the real capability, a real loopback
-//! socket, and a consumer that shuts itself down.
+//! A listener, the sessions it accepted, and a dialed session close when
+//! the consumer they deliver to closes (issue 7552), driven through the real
+//! capability, a real loopback socket, and a consumer that shuts itself
+//! down.
 //!
 //! No test here sleeps to order mail. A departure's notices are posted to
 //! its monitors in the order they registered. The capability registers its
@@ -13,8 +14,10 @@
 //! is the wait.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::mem;
+use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use aether_actor::{ActorPath, ActorRef, Addressable, HeldReply, ProtocolPath, actor};
@@ -29,9 +32,9 @@ use aether_substrate::mail::outbound::EgressEvent;
 use aether_substrate::testing::TestChassis;
 
 use super::{
-    BindListener, BindListenerResult, CapturedSessionMail, ListListeners, ListListenersResult, SessionConsumer,
-    ShutDown, TcpCapability, TcpConsumer, TcpListenerActor, address, boot_tcp_substrate_with, drive_and_decode,
-    framed_body, send_and_settle,
+    BindListener, BindListenerResult, CapturedSessionMail, Connect, ConnectResult, ListListeners, ListListenersResult,
+    SessionConsumer, ShutDown, TcpCapability, TcpConsumer, TcpListenerActor, address, boot_tcp_substrate_with,
+    drive_and_decode, framed_body, send_and_settle,
 };
 
 /// Monitor the actor at `target`; the reply confirms the monitor stands.
@@ -59,11 +62,17 @@ impl HeldReply for Noticed {
 }
 
 /// Monitors one actor, the way the capability monitors a listener, and holds
-/// an [`AwaitDeparture`] until that actor's notice arrives.
-struct Watcher {
-    watch: Option<MonitorHandle>,
-    departed: bool,
-    waiting: Option<Held<Noticed>>,
+/// an [`AwaitDeparture`] until that actor's notice arrives. Its state is
+/// where that watch stands.
+enum Watcher {
+    /// No `Watch` has arrived.
+    Idle,
+    /// The target is monitored and its notice has not arrived.
+    Watching { _monitor: MonitorHandle },
+    /// As `Watching`, with an [`AwaitDeparture`] held for the notice.
+    Awaited { _monitor: MonitorHandle, held: Held<Noticed> },
+    /// The target's notice arrived.
+    Departed,
 }
 
 #[actor(singleton, root)]
@@ -72,14 +81,13 @@ impl NativeActor for Watcher {
     type Config = ();
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { watch: None, departed: false, waiting: None })
+        Ok(Self::Idle)
     }
 
     #[handler::request]
     fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, watch: Watch) -> Watching {
         let proven = ctx.resolve_path(&watch.target).expect("the watched actor is live");
-        self.watch = Some(ctx.monitor(proven));
-        self.departed = false;
+        *self = Self::Watching { _monitor: ctx.monitor(proven) };
 
         Watching
     }
@@ -87,20 +95,24 @@ impl NativeActor for Watcher {
     #[handler::request]
     fn on_await_departure(&mut self, ctx: &mut NativeCtx<'_>, _await: AwaitDeparture) -> Pending<Noticed> {
         let (pending, held) = ctx.hold::<Noticed>();
-        if self.departed {
-            held.answer(ctx, &Noticed { notified: true });
-        } else {
-            self.waiting = Some(held);
-        }
+        *self = match mem::replace(self, Self::Idle) {
+            Self::Watching { _monitor: monitor } => Self::Awaited { _monitor: monitor, held },
+            Self::Departed => {
+                held.answer(ctx, &Noticed { notified: true });
+                Self::Departed
+            }
+            unwatched @ (Self::Idle | Self::Awaited { .. }) => {
+                held.answer(ctx, &Noticed { notified: false });
+                unwatched
+            }
+        };
 
         pending
     }
 
     #[handler::event]
     fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        drop(self.watch.take());
-        self.departed = true;
-        if let Some(held) = self.waiting.take() {
+        if let Self::Awaited { held, .. } = mem::replace(self, Self::Departed) {
             held.answer(ctx, &Noticed { notified: true });
         }
     }
@@ -131,9 +143,9 @@ fn spawn_closable_consumer(
     (consumer, path, received)
 }
 
-/// Bind a listener named `name` on an OS-picked loopback port and answer the
-/// port.
-fn bind((rx, chassis): &Booted, name: &str, consumer: Option<ProtocolPath<TcpConsumer>>) -> u16 {
+/// Bind a listener named `name` for `consumer` on an OS-picked loopback port
+/// and answer the port.
+fn bind((rx, chassis): &Booted, name: &str, consumer: ProtocolPath<TcpConsumer>) -> u16 {
     let tcp = chassis.actor_ref::<TcpCapability>();
     let bound: BindListenerResult = drive_and_decode(
         chassis,
@@ -171,14 +183,15 @@ fn listed((rx, chassis): &Booted) -> Vec<String> {
 
 /// A consumer that closes without unbinding takes its listener with it: the
 /// listener closes, the capability's entry goes, and the port stops
-/// accepting. Fails for a listener that never monitors its consumer or
-/// monitors and does not close (the watcher's notice never arrives), and for
-/// an entry the capability keeps after the listener is gone.
+/// accepting. Fails for a capability that never monitors the consumer or
+/// monitors and does not close its listener (the watcher's notice never
+/// arrives), and for an entry the capability keeps after the listener is
+/// gone.
 #[test]
 fn a_listener_closes_when_its_consumer_closes() {
     let booted = boot_with_watcher();
     let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "closing-consumer");
-    let local_port = bind(&booted, "closing", Some(consumer_path));
+    let local_port = bind(&booted, "closing", consumer_path);
     watch_listener(&booted, "closing");
 
     send_and_settle(&booted.1, consumer, &ShutDown, None);
@@ -189,15 +202,17 @@ fn a_listener_closes_when_its_consumer_closes() {
     assert!(dialed.is_err(), "the closed consumer's port no longer accepts");
 }
 
-/// A consumer that closes takes its live sessions with it: the peer of a
-/// session that was delivering to it reads end of stream. Fails for a
-/// session that never monitors its consumer, which keeps the peer's
-/// connection open and its read thread running with nothing to deliver to.
+/// A consumer that closes takes its listener's live sessions with it: the
+/// peer of an accepted session that was delivering to it reads end of
+/// stream. Fails for a capability that never monitors the consumer, and for
+/// a listener that closes without closing the sessions it accepted, either
+/// of which keeps the peer's connection open and its read thread running
+/// with nothing to deliver to.
 #[test]
 fn a_session_closes_when_its_consumer_closes() {
     let booted = boot_with_watcher();
     let (consumer, consumer_path, received) = spawn_closable_consumer(&booted.1, "session-consumer");
-    let local_port = bind(&booted, "sessions", Some(consumer_path));
+    let local_port = bind(&booted, "sessions", consumer_path);
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&framed_body(b"live")).expect("write one complete frame");
 
@@ -218,22 +233,56 @@ fn a_session_closes_when_its_consumer_closes() {
     assert_eq!(read, 0, "the session writes nothing more before it closes");
 }
 
-/// One consumer's close ends only what was bound to it: a listener bound
-/// with no consumer stays listed and bound. Fails when a consumer's close
-/// reaches a listener that was not bound to it, such as a close that sweeps
-/// every listener, or a listener with no consumer that monitors something
-/// and closes on its notice.
+/// A consumer that closes takes the sessions dialed for it with it: the
+/// server a dialed session was connected to reads end of stream. Fails for a
+/// capability that keeps no record of a dialed session, or that monitors the
+/// consumer and closes only its listeners.
 #[test]
-fn a_listener_with_no_consumer_stays_bound_when_another_actor_closes() {
+#[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
+fn a_dialed_session_closes_when_its_consumer_closes() {
+    let server = TcpListener::bind("127.0.0.1:0").expect("bind the loopback server");
+    let addr = server.local_addr().expect("the loopback server's address");
+    let accepted = thread::spawn(move || server.accept().expect("accept the dialed connection").0);
+
     let booted = boot_with_watcher();
-    let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "other-consumer");
-    let unowned_port = bind(&booted, "unowned", None);
-    bind(&booted, "owned", Some(consumer_path));
-    watch_listener(&booted, "owned");
+    let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "dialing-consumer");
+    let dialed: ConnectResult = drive_and_decode(
+        &booted.1,
+        &booted.0,
+        booted.1.actor_ref::<TcpCapability>(),
+        &Connect { addr: addr.to_string(), name: Some("dialed".into()), consumer: consumer_path },
+    );
+    assert!(matches!(dialed, ConnectResult::Ok { .. }), "the dial is answered with its session: {dialed:?}");
+    let mut peer = accepted.join().expect("the loopback server accepts");
 
     send_and_settle(&booted.1, consumer, &ShutDown, None);
+
+    // The close reaches this plain socket through the kernel, not through a
+    // chain the test holds; the read timeout only keeps a session that
+    // outlived its consumer from hanging the read.
+    peer.set_read_timeout(Some(Duration::from_secs(5))).expect("bound the wait for the close");
+    let mut trailing = Vec::new();
+    let read = peer.read_to_end(&mut trailing).expect("the dialed session closes the server's connection");
+    assert_eq!(read, 0, "the session writes nothing more before it closes");
+}
+
+/// One consumer's close ends only what was bound to it: a listener bound for
+/// another consumer stays listed and bound. Fails when a consumer's close
+/// reaches a listener that was not bound to it, such as a close that sweeps
+/// every listener rather than the ones whose entry names the closed
+/// consumer.
+#[test]
+fn a_consumers_close_leaves_another_consumers_listener_bound() {
+    let booted = boot_with_watcher();
+    let (closing, closing_path, _closing_received) = spawn_closable_consumer(&booted.1, "closing-consumer");
+    let (_staying, staying_path, _staying_received) = spawn_closable_consumer(&booted.1, "staying-consumer");
+    let kept_port = bind(&booted, "kept", staying_path);
+    bind(&booted, "closed", closing_path);
+    watch_listener(&booted, "closed");
+
+    send_and_settle(&booted.1, closing, &ShutDown, None);
     await_departure(&booted);
 
-    assert_eq!(listed(&booted), ["unowned"], "the listener with no consumer is the one still listed");
-    TcpStream::connect(("127.0.0.1", unowned_port)).expect("the listener with no consumer still accepts");
+    assert_eq!(listed(&booted), ["kept"], "the other consumer's listener is the one still listed");
+    TcpStream::connect(("127.0.0.1", kept_port)).expect("the other consumer's listener still accepts");
 }
