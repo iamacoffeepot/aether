@@ -96,8 +96,12 @@ struct Sandbox {
 impl Sandbox {
     fn new(tag: &str) -> Self {
         let root = scratch_dir("aether-fs-offload", tag);
-        let roots =
-            NamespaceRoots { save: root.join("save"), assets: root.join("assets"), config: root.join("config") };
+        let roots = NamespaceRoots {
+            save: root.join("save"),
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         for dir in [&roots.save, &roots.assets, &roots.config] {
             fs::create_dir_all(dir).expect("test setup: namespace root creates");
         }

@@ -87,7 +87,7 @@ raw bytes. Failures distinguish file I/O, invalid composition, transform error,
 and panic. Discover transform ids/contracts with `describe_transforms`; do not
 guess ids or treat the facility as arbitrary host execution.
 
-**Three namespaces.** A request names one by its short name — `save`, not
+**Four namespaces.** A request names one by its short name — `save`, not
 `save://` (the double-colon form is only a convention in prose):
 
 - **`save`** — writable, per-user persistent storage. Save games, preferences.
@@ -95,12 +95,32 @@ guess ids or treat the facility as arbitrary host execution.
   level data. A write or delete here replies `Forbidden`.
 - **`config`** — writable, for component-authored configuration (keybinds and
   the like).
+- **`objects`** — read-only, the content-addressed objects a package ships
+  under `pack/objects`
+  ([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md)
+  §1). It is addressed by hash and nothing else: `addr.path` is an object's
+  sha256 as 64 lowercase hex characters, and `read` is its only verb.
 
 Each resolves to a real directory chosen at boot; that resolution, and the
 `AETHER_*_DIR` knobs behind it, are covered under [Configuration](configuration.md).
 
-**Local paths receive a lexical check, not complete containment.** The shipped
-adapter rejects a string that starts with `/` or contains a slash-delimited
+**`objects` is how an actor loads a module boot did not.** Read the object and
+the reply's `bytes` is a `Blob`; put that blob in `aether.component.publish` as
+`code`, then `aether.component.spawn` a type it published. A guest holds the
+blob by handle and its publish names it by hash, so the object's bytes never
+enter guest memory. A path that is not an object name — uppercase hex, the
+wrong length, a sub-path, `..` — replies `Forbidden`, as does every `write`,
+`delete` and `list`; an object the store does not hold replies `NotFound`. The
+root is never created, so an engine with no object directory answers `NotFound`
+for every object. The read is not checked against its name: the hash locates the
+file, and the engine's identity for the bytes is the one its blob store takes
+when they are checked in. A packaged chassis roots the namespace at
+`pack/objects`; any other engine roots it at `AETHER_OBJECTS_DIR` /
+`--objects-dir`, a plain directory of hash-named files, defaulting to `objects`
+beside the binary.
+
+**Local paths receive a lexical check, not complete containment.** The local
+adapter behind `save`, `assets` and `config` rejects a string that starts with `/` or contains a slash-delimited
 segment exactly equal to `..`, so `save` / `../etc/passwd` fails with
 `Forbidden`. It then joins the unchecked remainder to the namespace root. It
 does not canonicalize the resolved target or defend against symlinks inside the
@@ -263,7 +283,7 @@ load. Writing a mesh DSL to a namespace and pointing the mesh viewer at the same
 path is the canonical loop — author the bytes, then send the load — and the same
 shape covers dropping a config blob a component reads at startup. The namespaces
 resolve to real directories you set per-spawn through `AETHER_SAVE_DIR` /
-`AETHER_ASSETS_DIR` / `AETHER_CONFIG_DIR` (or the matching `--save-dir` flags), so
+`AETHER_ASSETS_DIR` / `AETHER_CONFIG_DIR` / `AETHER_OBJECTS_DIR` (or the matching `--save-dir` flags), so
 you also control where those bytes land on disk.
 
 ## How to extend or reuse it
@@ -272,7 +292,7 @@ The seams are the namespace table and the backend trait.
 
 - **A new namespace** is registered at boot, chassis-side: build an adapter,
   register it under a short name, and it's addressable as just another
-  `namespace`. The three above are the substrate's defaults; chassis code can add
+  `namespace`. The four above are the substrate's defaults; chassis code can add
   more.
 - **A new backend** is an implementation of `FileAdapter` — four methods
   (`read` / `write` / `delete` / `list`), each returning `FsResult`. The trait is

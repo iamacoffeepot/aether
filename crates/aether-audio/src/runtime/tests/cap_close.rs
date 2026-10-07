@@ -41,8 +41,12 @@ fn close_purges_sender_state_and_in_flight_load() {
     let (registry, mailer, _egress) = fresh_substrate_and_rx();
     let chassis = boot_bare_test_chassis(&registry, &mailer);
     let scratch = scratch_dir("audio", "cap-close");
-    let roots =
-        NamespaceRoots { save: scratch.join("save"), assets: scratch.join("assets"), config: scratch.join("config") };
+    let roots = NamespaceRoots {
+        save: scratch.join("save"),
+        assets: scratch.join("assets"),
+        config: scratch.join("config"),
+        objects: scratch.join("objects"),
+    };
     let _fs = chassis.boot_pumped_actor::<FsCapability>(roots, ()).expect("the fs cap boots");
     let mut driver: PumpedDriver<AudioCapability> =
         PumpedDriver::boot(chassis, AudioConfig { output: AudioOutput::Null, requested_sample_rate: None }, ());

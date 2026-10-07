@@ -19,6 +19,12 @@
 //! by path because the running program does. Boot roots the `assets`
 //! namespace here via [`package_assets_root`].
 //!
+//! `pack/objects` is also what a running engine reads: boot roots the
+//! read-only `objects` file namespace there via [`package_objects_root`],
+//! so an actor mails `aether.fs.read { addr: { namespace: "objects", path:
+//! <sha256 hex> } }` for an object boot did not load and publishes the
+//! blob it is answered with. That read is unverified, as boot's is.
+//!
 //! [`PackageManifest`] is the *persisted, versioned* shipping artifact: where
 //! the JSON boot-manifest ([`crate::boot_manifest`]) names component files by
 //! path, the package manifest references wasm + config bytes by content hash
@@ -108,6 +114,19 @@ pub fn package_assets_root(package_root: &Path) -> Option<PathBuf> {
     let assets = package_root.join(PACK_DIR).join(ASSETS_DIR);
 
     assets.is_dir().then_some(assets)
+}
+
+/// A package's object store, `<package>/pack/objects`: the directory boot
+/// resolves manifest hashes against and the `objects` file namespace reads
+/// from at run time.
+///
+/// Always a path, never absent: every package has an object store, and one
+/// whose directory is missing holds no objects, which a read answers as
+/// `NotFound`. Returned rather than applied, as [`package_assets_root`] is,
+/// so the boot path keeps the precedence.
+#[must_use]
+pub fn package_objects_root(package_root: &Path) -> PathBuf {
+    package_root.join(PACK_DIR).join(OBJECTS_DIR)
 }
 
 /// A sha256 content address — the identity of a package object (ADR-0163
@@ -587,7 +606,7 @@ pub fn package_autoload(package_root: &Path) -> Result<(ChassisSettings, Vec<Aut
 /// replica fan-out.
 fn read_and_resolve(package_root: &Path) -> Result<(ChassisSettings, Vec<PackedComponent>), PackageError> {
     let PackageManifest { settings, entries } = read_manifest(package_root)?;
-    let stores = ObjectStores::single(package_root.join(PACK_DIR).join(OBJECTS_DIR));
+    let stores = ObjectStores::single(package_objects_root(package_root));
     let packed = resolve_entries(entries, &stores)?;
     Ok((settings, packed))
 }

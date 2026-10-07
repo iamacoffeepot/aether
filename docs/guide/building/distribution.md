@@ -143,6 +143,12 @@ operator's `AETHER_ASSETS_DIR` / `--assets-dir` still overrides a shipped depot.
 The check is per member rather than per field: any pinned `aether.fs` root — save
 or config as much as assets — keeps the operator's whole `NamespaceRoots`.
 
+The `objects` namespace takes the same slot: a packaged chassis roots it at
+`pack/objects`, so a running actor can read by hash any object the depot ships,
+and `AETHER_OBJECTS_DIR` / `--objects-dir` or any other pinned root overrides it.
+With no package it is the `objects` directory beside the binary, which need not
+exist. See [File I/O](../systems/file-io.md).
+
 ```sh
 cargo xtask package \
   --spec crates/aether-demo/demo.json \

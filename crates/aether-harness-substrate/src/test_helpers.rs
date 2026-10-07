@@ -298,14 +298,20 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 /// sandbox. The supplied `save_dir` (typically the path returned by
 /// [`init_save_sandbox`]) backs the `save://` namespace; `assets://`
 /// and `config://` reuse the same dir so writes that target either
-/// don't escape the sandbox. Pass the result to
+/// don't escape the sandbox, and `objects` reads it too, so a file
+/// written there under its sha256 hex name is an object. Pass the result to
 /// `SubstrateHarness::builder().namespace_roots(...)`.
 ///
 /// Per issue 464, this is the no-env replacement for the old
 /// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.
 #[must_use]
 pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
-    NamespaceRoots { save: save_dir.to_path_buf(), assets: save_dir.to_path_buf(), config: save_dir.to_path_buf() }
+    NamespaceRoots {
+        save: save_dir.to_path_buf(),
+        assets: save_dir.to_path_buf(),
+        config: save_dir.to_path_buf(),
+        objects: save_dir.to_path_buf(),
+    }
 }
 
 /// Write `bytes` into the sandbox at filename `name`, returning the

@@ -136,6 +136,7 @@ impl NativeActor for FsCapability {
             save = %roots.save.display(),
             assets = %roots.assets.display(),
             config = %roots.config.display(),
+            objects = %roots.objects.display(),
             transforms = transforms.len(),
             "adapters registered",
         );
@@ -363,7 +364,12 @@ mod tests {
     }
 
     fn roots_under(root: &Path) -> NamespaceRoots {
-        let r = NamespaceRoots { save: root.join("save"), assets: root.join("assets"), config: root.join("config") };
+        let r = NamespaceRoots {
+            save: root.join("save"),
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         fs::create_dir_all(&r.save).expect("test setup: save root creates");
         fs::create_dir_all(&r.assets).expect("test setup: assets root creates");
         fs::create_dir_all(&r.config).expect("test setup: config root creates");
@@ -537,7 +543,12 @@ mod tests {
         let root = scratch_root("init-fails");
         let save_path = root.join("save_is_actually_a_file");
         fs::write(&save_path, b"not a dir").expect("test setup: write save_path as a regular file");
-        let roots = NamespaceRoots { save: save_path, assets: root.join("assets"), config: root.join("config") };
+        let roots = NamespaceRoots {
+            save: save_path,
+            assets: root.join("assets"),
+            config: root.join("config"),
+            objects: root.join("objects"),
+        };
         fs::create_dir_all(&roots.assets).expect("test setup: assets root creates");
         fs::create_dir_all(&roots.config).expect("test setup: config root creates");
 

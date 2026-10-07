@@ -49,6 +49,9 @@ publish = false
 #   whose replace hooks succeed, return an error or trap as its config says,
 #   and its inline `test.republish.hooks.counter`, which has saved state. v2's
 #   counter returns an error from `on_rehydrate`, so it cannot be rebuilt.
+# - `object_loader` (issue 7629): a guest that reads a package object by hash
+#   from the `objects` file namespace, publishes the blob, and spawns a type
+#   from it. It names no type of the lib.
 [lib]
 crate-type = ["rlib"]
 
@@ -62,6 +65,9 @@ aether-clipboard = { path = "../aether-clipboard", default-features = false }
 # `republish_loader` and `republish_courier_v2` mail the component host. Identity face
 # only.
 aether-component = { path = "../aether-component", default-features = false }
+# `object_loader` reads the `objects` namespace through `aether.fs`. Identity
+# face only.
+aether-fs = { path = "../aether-fs", default-features = false }
 aether-kinds = { path = "../aether-kinds" }
 
 [[example]]
@@ -114,6 +120,10 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_loader"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "object_loader"
 crate-type = ["cdylib"]
 
 [[example]]
