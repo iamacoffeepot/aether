@@ -62,8 +62,29 @@ second with `tick.delta_seconds()`, so slowing or speeding the frame cadence doe
 not slow or speed authored motion, and logic that counts in whole steps reads them
 from `tick.steps(length)` (below). Every other stage is a zero-sized signal. Application state still rides its own mail — the
 camera computes a view-projection matrix on `Tick` and publishes it to
-`aether.render`, rather than threading it through a stage. The stage-kind
-vocabulary:
+`aether.render`, rather than threading it through a stage.
+
+**`Tick` time is game time; `ctx.now()` is measured time.** The two `Tick`
+fields say how far the game has advanced, as the driver states it. An actor that
+wants to know how long its own work took reads the engine's actor clock, with the
+same call on a guest ctx and a native one:
+
+```rust
+let started = ctx.now();
+// ... the work being measured ...
+let took = ctx.now().since(started); // core::time::Duration
+```
+
+`ctx.now()` returns an `aether_actor::Instant`. Within one engine a later reading
+is never less than an earlier one, and only the difference between two readings
+means anything: it is not wall-clock time, not game time, and it means nothing in
+another engine or after a restart. `init` can take a reading too
+(`WasmInitCtx::now`, `NativeInitCtx::now`), so an actor that keeps an `Instant` in
+its state builds it there. See
+[Guest, native, and wire boundaries](../architecture/guest-native-boundary.md)
+for what an `Instant` may not do.
+
+The stage-kind vocabulary:
 
 | Stage kind | Wire name | Role |
 |---|---|---|

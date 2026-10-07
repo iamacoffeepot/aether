@@ -680,6 +680,14 @@ impl ComponentCtx {
         self.reply_correlation.get()
     }
 
+    /// The engine's actor clock, in nanoseconds since its anchor. The
+    /// `now_nanos_p32` host fn surfaces this to the guest as its
+    /// `ctx.now()`; it reads the clock a native actor's `NativeCtx::now`
+    /// reads, through the same binding.
+    pub fn now_nanos(&self) -> u64 {
+        self.binding.mailer().actor_clock().now_nanos()
+    }
+
     /// Dispatch mail. If the recipient is a sink, the handler runs inline
     /// on the caller's thread. Otherwise defer to the mailer, which
     /// routes to the component's inbox, warn-drops dropped/unknown

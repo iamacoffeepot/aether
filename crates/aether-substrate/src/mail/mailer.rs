@@ -43,6 +43,7 @@ use crate::mail::registry::{
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::memory::{self, BlobStoreMemory, MemoryLedger, MemoryReport, OwnerMemory};
+use crate::runtime::actor_clock::ActorClock;
 use crate::runtime::thread_name;
 use crate::runtime::trace::{SentRecord, SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
@@ -141,6 +142,10 @@ pub struct Mailer {
     /// `Mailer` per engine and every ctx reaches it through its binding, so
     /// `NativeCtx::check_in` lands every native check-in here.
     blob_store: BlobStore,
+    /// The engine's one actor clock, fixed when the `Mailer` is built. Every
+    /// ctx reaches it through its binding, so a guest's and a native actor's
+    /// `ctx.now()` read the same clock.
+    actor_clock: ActorClock,
 }
 
 /// A chassis root minted from the [`Mailer`]'s counter, its `Sent` recorded,
@@ -189,6 +194,7 @@ impl Mailer {
             memory_ledger: Arc::new(MemoryLedger::default()),
             chassis_roots: AtomicU64::new(1),
             blob_store: BlobStore::new().expect("spawn the blob reclaim thread"),
+            actor_clock: ActorClock::running(),
         }
     }
 
@@ -196,6 +202,12 @@ impl Mailer {
     /// only public route to it is `NativeCtx::check_in`.
     pub(crate) const fn blob_store(&self) -> &BlobStore {
         &self.blob_store
+    }
+
+    /// The engine's actor clock. Crate-private, so the only public route to
+    /// a reading is a ctx's `now()`.
+    pub(crate) const fn actor_clock(&self) -> &ActorClock {
+        &self.actor_clock
     }
 
     /// ADR-0080 §5 chassis-mail router installation. Called once by
@@ -231,6 +243,15 @@ impl Mailer {
     #[must_use]
     pub fn with_trace_handle(mut self, handle: TraceHandle) -> Self {
         self.trace_handle = handle;
+        self
+    }
+
+    /// Swap in a non-default [`ActorClock`]. Every engine keeps the running
+    /// clock [`Self::new`] anchors; a harness whose test steps the clock by
+    /// hand passes a stepped one here before the `Arc` wrap.
+    #[must_use]
+    pub fn with_actor_clock(mut self, clock: ActorClock) -> Self {
+        self.actor_clock = clock;
         self
     }
 

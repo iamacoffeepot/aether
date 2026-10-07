@@ -70,6 +70,11 @@ unsafe extern "C" {
     /// Returns `0` when the dispatch is not a reply envelope.
     #[link_name = "reply_correlation_p32"]
     pub fn reply_correlation() -> u64;
+    /// Issue 7627: read the engine's actor clock, in nanoseconds since its
+    /// anchor. Within one engine a later read is never less than an earlier
+    /// one. The same clock answers a native actor's `NativeCtx::now`.
+    #[link_name = "now_nanos_p32"]
+    pub fn now_nanos() -> u64;
     /// Issue 525 Phase 4b / issue 531: stage a `ActorInitError` message
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
@@ -314,6 +319,21 @@ pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
 #[must_use]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-actor: prev_correlation called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::now_nanos` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn now_nanos() -> u64 {
+    panic!("aether-actor: now_nanos called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::reply_correlation` import.

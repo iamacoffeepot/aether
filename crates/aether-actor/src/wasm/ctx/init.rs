@@ -4,6 +4,8 @@
 
 use crate::asset::{AssetInfo, Assets};
 use crate::blob::guest;
+use crate::instant::Instant;
+use crate::wasm::bridge::clock;
 use crate::wasm::inline::Registry;
 use aether_data::Blob;
 use alloc::vec::Vec;
@@ -27,6 +29,17 @@ impl<'a> WasmInitCtx<'a> {
     #[must_use]
     pub fn __new(inline: &'a Registry) -> Self {
         Self { inline }
+    }
+
+    /// A reading of the engine's actor clock, for an actor that keeps an
+    /// [`Instant`] in its state and so needs one to build that state with.
+    /// It is the same clock [`WasmCtx::now`](super::WasmCtx::now) reads.
+    ///
+    /// The native twin is
+    /// `aether_substrate::actor::native::NativeInitCtx::now`.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        Instant::new(clock::now_nanos())
     }
 
     // Issue 1987: the init ctx exposes no send verbs. Every send routes

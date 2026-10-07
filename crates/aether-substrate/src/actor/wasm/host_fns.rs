@@ -507,6 +507,16 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         caller.data().reply_correlation()
     })?;
 
+    // HOST_FN_OK: ADR-0002 / issue 7627. A guest's `ctx.now()` reads the
+    // engine's actor clock. It cannot be a mail capability: a handler needs
+    // the answer before it returns, to measure its own work, and a reply
+    // arrives only after it has. The read exposes no engine state beyond
+    // elapsed time since the clock's anchor, and it is the clock a native
+    // actor's `NativeCtx::now` reads.
+    linker.func_wrap("aether", "now_nanos_p32", |caller: Caller<'_, ComponentCtx>| -> u64 {
+        caller.data().now_nanos()
+    })?;
+
     // HOST_FN_OK: ADR-0002 / issue 531. The ActorInitError plumbing
     // can't ride a mail sink because mail is not dispatched until
     // the component finishes booting — the `init` FFI call itself

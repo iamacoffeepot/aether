@@ -8,6 +8,7 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
+use aether_actor::Instant;
 use aether_data::ActorMail;
 
 use crate::actor::native::ActorProbe;
@@ -78,6 +79,16 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn actor_probe(&self) -> ActorProbe {
         self.binding.actor_probe()
+    }
+
+    /// A reading of the engine's actor clock, for an actor that keeps an
+    /// [`Instant`] in its state and so needs one to build that state with.
+    /// It is the same clock [`NativeCtx::now`](super::NativeCtx::now) reads.
+    ///
+    /// The guest twin is `aether_actor::WasmInitCtx::now`.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        aether_actor::__mint_instant(self.binding.mailer().actor_clock().now_nanos())
     }
 
     /// A [`MemoryGauge`] listed in the engine's memory report under this

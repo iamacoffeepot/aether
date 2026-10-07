@@ -8,6 +8,8 @@
 //! audited ptr/len marshalling) while closing the over-exposure the
 //! `pub static` forms created.
 //!
+//! - `clock` — the engine's actor clock (`now_nanos`), the transport under
+//!   `WasmCtx::now` and `WasmInitCtx::now`.
 //! - `log` — log-event FFI (`emit_log_event`). Split from `mail` because
 //!   it is a distinct op family with no relation to mail routing.
 //! - `mail` — outbound mail (`send_mail`, `reply_mail`,
@@ -43,6 +45,7 @@ pub(crate) mod address;
 pub(crate) mod asset;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod blob;
+pub(crate) mod clock;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod init;
 pub(crate) mod log;

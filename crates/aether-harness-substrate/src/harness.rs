@@ -53,6 +53,7 @@ use aether_substrate::chassis::settlement::{
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 #[cfg(test)]
 use aether_substrate::mail::MailboxId;
+use aether_substrate::runtime::actor_clock::{ActorClock, SteppedClock};
 use aether_substrate::{
     Builder, ChassisTarget, ChildRefused, EgressEvent, NativeActor, PassiveChassis, ReplyTarget, RingCapacities,
     RouteReadProbe, SchedulerTuning, SubstrateBoot, mail::MailId,
@@ -339,6 +340,9 @@ pub struct SubstrateHarnessBuilder {
     component_host: ComponentHostMode,
     compose: Vec<ComposeFn>,
     scheduler_tuning: SchedulerTuning,
+    /// The clock this harness's engine is built with: running unless the
+    /// test supplied a [`SteppedClock`] through [`Self::clock`].
+    clock: ActorClock,
 }
 
 impl Default for SubstrateHarnessBuilder {
@@ -356,6 +360,7 @@ impl Default for SubstrateHarnessBuilder {
             component_host: ComponentHostMode::Absent,
             compose: Vec::new(),
             scheduler_tuning: SchedulerTuning::default(),
+            clock: ActorClock::running(),
         }
     }
 }
@@ -456,6 +461,20 @@ impl SubstrateHarnessBuilder {
     #[must_use]
     pub fn settlement_cap(mut self, cap: Option<Duration>) -> Self {
         self.settlement_cap = cap;
+        self
+    }
+
+    /// Build this harness's engine on a clock the test moves by hand, so a
+    /// scenario over code that measures time with `ctx.now()` asserts an
+    /// exact duration. The test keeps its own clone of `stepped` and calls
+    /// [`SteppedClock::step`] on it: every `ctx.now()` in this engine, guest
+    /// or native, then reads the stepped value. Holding that clone is what
+    /// shows the harness was built stepped, so the harness itself has no step
+    /// method. Without this call the engine reads real elapsed time, as every
+    /// chassis does. Trace and cost timestamps are real either way.
+    #[must_use]
+    pub fn clock(mut self, stepped: SteppedClock) -> Self {
+        self.clock = ActorClock::stepped(stepped);
         self
     }
 
@@ -675,6 +694,7 @@ impl SubstrateHarness {
             component_host,
             compose,
             scheduler_tuning,
+            clock,
         } = builder;
 
         // Lower the per-field `Option` overrides onto the `Copy`
@@ -726,6 +746,7 @@ impl SubstrateHarness {
             pool_workers,
             ring_capacities,
             scheduler_tuning,
+            clock,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             namespace_roots,

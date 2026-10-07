@@ -38,6 +38,7 @@ extern crate self as aether_actor;
 pub mod asset;
 mod blob;
 mod held_reply;
+mod instant;
 pub mod local;
 pub mod log;
 pub mod mail;
@@ -55,6 +56,9 @@ pub use asset::{AssetInfo, Assets};
 #[doc(hidden)]
 pub use blob::guest::__mint_guest_blob;
 pub use held_reply::HeldReply;
+#[doc(hidden)]
+pub use instant::__mint_instant;
+pub use instant::Instant;
 pub use local::Local;
 pub use model::ctx::{Erased, MailSender, OutboundReply, Persistence, ReplyMode, Single, Unchecked};
 pub use model::slot::Slot;

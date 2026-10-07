@@ -27,7 +27,8 @@
 //! how it stages a registry batch (`registry`) or a child birth
 //! (`spawn`), how it retires itself and watches peers (`lifecycle`),
 //! how raw + typed mail leaves it (`send`), how it checks bytes into the
-//! engine blob store (`store`), and what a guest host
+//! engine blob store (`store`), how it reads the engine's actor clock
+//! (`clock`), and what a guest host
 //! declares (`guest`). `init` holds the
 //! boot-time [`NativeInitCtx`], and `handles` the chassis-owned
 //! [`ExportedHandles`] map it publishes into.
@@ -53,6 +54,7 @@ use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::trace::SettlementHold;
 
 mod address;
+mod clock;
 #[cfg(feature = "wasm")]
 mod guest;
 mod handles;

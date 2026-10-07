@@ -45,6 +45,23 @@ installs `FsCapability` and redirects `save://`, `assets://`, and `config://`.
 Point those namespaces at temporary roots so parallel tests do not share host
 files. Use the in-memory clipboard when testing deterministic text interaction.
 
+A test of code that measures time with `ctx.now()` builds the harness on a clock
+it moves by hand. Make a `SteppedClock`, hand a clone to the builder, and step
+the one you kept:
+
+```rust
+let clock = SteppedClock::new();
+let mut harness = SubstrateHarness::builder().clock(clock.clone()).build()?;
+// ... send the mail that starts the measurement and wait for it to settle ...
+clock.step(Duration::from_millis(7));
+// ... every ctx.now() in this engine, guest or native, now reads 7 ms later ...
+```
+
+The clock stands still between steps, so an asserted duration is exact. Without
+`.clock(..)` the harness reads real elapsed time, as every chassis does. Trace
+and cost timestamps are real either way. FleetHarness forks real engines, which
+always run on real time, so a stepped measurement is a SubstrateHarness test.
+
 Dropping the bench tears down its passives and scheduler. Do not leak it into a
 global or run several tests against one mutable bench unless the shared lifetime
 is itself the contract.
