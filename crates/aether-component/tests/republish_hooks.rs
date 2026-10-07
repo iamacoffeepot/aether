@@ -12,9 +12,10 @@
 //! The fixtures are the hooks pair: `test.republish.hooks.parent`, whose
 //! replace hooks do what its `HookFaultConfig` says, and its inline
 //! `test.republish.hooks.counter`. v2's counter returns an error from
-//! `on_rehydrate`. No test reads the counter after a refusal: the reinstated
-//! parent's second `wire` spawns it again over the resident one, which is
-//! issue 7536's to fix and assert.
+//! `on_rehydrate`. After a refusal the reinstated parent's `wire` runs a
+//! second time and spawns the counter's name again; that spawn answers the
+//! counter that stands (issue 7536, ADR-0249 §5), and one test reads its
+//! count to say so.
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -25,7 +26,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aether_actor::ProtocolRef;
 use aether_component::ComponentHostCapability;
-use aether_data::Kind;
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -34,6 +35,7 @@ use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DEHYDRATE_REFUSAL, HELD_UNANSWERED_TAG, HeldRequest, HeldRequestResult,
     HookFaultConfig, HookOutcome, REHYDRATE_REFUSAL,
 };
+use aether_test_fixtures_republish::{HooksV1Counter, HooksV1Parent};
 
 const PARENT: &str = "test.republish.hooks.parent";
 
@@ -210,4 +212,41 @@ fn a_child_that_cannot_be_rebuilt_refuses_the_republish() {
     assert!(refusal.contains("inline child `counter` was not rebuilt"), "the refusal names the child: {refusal}");
     assert!(refusal.contains(REHYDRATE_REFUSAL), "the refusal carries the child's message: {refusal}");
     assert_eq!(count(&mut harness, parent), 3, "the old parent keeps running with its count");
+}
+
+#[test]
+fn a_reinstated_guests_second_wire_answers_the_counter_that_stands() {
+    // Catches: the reinstated guest's `wire`, run a second time, spawning the
+    // counter's name over the resident counter, whose fresh `init` reads back
+    // as a count of 0 where the rebuilt one held 2.
+    let Some(fixtures) = hooks() else {
+        return;
+    };
+    let config = HookFaultConfig { successor_rehydrate: HookOutcome::Refuses, ..HookFaultConfig::default() };
+    let mut harness = SubstrateHarness::builder().with_component_host().size(64, 48).build().expect("boot");
+    let parent = harness
+        .load::<HooksV1Parent>(load_parent(&fixtures.v1, config))
+        .unwrap_or_else(|error| panic!("load {PARENT}: {error}"));
+    // The counter's alias is a second registry batch its parent's `wire`
+    // staged; the barrier proves the owner has applied it.
+    harness.await_registry_applied();
+    let counter = harness
+        .child::<HooksV1Parent, HooksV1Counter>(&parent, LoadName::new("counter").expect("a valid instance key"))
+        .unwrap_or_else(|error| panic!("the counter must be live: {error}"));
+    harness
+        .execute(vec![
+            ("bump_1", HarnessOp::send_and_settle(&counter, &Bump)),
+            ("bump_2", HarnessOp::send_and_settle(&counter, &Bump)),
+        ])
+        .expect("bump the counter");
+
+    let refusal = refused(&mut harness, successor_wasm(&fixtures.v1, 1));
+
+    assert!(refusal.contains("on_rehydrate failed"), "the successor's refusal is reported: {refusal}");
+    let standing = harness
+        .execute(vec![("count", HarnessOp::send_and_await_reply(&counter, &CountQuery))])
+        .expect("query the counter")
+        .reply::<CountReport>("count")
+        .expect("decode CountReport");
+    assert_eq!(standing.count, 2, "the reinstated guest's second wire left the counter it already had");
 }

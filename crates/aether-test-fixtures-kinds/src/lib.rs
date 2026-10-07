@@ -297,6 +297,31 @@ pub struct RespawnResult {
     pub alias_refused: bool,
 }
 
+/// Issue 7536: what the inline-unwire fixture's parent mails the harness
+/// observer from `unwire`. The observer records kinds in arrival order, so
+/// the three markers read back as the order the hooks ran in.
+#[aether_data::kind(name = "aether.test_fixture.inline_parent_unwired", default)]
+pub struct InlineParentUnwired;
+
+/// Issue 7536: what the inline-unwire fixture's child mails the harness
+/// observer from `unwire`.
+#[aether_data::kind(name = "aether.test_fixture.inline_child_unwired", default)]
+pub struct InlineChildUnwired;
+
+/// Issue 7536: what the inline-unwire fixture's leaf mails the harness
+/// observer from `unwire`.
+#[aether_data::kind(name = "aether.test_fixture.inline_leaf_unwired", default)]
+pub struct InlineLeafUnwired;
+
+/// Issue 7536: tells the inline-unwire fixture's child to despawn itself.
+/// `me` is the child's own path, which its sender read from the registry: an
+/// inline child holds no reference to itself, so it resolves the path to the
+/// proof `despawn_inline_child` takes.
+#[aether_data::kind(name = "aether.test_fixtures.despawn_self")]
+pub struct DespawnSelf {
+    pub me: ErasedActorPath,
+}
+
 /// Issue 6867: asks the inline-dependency fixture's holder how the spawn of
 /// its child in `wire` ended. Replied with a [`SpawnOutcome`].
 /// Structured-shaped unit struct.

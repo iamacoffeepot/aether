@@ -22,7 +22,10 @@ closes the child and spends its name
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §8),
 so spawning a despawned child's key again fails with
 `SpawnError::AliasAllocationFailed`; spawn a fresh child under a new key instead
-([the actor model](foundations/actor-model.md) has the details).
+([the actor model](foundations/actor-model.md) has the details). A parent's
+close runs each child's `unwire` before its own, deepest first, and a child
+that despawns itself runs `unwire` when its handler returns. Spawning a name
+whose child is standing answers that child and initialises nothing again.
 
 ## Deferred replies
 

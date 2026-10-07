@@ -1,8 +1,10 @@
 //! ADR-0114 inline-child scenarios (rehomed per issue #3769): a wasm
 //! parent's inline children carry state across `replace_component`
 //! (typed reconstruct + by-tag spawn, issue 2692) and surrender their
-//! address on a mid-life despawn (#1939, #4228), and match the host replies
-//! to their own requests by request id (#6530). The children ride
+//! address on a mid-life despawn (#1939, #4228), match the host replies
+//! to their own requests by request id (#6530), and run `unwire` when their
+//! parent closes or they despawn themselves, while a repeated spawn of a
+//! standing name answers the child that stands (#7536). The children ride
 //! aether-actor's inline-child machinery, but the component host is what
 //! boots and replaces the hosting module, so the scenarios live here.
 //!
@@ -17,16 +19,17 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::LoadComponent;
+use aether_kinds::{DropComponent, LoadComponent};
 use aether_substrate::testing::successor_wasm;
 use aether_test_fixtures_bundle::{
     InlineChild, InlineDespawnChild, InlineDespawnParent, InlineParent, InlineStatefulChild, InlineStatefulParent,
-    InlineTagParent, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
+    InlineTagParent, NestedLineageChild, NestedLineageLeaf, NestedLineageParent, UnwireChild, UnwireLeaf, UnwireParent,
 };
 use aether_test_fixtures_fs_demux::{InlineFsDemuxChild, InlineFsDemuxParent};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe, RespawnChild, RespawnResult, RunFsDemux, TagSpawnQuery, TagSpawnReport,
+    Bump, CountQuery, CountReport, DespawnChild, DespawnSelf, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
+    InlineChildUnwired, InlineEcho, InlineLeafUnwired, InlineParentUnwired, InlineProbe, RespawnChild, RespawnResult,
+    RunFsDemux, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -590,4 +593,120 @@ fn inline_child_matches_host_replies_to_its_own_requests() {
         "the inline child did not match both fs replies by request id; observed kinds: {:?}",
         harness.observed_kinds(),
     );
+}
+
+/// A booted harness with the inline-unwire fixture's parent loaded and its
+/// child and leaf live, or `None` when the bundle is not built.
+struct UnwireCluster {
+    harness: SubstrateHarness,
+    parent: ActorRef<UnwireParent>,
+    child: ActorRef<UnwireChild>,
+}
+
+fn unwire_cluster() -> Option<UnwireCluster> {
+    let wasm_path = require_wasm("aether_test_fixtures_bundle")?;
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let parent = harness
+        .load::<UnwireParent>(LoadComponent {
+            wasm,
+            name: None,
+            config: Vec::new(),
+            export: Some(UnwireParent::NAMESPACE.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_unwire load failed: {error}"));
+    let child = await_child::<UnwireParent, UnwireChild>(&harness, parent, "child");
+    await_child::<UnwireChild, UnwireLeaf>(&harness, child, "leaf");
+    Some(UnwireCluster { harness, parent, child })
+}
+
+/// The `unwire` markers the observer has recorded, oldest first.
+fn unwire_markers(harness: &SubstrateHarness) -> Vec<String> {
+    let markers = [InlineLeafUnwired::NAME, InlineChildUnwired::NAME, InlineParentUnwired::NAME];
+    harness.observed_kinds().into_iter().filter(|kind| markers.contains(&kind.as_str())).collect()
+}
+
+/// Issue 7536 (ADR-0249 §6): a close runs `unwire` on every inline child
+/// before its parent, deepest first, and on the entry actor last. Each of the
+/// fixture's three actors mails its own marker from `unwire`, and the
+/// observer records kinds in arrival order. Catches the `unwire` export
+/// running the entry actor's hook only, and a parent unwired before its
+/// child.
+#[test]
+fn a_drop_unwires_leaf_then_child_then_parent() {
+    let Some(UnwireCluster { mut harness, parent, .. }) = unwire_cluster() else {
+        return;
+    };
+    assert!(unwire_markers(&harness).is_empty(), "a live cluster has run no unwire");
+
+    // The close answers the drop once it has released the guest, and the
+    // guest's `unwire` runs in that release, so a settled drop has delivered
+    // every marker.
+    let target = harness.actor_path(&parent);
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    harness
+        .execute(vec![("drop", HarnessOp::send_and_settle(&host, &DropComponent { target }))])
+        .expect("the drop settles");
+
+    assert_eq!(
+        unwire_markers(&harness),
+        [InlineLeafUnwired::NAME, InlineChildUnwired::NAME, InlineParentUnwired::NAME],
+        "a close unwires the leaf, then the child, then the parent",
+    );
+}
+
+/// Issue 7536 (ADR-0249 §4): a child that despawns itself from its own
+/// handler runs `unwire` once that handler has returned. The child is out of
+/// its slot while it runs, so the despawn finds nothing seated to unwire.
+/// Catches the child's box dropped with no `unwire`.
+#[test]
+fn a_child_that_despawns_itself_runs_its_unwire() {
+    let Some(UnwireCluster { mut harness, child, .. }) = unwire_cluster() else {
+        return;
+    };
+
+    let me = harness.actor_path(&child);
+    harness
+        .execute(vec![("despawn", HarnessOp::send_and_settle(&child, &DespawnSelf { me }))])
+        .expect("the self-despawn settles");
+
+    assert_eq!(
+        unwire_markers(&harness),
+        [InlineChildUnwired::NAME],
+        "the departed child ran its unwire once, and nothing else closed",
+    );
+}
+
+/// Issue 7536 (ADR-0249 §5): an inline spawn of a name whose child is
+/// standing answers that child. The parent spawns its child's key a second
+/// time, as a `wire` run again does, after the child was bumped twice.
+/// Catches a second `init` whose box replaces the resident child, which
+/// reads back as a count of 0.
+#[test]
+fn a_repeated_named_spawn_answers_the_resident_child() {
+    let Some(UnwireCluster { mut harness, parent, child }) = unwire_cluster() else {
+        return;
+    };
+
+    let result = harness
+        .execute(vec![
+            ("bump_a", HarnessOp::send_and_settle(&child, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle(&child, &Bump)),
+            ("respawn", HarnessOp::send_and_await_reply(&parent, &RespawnChild)),
+            ("query", HarnessOp::send_and_await_reply(&child, &CountQuery)),
+        ])
+        .expect("bump, respawn and query sequence");
+
+    assert_eq!(
+        result.reply::<RespawnResult>("respawn").expect("decode RespawnResult"),
+        RespawnResult { alias_refused: false },
+        "a spawn of a standing name is not a spent name",
+    );
+    assert_eq!(
+        result.reply::<CountReport>("query").expect("decode CountReport"),
+        CountReport { count: 2 },
+        "the repeated spawn answered the child that stands, with its state",
+    );
+    assert!(unwire_markers(&harness).is_empty(), "the resident child was not closed to make way for another");
 }

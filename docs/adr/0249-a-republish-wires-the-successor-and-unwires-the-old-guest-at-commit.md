@@ -475,9 +475,16 @@ up is already standing.
   it once keeps a flag in saved state and checks it in `wire`.
   `on_rehydrate` runs before `wire` so that `wire` can read what was carried.
 - **An inline spawn in `wire` of a name that is already resident answers with
-  the resident child.** Nothing is initialised again. On `main` such a spawn
-  runs a second `init` and replaces the resident child's box without its
-  `unwire` (`install_inline_child`, `Registry::insert_child`).
+  the resident child.** Nothing is initialised again. Residency is read from
+  the guest's own registry, by the three things an alias is folded from: the
+  spawning actor, the child's type, and the name. The host is not called, so
+  the alias is not staged for publication a second time and the child's
+  dependencies are not checked again. The config a repeat passes is ignored,
+  as the `Spawn` door ignores it for a live name (ADR-0241 §9). A counter
+  spawn is always a new name, and a name whose child was despawned is spent,
+  not resident. On `main` such a spawn runs a second `init` and replaces the
+  resident child's box without its `unwire` (`install_inline_child`,
+  `Registry::insert_child`).
 
 | Door | A second identical call | Read in |
 | --- | --- | --- |
@@ -533,7 +540,15 @@ that is told.
 
 `unwire` runs the other way: every resident child before its parent, deepest
 first, the entry actor last. That is the order ADR-0247 rule 5 gives a close,
-and the order `despawn_inline_child` already uses for one child.
+and the order `despawn_inline_child` already uses for one child. A child's
+depth is the number of recorded parent links between it and the entry actor.
+Children at one depth run in the reverse of the order a republish rebuilds
+them in, which is the registry's walk order, so `unwire` is the exact reverse
+of the order step 3 wires rebuilt children in. A child that did not wire runs
+no `unwire` at a close: a rebuilt child that has not wired yet, or one whose
+`unwire` has already run. So each child runs `unwire` at most once, and a
+parent whose own `unwire` despawns its children unwires none of them a second
+time.
 
 ### 7. Held replies
 
