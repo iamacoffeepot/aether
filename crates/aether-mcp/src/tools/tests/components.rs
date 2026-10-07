@@ -807,3 +807,23 @@ async fn describe_component_takes_exactly_one_selector() {
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS, "got {error}");
     }
 }
+
+/// `forget_namespace` drops the type entry and only the matching instances,
+/// so a `describe_component` by namespace goes live to the engine after an
+/// unpublish instead of answering the withdrawn type. Catches a stale
+/// describe-by-namespace after an unpublish.
+#[test]
+fn forget_namespace_drops_the_type_and_only_its_instances() {
+    let cache = ComponentCache::default();
+    let probe = ErasedActorPath::new("test.probe:a").expect("fixture is an actor path");
+    let other = ErasedActorPath::new("test.other:b").expect("fixture is an actor path");
+    cache.record_type(DOOR_ENGINE, "test.probe", surface("test.on"));
+    cache.record_instance(DOOR_ENGINE, probe.clone(), surface("test.on"));
+    cache.record_instance(DOOR_ENGINE, other.clone(), surface("test.other"));
+
+    cache.forget_namespace(DOOR_ENGINE, "test.probe");
+
+    assert!(cache.published_type(DOOR_ENGINE, "test.probe").is_none(), "the withdrawn type is forgotten");
+    assert!(cache.instance(DOOR_ENGINE, &probe).is_none(), "the withdrawn type's instance is forgotten");
+    assert!(cache.instance(DOOR_ENGINE, &other).is_some(), "an instance of another namespace stays cached");
+}

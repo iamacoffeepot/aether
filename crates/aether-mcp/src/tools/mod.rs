@@ -55,7 +55,7 @@ use crate::args::{
     DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, EngineMailSpec, ListBinariesArgs,
     ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, PublishArgs,
     ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SpawnArgs, SpawnSubstrateArgs,
-    TerminateSubstrateArgs, UploadBinaryArgs, UploadComponentArgs,
+    TerminateSubstrateArgs, UnpublishArgs, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -322,6 +322,13 @@ impl Mcp {
     )]
     pub async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, McpError> {
         guard_response_size("spawn", components::spawn::spawn(self, args).await)
+    }
+
+    #[tool(
+        description = "Withdraw one published namespace on an engine (ADR-0250 §5). Omit `engine_id` to target the sole supervised engine; with zero or several engines an omitted id is an error naming the situation, never a guess, and the reply echoes the engine that answered. Pass `namespace`, the name a publish reported (NS, or NS.<hash> for a content-addressed module). Drop the namespace's live instances first: the host refuses an unpublish while one still runs, naming it — send `aether.component.drop` through `send_mail` for each, then unpublish. A namespace no module publishes, one native code implements, or one with a publish in flight is refused. Withdrawing a publication does not resurrect tombstoned instance names: a later spawn at the same instance name is still refused as retired. Returns {engine_id, namespace}."
+    )]
+    pub async fn unpublish(&self, Parameters(args): Parameters<UnpublishArgs>) -> Result<String, McpError> {
+        guard_response_size("unpublish", components::unpublish::unpublish(self, args).await)
     }
 
     #[tool(

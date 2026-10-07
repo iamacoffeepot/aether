@@ -231,7 +231,7 @@ does not query an engine.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
 stages it in the hub's component registry. The component tools follow the
-component host's two doors (ADR-0241 §9). `publish` takes that upload's
+component host's three doors (ADR-0241 §9, ADR-0250 §5). `publish` takes that upload's
 registry `selector` (hash or name, never `module@actor`) and binds every
 namespace the module exports, standing no instance up; its reply names each
 type as published (`NS`, or `NS.<hash>` for a content-addressed module).
@@ -254,6 +254,10 @@ every live instance of the module's namespaces moves to it as one group, or
 none does (ADR-0241 §7). Its `configs: [{address, config | config_path}]` give
 named instances a config, encoded to the successor's Config kind for each
 instance's type; the reply lists each published type with its capabilities.
+`unpublish(namespace)` withdraws one published namespace: drop its instances
+first — the host refuses an unpublish while one still runs, naming it — and
+the reply echoes `{engine_id, namespace}`. Withdrawing a publication does not
+resurrect tombstoned instance names.
 There is no drop tool: send `aether.component.drop` through `send_mail`. A drop
 closes the instance and retires its name, so a later spawn needs a new key.
 

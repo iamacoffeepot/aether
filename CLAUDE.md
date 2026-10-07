@@ -90,6 +90,7 @@ Tools (`mcp__aether-hub__*`):
 - `describe_transforms` — the native `#[transform]` set linked into `aether-mcp`.
 - `publish(engine_id?, selector, configs?, full?)` — bind every namespace a stored module exports (ADR-0241 §9); a successor republishes every live instance of them as one group behind its same mailbox, or none (§7); `configs: [{address, config | config_path}]` gives an instance a config of its type's new kind.
 - `spawn(engine_id?, namespace, key?, parent?, config?, config_path?, replicas?, full?)` — an instance of a published type; a live name answers with that instance, an absent one stands it up.
+- `unpublish(engine_id?, namespace)` — withdraw one published namespace; refused while any instance of it is live, naming it — drop its instances first.
 - `load_component(engine_id?, selector, namespace?, key?, config?, config_path?, replicas?, full?)` — publish then spawn; `namespace` may be omitted only for a module exporting one type, and `config` / `config_path` JSON is schema-encoded to the type's `Config` kind.
 - `capture_frame(engine_id?, window, mails?, after_mails?, checks?, similarity?, scale?, max_dimension?, include_image?, save_path?)` — desktop PNG readback of one window; `window` is required: the window's actor path `aether.window.list` reports (the short form `aether.window/:main` is accepted).
 - `collect_failure_evidence(engine_id?, primary_error, operation?, actor_addresses?, component_addresses?, kinds?, frame?)` — a bounded, non-mutating evidence bundle around a failure you already have.

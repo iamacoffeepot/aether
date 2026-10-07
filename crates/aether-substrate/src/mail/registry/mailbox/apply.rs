@@ -16,7 +16,7 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
 #[cfg(feature = "wasm")]
-use crate::mail::registry::publication::{Admitted, ModuleSurface, admit};
+use crate::mail::registry::publication::{Admitted, Holder, ModuleSurface, admit};
 use crate::mail::view::Update;
 use crate::mail::{KindId, MailboxId};
 
@@ -512,6 +512,52 @@ impl Registry {
                     }
                     applied.push(RegistryApplied::Published);
                 }
+                #[cfg(feature = "wasm")]
+                RegistryEffect::UnpublishNamespace { namespace, hash } => {
+                    let refusal =
+                        match staged_publications(staged_publications_table.as_ref(), inner).holder(&namespace) {
+                            None => Some(format!("no module publishes {namespace}")),
+                            Some(Holder::Native) => {
+                                Some(format!("{namespace} is published by a native actor linked into this engine"))
+                            }
+                            Some(Holder::Module { hash: held, .. }) if held != hash => {
+                                Some(format!("{namespace} is now published by a different module"))
+                            }
+                            Some(Holder::Module { .. }) => None,
+                        };
+                    if let Some(reason) = refusal {
+                        return Err(RegistryEffectError::Unpublish { namespace, reason });
+                    }
+                    let mut live: Vec<String> = Vec::new();
+                    for (id, staged) in &staged_routes {
+                        let Some(record) = staged.as_ref().or_else(|| inner.mailboxes.get(id)) else {
+                            continue;
+                        };
+                        if blocks_unpublish(record, &namespace) {
+                            live.push(record.canonical_name.to_string());
+                        }
+                    }
+                    for (id, record) in &inner.mailboxes {
+                        if staged_routes.contains_key(id) {
+                            continue;
+                        }
+                        if blocks_unpublish(record, &namespace) {
+                            live.push(record.canonical_name.to_string());
+                        }
+                    }
+                    if !live.is_empty() {
+                        live.sort();
+                        let reason = if live.len() == 1 {
+                            format!("instance {} is still live", live[0])
+                        } else {
+                            format!("instances {} are still live", live.join(", "))
+                        };
+                        return Err(RegistryEffectError::Unpublish { namespace, reason });
+                    }
+                    staged_publications_table.get_or_insert_with(|| inner.publications.clone()).remove(&namespace);
+                    publication.addresses_dirty = true;
+                    applied.push(RegistryApplied::Unpublished);
+                }
             }
         }
 
@@ -558,4 +604,23 @@ impl Registry {
             .pop()
             .ok_or_else(|| RegistryEffectError::Name(NameConflict { name: "empty registry effect".to_owned() }))
     }
+}
+
+/// The namespace of the type an actor path names: its last segment, before
+/// any `:key` (ADR-0241 §5).
+fn leaf_namespace(path: &str) -> &str {
+    let leaf = path.rsplit('/').next().unwrap_or(path);
+    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
+}
+
+/// Whether `record` blocks the unpublish of `namespace`: a route that still
+/// runs an instance of the type the path names. Tombstoned routes never
+/// block, and withdrawing a publication never resurrects them.
+fn blocks_unpublish(record: &RouteRecord, namespace: &str) -> bool {
+    let running = matches!(
+        record.lifecycle,
+        RouteLifecycle::Starting { .. } | RouteLifecycle::Live { .. } | RouteLifecycle::Alias { .. }
+    );
+    let leaf_matches = leaf_namespace(record.canonical_name.as_str()) == namespace;
+    running && leaf_matches
 }

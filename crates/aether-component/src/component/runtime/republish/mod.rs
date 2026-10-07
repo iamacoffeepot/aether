@@ -163,14 +163,15 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    /// Run a publish's pre-checks and route it, or queue it while a spawn or
-    /// a first publish of its namespaces is in flight: an unchanged module
-    /// is bound already, a first publish binds it, and a successor
-    /// republishes its group.
+    /// Run a publish's pre-checks and route it, or queue it while a spawn, a
+    /// first publish, or a staged unpublish of its namespaces is in flight:
+    /// an unchanged module is bound already, a first publish binds it, and a
+    /// successor republishes its group.
     pub(super) fn publish_or_queue<M: ReplyMode>(&mut self, ctx: &mut HostCtx<'_, M>, queued: QueuedPublish) {
         let busy = queued.module.published_groups().any(|(namespace, _)| {
             self.loads.values().any(|load| load.published() == namespace)
                 || self.publishes.values().any(|publish| publish.publishes(&namespace))
+                || self.unpublishes.values().any(|unpublish| unpublish.publishes(&namespace))
         });
         if busy {
             self.queued_publishes.push(queued);

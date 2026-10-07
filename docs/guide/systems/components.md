@@ -126,6 +126,7 @@ mailbox:
 | `aether.component.spawn` | stand up an instance of a published type at `NS`, `NS:key`, or `parent/NS:key`, or return a live one | `SpawnResult` |
 | `aether.component.load` | publish the module, then spawn the export it selects, in one call | `LoadResult` |
 | `aether.component.drop` | close the instance, which runs the guest's `unwire`; answers once the guest is released; its name tombstones | `DropResult` |
+| `aether.component.unpublish` | withdraw one published namespace; refused while any instance of it is live, naming it | `UnpublishResult` |
 | `aether.component.list` | enumerate the engine's live components | `ListComponentsResult` |
 | `aether.component.describe` | introspect one component's receive-side capabilities | `DescribeComponentResult` |
 
@@ -289,7 +290,7 @@ manifests only and refuses the whole module at the first failing namespace:
 - **Namespace.** No exported namespace may be native. A module that holds one
   of the candidate's exported namespaces is its predecessor, and the candidate
   must export every namespace each predecessor exports: a namespace, once
-  published, stays published.
+  published, stays published until `aether.component.unpublish` withdraws it.
 - **Contract growth.** Each exported namespace keeps its predecessor's rows and
   `#[fallback]`; rows may only be added. Each private child type
   (`export!(private = [..])`) a predecessor declares must still be declared,
@@ -316,7 +317,15 @@ A refusal answers `LoadResult::Err` or `PublishResult::Err` with
 swapped. A publish of a successor publishes too, so its new kinds register. A
 load that publishes and is then refused at spawn (an unmet dependency, a failed
 module boot) leaves its module published: publish and spawn are separate steps.
-A published module stays resident for the engine's life.
+A published module stays resident until its namespaces are unpublished.
+
+Operators unload a bundle by dropping its instances and unpublishing it: send
+`aether.component.drop` for each live instance, then `aether.component.unpublish`
+for its namespace. The unpublish is refused while any instance of the namespace
+is live, naming it. Withdrawing a publication does not resurrect tombstoned
+instance names: a later spawn at the same instance name is still refused as
+retired. Publishing the same bytes afterwards binds as a first publish, and the
+module's boot is not spawned again.
 
 ## Boot configuration across the boundary
 

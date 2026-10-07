@@ -657,3 +657,80 @@ fn a_hole_under_a_multi_type_guest_parent_resolves_to_its_live_holder() {
         })
     );
 }
+
+// Catches: an unpublish that removes sibling rows, or one that answers
+// without withdrawing its row.
+#[test]
+fn unpublish_withdraws_exactly_its_named_row() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.a", &[KEPT]), ("test.unpublish.b", &[KEPT])]);
+    fixture.publish(&module).expect("publish the two-namespace module");
+
+    let applied = fixture
+        .apply(RegistryBatch::unpublish_namespace("test.unpublish.a", module.hash()).into_effects())
+        .expect("withdraw the named row");
+    assert!(matches!(applied.as_slice(), [RegistryApplied::Unpublished]));
+
+    assert!(fixture.registry.published_module("test.unpublish.a").is_none(), "the withdrawn namespace is unpublished");
+    let sibling = fixture.registry.published_module("test.unpublish.b").expect("the sibling row is still held");
+    assert_eq!(sibling.hash(), module.hash(), "the sibling still points at its module");
+}
+
+// Catches: an unpublish arm that touches native publications, or one that
+// answers `Ok` where nothing was ever published.
+#[test]
+fn unpublish_of_a_native_or_never_published_namespace_is_refused() {
+    let fixture = Fixture::new();
+
+    let absent = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.absent", hash(9)).into_effects());
+    assert!(matches!(absent, Err(RegistryEffectError::Unpublish { .. })), "{absent:?}");
+
+    let native = fixture.apply(RegistryBatch::unpublish_namespace(NATIVE_SINGLETON, hash(9)).into_effects());
+    assert!(matches!(native, Err(RegistryEffectError::Unpublish { .. })), "{native:?}");
+}
+
+// Catches: an arm that ignores the hash check, withdrawing a namespace a
+// concurrent republish repointed under the caller.
+#[test]
+fn unpublish_with_a_stale_hash_is_refused() {
+    let fixture = Fixture::new();
+    let first = fixture.module(&[("test.unpublish.stale", &[KEPT])]);
+    fixture.publish(&first).expect("publish the first module");
+    let second = fixture.module(&[("test.unpublish.stale", &[KEPT, ADDED])]);
+    fixture.publish(&second).expect("republish the growing successor");
+
+    let stale = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.stale", first.hash()).into_effects());
+    assert!(matches!(stale, Err(RegistryEffectError::Unpublish { .. })), "{stale:?}");
+
+    let held = fixture.registry.published_module("test.unpublish.stale").expect("the successor still holds the row");
+    assert_eq!(held.hash(), second.hash());
+}
+
+// Catches: a second withdrawal of the same row answered as withdrawn.
+#[test]
+fn a_second_unpublish_of_the_same_namespace_is_refused() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.once", &[KEPT])]);
+    fixture.publish(&module).expect("publish the module");
+    fixture
+        .apply(RegistryBatch::unpublish_namespace("test.unpublish.once", module.hash()).into_effects())
+        .expect("withdraw the row");
+
+    let again = fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.once", module.hash()).into_effects());
+    assert!(matches!(again, Err(RegistryEffectError::Unpublish { .. })), "{again:?}");
+}
+
+// Catches: a withdrawal under a live instance, which would free code a
+// running guest still executes.
+#[test]
+fn unpublish_under_a_live_instance_is_refused() {
+    let fixture = Fixture::new();
+    let module = fixture.module(&[("test.unpublish.live", &[KEPT])]);
+    fixture.publish(&module).expect("publish the module");
+    fixture.register("test.unpublish.live:k");
+
+    let refused =
+        fixture.apply(RegistryBatch::unpublish_namespace("test.unpublish.live", module.hash()).into_effects());
+    assert!(matches!(refused, Err(RegistryEffectError::Unpublish { .. })), "{refused:?}");
+    assert!(fixture.registry.published_module("test.unpublish.live").is_some(), "the refused withdrawal holds no row");
+}

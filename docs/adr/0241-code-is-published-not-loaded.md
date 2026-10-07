@@ -144,7 +144,8 @@ one implementation is published per namespace per engine.
     `aether.bloomery.bundle.<hash>:<unit key>`. Two units on one bundle share
     its publication. A unit moving to a new bundle spawns the new root and
     closes its old one; it never republishes.
-  - Publications accumulate one per build (see Unpublish).
+  - Publications accumulate one per build, until an unpublish withdraws them
+    (§9).
   - A content-addressed type has no typed path, because its `NAMESPACE` is
     not its published name. It is reached through the reference its spawn or
     load reply stamps.
@@ -152,8 +153,8 @@ one implementation is published per namespace per engine.
   binary published is refused to every module.
 - **Republishing** points a module's namespaces at a new module. The set of
   exported namespaces may grow and never shrinks: a namespace, once
-  published, stays published for the engine's lifetime, and its successor
-  must export it. Otherwise a namespace with no live instance could drop out
+  published, stays published until `aether.component.unpublish` withdraws it,
+  and its successor must export it. Otherwise a namespace with no live instance could drop out
   and return with fewer rows, and the rows-only-grow rule (§4) would hold
   only while an instance happened to be live.
 
@@ -344,6 +345,11 @@ module's namespaces as one group (§7): `configs` supplies a new-kind config
 for an instance whose type's config kind changed, and an unlisted instance
 reuses its stored spawn config (§4). `DropComponent` becomes the close
 request: it asks the named instance to close, and its name tombstones (§8).
+`Unpublish { namespace }` withdraws the one row the publication table holds
+for `namespace` (§3): it is refused while an instance of the namespace is
+live, with an error naming the instances, and frees the module once its last
+publication row and last instance are gone. Withdrawing a publication does not
+resurrect tombstoned instance names (§8).
 `LoadResult.path` is the spawned actor's own canonical path. Bloomery
 restart adoption (ADR-0226 D9) becomes a `Spawn` that finds its instance
 live.
@@ -408,8 +414,8 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 - A closed name is spent. A caller that wants a fresh instance after a close
   picks a new key, and each tombstone costs one registry entry for the
   engine's lifetime (ADR-0079 §7).
-- A dead publication, one nothing will spawn again, stays resident, because
-  there is no unpublish (see Alternatives considered). Every built Bloomery
+- A dead publication, one nothing will spawn again, stays resident until
+  `aether.component.unpublish` withdraws it (§9). Every built Bloomery
   bundle adds one, because every bundle is content-addressed (§3).
 
 ### Neutral
@@ -466,11 +472,11 @@ step 3.
 - **One bundle namespace, exempt or per unit.** Rejected. Exempting bundle
   roots from the one-implementation rule breaks it, and a per-unit namespace
   refuses a rebuild that drops a program as a republish.
-- **Unpublish.** Deferred. Publications are content-addressed and a
+- **Unpublish.** Landed under #7613. Publications are content-addressed and a
   republish already points a namespace at new code, so the one thing an
-  unpublish would add is reclaiming the memory of a dead publication, one
-  nothing will spawn again. Revisit when memory held by dead publications
-  becomes a measured cost.
+  unpublish adds is reclaiming the memory of a dead publication, one
+  nothing will spawn again: `aether.component.unpublish` withdraws one
+  namespace's row once its instances are dropped (§9).
 - **Native spawn by mail.** Deferred. Every instanced native type today
   takes wiring from its composer or parent, as `Params` (`JournalActor`,
   `BundleDriver`, `Autoloader`) or as `Config` (`WasmTrampoline`,

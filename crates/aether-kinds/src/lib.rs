@@ -849,6 +849,27 @@ mod control_plane {
         Err { error: String },
     }
 
+    /// `aether.component.unpublish` — withdraw the publication of one
+    /// namespace (ADR-0250 §5), addressed to the component host. The
+    /// namespace must be one a module publishes, must name no native type,
+    /// and must have no live instance: a publish or load of it in flight, or
+    /// a live instance of it, refuses the unpublish. A withdrawal refused
+    /// while instances are live names them. Reply: [`UnpublishResult`].
+    #[aether_data::kind(name = "aether.component.unpublish")]
+    pub struct Unpublish {
+        pub namespace: String,
+    }
+
+    /// Reply to [`Unpublish`]. `Ok` once the namespace no longer points at
+    /// its module; `Err` if the namespace named no published module, named
+    /// a native type, had a publish or load in flight, or still had a live
+    /// instance.
+    #[aether_data::kind(name = "aether.component.unpublish_result")]
+    pub enum UnpublishResult {
+        Ok { namespace: String },
+        Err { error: String },
+    }
+
     /// `aether.component.list` — enumerate the components an engine has
     /// actually loaded and registered, addressed to its `aether.component`
     /// mailbox (issue 2020). Fieldless: the query is a definitive snapshot

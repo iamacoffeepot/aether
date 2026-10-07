@@ -1,6 +1,7 @@
-//! The component tools: the hub store (`store`), the component host's two
-//! doors, `publish` and `spawn` (ADR-0241 §9), `load_component` as publish
-//! then spawn (`load`), and the capability cache they fill (`cache`).
+//! The component tools: the hub store (`store`), the component host's three
+//! doors, `publish`, `spawn`, and `unpublish` (ADR-0241 §9, ADR-0250 §5),
+//! `load_component` as publish then spawn (`load`), and the capability cache
+//! they fill (`cache`).
 
 use super::bytes::resolve_bytes_params;
 use super::render::{json, project_capabilities};
@@ -16,6 +17,7 @@ pub(super) mod load;
 pub(super) mod publish;
 pub(super) mod spawn;
 pub(super) mod store;
+pub(super) mod unpublish;
 
 /// A component registry selector resolved to its bytes (ADR-0116) — the
 /// front half of `publish` / `load_component` and the boot-manifest

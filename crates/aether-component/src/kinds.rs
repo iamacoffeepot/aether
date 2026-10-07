@@ -43,3 +43,11 @@ pub struct RepublishMember {
 pub struct RepublishPublished {
     pub republish: u64,
 }
+
+/// `aether.component.unpublished` — the context an `Unpublish`'s withdrawal
+/// carries into its completion (ADR-0243 §9): the id of the unpublish, whose
+/// held reply waits in host state under it.
+#[aether_data::kind(name = "aether.component.unpublished", copy, no_serde)]
+pub struct Unpublished {
+    pub unpublish: u64,
+}
