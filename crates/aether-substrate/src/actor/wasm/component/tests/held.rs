@@ -11,12 +11,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use aether_actor::{DEHYDRATE_HELD_UNSAVED, DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
+use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
 use aether_data::{Kind, KindDescriptor, KindId, Schema, SchemaType};
 use aether_kinds::MonitorNotice;
 use crossbeam_channel::Receiver;
 
-use super::{WAT_REALLOC, ctx_at, instantiate, instantiate_with_ctx};
+use super::{WAT_REALLOC, ctx_at, instantiate_with_ctx};
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::component::Component;
 use crate::actor::wasm::host_fns::{REPLY_ENGINE_ONLY_KIND, REPLY_KIND_NOT_FOUND, REPLY_OK, REPLY_OOB};
@@ -430,25 +430,4 @@ fn an_inline_childs_unanswered_reply_comes_from_the_child() {
     let received = fixture.received.lock().unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].from, Some(child));
-}
-
-/// Catches a host that ignores `on_dehydrate`'s return, letting a replace
-/// strand a live held reply.
-#[test]
-fn dehydrate_status_two_is_a_save_error() {
-    let wat = format!(
-        r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
-                i32.const 0)
-            (func (export "on_dehydrate") (result i32)
-                i32.const {DEHYDRATE_HELD_UNSAVED}))
-        "#
-    );
-    let mut component = instantiate(&wat);
-
-    component.on_dehydrate();
-
-    assert!(component.take_save_error().is_some());
 }

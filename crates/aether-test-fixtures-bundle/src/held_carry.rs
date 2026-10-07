@@ -176,15 +176,16 @@ impl WasmActor for HeldKeeper {
 
     /// Hand-written, because the ADR-0113 `dehydrate(&self)` accessor cannot
     /// move a `Held` out of the actor.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let (helds, tags) = self.kept.drain(..).unzip();
-        ctx.save_state_kind(0, &KeptHelds { helds, tags });
+        ctx.save_state_kind(0, &KeptHelds { helds, tags })
     }
 
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Some(saved) = prior.decode_kind::<KeptHelds>() {
             self.kept = saved.helds.into_iter().zip(saved.tags).collect();
         }
+        Ok(())
     }
 }
 

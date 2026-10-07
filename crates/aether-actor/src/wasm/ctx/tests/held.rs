@@ -274,7 +274,9 @@ fn dehydrate_refuses_live_unsaved_and_reverts() {
     let unsaved = hold_on(&registry, 6);
 
     let mut capture = CapturedState::default();
-    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &HeldState { debt: saved });
+    WasmDropCtx::__new_capturing(&mut capture, &registry)
+        .save_state_kind(0, &HeldState { debt: saved })
+        .expect("a live ticket saves");
     assert!(registry.__held_unsaved(), "the unsaved ticket refuses the dehydrate");
 
     discharge(&registry, unsaved);
@@ -301,7 +303,7 @@ fn save_state_kind_bytes_match_serde() {
     let value = PlainState { count: 7, label: String::from("seven") };
 
     let mut capture = CapturedState::default();
-    WasmDropCtx::__new_capturing(ACTOR, &mut capture, &registry).save_state_kind(0, &value);
+    WasmDropCtx::__new_capturing(&mut capture, &registry).save_state_kind(0, &value).expect("a plain state saves");
 
     // Tripwire: the saved-state framing is the cross-SDK replace format; a
     // drift here breaks replace between old and new guests.

@@ -22,7 +22,7 @@ mod sections;
 mod state;
 
 pub use ctx::{ComponentCtx, CorrelationCursor, InlineChildType, PendingReplies, Watches};
-pub use dispatch::{DISPATCH_DROPPED_OVERSIZE, DISPATCH_UNKNOWN_KIND, WireFault};
+pub use dispatch::{DISPATCH_DROPPED_OVERSIZE, DISPATCH_UNKNOWN_KIND, HookFault};
 pub use instantiate::Component;
 pub(crate) use outbox::GuestAnswer;
 pub use state::StateBundle;

@@ -174,9 +174,9 @@ fn a_held_reply_in_saved_state_answers_after_replace() {
 
 #[test]
 fn an_unsaved_held_reply_refuses_the_replace_and_the_old_guest_answers() {
-    // Catches: the host ignoring `DEHYDRATE_HELD_UNSAVED` and swapping the
-    // forgetter out with its reply unsaved, or the rollback losing the reply
-    // table, so the reinstated guest's answer never arrives.
+    // Catches: the host ignoring the error `on_dehydrate` returned and
+    // swapping the forgetter out with its reply unsaved, or the rollback
+    // losing the reply table, so the reinstated guest's answer never arrives.
     let Some((harness, swap)) = replace_while_held(Holder::Forgetter) else {
         return;
     };

@@ -151,7 +151,7 @@ impl WasmActor for CameraComponent {
     }
 
     /// Save what a republish would otherwise reset (see the module docs).
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let state = CameraState {
             pose: self.pose,
             glide: self.glide,
@@ -160,16 +160,16 @@ impl WasmActor for CameraComponent {
             viewers: u32::try_from(self.viewers.len()).unwrap_or(u32::MAX),
         };
 
-        ctx.save_state_kind(0, &state);
+        ctx.save_state_kind(0, &state)
     }
 
     /// Take back what `on_dehydrate` saved. A replacement holds no viewers
     /// and says how many it lost; an instance reinstated after an aborted
     /// republish still holds its own.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         let Some(saved) = prior.decode_kind::<CameraState>() else {
             tracing::warn!(target: "aether_kit", "the saved camera state does not decode; starting from the config");
-            return;
+            return Ok(());
         };
         self.pose = saved.pose;
         self.glide = saved.glide;
@@ -193,6 +193,7 @@ impl WasmActor for CameraComponent {
                 "a republish dropped this camera's viewers; each must send aether.render.view_subscribe again",
             );
         }
+        Ok(())
     }
 
     /// Set the pose, ending any glide in progress.

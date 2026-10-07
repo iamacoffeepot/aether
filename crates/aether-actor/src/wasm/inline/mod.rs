@@ -40,6 +40,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
@@ -50,10 +51,10 @@ use aether_data::{__watch_id_number, Blob, Kind, KindId, MailboxId, RequestId, S
 use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::request_context::{RequestContextTable, compose_state_envelope};
-use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
 use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 use crate::wasm::decode::guest_ctx;
+use crate::wasm::{ActorInitError, ErasedWasmActor};
 
 mod bundle;
 pub mod compose;
@@ -467,19 +468,21 @@ impl Registry {
     /// Frame `value` for `save_state` as `K::ID` then its wire bytes,
     /// parking each held ticket in it as saved (ADR-0243 §6).
     ///
-    /// # Panics
-    ///
+    /// # Errors
     /// When `value` does not encode: a length past the `u32` ceiling, or a
-    /// ticket this instance does not hold live (ADR-0063).
-    pub(crate) fn encode_saved_state<K: Kind>(&self, value: &K) -> Vec<u8> {
+    /// ticket this instance does not hold live. Tickets the encode reached
+    /// before it failed stay parked as saved; the next dehydrate's
+    /// [`Self::__revert_dehydrate`] returns them to live.
+    pub(crate) fn encode_saved_state<K: Kind>(&self, value: &K) -> Result<Vec<u8>, ActorInitError> {
         let mut held = self.held.borrow_mut();
         let mut ledger = DehydrateLedger::new(&mut held);
         let mut enc = LedgerEncoder::new(&mut ledger);
         enc.out().extend_from_slice(&K::ID.0.to_le_bytes());
-        if let Err(error) = value.encode_with(&mut enc) {
-            panic!("aether-actor: saved state `{}` failed to encode: {error}", K::NAME);
-        }
-        enc.into_bytes()
+        value
+            .encode_with(&mut enc)
+            .map_err(|error| ActorInitError::from(format!("saved state `{}` failed to encode: {error}", K::NAME)))?;
+
+        Ok(enc.into_bytes())
     }
 
     /// Decode saved-state bytes as `K`, claiming each held ticket in them
@@ -1090,12 +1093,15 @@ mod tests {
             Ok(())
         }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_on_rehydrate(
             &mut self,
             _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
-        ) {
+        ) -> Result<(), ActorInitError> {
+            Ok(())
         }
     }
 
@@ -1139,12 +1145,15 @@ mod tests {
             Ok(())
         }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_on_rehydrate(
             &mut self,
             _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
-        ) {
+        ) -> Result<(), ActorInitError> {
+            Ok(())
         }
     }
 
@@ -1176,12 +1185,15 @@ mod tests {
             Ok(())
         }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+            Ok(())
+        }
         fn erased_on_rehydrate(
             &mut self,
             _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
             _prior: PriorState<'_>,
-        ) {
+        ) -> Result<(), ActorInitError> {
+            Ok(())
         }
     }
 

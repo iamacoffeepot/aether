@@ -85,10 +85,14 @@ impl ErasedWasmActor for FailingChild {
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {
         unreachable!()
     }
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         unreachable!()
     }
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
         unreachable!()
     }
 }
@@ -182,8 +186,16 @@ impl ErasedWasmActor for SucceedingChild {
         Ok(())
     }
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {}
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        Ok(())
+    }
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 }
 
 // Issue 2692: the by-tag spawn host-unit fixtures. `thread_local` (not
@@ -262,8 +274,16 @@ impl ErasedWasmActor for StubChild {
         Ok(())
     }
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {}
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        Ok(())
+    }
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 }
 
 /// Synthetic stand-in for the `export!`-generated resolver: matches the
@@ -379,8 +399,16 @@ impl ErasedWasmActor for LifecycleProbe {
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {
         PROBE_UNWIRE_COUNT.set(PROBE_UNWIRE_COUNT.get() + 1);
     }
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {}
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        Ok(())
+    }
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 }
 
 /// Inline child whose `wire` spawns a nested inline child by tag — the
@@ -473,8 +501,16 @@ impl ErasedWasmActor for NestingParent {
         Ok(())
     }
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {}
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        Ok(())
+    }
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 }
 
 /// A target actor that records every dispatch it receives and the source the
@@ -511,9 +547,17 @@ impl ErasedWasmActor for RecordingTarget {
 
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
 
-    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(
+        &mut self,
+        _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>,
+        _prior: PriorState<'_>,
+    ) -> Result<(), ActorInitError> {
+        Ok(())
+    }
 }
 
 fn recording_target() -> RecordingTargetProbe {

@@ -9,7 +9,7 @@ use crate::handler_parse::{
     allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature,
     check_watch_signature, classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type,
     fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class, reject_ctx_sender,
-    reject_duplicate_handler_kinds, reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result,
+    reject_duplicate_handler_kinds, reject_duplicate_watched_types, rename_lifecycle_hooks, require_hook_results,
     sender_arm, silent_call, validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
@@ -683,38 +683,40 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `Self::State` resolves directly inside `impl WasmActor for Self`.
     // `on_dehydrate` snapshots through `self.dehydrate()` and frames the
     // value with `save_state_kind`; `on_rehydrate` decodes via
-    // `PriorState::decode_kind` and either restores through `self.rehydrate`
-    // or boots fresh, warning only when bytes were present but did not
-    // decode (a reshaped state kind — `K::ID` changed). When `type State`
+    // `PriorState::decode_kind` and restores through `self.rehydrate`. Both
+    // return the result (ADR-0249 §1): the save's, and for the decode `Ok`
+    // when nothing was carried and an error when bytes were present but did
+    // not decode (a reshaped state kind — `K::ID` changed). When `type State`
     // was omitted these are empty and the actor keeps the default no-op
     // hooks (or its own hand-written ones, carried in `lifecycle_methods`).
     let generated_state_hooks = if state_type.is_some() {
         quote! {
-            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>) {
+            fn on_dehydrate(
+                &mut self,
+                __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 let __aether_state = self.dehydrate();
                 ::aether_actor::Persistence::save_state_kind::<
                     <Self as ::aether_actor::WasmActor>::Persist,
-                >(__aether_ctx, 0, &__aether_state);
+                >(__aether_ctx, 0, &__aether_state)
             }
 
             fn on_rehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 match __aether_prior.decode_kind::<<Self as ::aether_actor::WasmActor>::Persist>() {
                     ::core::option::Option::Some(__aether_state) => {
                         self.rehydrate(__aether_state);
+                        ::core::result::Result::Ok(())
                     }
-                    ::core::option::Option::None => {
-                        if !__aether_prior.bytes().is_empty() {
-                            ::aether_actor::__macro_internals::tracing::warn!(
-                                "discarded prior state on rehydrate: bytes were present but did \
-                                 not decode as the declared `type State` (a reshaped state kind); \
-                                 booting fresh",
-                            );
-                        }
+                    ::core::option::Option::None if __aether_prior.bytes().is_empty() => {
+                        ::core::result::Result::Ok(())
                     }
+                    ::core::option::Option::None => ::core::result::Result::Err(
+                        ::aether_actor::wasm::__state_kind_refused::<<Self as ::aether_actor::WasmActor>::Persist>(),
+                    ),
                 }
             }
         }
@@ -740,6 +742,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // takes the typed ctx, so a hand-written one is renamed and forwarded to
     // like `wire` / `unwire`, and only `on_dehydrate` lands in the trait impl
     // as written.
+    require_hook_results(&lifecycle_methods, &["wire", "on_dehydrate", "on_rehydrate"], "ActorInitError")?;
     let (mut boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) = lifecycle_methods
         .into_iter()
         .partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire" | "on_rehydrate"));
@@ -751,7 +754,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // from the trait fn via UFCS (passing the state as the `&mut self`
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
-    require_wire_result(&boot_hooks, "ActorInitError")?;
     let (has_wire, has_unwire, has_rehydrate) = rename_lifecycle_hooks(&mut boot_hooks);
     // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
     // `WasmCtx`, so an author can read assets in `wire` but not from a
@@ -806,8 +808,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
-                #self_ty::__aether_on_rehydrate(self, #rehydrate_ctx, __aether_prior);
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                #self_ty::__aether_on_rehydrate(self, #rehydrate_ctx, __aether_prior)
             }
         }
     } else {
@@ -935,19 +937,19 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             fn erased_on_dehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
-            ) {
-                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx);
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
+                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx)
             }
             fn erased_on_rehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
-            ) {
+            ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(
                     self,
                     __aether_ctx.__for_actor::<Self>().as_single(),
                     __aether_prior,
-                );
+                )
             }
         }
 

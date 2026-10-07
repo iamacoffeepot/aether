@@ -1190,26 +1190,39 @@ pub fn allow_abi_receiver(m: &mut syn::ImplItemFn) {
     m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
 }
 
-/// Require a hand-written `wire` hook to declare its return type (ADR-0247
-/// rule 3): `wire` returns the birth's result, as `init` does, and a hook
-/// written without one is refused here with the signature to write rather
-/// than left to fail as a type mismatch inside the generated forwarder.
-/// `error` is the transport's birth error, named in the diagnostic. Called
-/// before [`rename_lifecycle_hooks`], while the hook still has its name.
-pub fn require_wire_result(methods: &[syn::ImplItemFn], error: &str) -> syn::Result<()> {
-    let Some(wire) = methods.iter().find(|m| m.sig.ident == "wire") else {
+/// Require each hand-written hook named in `hooks` to declare its return
+/// type. `wire` returns the birth's result, as `init` does (ADR-0247 rule 3),
+/// and a wasm actor's `on_dehydrate` and `on_rehydrate` return the
+/// republish's (ADR-0249 §1). A hook written without one is refused here with
+/// the signature to write rather than left to fail as a type mismatch inside
+/// generated code. `error` is the transport's hook error, named in the
+/// diagnostic. Called before [`rename_lifecycle_hooks`], while each hook
+/// still has its name.
+pub fn require_hook_results(methods: &[syn::ImplItemFn], hooks: &[&str], error: &str) -> syn::Result<()> {
+    let Some(hook) = methods.iter().find(|method| lacks_result(method, hooks)) else {
         return Ok(());
     };
-    if matches!(wire.sig.output, ReturnType::Type(..)) {
-        return Ok(());
-    }
+
+    let name = &hook.sig.ident;
+    let (operation, consequence) = if name == "wire" {
+        ("birth", "fails the birth and whoever asked for the actor is told")
+    } else {
+        ("republish", "refuses the republish and whoever asked for it is told")
+    };
     Err(syn::Error::new(
-        wire.sig.ident.span(),
+        name.span(),
         format!(
-            "`wire` returns the birth's result: write `fn wire(..) -> Result<(), {error}>` and end it with `Ok(())`; \
-             an `Err` fails the birth and whoever asked for the actor is told"
+            "`{name}` returns the {operation}'s result: write `fn {name}(..) -> Result<(), {error}>` and end it with \
+             `Ok(())`; an `Err` {consequence}"
         ),
     ))
+}
+
+/// Whether `method` is one of `hooks` written with no return type.
+fn lacks_result(method: &syn::ImplItemFn, hooks: &[&str]) -> bool {
+    let named = hooks.iter().any(|hook| method.sig.ident == *hook);
+    let unreturning = matches!(method.sig.output, ReturnType::Default);
+    named && unreturning
 }
 
 /// Rename `wire` → `__aether_wire`, `unwire` → `__aether_unwire` and

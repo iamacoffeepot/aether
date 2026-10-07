@@ -12,7 +12,7 @@ use crate::handler_parse::{
     attr_is_handler, check_intent_signature, classify_handler_reply, classify_task_reply_mode, ctx_sender,
     erase_unless_ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor,
     handler_cfgs, parse_handler_args, parse_handler_class, reject_ctx_sender, reject_duplicate_handler_kinds,
-    rename_lifecycle_hooks, require_wire_result, rewrite_self_state_first_param, sender_arm, silent_call,
+    rename_lifecycle_hooks, require_hook_results, rewrite_self_state_first_param, sender_arm, silent_call,
     types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
@@ -455,7 +455,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             rewrite_self_state_first_param(m, concrete);
         }
     }
-    require_wire_result(&lifecycle_methods, "BootError")?;
+    require_hook_results(&lifecycle_methods, &["wire"], "BootError")?;
     let (has_wire, has_unwire, _) = rename_lifecycle_hooks(&mut lifecycle_methods);
 
     // The concrete runtime state type: the declared `type State` for a split

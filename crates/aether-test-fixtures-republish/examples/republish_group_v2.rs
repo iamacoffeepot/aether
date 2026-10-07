@@ -41,14 +41,14 @@ impl WasmActor for Peer {
 
     /// Hand-written, where v1 generates it from `type State`, because the
     /// rehydrate side must be able to trap.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<PeerState>(0, &PeerState { count: self.count });
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<PeerState>(0, &PeerState { count: self.count })
     }
 
     /// Restore v1's count, or, with `trap_on_rehydrate` set, report
     /// `TickObserved` and trap: `abort` lowers to `unreachable`, which the
     /// host reports as an `on_rehydrate` failure.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if self.trap_on_rehydrate {
             ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: u64::from(self.count) });
             process::abort();
@@ -56,6 +56,7 @@ impl WasmActor for Peer {
         if let Some(saved) = prior.decode_kind::<PeerState>() {
             self.count = saved.count;
         }
+        Ok(())
     }
 
     #[handler::tell]

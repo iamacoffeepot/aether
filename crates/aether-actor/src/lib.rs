@@ -140,16 +140,6 @@ pub const DISPATCH_HANDLED_HOLD: u32 = 4;
 /// handle, as for [`DISPATCH_HANDLED`].
 pub const DISPATCH_REFUSED_SENDER: u32 = 5;
 
-/// Status the guest's `on_dehydrate` export returns when a live held reply
-/// was left unsaved: refuse the replace (ADR-0243 §6). The substrate maps it
-/// onto the save-error rollback, which reinstates the old guest so the
-/// requester is not stranded. The refusing export still saves the state it
-/// composed, and the reinstated guest gets that state back through its
-/// `on_rehydrate`, so a held reply the dehydrate moved into it returns too
-/// (issue 7125). `0` is a normal dehydrate and `1` is the shim's "no
-/// instance" status.
-pub const DEHYDRATE_HELD_UNSAVED: u32 = 2;
-
 /// Return code for "no `#[handler]` matched and there's no `#[fallback]`"
 /// — the strict-receiver miss. Propagated through the FFI so the
 /// substrate's scheduler can emit a `tracing::warn!` naming the
@@ -202,10 +192,10 @@ pub mod __macro_internals {
     // `String` the same way — the emitted code stays free of an `alloc`
     // prelude assumption on the guest crate.
     pub use alloc::string::String;
-    // ADR-0113: the `#[actor]`-generated `on_rehydrate` warns through
-    // `::aether_actor::__macro_internals::tracing::warn!` on a non-empty
-    // decode-miss, so the macro roots the warn here rather than forcing
-    // `tracing` into every component's dependency list.
+    // The `#[actor]`-generated dispatch arms log through
+    // `::aether_actor::__macro_internals::tracing`, so the macro roots the
+    // log here rather than forcing `tracing` into every component's
+    // dependency list.
     pub use tracing;
 }
 

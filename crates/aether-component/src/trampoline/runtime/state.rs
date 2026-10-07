@@ -6,7 +6,7 @@ use aether_kinds::{ComponentCapabilities, DropResult};
 use aether_substrate::InboundMail;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Held, NativeCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, StateBundle, WireFault};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, HookFault, StateBundle};
 use aether_substrate::actor::wasm::module::{Module, ModuleCache};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -72,7 +72,9 @@ pub enum Slot {
     /// back.
     Prepared(Box<PreparedSlot>),
     /// No guest is resident: the transient a republish step holds while it
-    /// moves a guest, and the state the trampoline's close leaves.
+    /// moves a guest, the state the trampoline's close leaves, and the state
+    /// a reinstatement leaves, ahead of that close, when the kept guest
+    /// refused its own saved state (ADR-0249 §4).
     Released,
 }
 
@@ -82,12 +84,14 @@ pub enum Slot {
 /// gate queued meanwhile.
 pub struct PreparedSlot {
     /// The guest that ran until prepare. It has run `unwire` and
-    /// `on_dehydrate`, and its reply table, correlation cursor and watches
-    /// moved to the candidate. An abort reinstates it with [`Self::saved`].
+    /// `on_dehydrate`, which returned `Ok`, and its reply table, correlation
+    /// cursor and watches moved to the candidate. An abort reinstates it with
+    /// [`Self::saved`].
     pub(crate) old: Component,
     /// The state the kept guest saved in `on_dehydrate`, which the candidate
     /// rehydrated from. An abort hands it back to the kept guest through its
-    /// `on_rehydrate`, so what the dehydrate moved out returns to it.
+    /// `on_rehydrate`, so what the dehydrate moved out returns to it; a kept
+    /// guest that returns an error from it closes.
     pub(crate) saved: Option<StateBundle>,
     /// The candidate, whose outbox is held: nothing it sent has left.
     pub(crate) candidate: Component,
@@ -117,7 +121,7 @@ impl WasmTrampolineState {
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
         component: &mut Component,
         root: Option<MailId>,
-    ) -> Result<(), WireFault> {
+    ) -> Result<(), HookFault> {
         let wired = component.wire(root);
         // ADR-0163 §3 (#3984): the asset load window closes when `wire`
         // returns — it lets go of the module's code so
@@ -176,6 +180,16 @@ impl WasmTrampolineState {
     /// (ADR-0063), as a trap in delivery does: there is no other guest to
     /// fall back to. A fault in its second `wire` aborts the same way: no
     /// birth is in flight to fail with it.
+    ///
+    /// The old guest's `on_rehydrate` returning an error closes the instance
+    /// (ADR-0249 §4): it is intact, and it has said it cannot take its state
+    /// back, with no operation left to refuse. Its `unwire` ran at prepare,
+    /// so it is not put back in `Slot::Live`, whose close would run `unwire`
+    /// a second time. Each reply it holds is answered `unanswered`, it is
+    /// dropped with the slot left `Released`, the gated mail drops and each
+    /// chain settles, and the trampoline is asked to shut down. The close
+    /// that follows finds no guest, clears the accept set, answers any drop
+    /// request, and the name tombstones.
     pub(crate) fn reinstate(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -194,13 +208,26 @@ impl WasmTrampolineState {
         // published while the slot was prepared.
         old.register_published_watches();
 
-        if let Some(bundle) = saved
-            && let Err(e) = old.call_on_rehydrate(&bundle)
-        {
-            ctx.fatal_abort(format!(
-                "component {} trapped restoring its state after an aborted republish: {e}",
+        let restored = saved.map_or(Ok(()), |bundle| old.call_on_rehydrate(&bundle));
+        match restored {
+            Ok(()) => {}
+            Err(HookFault::Trapped(trap)) => ctx.fatal_abort(format!(
+                "component {} trapped restoring its state after an aborted republish: {trap:#}",
                 ctx.path()
-            ));
+            )),
+            Err(HookFault::Returned(error)) => {
+                tracing::error!(
+                    target: "aether_component",
+                    actor = %ctx.path(),
+                    %error,
+                    "the guest refused its own saved state after an aborted republish; the instance closes",
+                );
+                old.answer_held_at_close();
+                drop(old);
+                drop(gated);
+                ctx.shutdown();
+                return;
+            }
         }
         if let Err(fault) = Self::wire_guest(ctx, &mut old, None) {
             ctx.fatal_abort(format!("component {} failed its wire after an aborted republish: {fault}", ctx.path()));
