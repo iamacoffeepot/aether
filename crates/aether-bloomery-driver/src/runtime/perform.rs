@@ -150,8 +150,7 @@ impl BundleDriverState {
         namespace: String,
         ticket: LoadTicket,
     ) {
-        let spawn =
-            Spawn { namespace, key: Some(self.unit.as_str().to_owned()), parent: None, config: Vec::new(), code: None };
+        let spawn = Spawn { namespace, key: Some(self.unit.as_str().to_owned()), parent: None, config: Vec::new() };
         let _ = ctx.send_with_context::<ComponentHostCapability>(&spawn, ticket);
     }
 

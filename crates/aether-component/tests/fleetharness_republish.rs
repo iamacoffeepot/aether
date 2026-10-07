@@ -7,7 +7,7 @@
 //! at the same path with nothing stood up twice.
 
 mod tests {
-    use aether_data::{Blob, Kind};
+    use aether_data::Kind;
     use aether_kinds::{ComponentCapabilities, LoadComponent, LogTailResult, PublishedType, Spawn, SpawnResult};
     use aether_substrate::testing::successor_wasm;
     use aether_test_fixtures_kinds::{GateProbe, GateQuery};
@@ -130,14 +130,11 @@ mod tests {
         let engine = harness.spawn_headless();
         harness.publish(engine, read_component_wasm("aether_test_fixtures_bundle"));
 
-        // The fixture reads an asset in `wire`, so the spawn that stands it
-        // up brings the module's bytes for its load window (ADR-0163 §4).
-        let request =
-            Spawn { namespace: "test.quiet_probe".to_owned(), key: None, parent: None, config: Vec::new(), code: None };
-        let standing =
-            Spawn { code: Some(Blob::from(read_component_wasm("aether_test_fixtures_bundle"))), ..request.clone() };
+        // A spawn of a published type always builds an instance that can read
+        // its assets, in every hook, from its own module (ADR-0250).
+        let request = Spawn { namespace: "test.quiet_probe".to_owned(), key: None, parent: None, config: Vec::new() };
 
-        let first_path = match harness.spawn(engine, &standing) {
+        let first_path = match harness.spawn(engine, &request) {
             SpawnResult::Spawned { path, .. } => path,
             other => panic!("the first spawn of an absent name should answer Spawned, got {other:?}"),
         };

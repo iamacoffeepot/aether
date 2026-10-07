@@ -5,7 +5,7 @@
 use core::cell::OnceCell;
 use core::marker::PhantomData;
 
-use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::asset::{AssetInfo, Assets};
 use crate::blob::guest;
 use crate::wasm::bridge::asset;
 use aether_data::Blob;
@@ -17,9 +17,9 @@ use alloc::vec::Vec;
 // The `Wasm` prefix carries the native/wasm split signal; bare `InitCtx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmInitCtx<'a> {
-    /// ADR-0163 §3 asset catalog, fetched lazily on the first
-    /// [`AssetCatalog::assets`] call and cached for the ctx's life —
-    /// `init` is inside the load window, so asset access is live here.
+    /// Asset catalog, fetched lazily on the first [`Assets::assets`] call
+    /// and cached for the ctx's life — served from the instance's own module
+    /// in every hook (ADR-0250).
     catalog: OnceCell<Vec<AssetInfo>>,
     _borrow: PhantomData<&'a ()>,
 }
@@ -39,13 +39,11 @@ impl WasmInitCtx<'_> {
     // `WasmCtx` carries the registry.
 }
 
-impl AssetCatalog for WasmInitCtx<'_> {
+impl Assets for WasmInitCtx<'_> {
     fn assets(&self) -> &[AssetInfo] {
         self.catalog.get_or_init(asset::fetch_catalog).as_slice()
     }
-}
 
-impl AssetWindow for WasmInitCtx<'_> {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
         asset::fetch_asset(name)
     }

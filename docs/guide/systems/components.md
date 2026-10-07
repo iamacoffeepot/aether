@@ -132,7 +132,7 @@ mailbox:
 
 A bare `Publish { code, configs }` binds every namespace the module exports;
 identical bytes already bound are a no-op, and a first publish spawns the
-module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config, code }`
+module's boot once (ADR-0147). A `Spawn { namespace, key, parent, config }`
 then stands up an instance of a published type: a live name answers
 `SpawnResult::Live` without re-init, an absent name answers `Spawned`, and a
 tombstoned name (§8, below) is refused. A `namespace` naming a native type —
@@ -171,35 +171,26 @@ module's namespaces are the group it binds, or, for a successor, republishes.
 The engine compiles each distinct module, and parses its custom sections, once
 per content hash (the BLAKE3 hash of its wasm bytes). Every load, module boot,
 and publish of the same bytes shares that one entry, which lives
-while its publication or any of them holds it. Neither the wasm bytes nor any
-`aether.asset.*` payload is kept once the module is built; the entry keeps each
-asset's catalog entry and byte range
+while its publication or any of them holds it. A publish checks each asset
+into the engine blob store as its own deduplicated blob held by the `Module`;
+the file bytes are let go once the module is built, while each asset lives
+exactly as long as a `Module` holds it
 ([ADR-0241](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0241-code-is-published-not-loaded.md) §2).
-A guest's load window (`init` + `wire`) reads its assets from the bytes the
-load or republish brought and lets go of them when `wire` returns
-([ADR-0163](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0163-content-addressed-packages-and-asset-bundles.md) §3).
-The window has two verbs. `asset_blob(name)` hands the asset over as a `Blob`
-the guest holds by handle: a range of the module's bytes where they already
-sit in the engine blob store, so no payload byte enters guest memory, and
-sending it on as a `Blob` field gives an in-process recipient the same bytes
-uncopied. It is the verb for a bundle that is mostly payload and routes an
-asset to the actor that makes it resident. `asset(name)` copies the asset into
-guest memory as a `Vec<u8>`, for an actor that parses or transforms the payload
-itself, or whose asset is small beside its module's code, as the reference
-bundle's tile is. A blob the actor keeps in its state past `wire`, or that its recipient
-keeps, holds the module's bytes resident until it drops; the window itself
-still lets go when `wire` returns, and neither verb is reachable from a
-handler.
-A `Spawn` reads its module's assets only from the bytes it brings. One that
-brings the published module's bytes in `code` opens a window over them, and
-its guest reads its assets as a loaded one does; bytes of any other module are
-refused, since the asset ranges belong to the published module. A boot
-manifest entry spawns this way: every instance it stands up, each replica of a
-`replicas: N` entry included, brings the entry's module and reads its assets in
-`wire`. A `Spawn` with no `code` brings no bytes: its guest sees the catalog,
-and a fetch of a catalogued asset by either verb traps naming the two doors
-that bring them, a spawn with its code and `load_component`. A trap in the
-load window fails the birth, so that spawn answers `Err` with the reason.
+A guest reads its assets from its own module in every hook — `init`, `wire`,
+all handlers, `on_rehydrate`, and `unwire` — through the `Assets` ctx trait
+([ADR-0250](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0250-a-component-reads-its-assets-whenever-it-runs.md)).
+The surface has two verbs. `asset_blob(name)` hands the asset over as a `Blob`
+the guest holds by handle: the asset's own store entry, so no payload byte
+enters guest memory, and sending it on as a `Blob` field gives an in-process
+recipient the same bytes uncopied. It is the verb for a bundle that is mostly
+payload and routes an asset to the actor that makes it resident. `asset(name)`
+copies the asset into guest memory as a `Vec<u8>`, for an actor that parses or
+transforms the payload itself, or whose asset is small. A name the catalog
+does not carry answers `None`, as do both verbs. A `Spawn` of a published
+type always builds an instance that can read its assets, whoever asks for it:
+a boot manifest entry spawns this way, every instance it stands up, each
+replica of a `replicas: N` entry included, reading its assets from its own
+module in `wire` and in every later hook.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the

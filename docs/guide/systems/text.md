@@ -60,7 +60,7 @@ blob (`aether_data::Blob`). The renderer reads no file and depends on no other
 capability, so the caller gets the bytes however it likes:
 
 - a component reads the file with `aether.fs.read` and passes the `bytes` blob
-  of the `ReadResult` on, or takes an asset from its load window. A blob held
+  of the `ReadResult` on, or takes one of its module's assets. A blob held
   this way is sent on by reference, so the font is not copied through the
   guest's memory;
 - a component that embeds a font builds the blob with `Blob::from`;

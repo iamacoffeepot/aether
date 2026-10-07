@@ -179,7 +179,7 @@ manifest against those objects, so it does not require the development hub.
 **Asset bundle**
 
 A component that carries payload bytes in a wasm custom section, transforms them
-into an engine resident inside its `wire` load window, and afterwards holds only
+into an engine resident, usually in `wire`, and afterwards holds only
 the handle (ADR-0163 §4). `aether.kit.bundle` is the reference actor. Distinct
 from the package depot above, which is a shipping layout rather than an actor.
 

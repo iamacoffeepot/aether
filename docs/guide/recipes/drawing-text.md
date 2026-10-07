@@ -64,7 +64,7 @@ impl WasmActor for FontLoader {
 }
 ```
 
-A component that carries its font with it takes it from its load window, or
+A component that carries its font with it takes it from its module's assets, or
 builds the blob from embedded bytes with `Blob::from`, and skips the read.
 
 Either way the renderer parses the font off its own turn and replies

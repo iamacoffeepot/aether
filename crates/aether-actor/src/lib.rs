@@ -50,7 +50,7 @@ mod sender_refused;
 pub mod trace;
 pub mod wasm;
 
-pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
+pub use asset::{AssetInfo, Assets};
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use blob::guest::__mint_guest_blob;

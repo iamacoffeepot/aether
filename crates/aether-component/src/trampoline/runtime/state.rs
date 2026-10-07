@@ -139,12 +139,6 @@ impl WasmTrampolineState {
         root: Option<MailId>,
     ) -> Result<(), HookFault> {
         let wired = component.wire(root);
-        // ADR-0163 §3 (#3984): the asset load window closes when `wire`
-        // returns — it lets go of the module's code so
-        // `asset_fetch_p32` traps thereafter, retaining the catalog
-        // metadata for the instance's life. Runs whether or not `wire`
-        // faulted; the window's job (init + wire) is done either way.
-        component.close_load_window();
         wired?;
         Self::stage_guest_aliases(ctx, component);
         Ok(())

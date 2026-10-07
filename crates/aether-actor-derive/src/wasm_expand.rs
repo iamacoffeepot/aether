@@ -755,11 +755,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // receiver for an un-split `State = Self`). Emitted only when the user
     // provided the hook; the trait's default no-op stands otherwise.
     let (has_wire, has_unwire, has_rehydrate) = rename_lifecycle_hooks(&mut boot_hooks);
-    // ADR-0163 §3: `wire` receives the window-bearing `WireCtx`, not a bare
-    // `WasmCtx`, so an author can read assets in `wire` but not from a
-    // handler (which is handed a `WasmCtx`). The forwarder wraps the
-    // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
-    // user's `wire` body reaches every send / subscribe verb unchanged.
+    // ADR-0250: `wire` receives the asset-bearing `WireCtx`, not a bare
+    // `WasmCtx`. The forwarder wraps the `WasmCtx` the lifecycle call builds;
+    // `WireCtx` `Deref`s to it, so the user's `wire` body reaches every send
+    // / subscribe verb unchanged.
     // Issue 6279: the renamed hooks keep the author's signatures, so read the
     // actor off them. The lifecycle ctx is typed by the actor, and so is every
     // hook that omitted its actor (#6533), so it passes as is; only a hook

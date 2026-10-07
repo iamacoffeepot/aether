@@ -99,13 +99,13 @@ fn a_module_leaves_the_map_once_its_last_holder_drops() {
     assert!(alpha_again.compiled().get_export("alpha").is_some(), "a dead entry compiles again rather than failing");
 }
 
-/// The module holds neither its code nor any asset's payload: once the
-/// caller drops the code blob, nothing of the module is resident in the
-/// store, while the manifest still catalogues the asset. It catches a module
-/// entry that keeps a bundle's payload (or its wasm bytes) resident for as
-/// long as any instance or publication holds the module.
+/// A held module keeps each asset once as its own blob and lets the file
+/// bytes go: once the caller drops the code blob, the store holds exactly the
+/// distinct asset payload bytes, while the manifest still catalogues the
+/// asset. It catches a module entry that keeps the whole file resident, or
+/// that lets an asset's payload go with it.
 #[test]
-fn a_module_holds_neither_its_code_nor_its_asset_payloads() {
+fn a_module_holds_each_asset_once_and_lets_the_file_go() {
     let store = store();
     let (cache, blobs) = (cache(), BlobCheckIn::new(store.clone()));
     let code = blobs.check_in(wasm(
@@ -115,12 +115,58 @@ fn a_module_holds_neither_its_code_nor_its_asset_payloads() {
     let module = cache.check_in(&blobs, &code).expect("check the module in");
     drop(code);
 
-    assert_eq!(store.resident_bytes(), 0, "a held module keeps no bytes resident");
+    assert_eq!(
+        store.resident_bytes(),
+        b"slime-sprite-bytes".len(),
+        "a held module keeps exactly its asset payload bytes resident"
+    );
     let [asset] = module.manifest().asset_catalog() else {
         panic!("one asset section is one catalog entry");
     };
     assert_eq!(asset.name, "sprites/slime.png");
     assert_eq!(asset.len, b"slime-sprite-bytes".len() as u64);
+}
+
+/// Two modules carrying the same asset bytes share one store entry between
+/// them: dropping one module leaves the bytes, dropping both frees them. It
+/// catches a per-module copy that content dedup was supposed to share.
+#[test]
+fn two_modules_sharing_asset_bytes_hold_one_store_entry() {
+    let store = store();
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store.clone()));
+    let module_for = |export: &str| {
+        let wat = format!(r#"(module (@custom "aether.asset.sprite" "shared-bytes") (func (export "{export}")))"#);
+        check_in(&cache, &blobs, &wat)
+    };
+
+    let alpha = module_for("alpha");
+    let beta = module_for("beta");
+    assert_ne!(alpha.hash(), beta.hash(), "different code is different modules");
+
+    assert_eq!(store.resident_bytes(), b"shared-bytes".len(), "one shared asset is resident once");
+
+    drop(alpha);
+    assert_eq!(store.resident_bytes(), b"shared-bytes".len(), "the remaining module still holds the shared asset");
+
+    drop(beta);
+    assert_eq!(store.resident_bytes(), 0, "the bytes leave with the last module over them");
+}
+
+/// Each indexed section serves its own exact payload bytes. It catches a
+/// range-slicing regression in the check-in loop that mixes assets up.
+#[test]
+fn each_section_serves_its_own_exact_payload_bytes() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+    let module = check_in(
+        &cache,
+        &blobs,
+        r#"(module (@custom "aether.asset.a" "one") (@custom "aether.asset.b" "two-longer") (func (export "noop")))"#,
+    );
+
+    for (name, expected) in [("a", b"one".as_slice()), ("b", b"two-longer".as_slice())] {
+        let section = module.manifest().assets().section(name).expect("the asset is indexed");
+        assert_eq!(section.blob.contiguous(), Some(expected), "the section serves its own bytes");
+    }
 }
 
 /// `Owned` code bytes and the same bytes already checked in must answer one

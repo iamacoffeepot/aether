@@ -1407,7 +1407,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Reply: `CreateFontResult`. `bytes` is the whole font file as a blob:
     /// `{"$hex": ...}` from a session, or the blob a component got from
-    /// `aether.fs.read` or its load window. `Ok { font_id }` names the font
+    /// `aether.fs.read` or from its module's assets. `Ok { font_id }` names the font
     /// in `draw_text` and `font_metrics` for the rest of the session; `Err`
     /// says why the bytes are not a font.
     #[handler::request]

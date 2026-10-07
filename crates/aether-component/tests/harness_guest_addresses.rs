@@ -46,7 +46,6 @@ fn spawn_matrix_child_under(
         key: Some("k".to_owned()),
         parent: Some(parent),
         config: Vec::new(),
-        code: None,
     };
     harness.spawn_any(&spawn).map(|spawned| spawned.path)
 }

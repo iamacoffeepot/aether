@@ -22,7 +22,7 @@ use crate::mail::registry::{
 use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::scheduler::pending_depth;
 
-use crate::actor::wasm::asset_manifest::LoadWindow;
+use crate::actor::wasm::module::Module;
 
 use super::StateBundle;
 use super::meter::MemoryMeter;
@@ -201,18 +201,15 @@ pub struct ComponentCtx {
     /// `Component::instantiate`; empty on the test paths that build a bare
     /// ctx, where a tag lookup always misses and no alias is staged.
     inline_children: FxHashMap<u64, InlineChildType>,
-    /// ADR-0163 §3 asset load window. `Some` for a component loaded
-    /// through the trampoline (installed before `Component::instantiate`,
-    /// so the guest's `init` and `wire` can pull assets); the
-    /// `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host fns
-    /// serve the guest's `AssetWindow` / `AssetCatalog` surfaces from it.
-    /// Closed after the guest's `wire` returns — the window lets go of the
-    /// module's code, so `asset_fetch` and `asset_blob` trap thereafter,
-    /// while the catalog metadata is retained for the instance's life so
-    /// `asset_catalog` still answers. An asset blob the guest took sits in
-    /// `blob_table`, not here, and outlives the close.
+    /// ADR-0250 instance module. `Some` for a component loaded through the
+    /// trampoline (installed before `Component::instantiate`, so the guest's
+    /// `init`, `wire`, handlers, `on_rehydrate`, and `unwire` read assets);
+    /// the `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host
+    /// fns serve the guest's `Assets` surface from it. Held for the
+    /// instance's life, so asset reads work in every hook. An asset blob the
+    /// guest took sits in `blob_table`, not here.
     /// `None` on the test paths that build a bare ctx.
-    pub load_window: Option<LoadWindow>,
+    pub module: Option<Module>,
     /// A candidate guest's held outbox (#7067): `Some` from
     /// [`Self::hold_outbox`] until the candidate is flushed or discarded,
     /// while every send and reply it makes is held rather than sent.
@@ -322,7 +319,7 @@ impl ComponentCtx {
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
             inline_children: FxHashMap::default(),
-            load_window: None,
+            module: None,
             held: None,
             pending_unanswered: None,
         }
@@ -494,12 +491,12 @@ impl ComponentCtx {
         mem::take(&mut self.pending_alias_retirements)
     }
 
-    /// Install the ADR-0163 asset load window before
-    /// `Component::instantiate`, so the guest's `init` and `wire` can pull
-    /// asset bytes through the `asset_fetch_p32` host fn. Called by
+    /// Install the ADR-0250 instance module before `Component::instantiate`,
+    /// so the guest's `init`, `wire`, handlers, `on_rehydrate`, and `unwire`
+    /// read assets through the `asset_fetch_p32` host fns. Called by
     /// `WasmTrampoline::init` right after it builds the ctx.
-    pub fn install_load_window(&mut self, window: LoadWindow) {
-        self.load_window = Some(window);
+    pub fn install_module(&mut self, module: Module) {
+        self.module = Some(module);
     }
 
     /// Install the type of every inline-child actor the resident module can
@@ -516,17 +513,6 @@ impl ComponentCtx {
     /// for a tag the resident module does not declare.
     pub(crate) fn inline_child(&self, tag: u64) -> Option<&InlineChildType> {
         self.inline_children.get(&tag)
-    }
-
-    /// Close the asset load window when the guest's `wire` returns
-    /// (ADR-0163 §3): let go of the module's code the window read
-    /// payloads from, so `asset_fetch` no longer serves, retaining the catalog metadata for
-    /// the instance's life so `asset_catalog` still answers. Idempotent; a
-    /// no-op when no window was installed.
-    pub fn close_load_window(&mut self) {
-        if let Some(window) = self.load_window.as_mut() {
-            window.close();
-        }
     }
 
     /// The next send correlation and the next reply-lineage id this
