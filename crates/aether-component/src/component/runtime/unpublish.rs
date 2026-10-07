@@ -9,8 +9,8 @@
 //! then runs as a first publish.
 
 use aether_actor::ReplyMode;
-use aether_data::MailboxCategory;
 use aether_data::name_inventory::native_type_entries;
+use aether_data::{ErasedActorPath, MailboxCategory};
 use aether_kinds::{Unpublish, UnpublishResult};
 use aether_substrate::actor::native::{Held, RegistryBatch, RegistryBatchResult};
 
@@ -130,7 +130,7 @@ impl ComponentHostCapabilityState {
                 .mailboxes
                 .into_iter()
                 .filter(|mailbox| mailbox.category == Some(MailboxCategory::Trampoline))
-                .filter(|mailbox| leaf_namespace(&mailbox.name) == namespace)
+                .filter(|mailbox| names_instance_of(&mailbox.name, namespace))
                 .map(|mailbox| mailbox.name),
         );
         live.sort();
@@ -139,9 +139,8 @@ impl ComponentHostCapabilityState {
     }
 }
 
-/// The namespace of the type an actor path names: its last segment, before
-/// any `:key` (ADR-0241 §5).
-fn leaf_namespace(path: &str) -> &str {
-    let leaf = path.rsplit('/').next().unwrap_or(path);
-    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
+/// Whether the inventory name `name` is the path of an instance of
+/// `namespace`. A name that is no actor path names no instance.
+fn names_instance_of(name: &str, namespace: &str) -> bool {
+    ErasedActorPath::new(name).is_ok_and(|path| path.leaf_namespace() == namespace)
 }

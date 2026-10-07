@@ -55,7 +55,7 @@ impl ComponentCache {
         }
         for ((cached_engine, path), capabilities) in &mut maps.instances {
             if let Some(published) =
-                types.iter().find(|published| *cached_engine == engine && published.namespace == leaf_namespace(path))
+                types.iter().find(|published| *cached_engine == engine && published.namespace == path.leaf_namespace())
             {
                 capabilities.clone_from(&published.capabilities);
             }
@@ -96,13 +96,7 @@ impl ComponentCache {
     pub(in crate::tools) fn forget_namespace(&self, engine: EngineId, namespace: &str) {
         let mut maps = self.maps();
         maps.types.remove(&(engine, namespace.to_owned()));
-        maps.instances.retain(|(cached_engine, path), _| *cached_engine != engine || leaf_namespace(path) != namespace);
+        maps.instances
+            .retain(|(cached_engine, path), _| *cached_engine != engine || path.leaf_namespace() != namespace);
     }
-}
-
-/// The namespace of the type an actor path names: its last segment, before
-/// any `:key` (ADR-0241 §5).
-pub(super) fn leaf_namespace(path: &ErasedActorPath) -> &str {
-    let leaf = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
-    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
 }

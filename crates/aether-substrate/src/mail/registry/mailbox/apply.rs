@@ -634,13 +634,6 @@ impl Registry {
     }
 }
 
-/// The namespace of the type an actor path names: its last segment, before
-/// any `:key` (ADR-0241 §5).
-fn leaf_namespace(path: &str) -> &str {
-    let leaf = path.rsplit('/').next().unwrap_or(path);
-    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
-}
-
 /// Whether `record` blocks the unpublish of `namespace`: a route that still
 /// runs an instance of the type the path names. Tombstoned routes never
 /// block, and withdrawing a publication never resurrects them.
@@ -649,6 +642,6 @@ fn blocks_unpublish(record: &RouteRecord, namespace: &str) -> bool {
         record.lifecycle,
         RouteLifecycle::Starting { .. } | RouteLifecycle::Live { .. } | RouteLifecycle::Alias { .. }
     );
-    let leaf_matches = leaf_namespace(record.canonical_name.as_str()) == namespace;
+    let leaf_matches = record.canonical_name.leaf_namespace() == namespace;
     running && leaf_matches
 }

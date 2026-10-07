@@ -5,7 +5,6 @@
 use super::super::envelope::engine_envelope;
 use super::super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::super::{COMPONENT_CAP, Mcp};
-use super::cache::leaf_namespace;
 use super::component_config_bytes;
 use crate::args::{InstanceConfigArgs, PublishArgs};
 use aether_data::{Blob, EngineId, Kind};
@@ -36,7 +35,7 @@ pub(in crate::tools) async fn publish(mcp: &Mcp, args: PublishArgs) -> Result<St
         // resolving `module@type` answers that type's config kind in the
         // successor module, the kind its config is encoded to.
         let path = mcp.resolve_engine_path(engine, &address).await.map_err(internal)?;
-        let typed = mcp.resolve_component(&format!("{selector}@{}", leaf_namespace(&path))).await?;
+        let typed = mcp.resolve_component(&format!("{selector}@{}", path.leaf_namespace())).await?;
         let config = component_config_bytes(typed.config_kind.as_ref(), config, config_path.as_deref(), &context)
             .await?
             .ok_or_else(|| {

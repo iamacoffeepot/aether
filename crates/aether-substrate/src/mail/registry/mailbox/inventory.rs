@@ -53,13 +53,11 @@ pub(super) fn live_inventory(
 }
 
 fn category(route: &RouteRecord, publications: &PublicationTable) -> Option<MailboxCategory> {
-    let name = route.canonical_name.as_str();
-    let leaf = name.rsplit('/').next().unwrap_or(name);
-    let leaf_namespace = leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace);
+    let leaf_namespace = route.canonical_name.leaf_namespace();
     if matches!(route.lifecycle, RouteLifecycle::Alias { .. }) || publications.is_module(leaf_namespace) {
         Some(MailboxCategory::Trampoline)
     } else {
-        categorise_mailbox_name(name)
+        categorise_mailbox_name(route.canonical_name.as_str())
     }
 }
 
