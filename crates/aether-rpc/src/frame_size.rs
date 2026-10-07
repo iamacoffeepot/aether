@@ -25,7 +25,7 @@ use aether_codec::frame::MAX_FRAME_SIZE;
 /// — the drift check the retired `KnobRecord` sync-note used to ask for by
 /// hand.
 const _: () = assert!(
-    MAX_FRAME_SIZE == 67_108_864,
+    MAX_FRAME_SIZE == 134_217_728,
     "the AETHER_MAX_FRAME_SIZE config default literal must equal aether_codec::frame::MAX_FRAME_SIZE",
 );
 
@@ -43,10 +43,10 @@ const _: () = assert!(
 pub struct FrameSizeConfig {
     /// Maximum accepted wire-frame body size in bytes.
     ///
-    /// Unset resolves to the codec's compiled default (64 MiB); the codec
+    /// Unset resolves to the codec's compiled default (128 MiB); the codec
     /// clamps the installed value to its 1 GiB ceiling so a runaway
     /// override cannot defeat the OOM guard.
-    #[config(env = "AETHER_MAX_FRAME_SIZE", default = 67_108_864)]
+    #[config(env = "AETHER_MAX_FRAME_SIZE", default = 134_217_728)]
     pub max_frame_size: usize,
 }
 
