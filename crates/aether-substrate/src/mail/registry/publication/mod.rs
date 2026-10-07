@@ -190,6 +190,15 @@ impl PublicationTable {
         }
     }
 
+    /// Whether `born` already holds `namespace`, so its birth needs no write.
+    pub(super) fn held_by(&self, namespace: &str, born: NativeType) -> bool {
+        let Some(Published::Native(publication)) = self.namespaces.get(namespace) else {
+            return false;
+        };
+
+        publication.held.is_some_and(|holder| holder.id == born.id)
+    }
+
     /// Whether `namespace` is published by the module `module`, the one check
     /// a guest birth passes before the owner reserves it (ADR-0241 §3, §6):
     /// a native, unpublished, or other module's namespace binds no guest.
