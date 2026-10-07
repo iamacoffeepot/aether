@@ -575,3 +575,33 @@ fn back_culling_discards_clockwise_triangles() {
     assert!(shows(&img, plain_left, LEFT, RED), "Cull::None must draw the clockwise quad");
     assert!(shows(&img, plain_left, RIGHT, GREEN), "Cull::None must draw the counter-clockwise quad");
 }
+
+/// One set draws a clockwise quad on the left and a counter-clockwise
+/// one on the right. Under `Cull::Front` the left is drawn and the right
+/// is unlit. The named bug: `Front` mapped to the face `Back` discards,
+/// or to no culling, so a mirrored set draws inside out or unculled
+/// while every other scenario still passes.
+#[test]
+fn front_culling_discards_counter_clockwise_triangles() {
+    if !require_wgpu_adapter() {
+        return;
+    }
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_render().build().expect("boot");
+
+    let clockwise = create_quad(&mut harness, "create_clockwise", CLOCKWISE);
+    let counter_clockwise = create_quad(&mut harness, "create_counter_clockwise", COUNTER_CLOCKWISE);
+    let records = create_records(&mut harness, "create_records", &[left(RED), right(GREEN)]);
+    let set = create_set(
+        &mut harness,
+        "create_set",
+        vec![draw(clockwise, records, (0, 1)), draw(counter_clockwise, records, (1, 1))],
+    );
+    let output = create_output(&mut harness, "create_output");
+    let program = register(&mut harness, "register_front_culled", &[plain_pass(Cull::Front)]);
+
+    let dispatches = [dispatch(program, output, vec![vec![set]])];
+    let img = capture(&mut harness, &dispatches, &[(output, 0)]);
+
+    assert!(shows(&img, 0, LEFT, RED), "Cull::Front must keep the clockwise quad");
+    assert!(unlit(&img, 0, RIGHT), "Cull::Front must discard the counter-clockwise quad");
+}

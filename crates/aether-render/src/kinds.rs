@@ -1568,6 +1568,8 @@ pub enum Cull {
     None,
     /// Discard clockwise triangles.
     Back,
+    /// Discard counter-clockwise triangles.
+    Front,
 }
 
 /// Whether a depth-testing `PassStage::DrawSets` pass also writes the

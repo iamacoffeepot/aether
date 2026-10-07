@@ -1002,7 +1002,7 @@ DrawSetsPass {
     vertex_layout: Vec<VertexAttribute>,  // every drawn geometry's layout
     instance_layout: Vec<VertexAttribute>, // every drawn instance buffer's layout
     draw_sets: u32,                       // index into ProgramDispatch.draw_sets
-    cull: Cull,                           // None or Back
+    cull: Cull,                           // None, Back or Front
     depth: Option<DepthUse>,              // { slot, write: Write | TestOnly }
     load: PassLoad,                       // Clear or Load, on the color output
 }
@@ -1063,7 +1063,9 @@ stage, so a record can carry an index into a `Texel` table the stage reads with
 ### Cull and depth
 
 `Cull::None` draws both windings. `Cull::Back` discards clockwise triangles;
-the front face is counter-clockwise, as it is for a draw pass.
+`Cull::Front` discards counter-clockwise triangles; a set of instances whose
+matrix mirrors the mesh winds clockwise on screen, so it is drawn in its own pass
+under it. The front face is counter-clockwise, as it is for a draw pass.
 
 `depth: Some(DepthUse { slot, write })` attaches
 `ProgramRegister.depth_transients[slot]` under a `LessEqual` test.
@@ -1345,7 +1347,7 @@ and the draw-set lifecycle in
 [`draw_sets_pass_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/draw_sets_pass_scenario.rs)
 covers the draw-sets stage in rasterized pixels: two sets sharing a geometry,
 a dispatch listing an unknown set, a geometry destroyed under its set, a
-`TestOnly` pass, and back-face culling.
+`TestOnly` pass, and back-face and front-face culling.
 [`samples_blend_scenario.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-render/tests/samples_blend_scenario.rs)
 covers samples and blend: a half-covered texel of a `Four` transient, a `Four`
 transient read between two writers, an additive accumulation on a float

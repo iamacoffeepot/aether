@@ -493,6 +493,7 @@ fn cull_mode(cull: Cull) -> Option<wgpu::Face> {
     match cull {
         Cull::None => None,
         Cull::Back => Some(wgpu::Face::Back),
+        Cull::Front => Some(wgpu::Face::Front),
     }
 }
 
