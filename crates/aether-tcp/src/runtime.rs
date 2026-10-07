@@ -198,10 +198,8 @@ pub struct ListenerEntry {
     /// The consumer this listener was bound for. Its close closes the
     /// listener.
     pub consumer: ProtocolRef<TcpConsumer>,
-    /// The unbind reply held until this listener's close notice arrives.
-    /// One unbind at a time: a second request while this is `Some` is
-    /// refused.
-    pub pending_unbind: Option<PendingUnbind>,
+    /// Whether an unbind reply is parked on the entry.
+    pub pending_unbind: UnbindState,
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
@@ -263,6 +261,14 @@ impl TcpCapabilityState {
 pub struct PendingUnbind {
     pub held: Held<UnbindListenerResult>,
     pub listener_name: String,
+}
+
+/// Whether an unbind reply is parked on a listener entry.
+pub enum UnbindState {
+    /// No unbind is outstanding.
+    Idle,
+    /// The held reply waits for the listener close notice.
+    Unbinding(PendingUnbind),
 }
 
 /// A connect whose reply waits for its dial sidecar.
@@ -545,7 +551,7 @@ impl NativeActor for TcpCapability {
                 name: listener_name.clone(),
                 listener,
                 consumer,
-                pending_unbind: None,
+                pending_unbind: UnbindState::Idle,
                 _monitor_handle: ctx.monitor(listener),
             },
         );
@@ -587,7 +593,7 @@ impl NativeActor for TcpCapability {
         // first caller when a duplicate request arrives while that
         // close is still in flight; replacing it would lose the
         // original reply.
-        if entry.pending_unbind.is_some() {
+        if matches!(entry.pending_unbind, UnbindState::Unbinding(_)) {
             held.answer(
                 ctx,
                 &UnbindListenerResult::Err {
@@ -597,7 +603,7 @@ impl NativeActor for TcpCapability {
             );
             return pending;
         }
-        entry.pending_unbind = Some(PendingUnbind { held, listener_name: mail.listener_name });
+        entry.pending_unbind = UnbindState::Unbinding(PendingUnbind { held, listener_name: mail.listener_name });
         let listener = entry.listener;
         // Mail Close through the reference the listener's spawn outcome
         // proved. ADR-0099 §3: the listener is a spawned child, so its id
@@ -655,7 +661,7 @@ impl NativeActor for TcpCapability {
             // The close came from an unbind request when one is parked here;
             // otherwise from the consumer's close or a teardown, with no one
             // to answer.
-            if let Some(PendingUnbind { held, listener_name }) = entry.pending_unbind {
+            if let UnbindState::Unbinding(PendingUnbind { held, listener_name }) = entry.pending_unbind {
                 held.answer(ctx, &UnbindListenerResult::Ok { listener_name });
             }
             return;

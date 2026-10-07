@@ -23,6 +23,8 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
+use std::mem;
+
 use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -61,9 +63,19 @@ pub struct TcpSessionState {
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
-    pub read_start: Option<mpsc::Sender<()>>,
-    pub read_thread: Option<JoinHandle<()>>,
+    /// Where the read sidecar stands between parked, running, and stopped.
+    pub read_sidecar: ReadSidecar,
     pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+}
+
+/// Where the read sidecar stands between parked, running, and stopped.
+pub enum ReadSidecar {
+    /// The thread was spawned in `init` and the gate is not yet released.
+    Parked { gate: mpsc::Sender<()>, thread: JoinHandle<()> },
+    /// `wire` released the gate and the thread is reading.
+    Running { thread: JoinHandle<()> },
+    /// Shutdown was requested and the thread was joined.
+    Stopped,
 }
 
 #[runtime]
@@ -154,15 +166,19 @@ impl NativeActor for TcpSessionActor {
             read_buffer: Vec::new(),
             write_half,
             shutdown,
-            read_start: Some(read_start_tx),
-            read_thread: Some(thread),
+            read_sidecar: ReadSidecar::Parked { gate: read_start_tx, thread },
             bytes_rx,
         })
     }
 
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        if let Some(start) = state.read_start.take() {
-            let _ = start.send(());
+        let sidecar = mem::replace(&mut state.read_sidecar, ReadSidecar::Stopped);
+        match sidecar {
+            ReadSidecar::Parked { gate, thread } => {
+                let _ = gate.send(());
+                state.read_sidecar = ReadSidecar::Running { thread };
+            }
+            other => state.read_sidecar = other,
         }
         Ok(())
     }
@@ -174,8 +190,16 @@ impl NativeActor for TcpSessionActor {
         // Best-effort: a peer that already closed gives EBADF or
         // ENOTCONN here, which is fine.
         let _ = state.write_half.shutdown(Shutdown::Both);
-        if let Some(t) = state.read_thread.take() {
-            let _ = t.join();
+        let sidecar = mem::replace(&mut state.read_sidecar, ReadSidecar::Stopped);
+        match sidecar {
+            ReadSidecar::Parked { gate, thread } => {
+                drop(gate);
+                let _ = thread.join();
+            }
+            ReadSidecar::Running { thread } => {
+                let _ = thread.join();
+            }
+            ReadSidecar::Stopped => {}
         }
         tracing::info!(
             target: "aether_tcp",
