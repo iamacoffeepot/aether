@@ -43,7 +43,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_actor::{ErasedActorRef, Root};
-use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_data::{ActorPathForm, ErasedActorPath, Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::NativeActor;
@@ -208,8 +208,20 @@ pub fn try_registered_ref(
     handler: Arc<dyn InboxHandler>,
 ) -> Result<ErasedActorRef, RegisterError> {
     registry
-        .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
+        .try_register_inbox_with_id(&boot_authority(), canonical_id(name), name, handler)
         .map(|id| registry.resolve_live(id).expect("a freshly registered inbox proves"))
+}
+
+/// The position the canonical fixture path `name` names. Panics on a name
+/// that is no actor path or is a short path: a fixture names its actor in
+/// full.
+pub(crate) fn canonical_id(name: &str) -> MailboxId {
+    let path = ErasedActorPath::new(name).expect("the fixture name is an actor path");
+    let ActorPathForm::Canonical(view) = path.form() else {
+        panic!("the fixture name is canonical");
+    };
+
+    lineage_mailbox_id(&view)
 }
 
 /// Register a relay inbox under `name` the way `ChassisCtx::claim_mailbox`

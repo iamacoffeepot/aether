@@ -22,8 +22,9 @@ use crate::chassis::error::BootError;
 use crate::mail::MailId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
-use crate::mail::registry::{OwnedDispatch, Registry, lineage_mailbox_id};
+use crate::mail::registry::{OwnedDispatch, Registry};
 use crate::store::BlobStore;
+use crate::testing::canonical_id;
 use crate::testing::{TestChassis, bare_substrate, boot_test_chassis_with, registered_ref};
 
 /// How long a wait that must succeed may take before the test fails.
@@ -373,7 +374,7 @@ fn a_guest_birth_the_table_does_not_bind_is_refused_and_leaves_no_route() {
             "birth {birth} is refused as unpublished: {:?}",
             outcome.result,
         );
-        assert_eq!(booted.registry.mailbox_name(lineage_mailbox_id(&name)), None, "{name} leaves no route");
+        assert_eq!(booted.registry.mailbox_name(canonical_id(&name)), None, "{name} leaves no route");
     }
     drop(booted);
 }

@@ -19,9 +19,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use aether_actor::ErasedActorRef;
-use aether_data::MAX_SCOPE_PATH_DEPTH;
-
-use crate::mail::registry::names::lineage_prefixes;
+use aether_data::{ActorPathForm, MAX_SCOPE_PATH_DEPTH};
 
 use super::Registry;
 use super::route::BirthSerial;
@@ -122,9 +120,12 @@ impl Registry {
     pub(crate) fn lineage_order(&self, actor: ErasedActorRef) -> Option<LineageOrder> {
         let routes = self.routes.load();
         let own = routes.entry_for(&actor.id())?;
-        let name = own.canonical_name.as_str();
+        let ActorPathForm::Canonical(view) = own.canonical_name.form() else {
+            return None;
+        };
+        let name = view.text();
 
-        lineage_prefixes(name).try_fold(LineageOrder::ROOT, |order, (prefix, id)| {
+        view.ancestors().try_fold(LineageOrder::ROOT, |order, (prefix, id)| {
             let born = if prefix.len() == name.len() {
                 own.born
             } else {

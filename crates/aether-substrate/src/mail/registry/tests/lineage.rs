@@ -13,10 +13,11 @@ use crate::mail::registry::effect::{
     EffectBatch, PreparedActivation, PreparedAliasRoute, RegistryApplied, RegistryEffect, RegistryEffectError,
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{LineageOrder, MailboxEntry, Registry, RouteContract, lineage_mailbox_id, noop_handler};
+use crate::mail::registry::{LineageOrder, MailboxEntry, Registry, RouteContract, noop_handler};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 use super::resolve::contract;
 use super::support::{activation_barrier, prepared_test_spawn, starting_token};
@@ -53,13 +54,13 @@ impl Rig {
 
     /// Reserve `name` as `Starting` at its lineage fold.
     fn reserve(&self, name: &str) -> Result<Vec<RegistryApplied>, RegistryEffectError> {
-        self.apply(RegistryEffect::reserve_with_id(lineage_mailbox_id(name), name.to_owned()))
+        self.apply(RegistryEffect::reserve_with_id(canonical_id(name), name.to_owned()))
     }
 
     /// Publish `name` as a `Live` inbox route at its lineage fold.
     fn publish(&self, name: &str) -> Result<Vec<RegistryApplied>, RegistryEffectError> {
         self.apply(RegistryEffect::publish_with_id(
-            lineage_mailbox_id(name),
+            canonical_id(name),
             name.to_owned(),
             inbox(),
             RouteContract::empty(),
@@ -74,9 +75,9 @@ impl Rig {
         contract: RouteContract,
     ) -> Result<Vec<RegistryApplied>, RegistryEffectError> {
         self.apply(RegistryEffect::PublishAlias(PreparedAliasRoute::new(
-            lineage_mailbox_id(name),
+            canonical_id(name),
             name,
-            lineage_mailbox_id(target),
+            canonical_id(target),
             contract,
         )))
     }
@@ -89,17 +90,17 @@ impl Rig {
             name,
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(AtomicUsize::new(0)),
-            vec![lineage_mailbox_id(name)],
+            vec![canonical_id(name)],
             1,
         );
-        assert_eq!(id, lineage_mailbox_id(name));
+        assert_eq!(id, canonical_id(name));
 
         self.apply(birth)
     }
 
     /// The lineage order of the route standing at `name`, in any lifecycle.
     fn order(&self, name: &str) -> LineageOrder {
-        let actor = self.registry.stamped_sender(lineage_mailbox_id(name)).expect("a record stands at the name");
+        let actor = self.registry.stamped_sender(canonical_id(name)).expect("a record stands at the name");
 
         self.registry.lineage_order(actor).expect("a record and its ancestors answer their order")
     }
@@ -133,8 +134,8 @@ fn siblings_keep_reservation_order_when_promoted_in_the_other_order() {
     let first_reserved = rig.reserve(first).expect("the first sibling reserves");
     let second_reserved = rig.reserve(second).expect("the second sibling reserves");
 
-    rig.apply(promote(lineage_mailbox_id(second), &second_reserved)).expect("the second sibling promotes first");
-    rig.apply(promote(lineage_mailbox_id(first), &first_reserved)).expect("the first sibling promotes second");
+    rig.apply(promote(canonical_id(second), &second_reserved)).expect("the second sibling promotes first");
+    rig.apply(promote(canonical_id(first), &first_reserved)).expect("the first sibling promotes second");
 
     assert!(rig.order(first) < rig.order(second));
 }
@@ -167,11 +168,11 @@ fn a_record_rebuilt_in_place_keeps_its_order() {
     let (born_before, alias_before) = (rig.order(born), rig.order(alias));
     rig.publish(later).expect("a later root publishes");
 
-    rig.mailer.push(activation_barrier(lineage_mailbox_id(born), token, 1));
+    rig.mailer.push(activation_barrier(canonical_id(born), token, 1));
     rig.owner.run_once();
     rig.alias(alias, born, contract(&[(KindId(7), ReplyContract::None)])).expect("the alias grows its contract");
 
-    assert!(rig.registry.is_live_at(lineage_mailbox_id(born)), "the barrier promoted the birth");
+    assert!(rig.registry.is_live_at(canonical_id(born)), "the barrier promoted the birth");
     assert_eq!(rig.order(born), born_before);
     assert_eq!(rig.order(alias), alias_before);
     assert!(rig.order(alias) < rig.order(later));
@@ -188,9 +189,9 @@ fn a_dropped_route_and_its_children_keep_their_order() {
     rig.publish(child).expect("the child publishes");
     let (parent_before, child_before) = (rig.order(parent), rig.order(child));
 
-    rig.apply(RegistryEffect::DropMailbox(lineage_mailbox_id(parent))).expect("the parent retires");
+    rig.apply(RegistryEffect::DropMailbox(canonical_id(parent))).expect("the parent retires");
 
-    assert!(!rig.registry.is_live_at(lineage_mailbox_id(parent)));
+    assert!(!rig.registry.is_live_at(canonical_id(parent)));
     assert_eq!(rig.order(parent), parent_before);
     assert_eq!(rig.order(child), child_before);
 }

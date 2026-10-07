@@ -81,7 +81,8 @@ pub use name_inventory::{
 };
 pub use reach::{CrossesActors, CrossesWire, WireMail};
 pub use reference::{
-    ActorPathError, ActorPathForm, ErasedActorPath, LoadName, LoadNameError, Namespace, PathSegment, SegmentFault,
+    ActorPathError, ActorPathForm, CanonicalPath, ErasedActorPath, LoadName, LoadNameError, Namespace, PathSegment,
+    SegmentFault,
 };
 pub use schema::*;
 pub use schema_docs::{Doc, DocCell, DocNode, FieldDoc, MAX_DOC_DEPTH, StaticSchema, VariantDoc, require_documented};
