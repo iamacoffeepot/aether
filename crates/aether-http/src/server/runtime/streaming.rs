@@ -25,7 +25,7 @@ impl HttpShardState {
         self.request_streams
             .insert(stream_id, RequestStreamState { conn_id, handler, member, method, keep_alive: head.keep_alive });
         if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.active_stream = Some(stream_id);
+            conn.phase = ConnPhase::RequestStreaming(stream_id);
         }
         ctx.send_detached_to(
             handler,
@@ -45,7 +45,10 @@ impl HttpShardState {
     /// on the connection's active stream (ADR-0128). A missing stream (the
     /// connection closed, or the stream already ended) drops the chunk.
     pub fn forward_request_chunk<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, body: Vec<u8>) {
-        let Some(stream_id) = self.connections.get(&conn_id).and_then(|c| c.active_stream) else {
+        let Some(stream_id) = self.connections.get(&conn_id).and_then(|conn| match conn.phase {
+            ConnPhase::RequestStreaming(stream_id) => Some(stream_id),
+            ConnPhase::Idle | ConnPhase::UpgradePending(_) | ConnPhase::WebSocket(_) => None,
+        }) else {
             return;
         };
         let Some(handler) = self.request_streams.get(&stream_id).map(|s| s.handler) else {
@@ -61,9 +64,13 @@ impl HttpShardState {
     /// upload answers with one ordinary response and the settlement safety net
     /// still `502`s a handler that drops without replying.
     pub fn end_request_stream<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId) {
-        let Some(stream_id) = self.connections.get_mut(&conn_id).and_then(|c| c.active_stream.take()) else {
+        let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };
+        let ConnPhase::RequestStreaming(stream_id) = conn.phase else {
+            return;
+        };
+        conn.phase = ConnPhase::Idle;
         let Some(stream) = self.request_streams.remove(&stream_id) else {
             return;
         };
@@ -114,10 +121,12 @@ impl HttpShardState {
         // real replier regardless of dispatch path. A missing in-flight entry
         // leaves no handler, and the stream grants no credit.
         let (keep_alive, handler) = match self.in_flight.remove(&correlation) {
-            None => (false, None),
-            Some(PendingRequest { keep_alive, handler: RouteMember { credit: Some(credit), .. }, .. }) => {
-                (keep_alive, Some(credit))
-            }
+            None => (false, StreamCreditSupport::Unsupported),
+            Some(PendingRequest {
+                keep_alive,
+                handler: RouteMember { credit: StreamCreditSupport::Supported(credit), .. },
+                ..
+            }) => (keep_alive, StreamCreditSupport::Supported(credit)),
             // A holder that cannot take credit would never be granted a
             // chunk, so the stream is refused before its head is written.
             Some(PendingRequest { handler: RouteMember { router, .. }, .. }) => {
@@ -186,7 +195,7 @@ impl HttpShardState {
                 conn_id,
                 handler,
                 tx,
-                writer_thread: Some(writer_thread),
+                writer_thread,
                 credit_outstanding: window,
                 ended: false,
                 pending_end: false,
@@ -308,7 +317,10 @@ impl HttpShardState {
     /// registrant, or a websocket's handshake handler, ADR-0129); a stream
     /// opened with no handler grants nothing.
     pub fn send_stream_credit<A>(&self, ctx: &mut NativeCtx<'_, A>, stream_id: u64, credit: u32) {
-        let Some(handler) = self.streams.get(&stream_id).and_then(|stream| stream.handler) else {
+        let Some(handler) = self.streams.get(&stream_id).and_then(|stream| match stream.handler {
+            StreamCreditSupport::Supported(handler) => Some(handler),
+            StreamCreditSupport::Unsupported => None,
+        }) else {
             return;
         };
         ctx.send_detached_to(handler, &HttpStreamCredit { stream_id, credit });
@@ -319,8 +331,6 @@ impl HttpShardState {
     /// sender unblocks a recv-waiting writer; a socket shutdown by the caller
     /// unblocks a write-blocked one.
     pub fn teardown_stream(&mut self, stream_id: u64) {
-        if let Some(mut stream) = self.streams.remove(&stream_id) {
-            drop(stream.writer_thread.take());
-        }
+        self.streams.remove(&stream_id);
     }
 }

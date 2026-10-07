@@ -34,8 +34,7 @@ impl NativeActor for HttpDispatchShard {
 
     const NAMESPACE: &'static str = "aether.http.server.shard";
 
-    fn init(mut seed: HttpShardSeed, ctx: &mut NativeInitCtx<'_>) -> Result<HttpShardState, BootError> {
-        let inbound_rx = seed.inbound_rx.take().expect("HttpShardSeed::inbound_rx consumed exactly once");
+    fn init(seed: HttpShardSeed, ctx: &mut NativeInitCtx<'_>) -> Result<HttpShardState, BootError> {
         Ok(HttpShardState {
             routes: seed.routes,
             live_connections: seed.live_connections,
@@ -45,7 +44,7 @@ impl NativeActor for HttpDispatchShard {
             keep_alive_timeout: seed.keep_alive_timeout,
             probe: ctx.actor_probe(),
             wake: ctx.self_wake(),
-            inbound_rx,
+            inbound_rx: seed.inbound_rx,
             inbound_tx: seed.inbound_tx,
             wake_dirty: seed.wake_dirty,
             connections: HashMap::new(),
@@ -63,23 +62,19 @@ impl NativeActor for HttpDispatchShard {
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         // Stop every per-connection reader. Shutting the socket down
         // wakes the blocked `read()`; the reader sees the flag and exits.
-        for conn in state.connections.values_mut() {
+        for (_, conn) in state.connections.drain() {
             conn.shutdown.store(true, Ordering::Release);
             let _ = conn.write_half.shutdown(Shutdown::Both);
-            if let Some(thread) = conn.reader_thread.take() {
-                let _ = thread.join();
-            }
+            let _ = conn.reader_thread.join();
         }
         // Stop every response-stream writer (ADR-0128). The socket shutdown
         // above unblocks a write-blocked writer; dropping the sender unblocks
         // a recv-blocked one, so drop it before joining to keep `unwire`
         // prompt (never waiting out the idle-write deadline).
-        for (_, mut stream) in state.streams.drain() {
-            let writer = stream.writer_thread.take();
-            drop(stream);
-            if let Some(thread) = writer {
-                let _ = thread.join();
-            }
+        for (_, stream) in state.streams.drain() {
+            let StreamState { tx, writer_thread, .. } = stream;
+            drop(tx);
+            let _ = writer_thread.join();
         }
     }
 

@@ -85,7 +85,7 @@ an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 ```rust
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_http::HttpServerCapability;
-use aether_http::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use aether_http::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, MethodFilter, RegisterRouteSelf};
 
 pub struct Web;
 
@@ -103,7 +103,7 @@ impl WasmActor for Web {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/".to_string(),
-            method: None,
+            method: MethodFilter::Any,
             shared: false,
         });
         Ok(())
@@ -210,13 +210,13 @@ catch-all (as the §3 handler does) — then everything unmatched goes there.
 
 ```rust
 use aether_http::HttpServerCapability;
-use aether_http::kinds::RegisterRouteSelf;
+use aether_http::kinds::{HttpMethod, MethodFilter, RegisterRouteSelf};
 
 // In an `#[actor(depends(HttpServerCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
     ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
         prefix: "/api".to_string(),
-        method: None,                        // or Some(HttpMethod::Get)
+        method: MethodFilter::Any,           // or MethodFilter::Only(HttpMethod::Get)
         shared: false,                       // true joins an ADR-0136 member set
     });
     Ok(())
@@ -246,7 +246,7 @@ request handler, so a component serving several prefixes tells them apart by
 `Source`; an MCP session or a test has no such source, so it uses the named
 form instead — `register_route` / `unregister_route`, which name the handler
 by its canonical actor path. `RegisterRoute` carries `prefix` (`String`),
-`method` (`Option<HttpMethod>` — a bare variant string like `"Get"`, or `null`
+`method` (`MethodFilter` — `{"Only": "Get"}` for one method, `"Any"`
 to match every method; the seven variants are `Get`, `Post`, `Put`, `Delete`,
 `Patch`, `Head`, `Options`), `handler` (the path text), and `shared` (the
 ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
@@ -267,7 +267,7 @@ a streaming, websocket, or deferred handler and a `#[http::router]` actor.
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
 {
   "prefix": "/api",
-  "method": "Get",
+  "method": { "Only": "Get" },
   "handler": "api",
   "shared": false
 }
@@ -292,7 +292,7 @@ included:
 // send_mail → aether.http.server  (kind: aether.http.server.unregister_route)
 {
   "prefix": "/api",
-  "method": "Get",
+  "method": { "Only": "Get" },
   "handler": "api"
 }
 ```

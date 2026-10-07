@@ -10,7 +10,7 @@ use aether_substrate::chassis::error::BootError;
 
 use crate as http;
 use crate::kinds::{
-    HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteResult, RegisterRouteSelf,
+    HttpRouterResult, HttpServerRequest, HttpServerResponse, MethodFilter, RegisterRouteResult, RegisterRouteSelf,
     UnregisterRouteSelf,
 };
 use crate::server::HttpServerCapability;
@@ -122,7 +122,7 @@ impl NativeActor for TmpRouteHandler {
     fn wire(_state: &mut TmpRouteHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/tmp".to_string(),
-            method: None,
+            method: MethodFilter::Any,
             shared: false,
         });
         Ok(())
@@ -137,7 +137,7 @@ impl NativeActor for TmpRouteHandler {
     ) -> Pending<HttpRouterResult> {
         let (pending, held) = ctx.hold::<HttpRouterResult>();
         let _ = ctx.send_with_context::<HttpServerCapability>(
-            &UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None },
+            &UnregisterRouteSelf { prefix: "/tmp".to_string(), method: MethodFilter::Any },
             ReleaseContext { held },
         );
         pending
@@ -185,7 +185,7 @@ impl NativeActor for WiredRouteHandler {
     fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/wired-extra".to_string(),
-            method: None,
+            method: MethodFilter::Any,
             shared: false,
         });
         Ok(())

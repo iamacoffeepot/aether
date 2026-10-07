@@ -47,7 +47,7 @@ pub use aether_substrate::chassis::error::BootError;
 pub use crate::kinds::{
     HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd, HttpRequestStreamOpen,
     HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
-    HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
+    HttpStreamCredit, MethodFilter, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use crate::kinds::{
     HttpRouter, RegisterRoute, RegisterRouteResult, RegisterRouteSelf, RequestStreamRouter, StreamCreditRouter,
@@ -187,7 +187,7 @@ impl NativeActor for HttpServerCapability {
             live_connections: Arc::new(AtomicUsize::new(0)),
             listener_port: port,
             accept_shutdown,
-            accept_thread: Some(accept_thread),
+            accept_thread: AcceptThread::Running(accept_thread),
             inbound_rx,
             wake_dirty,
             shard_startup: ShardStartup::Idle,
@@ -217,8 +217,11 @@ impl NativeActor for HttpServerCapability {
                 "http server teardown wake self-connect failed; accept-thread join may stall",
             );
         }
-        if let Some(thread) = state.accept_thread.take() {
-            let _ = thread.join();
+        match mem::replace(&mut state.accept_thread, AcceptThread::Joined) {
+            AcceptThread::Running(thread) => {
+                let _ = thread.join();
+            }
+            AcceptThread::Disabled | AcceptThread::Joined => {}
         }
         tracing::info!(
             target: "aether_http::server",
@@ -284,8 +287,8 @@ impl NativeActor for HttpServerCapability {
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        let sink = match done.into_output().result {
-            Ok(shard) => state.staged_sink(index, shard),
+        let outcome = match done.into_output().result {
+            Ok(shard) => state.staged_sink(index, shard).map_or(ShardSpawnOutcome::Failed, ShardSpawnOutcome::Ready),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_http::server",
@@ -293,11 +296,11 @@ impl NativeActor for HttpServerCapability {
                     error = ?error,
                     "http dispatch shard activation failed",
                 );
-                None
+                ShardSpawnOutcome::Failed
             }
         };
 
-        let settlement = state.finish_shard_spawn(index, sink);
+        let settlement = state.finish_shard_spawn(index, outcome);
         state.apply_shard_settlement(ctx, settlement);
     }
 

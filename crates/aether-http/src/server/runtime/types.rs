@@ -33,9 +33,9 @@ pub struct ReaderShared {
 /// table + live-connection count, and the per-connection tuning copied
 /// from [`HttpServerConfig`].
 pub struct HttpShardSeed {
-    /// The shard's inbound event channel; `Some` exactly until the shard's
-    /// `init` takes it (the `TcpSessionConfig::stream` consume pattern).
-    pub inbound_rx: Option<mpsc::Receiver<InboundEvent>>,
+    /// The shard's inbound event channel, moved into the shard's `init`;
+    /// the supervisor keeps the matching sender as its assignment sink.
+    pub inbound_rx: mpsc::Receiver<InboundEvent>,
     /// The matching sender: the supervisor keeps a clone (its assignment
     /// sink), and the shard clones it into each reader's [`WakeSink`].
     pub inbound_tx: mpsc::Sender<InboundEvent>,
@@ -137,6 +137,8 @@ pub struct PreparedRequest {
     /// `Some` on a websocket upgrade handshake (ADR-0129) the
     /// reader validated: the `Sec-WebSocket-Key` the shard stashes
     /// before dispatching, consumed if the handler accepts.
+    /// `None` when no handshake rode along — fixed at construction,
+    /// single producer to single consumer.
     pub ws_key: Option<String>,
 }
 
@@ -222,6 +224,25 @@ pub enum WriterMsg {
     WsClose(Vec<u8>),
 }
 
+/// Per-connection lifecycle phase (ADR-0128 / ADR-0129): an idle
+/// connection, an in-progress inbound request stream, a stashed
+/// handshake key awaiting the handler's accept, or an upgraded
+/// websocket. The three active cases never co-occur, so one enum
+/// makes the meaningless product unrepresentable.
+///
+/// Transitions: `spawn_reader_for_peer` builds `Idle`;
+/// `start_request_stream` assigns `RequestStreaming` unconditionally;
+/// `dispatch_prepared` assigns `UpgradePending` only when the prepared
+/// request carries a key; `end_request_stream` returns a
+/// `RequestStreaming` connection to `Idle` and `accept_websocket` an
+/// `UpgradePending` one, each leaving any other phase as it stands.
+pub enum ConnPhase {
+    Idle,
+    RequestStreaming(u64),
+    UpgradePending(String),
+    WebSocket(WsConn),
+}
+
 /// Per-connection state owned by the cap dispatcher. The reader sidecar
 /// holds `shutdown` + the read half; the dispatcher writes the response
 /// through `write_half`.
@@ -240,22 +261,12 @@ pub struct ConnState {
     /// sender (on [`HttpShardState::close_connection`]) makes the reader's
     /// `recv_timeout` return `Disconnected`, its close-path exit.
     pub control_tx: mpsc::Sender<ReaderControl>,
-    /// The `stream_id` of this connection's in-progress inbound request stream
-    /// (ADR-0128), if any — the reverse index the dispatcher uses to route a
-    /// reader's [`InboundEvent::RequestBodyChunk`] / `RequestBodyEnd` to the
-    /// right [`RequestStreamState`]. `None` on a buffered or idle connection.
-    pub active_stream: Option<u64>,
-    /// Reader thread handle. Joined in `unwire`, detached on close.
-    pub reader_thread: Option<JoinHandle<()>>,
-    /// The connection's `Sec-WebSocket-Key`, stashed by the dispatcher when it
-    /// validates an inbound RFC 6455 upgrade handshake (ADR-0129) and consumed
-    /// when the handler accepts (to compute `Sec-WebSocket-Accept`). `None` on
-    /// a non-upgrade connection; cleared once consumed.
-    pub ws_pending_key: Option<String>,
-    /// Per-connection websocket state once upgraded (ADR-0129). `None` until
-    /// the handler replies `WebSocketAccept` and the cap flips the connection
-    /// into websocket mode.
-    pub websocket: Option<WsConn>,
+    /// This connection's lifecycle phase — idle, request-streaming,
+    /// upgrade-pending, or websocket.
+    pub phase: ConnPhase,
+    /// Reader thread handle, moved out at teardown; detached on close,
+    /// joined in `unwire`.
+    pub reader_thread: JoinHandle<()>,
 }
 
 /// Per-connection websocket state (ADR-0129), set on accept. Outbound frames
@@ -307,18 +318,17 @@ pub struct StreamState {
     /// websocket (ADR-0129) it is the handler resolved at handshake. Either
     /// way it is that holder's [`StreamCreditRouter`] cast from registration,
     /// stored so credit replenishment addresses the right actor without a
-    /// re-lookup. `None` for a response stream whose in-flight record was
-    /// already gone at open, which then grants no credit.
-    pub handler: Option<ProtocolRef<StreamCreditRouter>>,
+    /// re-lookup. `Unsupported` for a response stream whose in-flight record
+    /// was already gone at open, which then grants no credit.
+    pub handler: StreamCreditSupport,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant
     /// `credit_outstanding + queued <= window`, so a slot is always free when
     /// a within-credit chunk arrives.
     pub tx: mpsc::SyncSender<WriterMsg>,
-    /// Writer thread handle. Detached on teardown / close (the dispatcher
-    /// must never block joining a slow-peer write); joined in `unwire` after
-    /// the sender is dropped.
-    pub writer_thread: Option<JoinHandle<()>>,
+    /// Writer thread handle, moved out at teardown; detached on teardown /
+    /// close, joined in `unwire` after the sender is dropped.
+    pub writer_thread: JoinHandle<()>,
     /// Credits granted to the handler it has not yet spent, bounded by the
     /// window. A chunk arriving with this at zero is an over-window flood
     /// (ADR-0128 §Consequences trust boundary) → the stream is torn down.
