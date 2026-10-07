@@ -24,7 +24,7 @@ use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::{NativeActor, NativeCtx};
 use crate::mail::cost::CostCells;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
-use crate::mail::registry::{BootAuthority, NameConflict};
+use crate::mail::registry::{BootAuthority, NameConflict, RegisterError};
 use crate::mail::{KindId, MailboxId};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::wire_root::WireRoot;
@@ -199,7 +199,10 @@ impl Spawner {
         let registered = self.registry.try_register_inbox_with_id(authority, id, full_name.to_string(), relay);
         match registered {
             Ok(returned_id) => debug_assert_eq!(returned_id, id),
-            Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),
+            Err(RegisterError::NameConflict(NameConflict { name })) => {
+                return Err(SpawnError::SubnameInUse { full_name: name });
+            }
+            Err(RegisterError::ParentUnknown { name }) => return Err(SpawnError::ParentUnknown { full_name: name }),
         }
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.

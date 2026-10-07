@@ -30,7 +30,10 @@ a draw every frame it should be visible.
 A text draw is one mail from the actor that wants the text to the renderer,
 and nothing else. The renderer lays it out on its own turn and pushes one
 batch onto the overlay list, where a shape batch would go. So text and shapes
-from one actor keep the order that actor sent them in.
+from one actor keep the order that actor sent them in. Between two actors the
+order is lineage order: a child's draws lie over its parent's and a later
+sibling's over an earlier one's, whatever order the mail arrived in
+([Rendering](rendering.md)).
 
 The kinds compile without the renderer's native half: a wasm guest that
 depends on `aether-render` with `default-features = false` gets the kind types
@@ -151,7 +154,9 @@ There is no LRU or multi-atlas spill. See
 - A text draw and a shape from one actor keep that actor's send order. Both
   are mail to the one renderer through one queue, and each becomes an overlay
   batch in the turn its mail is handled. An opaque plate sent after a text
-  draw covers it, and text sent after a plate lies on it.
+  draw covers it, and text sent after a plate lies on it. Text and a plate
+  from two different actors lie in lineage order instead: the actor created
+  later, or beneath the other, is on top.
 - The first draw of a registered font shows. Nothing is created by a round
   trip on the way.
 - Draw mail has no success reply. Unknown ids, bad sizes and atlas overflow

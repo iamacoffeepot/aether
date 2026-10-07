@@ -206,6 +206,11 @@ pub enum PreparedSpawnFailure {
     SubnameInUse {
         full_name: String,
     },
+    /// The birth's name is nested beneath a parent the registry holds no
+    /// record for (ADR-0248 §5).
+    ParentUnknown {
+        full_name: String,
+    },
     ActivationRejected,
     OwnerClosed,
     /// The actor's `wire` hook returned an error (ADR-0247 rule 3). Reported
@@ -527,6 +532,14 @@ pub enum RegistryApplied {
 #[derive(Debug)]
 pub enum RegistryEffectError {
     Name(super::NameConflict),
+    /// A birth whose name is nested beneath a parent the registry holds no
+    /// record for, in any lifecycle (ADR-0248 §5). Every record's ancestors
+    /// hold records, which is what lets `Registry::lineage_order` read one
+    /// birth serial per path segment with nothing to miss. `name` is the
+    /// refused birth's own.
+    ParentUnknown {
+        name: String,
+    },
     Drop(super::DropError),
     Kind(super::KindConflict),
     AliasTargetUnavailable {
@@ -553,6 +566,9 @@ impl fmt::Display for RegistryEffectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Name(error) => error.fmt(formatter),
+            Self::ParentUnknown { name } => {
+                write!(formatter, "mailbox name {name:?} is nested beneath a parent the registry holds no record for")
+            }
             Self::Drop(error) => error.fmt(formatter),
             Self::Kind(error) => error.fmt(formatter),
             Self::AliasTargetUnavailable { alias, target_parent } => {

@@ -22,7 +22,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 #[cfg(feature = "wasm")]
 use crate::mail::registry::effect::RegistryBatch;
-use crate::mail::registry::{AddressResolutionError, RegistrySubscription, RouteContract};
+use crate::mail::registry::{AddressResolutionError, LineageOrder, RegistrySubscription, RouteContract};
 use crate::mail::{KindId, MailId, MailboxId};
 use crate::memory::{MemoryGauge, MemoryReport};
 use crate::runtime::lifecycle::FatalAborter;
@@ -319,6 +319,13 @@ impl NativeBinding {
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.mailer.actor_path(reference)
+    }
+
+    /// Where the actor a reference proves stands in the actor tree by
+    /// creation order. The path behind
+    /// [`NativeCtx::lineage_order`](crate::actor::native::ctx::NativeCtx::lineage_order).
+    pub(crate) fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.mailer.lineage_order(reference)
     }
 
     /// The canonical path of the route record at `position`, as

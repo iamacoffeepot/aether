@@ -23,8 +23,8 @@ use crate::mail::{KindId, MailboxId};
 use super::birth::{PendingBirth, RouteContinuation};
 use super::kinds::KindSlot;
 use super::publish::Publication;
-use super::route::{RouteEndpoint, RouteLifecycle, RouteRecord};
-use super::staged::{commit_staged, staged_kind, staged_pending_token, staged_route};
+use super::route::{BirthSerial, RouteEndpoint, RouteLifecycle, RouteRecord};
+use super::staged::{commit_staged, parent_stands, staged_kind, staged_pending_token, staged_route};
 use super::{CapturedDisposition, Inner, Registry, SeizeCell};
 
 impl Registry {
@@ -72,6 +72,7 @@ impl Registry {
         let mut staged_kinds = FxHashMap::<KindId, KindSlot>::default();
         let mut staged_pending = FxHashMap::<MailboxId, Option<ActivationToken>>::default();
         let mut next_activation_token = inner.next_activation_token;
+        let mut next_birth_serial = inner.next_birth_serial;
         let mut publication = Publication::default();
         let mut applied = Vec::with_capacity(batch.effects.len());
         let mut prepared_births = FxHashMap::<MailboxId, PendingBirth>::default();
@@ -113,6 +114,15 @@ impl Registry {
                         let failure = commit.route_conflict_failure();
                         drop(commit.reject_at_home(failure));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
+                    }
+                    // ADR-0248 §5: a birth names a parent that holds a record,
+                    // so every prefix of a stored name has a birth serial to
+                    // read. Checked ahead of the namespace hold below, which
+                    // a refused birth must not leave behind.
+                    if !parent_stands(&staged_routes, inner, commit.canonical_name.as_str()) {
+                        let name = commit.canonical_name.to_string();
+                        drop(commit.reject_at_home(PreparedSpawnFailure::ParentUnknown { full_name: name.clone() }));
+                        return Err(RegistryEffectError::ParentUnknown { name });
                     }
                     // ADR-0241 §3, §6: a guest birth takes a published
                     // namespace, so it is admitted only where the table, as
@@ -156,6 +166,7 @@ impl Registry {
                     }
                     let record = RouteRecord {
                         canonical_name: commit.canonical_name,
+                        born: BirthSerial::next(&mut next_birth_serial),
                         lifecycle: RouteLifecycle::Starting { token },
                     };
                     staged_routes.insert(id, Some(record.clone()));
@@ -200,6 +211,7 @@ impl Registry {
                         // keep the published ones (ADR-0231 §5).
                         Some(RouteRecord {
                             canonical_name: existing,
+                            born,
                             lifecycle: RouteLifecycle::Alias { target_parent, contract },
                         }) if *existing == canonical_name && *target_parent == alias.target_parent => {
                             if let Some(contract_break) = contract.first_break(&alias.contract) {
@@ -208,6 +220,7 @@ impl Registry {
                             if *contract != alias.contract {
                                 let record = RouteRecord {
                                     canonical_name,
+                                    born: *born,
                                     lifecycle: RouteLifecycle::Alias {
                                         target_parent: alias.target_parent,
                                         contract: alias.contract,
@@ -224,8 +237,12 @@ impl Registry {
                         }
                         None => {}
                     }
+                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
+                        return Err(RegistryEffectError::ParentUnknown { name: canonical_name.to_string() });
+                    }
                     let record = RouteRecord {
                         canonical_name,
+                        born: BirthSerial::next(&mut next_birth_serial),
                         lifecycle: RouteLifecycle::Alias {
                             target_parent: alias.target_parent,
                             contract: alias.contract,
@@ -273,8 +290,12 @@ impl Registry {
                     if staged_route(&staged_routes, inner, route.id).is_some() {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
+                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
+                        return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                    }
                     let token = ActivationToken::next(&mut next_activation_token);
-                    let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Starting { token } };
+                    let born = BirthSerial::next(&mut next_birth_serial);
+                    let record = RouteRecord { canonical_name, born, lifecycle: RouteLifecycle::Starting { token } };
                     staged_routes.insert(route.id, Some(record.clone()));
                     staged_pending.insert(route.id, Some(token));
                     publication.route_updates.push(Update::Insert(route.id, record));
@@ -285,8 +306,11 @@ impl Registry {
                         staged_route(&staged_routes, inner, id).map(|route| &route.lifecycle),
                         Some(RouteLifecycle::Starting { token: current }) if *current == token
                     ) && staged_pending_token(&staged_pending, inner, id) == Some(token);
-                    let Some(canonical_name) = reserved
-                        .then(|| staged_route(&staged_routes, inner, id).map(|route| route.canonical_name.clone()))
+                    let Some((canonical_name, born)) = reserved
+                        .then(|| {
+                            staged_route(&staged_routes, inner, id)
+                                .map(|route| (route.canonical_name.clone(), route.born))
+                        })
                         .flatten()
                     else {
                         return Err(RegistryEffectError::ActivationRejected);
@@ -294,6 +318,7 @@ impl Registry {
                     let endpoint = RouteEndpoint::from_entry(activation.into_legacy());
                     let record = RouteRecord {
                         canonical_name,
+                        born,
                         lifecycle: RouteLifecycle::Live { endpoint: endpoint.clone(), contract },
                     };
                     staged_routes.insert(id, Some(record.clone()));
@@ -336,16 +361,20 @@ impl Registry {
                     else {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     };
+                    if staged_route(&staged_routes, inner, route.id).is_some() {
+                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                    }
+                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
+                        return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                    }
                     let record = RouteRecord {
                         canonical_name,
+                        born: BirthSerial::next(&mut next_birth_serial),
                         lifecycle: RouteLifecycle::Live {
                             endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
                             contract,
                         },
                     };
-                    if staged_route(&staged_routes, inner, route.id).is_some() {
-                        return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
-                    }
                     staged_routes.insert(route.id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(route.id, record));
                     publication.inventory_dirty = true;
@@ -482,6 +511,7 @@ impl Registry {
         }
 
         inner.next_activation_token = next_activation_token;
+        inner.next_birth_serial = next_birth_serial;
         let mut continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
         #[cfg(feature = "wasm")]
         if let Some(publications) = staged_publications {

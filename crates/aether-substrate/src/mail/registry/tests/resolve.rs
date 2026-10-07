@@ -51,6 +51,7 @@ fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
     let r = Registry::new();
     let canonical = "root/worker:camera";
     let id = lineage_mailbox_id(canonical);
+    r.register_inbox(&auth(), "root", noop_handler());
     r.try_register_inbox_with_id(&auth(), id, canonical, noop_handler()).unwrap();
 
     let path = |text| ErasedActorPath::new(text).expect("fixture is a well-formed actor path");
@@ -203,7 +204,7 @@ fn resolve_protocol_proves_live_routes_and_refuses_the_rest() {
 
 /// A route contract publishing `rows`, built the way both transports build
 /// theirs: from a receive surface.
-fn contract(rows: &[(KindId, ReplyContract)]) -> RouteContract {
+pub(super) fn contract(rows: &[(KindId, ReplyContract)]) -> RouteContract {
     RouteContract::from_capabilities(&ComponentCapabilities {
         handlers: rows
             .iter()

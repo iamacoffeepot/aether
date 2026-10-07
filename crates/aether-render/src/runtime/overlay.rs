@@ -1,10 +1,15 @@
 //! Per-frame overlay accumulator state for the `aether.render` cap
 //! (ADR-0105). `on_draw_textured_quads` / `on_draw_text` /
-//! `on_draw_screen_triangles` / `on_draw_shapes` push an [`OverlayBatch`]
-//! into the accumulator; the
-//! driver's `record_overlay_batches` consumes them at record time.
+//! `on_draw_screen_triangles` / `on_draw_shapes` file an [`OverlayBatch`]
+//! in the [`OverlayFrame`] under the actor that sent it; the frame commit
+//! sorts the batches into painter order (ADR-0248 §4), and the driver's
+//! `record_overlay_batches` consumes the sorted list at record time.
 
+use std::collections::BTreeMap;
+
+use aether_actor::ErasedActorRef;
 use aether_kinds::{ClipRect, QuadSpace};
+use aether_substrate::mail::registry::LineageOrder;
 
 use super::super::kinds::{
     DrawScreenTriangles, DrawShapes, DrawTexturedQuads, QuadBlend, ScreenTriangle, Shape, TexturedQuad,
@@ -13,10 +18,13 @@ use super::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry};
 
 /// One accumulated overlay batch (ADR-0105): what it draws, the projection
 /// `space` reads its coordinates in, and the scissor it draws inside. Every
-/// arm records in the one overlay pass in submission order, so painter order
-/// is the order the cap received the mail. Cloned out of the accumulator at
-/// record time so the cap dispatcher thread can keep appending the next
-/// frame's batches while the driver thread expands these.
+/// arm records in the one overlay pass in the order the frame commit left
+/// the batches in: between two actors that is lineage order, a child over
+/// its parent and a later sibling over an earlier one, and inside one actor
+/// it is the order that actor sent them ([`OverlayFrame::commit`]). Cloned
+/// out of the committed list at record time so the cap dispatcher thread can
+/// keep filing the next frame's batches while the driver thread expands
+/// these.
 ///
 /// The arms carry their own fields rather than sharing a header: only the
 /// textured arm composites a caller-supplied image, so only it names a
@@ -82,5 +90,58 @@ impl OverlayBatch {
                 clip.as_ref()
             }
         }
+    }
+}
+
+/// One frame's overlay batches, each filed under the actor that sent it
+/// (ADR-0248 §4).
+///
+/// Mail from two actors reaches the renderer in an order that can differ
+/// from frame to frame, so arrival order between actors means nothing. The
+/// accumulator keeps who sent each batch, and [`Self::commit`] orders the
+/// frame once, after the frame's draws have settled. There is no way to add
+/// a batch without saying who sent it.
+#[derive(Default)]
+pub(super) struct OverlayFrame {
+    /// In arrival order, which is the order each single sender sent its own.
+    filed: Vec<(Option<ErasedActorRef>, OverlayBatch)>,
+}
+
+impl OverlayFrame {
+    /// File `batch` under `sender`, the actor whose mail it arrived as, or
+    /// under no sender for a draw pushed from outside the actor tree.
+    pub(super) fn file(&mut self, sender: Option<ErasedActorRef>, batch: OverlayBatch) {
+        self.filed.push((sender, batch));
+    }
+
+    /// Take the frame's batches in painter order, back to front, leaving the
+    /// accumulator empty for the next frame.
+    ///
+    /// Batches are ordered by their sender's lineage order, read through
+    /// `lineage_order` once per distinct sender: a parent's draws lie under
+    /// its children's, and an earlier sibling's under a later one's. A batch
+    /// with no sender lies under every actor's. The sort is stable, so one
+    /// sender's batches keep the order it sent them in. No draw states an
+    /// order and none is refused for want of one.
+    pub(super) fn commit(&mut self, lineage_order: impl Fn(ErasedActorRef) -> LineageOrder) -> Vec<OverlayBatch> {
+        let mut orders = BTreeMap::new();
+        let mut placed: Vec<(Option<LineageOrder>, OverlayBatch)> = self
+            .filed
+            .drain(..)
+            .map(|(sender, batch)| {
+                let order = sender.map(|sender| *orders.entry(sender).or_insert_with(|| lineage_order(sender)));
+
+                (order, batch)
+            })
+            .collect();
+        placed.sort_by_key(|(order, _)| *order);
+
+        placed.into_iter().map(|(_, batch)| batch).collect()
+    }
+
+    /// The batches filed so far, in arrival order.
+    #[cfg(test)]
+    pub(super) fn filed(&self) -> impl ExactSizeIterator<Item = &OverlayBatch> + DoubleEndedIterator {
+        self.filed.iter().map(|(_, batch)| batch)
     }
 }

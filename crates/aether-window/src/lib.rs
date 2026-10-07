@@ -210,6 +210,7 @@ mod tests {
         let typed = WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main");
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
+        registered_ref(&registry, "aether.window", noop_handler());
         let live = registered_ref(&registry, canonical, noop_handler());
         assert_eq!(live.id(), typed, "the fixture stands the route at the typed resolver's position");
 

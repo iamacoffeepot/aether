@@ -9,7 +9,7 @@ use aether_actor::ErasedActorRef;
 use crate::mail::MailboxId;
 use crate::mail::registry::authority::BootAuthority;
 use crate::mail::registry::effect::{RegistryApplied, RegistryEffect, RegistryEffectError};
-use crate::mail::registry::errors::{DropError, NameConflict};
+use crate::mail::registry::errors::{DropError, NameConflict, RegisterError};
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 use crate::mail::registry::{RouteContract, canonical_mailbox_id};
 use crate::scheduler::SeizeHandle;
@@ -20,14 +20,15 @@ impl Registry {
     /// Insert a mailbox, allocating its id from the name hash (ADR-0029).
     /// Any occupied entry is a collision, a `Dropped` one included: a
     /// retired name is never registered again (ADR-0079 §7). The route
-    /// publishes `contract` as it goes `Live` (ADR-0231 §4).
+    /// publishes `contract` as it goes `Live` (ADR-0231 §4). A name nested
+    /// beneath a parent that holds no record is refused (ADR-0248 §5).
     fn insert(
         &self,
         authority: &BootAuthority,
         name: String,
         entry: MailboxEntry,
         contract: RouteContract,
-    ) -> Result<MailboxId, NameConflict> {
+    ) -> Result<MailboxId, RegisterError> {
         // Depth-1 / root registrations derive the id from the name
         // (ADR-0029) — the lineage fold's fixed point.
         self.insert_with_id(authority, canonical_mailbox_id(&name), name, entry, contract)
@@ -47,11 +48,12 @@ impl Registry {
         name: String,
         entry: MailboxEntry,
         contract: RouteContract,
-    ) -> Result<MailboxId, NameConflict> {
+    ) -> Result<MailboxId, RegisterError> {
         match self.apply_one(authority, RegistryEffect::publish_with_id(id, name, entry, contract)) {
             Ok(RegistryApplied::Mailbox(id)) => Ok(id),
-            Err(RegistryEffectError::Name(error)) => Err(error),
-            Ok(_) | Err(_) => unreachable!("publish-live returns mailbox or name conflict"),
+            Err(RegistryEffectError::Name(error)) => Err(RegisterError::NameConflict(error)),
+            Err(RegistryEffectError::ParentUnknown { name }) => Err(RegisterError::ParentUnknown { name }),
+            Ok(_) | Err(_) => unreachable!("publish-live returns a mailbox, a name conflict, or an unknown parent"),
         }
     }
 
@@ -184,14 +186,15 @@ impl Registry {
             RouteContract::empty(),
         ) {
             Ok(id) => id,
-            Err(NameConflict { name }) => {
+            Err(RegisterError::NameConflict(NameConflict { name })) => {
                 panic!("mailbox name already registered: {name}")
             }
+            Err(refused @ RegisterError::ParentUnknown { .. }) => panic!("{refused}"),
         }
     }
 
     /// Non-panicking variant of [`Self::register_inbox`]. Returns
-    /// `NameConflict` on a collision so callers that legitimately
+    /// [`RegisterError::NameConflict`] on a collision so callers that legitimately
     /// race (ADR-0070 capability boots, where the side-by-side
     /// extraction period puts legacy registrations and a new
     /// capability claim against the same mailbox during the
@@ -211,7 +214,7 @@ impl Registry {
         authority: &BootAuthority,
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
-    ) -> Result<MailboxId, NameConflict> {
+    ) -> Result<MailboxId, RegisterError> {
         self.insert(
             authority,
             name.into(),
@@ -240,7 +243,7 @@ impl Registry {
         id: MailboxId,
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
-    ) -> Result<MailboxId, NameConflict> {
+    ) -> Result<MailboxId, RegisterError> {
         self.insert_with_id(
             authority,
             id,
@@ -317,9 +320,10 @@ impl Registry {
     ) -> ErasedActorRef {
         let id = match self.insert(authority, name.into(), MailboxEntry::Inline(handler), RouteContract::empty()) {
             Ok(id) => id,
-            Err(NameConflict { name }) => {
+            Err(RegisterError::NameConflict(NameConflict { name })) => {
                 panic!("mailbox name already registered: {name}")
             }
+            Err(refused @ RegisterError::ParentUnknown { .. }) => panic!("{refused}"),
         };
         self.resolve_live(id).expect("a freshly registered inline route is live")
     }

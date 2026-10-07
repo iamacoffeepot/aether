@@ -3,10 +3,11 @@
 //!
 //! Each concern lives in a sibling: [`route`] the record itself,
 //! [`resolve`] the lookup walk, [`alias`] the inline-child addresses,
-//! [`birth`] the reservation a `Starting` route stands on, [`kinds`] the
-//! kind table, [`register`] the public claim surface, [`apply`] and
-//! [`staged`] the effect fold, [`commands`] the owner drain, and
-//! [`publish`] / [`inventory`] what a write publishes outward.
+//! [`birth`] the reservation a `Starting` route stands on,
+//! [`lineage_order`] where an actor stands in the tree by creation order,
+//! [`kinds`] the kind table, [`register`] the public claim surface,
+//! [`apply`] and [`staged`] the effect fold, [`commands`] the owner drain,
+//! and [`publish`] / [`inventory`] what a write publishes outward.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -40,6 +41,7 @@ mod commands;
 mod dependency;
 mod inventory;
 mod kinds;
+mod lineage_order;
 mod proven;
 mod publish;
 mod register;
@@ -48,6 +50,7 @@ mod route;
 mod staged;
 
 pub use birth::{CapturedDisposition, RouteContinuation};
+pub use lineage_order::LineageOrder;
 pub use proven::{AdoptRefused, ChildRefused, ResolveLiveError};
 pub use resolve::RouteResolution;
 pub use route::RouteEndpoint;
@@ -162,6 +165,10 @@ struct Inner {
     mailboxes: FxHashMap<MailboxId, RouteRecord>,
     pending_births: FxHashMap<MailboxId, PendingBirth>,
     next_activation_token: u64,
+    /// The last birth serial drawn (ADR-0248 §5). A batch stages its draws
+    /// and writes the counter back only when it commits, as it does
+    /// `next_activation_token`, so a refused batch draws nothing.
+    next_birth_serial: u64,
     /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
     /// (ADR-0030 Phase 2). Every descriptor registered with a given
     /// (name, schema) maps to the same id everywhere it's ever
@@ -210,6 +217,7 @@ impl Registry {
                 mailboxes: FxHashMap::default(),
                 pending_births: FxHashMap::default(),
                 next_activation_token: 0,
+                next_birth_serial: 0,
                 kinds: FxHashMap::default(),
                 name_index: HashMap::default(),
                 publications,

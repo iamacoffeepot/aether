@@ -40,13 +40,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ReplyMode, runtime};
+use aether_actor::{ErasedActorRef, ReplyMode, runtime};
 use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
 
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::mail::registry::LineageOrder;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, MainPassRecord, RenderError, encode_png, map_capture_rgba, prepare_capture_copy,
@@ -142,6 +143,7 @@ pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
+use self::overlay::OverlayFrame;
 use self::program::{DispatchResources, ProgramRegistry};
 use self::text::{FontParse, FontParseOutput, TextState};
 pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
@@ -177,7 +179,10 @@ pub struct RenderCapabilityState {
     /// The view source the renderer follows, absent until the first
     /// `aether.render.view_from` and again once that source closes.
     view_source: Option<FollowedView>,
-    overlay_frame: Vec<OverlayBatch>,
+    /// This frame's overlay batches, each filed under its sender. The frame
+    /// commit sorts them into `overlay_last_submitted` (ADR-0248 §4).
+    overlay_frame: OverlayFrame,
+    /// The last committed overlay list, in painter order.
     overlay_last_submitted: Vec<OverlayBatch>,
     material_frame: Vec<MaterialBatch>,
     material_last_submitted: Vec<MaterialBatch>,
@@ -754,10 +759,16 @@ impl RenderCapabilityState {
         Ok(generation)
     }
 
-    fn commit_scene(&mut self, replay_cache_when_idle: bool) {
+    /// Commit the frame's accumulators into the lists the record path reads.
+    /// The overlay batches are sorted here, once, by the lineage order of the
+    /// actor that sent each (ADR-0248 §4), read through `lineage_order`; the
+    /// sorted list then takes the same commit-or-replay outcome as the other
+    /// two, so a replayed frame keeps its order.
+    fn commit_scene(&mut self, replay_cache_when_idle: bool, lineage_order: impl Fn(ErasedActorRef) -> LineageOrder) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
-        commit_or_replay(&mut self.overlay_frame, &mut self.overlay_last_submitted, replay_cache_when_idle);
+        let mut overlay = self.overlay_frame.commit(lineage_order);
+        commit_or_replay(&mut overlay, &mut self.overlay_last_submitted, replay_cache_when_idle);
     }
 
     /// Drop only scene caches that may have been submitted ambiguously on
@@ -980,7 +991,7 @@ impl NativeActor for RenderCapability {
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
             view_source: None,
-            overlay_frame: Vec::new(),
+            overlay_frame: OverlayFrame::default(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
@@ -1342,13 +1353,14 @@ impl NativeActor for RenderCapability {
         state.programs.timings(&mail)
     }
 
-    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `overlay_frame`.
+    /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned
+    /// `overlay_frame`, filed under the mail's sender.
     #[handler::tell]
-    fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
+    fn on_draw_textured_quads(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
         }
-        state.overlay_frame.push(OverlayBatch::textured(mail));
+        state.overlay_frame.file(ctx.sender(), OverlayBatch::textured(mail));
     }
 
     /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
@@ -1356,23 +1368,24 @@ impl NativeActor for RenderCapability {
     /// so flat 2D content keeps its proportions on a non-square window
     /// without a camera publishing a projection for it.
     #[handler::tell]
-    fn on_draw_screen_triangles(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
+    fn on_draw_screen_triangles(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawScreenTriangles) {
         if state.warn_drop_if_unusable("draw_screen_triangles") {
             return;
         }
         let batch = OverlayBatch::screen_triangles(mail, &mut state.textures);
-        state.overlay_frame.push(batch);
+        state.overlay_frame.file(ctx.sender(), batch);
     }
 
     /// `DrawShapes` (ADR-0213), on the owned `overlay_frame` — rounded,
     /// stroked, shadowed boxes evaluated as a distance field on the overlay
-    /// pass, at the same painter position as the quad batches.
+    /// pass, ordered with the quad batches: by sender across actors, and by
+    /// send order inside one.
     #[handler::tell]
-    fn on_draw_shapes(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
+    fn on_draw_shapes(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
         }
-        state.overlay_frame.push(OverlayBatch::shapes(mail));
+        state.overlay_frame.file(ctx.sender(), OverlayBatch::shapes(mail));
     }
 
     /// Register a font from the bytes of a TrueType or OpenType file.
@@ -1428,16 +1441,18 @@ impl NativeActor for RenderCapability {
 
     /// `DrawText` (ADR-0248 §10), on the owned `overlay_frame`: lay the
     /// runs out, write any glyph not yet in the reserved atlas texture, and
-    /// push one textured batch at the painter position the mail arrived in.
+    /// file one textured batch under the mail's sender.
     ///
     /// # Agent
     /// Fire-and-forget; send it every frame the text should show. The
     /// batch is one overlay draw in your own send order: a `draw_shapes`
-    /// you send after it lies over it. A run with an unknown `font_id` or a
+    /// you send after it lies over it. Against another actor's draws it
+    /// sorts by lineage order: over your parent's and over those of an
+    /// actor created before you. A run with an unknown `font_id` or a
     /// size that is not finite and positive is dropped with a warning and
     /// the other runs draw. The first draw of a font shows.
     #[handler::tell]
-    fn on_draw_text(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawText) {
+    fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
         if state.warn_drop_if_unusable("draw_text") {
             return;
         }
@@ -1445,7 +1460,7 @@ impl NativeActor for RenderCapability {
         if quads.is_empty() {
             return;
         }
-        state.overlay_frame.push(OverlayBatch::glyphs(mail.clip, mail.space, quads));
+        state.overlay_frame.file(ctx.sender(), OverlayBatch::glyphs(mail.clip, mail.space, quads));
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
@@ -1564,7 +1579,7 @@ impl NativeActor for RenderCapability {
         if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
-        state.commit_scene(replay_cache_when_idle);
+        state.commit_scene(replay_cache_when_idle, |sender| ctx.lineage_order(sender));
         #[cfg(feature = "desktop")]
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
 
@@ -1679,6 +1694,7 @@ mod tests {
     use aether_harness_substrate_capture::test_helpers::require_wgpu_adapter;
     use aether_kinds::QuadSpace;
     use aether_math::Rgba;
+    use aether_substrate::Subname;
     use aether_substrate::chassis::builder::ReplyTarget;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::memory::{Charged, MemoryGauge};
@@ -1716,7 +1732,7 @@ mod tests {
             triangles_rendered: 0,
             camera_state: IDENTITY_VIEW_PROJ,
             view_source: None,
-            overlay_frame: Vec::new(),
+            overlay_frame: OverlayFrame::default(),
             overlay_last_submitted: Vec::new(),
             material_frame: Vec::new(),
             material_last_submitted: Vec::new(),
@@ -1897,7 +1913,7 @@ mod tests {
         assert_eq!(state.frame_vertices, [4, 5, 6], "fresh frame mail survives replacement");
         assert_eq!(state.pending_program_dispatches[0].program_id, 9, "fresh program dispatch survives replacement");
 
-        state.commit_scene(true);
+        state.commit_scene(true, |_sender| unreachable!("this frame filed no overlay batch, so no sender is read"));
         assert_eq!(state.last_submitted, [4, 5, 6], "the replacement frame commits fresh work, not the old cache");
     }
 
@@ -2127,9 +2143,97 @@ mod tests {
         );
     }
 
+    /// A peer that draws: it forwards each `DrawShapes` it is sent to the
+    /// renderer as mail of its own, so the renderer's turn reads this actor
+    /// as the stamped sender, as it reads any component that draws.
+    struct Drawer;
+
+    #[aether_actor::actor(instanced, root, depends(RenderCapability))]
+    impl NativeActor for Drawer {
+        const NAMESPACE: &'static str = "test.render.drawer";
+        type Config = ();
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[handler::tell]
+        fn on_draw_shapes(&mut self, ctx: &mut NativeCtx<'_>, mail: DrawShapes) {
+            let _ = self;
+            ctx.send::<RenderCapability>(&mail);
+        }
+    }
+
+    /// A shapes batch of `count` boxes: the count tells one batch from
+    /// another in the committed list.
+    fn shapes_batch(count: usize) -> DrawShapes {
+        let shape = Shape {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+            corner_radius: 0.0,
+            fill: Some(Rgba::WHITE),
+            stroke: None,
+            shadow: None,
+            texture: None,
+        };
+
+        DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape; count] }
+    }
+
+    fn shape_count(batch: &OverlayBatch) -> usize {
+        let OverlayBatch::Shapes { shapes, .. } = batch else {
+            panic!("the drawers send only shape batches");
+        };
+
+        shapes.len()
+    }
+
+    /// ADR-0248 §4. Three drawers are created in the reverse of their names'
+    /// order and draw in the reverse of the order they were created, one of
+    /// them twice with another's draw in between; a draw with no sender
+    /// arrives last. Every draw reaches the renderer as production mail and
+    /// its chain settles before the next is sent. The commit lays the
+    /// senderless batch first and the drawers' in creation order, and the
+    /// drawer that drew twice keeps its own order.
+    ///
+    /// It catches a commit that falls back to receipt order, a sort keyed on
+    /// path text, a sort that is not stable, and a handler that files its
+    /// batch under no sender.
+    #[test]
+    fn the_commit_orders_overlay_batches_by_sender_lineage_and_keeps_each_senders_own_order() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+        let [oldest, middle, newest] = ["c", "b", "a"].map(|key| {
+            let spawned = render.cap.chassis().spawn_actor_for_test::<Drawer>(Subname::Named(key), (), ()).finish();
+            spawned.expect("the drawer spawns")
+        });
+
+        render.cap.send_and_settle(newest, &shapes_batch(1), None);
+        render.cap.send_and_settle(middle, &shapes_batch(2), None);
+        render.cap.send_and_settle(oldest, &shapes_batch(3), None);
+        render.cap.send_and_settle(middle, &shapes_batch(4), None);
+        render.send(&shapes_batch(5));
+
+        assert_eq!(
+            render.read(|state| state.overlay_frame.filed().map(shape_count).collect::<Vec<_>>()),
+            [1, 2, 3, 4, 5],
+            "the batches arrived in the order they were sent",
+        );
+        render
+            .cap
+            .host_turn(|state, ctx| state.commit_scene(false, |sender| ctx.lineage_order(sender)))
+            .expect("the slot is live");
+        assert_eq!(
+            render.read(|state| state.overlay_last_submitted.iter().map(shape_count).collect::<Vec<_>>()),
+            [5, 3, 2, 4, 1],
+            "no sender first, then the drawers in creation order, each drawer's own batches in send order",
+        );
+    }
+
     /// ADR-0213. Catches `draw_shapes` accumulating anywhere but the one
-    /// overlay accumulator, which would break painter order against the
-    /// other overlay verbs, and a first solid send that leaves the reserved
+    /// overlay accumulator, which would break one sender's send order
+    /// against the other overlay verbs, and a first solid send that leaves the reserved
     /// white texture uninserted.
     #[test]
     fn draw_shapes_accumulates_in_painter_order() {
@@ -2155,8 +2259,8 @@ mod tests {
         render.send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes: vec![shape.clone()] });
 
         render.read(|state| {
-            assert_eq!(state.overlay_frame.len(), 2, "both batches share the one overlay accumulator");
-            let OverlayBatch::Shapes { shapes, .. } = &state.overlay_frame[1] else {
+            assert_eq!(state.overlay_frame.filed().len(), 2, "both batches share the one overlay accumulator");
+            let Some(OverlayBatch::Shapes { shapes, .. }) = state.overlay_frame.filed().last() else {
                 panic!("a shape submission must accumulate as a shape batch, after the triangles sent before it");
             };
             assert_eq!(shapes.as_slice(), &[shape]);

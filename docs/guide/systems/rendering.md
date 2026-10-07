@@ -157,11 +157,43 @@ field with the same meaning. Sprites and HUD images compose this surface, and
 so does the renderer's own text: a `draw_text` becomes one textured batch
 over the glyph atlas ([Text](text.md)).
 
+**Overlay order between actors is lineage order**
+([ADR-0248](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)).
+The four overlay verbs (`draw_textured_quads`, `draw_screen_triangles`,
+`draw_shapes`, `draw_text`) share one painter order, and it has two parts.
+Inside one actor it is submission order: the batches that actor sent, in the
+order it sent them. Between two actors it is the order of the actor tree: a
+child's draws lie over its parent's, and a later sibling's over an earlier
+one's, where "later" is creation order and the root actors count as siblings.
+The order the mail reaches the renderer in plays no part, so two actors that
+draw on the same `Tick` lie the same way on every frame. The renderer files
+each batch under the mail's sender and sorts once, when the frame commits,
+reading each sender's place with `NativeCtx::lineage_order`. Nothing states an
+order: there is no z-index, layer number, or reorder verb. An actor that must
+lie over another is created after it, or beneath a parent created after it;
+a parent that needs fixed places creates its layers first, as empty children
+in the order it wants, and spawns content beneath the right one.
+
+A draw that is not mail from an ordinary actor sorts by the same rule, with
+no special case:
+
+| Draws from | Sender the renderer reads | Where it lies |
+|---|---|---|
+| MCP `send_mail`, `send_mail_traced` | `aether.rpc.server` | At that root's place in boot order: under every boot-list component and every later load |
+| `capture_frame` pre-mails and after-mails | `aether.render` itself | At the render capability's place in boot order, under every component |
+| SubstrateHarness sends | none | Under everything |
+| A driver root push with no reply inbox | none | Under everything |
+
+So a debug shape mailed straight to the renderer from a session lies under
+every component's overlay draws. A session that wants a draw in front loads
+or spawns an actor that draws: a root created later is last.
+
 **Screen triangles are the overlay's free-form primitive.**
 `draw_screen_triangles` takes triangles whose three corners are pixels — one
 linear RGBA per corner interpolated across the face — and records them in the
-same overlay pass, through the same pipeline, in submission order with the quad
-batches. Either winding draws; the batch carries the same optional `clip`
+same overlay pass, through the same pipeline, in the one painter order they
+share with the quad batches: submission order inside one actor, lineage order
+between actors. Either winding draws; the batch carries the same optional `clip`
 scissor and the same `space`, so a gauge or a graph edge can hang off a
 world-space anchor exactly as a label does. It exists because 2D content built from
 rotated geometry had no aspect-correct path: a quad is `{x, y, width, height}`

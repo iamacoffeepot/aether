@@ -510,6 +510,9 @@ mod tests {
         let name = "camera";
         let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
         let fixture = InventoryFixture::boot();
+        for root in [ADDRESS_TEST_ROOT, AMBIGUOUS_ADDRESS_TEST_ROOT] {
+            registered_ref(&fixture.registry, root, noop_handler());
+        }
         registered_ref(&fixture.registry, &canonical, noop_handler());
         // Both candidates hold `camera` live, so the hole stays ambiguous
         // rather than filling with the one live holder (ADR-0166 §5).

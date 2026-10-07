@@ -35,8 +35,9 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    AddressResolutionError, CapturedDisposition, DispatchParts, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
-    RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    AddressResolutionError, CapturedDisposition, DispatchParts, LineageOrder, MailDispatch, OwnedDispatch,
+    ParkAdmission, Registry, RegistryQueueMetrics, RegistrySubscription, ResolvedAddress, RouteContinuation,
+    RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::memory::{self, BlobStoreMemory, MemoryLedger, MemoryReport, OwnerMemory};
@@ -439,6 +440,28 @@ impl Mailer {
         self.registry
             .actor_path(reference)
             .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
+    }
+
+    /// Where the actor `reference` proves stands in the actor tree by creation
+    /// order, as [`Registry::lineage_order`] reads it. The crate-private path
+    /// behind
+    /// [`NativeCtx::lineage_order`](crate::actor::native::ctx::NativeCtx::lineage_order).
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference` or for one of its
+    /// ancestors. The registry mints a reference only for a route that holds
+    /// a record, refuses a birth whose parent holds none, and keeps every
+    /// record through `Dropped`. A record leaves the table only when a
+    /// `Starting` reservation is cancelled, or a claim is withdrawn before
+    /// any actor could have observed it; neither follows a mint that
+    /// survives, and the births a starting actor staged beneath itself are
+    /// discarded with it. So a missing record is a broken invariant
+    /// (ADR-0063).
+    pub(crate) fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.registry.lineage_order(reference).expect(
+            "a minted reference names a route whose record, and every ancestor's, the registry keeps for the session",
+        )
     }
 
     /// The reference for a host-stamped position that holds a route record,

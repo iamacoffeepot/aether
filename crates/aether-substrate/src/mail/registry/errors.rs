@@ -46,6 +46,30 @@ impl fmt::Display for NameConflict {
 
 impl error::Error for NameConflict {}
 
+/// Why a direct mailbox registration (`try_register_inbox`,
+/// `try_register_inbox_with_id`) was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterError {
+    /// The name is already registered, or is one no route may take.
+    NameConflict(NameConflict),
+    /// The name is nested beneath a parent the registry holds no record for
+    /// (ADR-0248 §5). `name` is the refused registration's own.
+    ParentUnknown { name: String },
+}
+
+impl fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NameConflict(conflict) => conflict.fmt(f),
+            Self::ParentUnknown { name } => {
+                write!(f, "mailbox name {name:?} is nested beneath a parent the registry holds no record for")
+            }
+        }
+    }
+}
+
+impl error::Error for RegisterError {}
+
 /// Reasons `Registry::drop_mailbox` or `Registry::withdraw_claim` can
 /// refuse. Distinct from the post-drop dispatch log, which the scheduler
 /// handles independently. `AlreadyDropped` is also a withdrawal's refusal

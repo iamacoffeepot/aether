@@ -24,15 +24,39 @@ pub fn canonical_mailbox_id(name: &str) -> MailboxId {
 /// [`canonical_mailbox_id`] for the same name.
 ///
 /// Crate-private: the registry's name lookup is the one place a written
-/// address becomes a position (ADR-0230 §3), and this is the fold it keys with.
+/// address becomes a position (ADR-0230 §3), and this is the fold it keys
+/// with. It is the last step of [`lineage_prefixes`], so a path and its
+/// ancestors are folded by one piece of code.
 pub fn lineage_mailbox_id(path: &str) -> MailboxId {
-    let mut nodes = path.split('/').map(|segment| match segment.split_once(':') {
-        Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
-        None => ActorId::singleton(segment),
-    });
-    // `split` yields at least one segment, even for an empty path.
-    let root = nodes.next().map_or(0, |root| root.0);
-    MailboxId(with_tag(Tag::Mailbox, nodes.fold(root, fold_lineage)))
+    // `split` yields at least one segment, even for an empty path, so the
+    // fallback is never taken.
+    lineage_prefixes(path).last().map_or(MailboxId(with_tag(Tag::Mailbox, 0)), |(_, id)| id)
+}
+
+/// Every prefix of a `/`-rendered canonical lineage path that ends on a
+/// segment boundary, root first, each with the position it names: the path's
+/// ancestors in order, then the path itself (ADR-0099 §4).
+///
+/// The fold carries the untagged hash from one segment to the next and tags
+/// a copy for each prefix, so the id of a prefix is the id that prefix has as
+/// a path of its own, at any depth.
+///
+/// Consumers: [`lineage_mailbox_id`], the registry's birth check that a
+/// nested name's parent holds a record, and `Registry::lineage_order`, which
+/// reads one birth serial per prefix (ADR-0248 §5).
+pub(super) fn lineage_prefixes(path: &str) -> impl Iterator<Item = (&str, MailboxId)> {
+    path.split('/').scan((0, None), move |(end, carry), segment| {
+        let node = match segment.split_once(':') {
+            Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
+            None => ActorId::singleton(segment),
+        };
+        let folded = carry.map_or(node.0, |parent| fold_lineage(parent, node));
+        // A separator precedes every segment but the first.
+        *end += segment.len() + usize::from(carry.is_some());
+        *carry = Some(folded);
+
+        Some((&path[..*end], MailboxId(with_tag(Tag::Mailbox, folded))))
+    })
 }
 
 /// Categorise a native mailbox name for the inventory snapshot (issue 730).

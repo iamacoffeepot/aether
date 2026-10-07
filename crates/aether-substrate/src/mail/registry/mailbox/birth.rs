@@ -239,10 +239,12 @@ impl Registry {
                 panic!("prepared actor activation must install an inbox endpoint")
             }
         };
-        let canonical_name =
-            inner.mailboxes.get(&id).expect("Starting route exists while promoting").canonical_name.clone();
-        let record =
-            RouteRecord { canonical_name, lifecycle: RouteLifecycle::Live { endpoint, contract: installed.contract } };
+        let reserved = inner.mailboxes.get(&id).expect("Starting route exists while promoting");
+        let record = RouteRecord {
+            canonical_name: reserved.canonical_name.clone(),
+            born: reserved.born,
+            lifecycle: RouteLifecycle::Live { endpoint, contract: installed.contract },
+        };
         inner.mailboxes.insert(id, record.clone());
         publication.route_updates.push(Update::Insert(id, record));
         publication.inventory_dirty = true;
