@@ -7,7 +7,7 @@
 //! the guest's `init` and handler readings are the engine's.
 
 use aether_actor::{ActorInitError, Instant, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{ClockElapsed, ClockElapsedReport, ClockMark};
+use aether_test_fixtures_kinds::{ClockElapsed, ClockElapsedResult, ClockMark};
 
 pub struct ClockProbe {
     /// The reading taken at `init` and again at each [`ClockMark`].
@@ -28,7 +28,7 @@ impl WasmActor for ClockProbe {
     }
 
     #[handler::request]
-    fn on_elapsed(&mut self, ctx: &mut WasmCtx<'_>, _ask: ClockElapsed) -> ClockElapsedReport {
-        ClockElapsedReport::of(ctx.now().since(self.marked))
+    fn on_elapsed(&mut self, ctx: &mut WasmCtx<'_>, _ask: ClockElapsed) -> ClockElapsedResult {
+        ClockElapsedResult::of(ctx.now().since(self.marked))
     }
 }

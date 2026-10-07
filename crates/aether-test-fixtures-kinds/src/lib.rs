@@ -1194,13 +1194,13 @@ pub struct ClockMark;
 pub struct ClockElapsed;
 
 /// Issue 7627: the reply to [`ClockElapsed`].
-#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed_report", copy, eq)]
-pub struct ClockElapsedReport {
+#[aether_data::kind(name = "aether.test_fixtures.clock.elapsed_result", copy, eq)]
+pub struct ClockElapsedResult {
     /// The duration since the last mark, in nanoseconds.
     pub elapsed_nanos: u64,
 }
 
-impl ClockElapsedReport {
+impl ClockElapsedResult {
     /// The report for a probe whose last mark was `elapsed` ago.
     #[must_use]
     pub fn of(elapsed: Duration) -> Self {

@@ -23,7 +23,7 @@ use aether_kinds::LoadComponent;
 use aether_substrate::BootError;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_test_fixtures_bundle::ClockProbe;
-use aether_test_fixtures_kinds::{ClockElapsed, ClockElapsedReport, ClockMark};
+use aether_test_fixtures_kinds::{ClockElapsed, ClockElapsedResult, ClockMark};
 
 /// How far each scenario steps the clock before its probe is built, so the
 /// probe's `init` reading is not the clock's zero.
@@ -50,8 +50,8 @@ impl NativeActor for NativeClockProbe {
     }
 
     #[handler::request]
-    fn on_elapsed(&mut self, ctx: &mut NativeCtx<'_>, _ask: ClockElapsed) -> ClockElapsedReport {
-        ClockElapsedReport::of(ctx.now().since(self.marked))
+    fn on_elapsed(&mut self, ctx: &mut NativeCtx<'_>, _ask: ClockElapsed) -> ClockElapsedResult {
+        ClockElapsedResult::of(ctx.now().since(self.marked))
     }
 }
 
@@ -60,7 +60,7 @@ fn elapsed_nanos<R>(harness: &mut SubstrateHarness, probe: ActorRef<R>) -> u64
 where
     R: HandlesKind<ClockElapsed> + 'static,
 {
-    let report: ClockElapsedReport = harness
+    let report: ClockElapsedResult = harness
         .execute(vec![("elapsed", HarnessOp::send_and_await_reply(&probe, &ClockElapsed))])
         .expect("the probe answers")
         .reply("elapsed")
