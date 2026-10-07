@@ -68,6 +68,14 @@ impl fmt::Display for HttpMethod {
     }
 }
 
+/// Method filter on a route key (ADR-0130): `Any` matches every method,
+/// `Only` matches one method.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MethodFilter {
+    Any,
+    Only(HttpMethod),
+}
+
 /// One HTTP header on a `Fetch` request or `FetchResult`
 /// response. Expressed as a named-field struct because
 /// `aether_data::Schema` has no blanket impl for tuples — if
@@ -446,6 +454,8 @@ pub struct HttpRequestCredit {
 /// correlation id.
 #[aether_data::kind(name = "aether.http.server.websocket.accept")]
 pub struct WebSocketAccept {
+    /// No negotiated subprotocol when `None` — fixed at construction;
+    /// wire shape pinned by ADR-0129.
     pub subprotocol: Option<String>,
     pub headers: Vec<HttpHeader>,
 }
@@ -501,7 +511,7 @@ pub struct WebSocketClose {
 /// actor at `handler`. `prefix` is segment-boundary matched (`/api` matches
 /// `/api` and `/api/…`, never `/apiary`; `/` is the catch-all; a
 /// trailing slash is normalized off at registration). `method` filters
-/// the route to one HTTP method; `None` accepts every method. Among
+/// the route to one HTTP method; `MethodFilter::Any` accepts every method. Among
 /// matching routes the longest prefix wins, and a method-specific
 /// route beats a method-agnostic one at equal prefix. A `(prefix,
 /// method)` key already claimed by a *different* handler is answered
@@ -525,7 +535,7 @@ pub struct WebSocketClose {
 #[aether_data::kind(name = "aether.http.server.register_route", no_serde)]
 pub struct RegisterRoute {
     pub prefix: String,
-    pub method: Option<HttpMethod>,
+    pub method: MethodFilter,
     pub handler: ProtocolPath<HttpRouter>,
     pub shared: bool,
 }
@@ -549,7 +559,7 @@ pub struct RegisterRoute {
 #[aether_data::kind(name = "aether.http.server.register_route_self")]
 pub struct RegisterRouteSelf {
     pub prefix: String,
-    pub method: Option<HttpMethod>,
+    pub method: MethodFilter,
     pub shared: bool,
 }
 
@@ -570,7 +580,7 @@ pub struct RegisterRouteSelf {
 #[aether_data::kind(name = "aether.http.server.unregister_route")]
 pub struct UnregisterRoute {
     pub prefix: String,
-    pub method: Option<HttpMethod>,
+    pub method: MethodFilter,
     pub handler: aether_data::ErasedActorPath,
 }
 
@@ -581,7 +591,7 @@ pub struct UnregisterRoute {
 #[aether_data::kind(name = "aether.http.server.unregister_route_self")]
 pub struct UnregisterRouteSelf {
     pub prefix: String,
-    pub method: Option<HttpMethod>,
+    pub method: MethodFilter,
 }
 
 /// Reply to the route registration / unregistration kinds (ADR-0130).

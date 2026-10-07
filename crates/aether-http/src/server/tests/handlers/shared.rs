@@ -7,7 +7,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
-use crate::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use crate::kinds::{HttpRouterResult, HttpServerRequest, HttpServerResponse, MethodFilter, RegisterRouteSelf};
 use crate::server::HttpServerCapability;
 
 /// A routed handler whose `wire` registers each claim `shared: true`
@@ -64,14 +64,14 @@ shared_routed_handler!(
     SharedAlphaHandlerState,
     "aether.http.test_route_shared_alpha",
     b"alpha",
-    [(None, "/pool")]
+    [(MethodFilter::Any, "/pool")]
 );
 shared_routed_handler!(
     SharedBetaHandler,
     SharedBetaHandlerState,
     "aether.http.test_route_shared_beta",
     b"beta",
-    [(None, "/pool")]
+    [(MethodFilter::Any, "/pool")]
 );
 
 /// A `#[http::router(shared)]` handler (issue 2625) — the typed

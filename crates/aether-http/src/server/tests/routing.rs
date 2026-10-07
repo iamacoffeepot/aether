@@ -12,7 +12,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kinds::{HttpRouter, RegisterRoute, UnregisterRoute};
+use crate::kinds::{HttpRouter, MethodFilter, RegisterRoute, UnregisterRoute};
 use crate::server::HttpServerCapability;
 
 use super::handlers::{
@@ -216,7 +216,7 @@ fn route_registered_mid_connection_serves_next_request() {
     let handler = ActorPath::<WiredRouteHandler>::root();
     let mail = RegisterRoute {
         prefix: "/late".to_string(),
-        method: None,
+        method: MethodFilter::Any,
         handler: handler.narrow::<HttpRouter>(),
         shared: false,
     };
@@ -231,7 +231,11 @@ fn route_registered_mid_connection_serves_next_request() {
 
     // Release the same key by the holder's plain path: the route drops and
     // /late falls back to the echo catch-all, which stamps the path header.
-    let mail = UnregisterRoute { prefix: "/late".to_string(), method: None, handler: handler.as_erased().clone() };
+    let mail = UnregisterRoute {
+        prefix: "/late".to_string(),
+        method: MethodFilter::Any,
+        handler: handler.as_erased().clone(),
+    };
     let (_, released) = chassis.send_tracked(chassis.actor_ref::<HttpServerCapability>(), &mail, None);
     released.recv_timeout(Duration::from_secs(10)).expect("the route release settles");
 

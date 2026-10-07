@@ -441,14 +441,24 @@ impl HttpShardState {
         accept: &WebSocketAccept,
     ) {
         self.in_flight.remove(&correlation);
-        let Some(key) = self.connections.get_mut(&conn_id).and_then(|conn| conn.ws_pending_key.take()) else {
+        let Some(conn) = self.connections.get_mut(&conn_id) else {
+            return;
+        };
+        let ConnPhase::UpgradePending(pending_key) = &mut conn.phase else {
             // A `WebSocketAccept` with no stashed key — the handler replied it
             // to a non-upgrade request. Cap-level error; the parked reader
             // writes the canned status and exits (ADR-0135 §3).
             self.respond_and_finish(conn_id, render_status_response(500, "websocket accept without upgrade"), false);
             return;
         };
-        let RouteMember { credit: Some(credit), websocket: Some(handler), .. } = member else {
+        let key = mem::take(pending_key);
+        conn.phase = ConnPhase::Idle;
+        let RouteMember {
+            credit: StreamCreditSupport::Supported(credit),
+            websocket: WebSocketSupport::Supported(handler),
+            ..
+        } = member
+        else {
             // A holder that cannot take credit or its messages would hold an
             // upgraded socket nothing is delivered to, so the upgrade is
             // refused before the `101` is written.
@@ -515,9 +525,9 @@ impl HttpShardState {
             stream_id,
             StreamState {
                 conn_id,
-                handler: Some(credit),
+                handler: StreamCreditSupport::Supported(credit),
                 tx,
-                writer_thread: Some(writer_thread),
+                writer_thread,
                 credit_outstanding: window,
                 ended: false,
                 pending_end: false,
@@ -529,7 +539,7 @@ impl HttpShardState {
             },
         );
         if let Some(conn) = self.connections.get_mut(&conn_id) {
-            conn.websocket = Some(WsConn { handler, stream_id });
+            conn.phase = ConnPhase::WebSocket(WsConn { handler, stream_id });
         }
         // Grant the initial outbound window; the handler learns its `stream_id`
         // from this first credit mail (ADR-0128 / ADR-0129 §3).
@@ -549,7 +559,10 @@ impl HttpShardState {
     /// (ADR-0132), or `None` if `conn_id` names no such connection — the
     /// shared lookup behind every ws dispatch/close/send site.
     fn ws_target(&self, conn_id: ConnId) -> Option<(ProtocolRef<WebSocketRouter>, u64)> {
-        self.connections.get(&conn_id).and_then(|conn| conn.websocket.as_ref()).map(|ws| (ws.handler, ws.stream_id))
+        self.connections.get(&conn_id).and_then(|conn| match &conn.phase {
+            ConnPhase::WebSocket(ws) => Some((ws.handler, ws.stream_id)),
+            ConnPhase::Idle | ConnPhase::RequestStreaming(_) | ConnPhase::UpgradePending(_) => None,
+        })
     }
 
     /// Deliver one reassembled inbound websocket message to the handler

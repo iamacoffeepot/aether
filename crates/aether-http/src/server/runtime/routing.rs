@@ -17,12 +17,12 @@ pub struct RouteTable {
     pub held: HashMap<ErasedActorRef, HashSet<RouteKey>>,
 }
 
-/// A route's identity: a normalized path prefix and an optional method
+/// A route's identity: a normalized path prefix and a method
 /// filter. At most one route stands under each key.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RouteKey {
     pub prefix: String,
-    pub method: Option<HttpMethod>,
+    pub method: MethodFilter,
 }
 
 /// One registered route (ADR-0130 / ADR-0136): requests whose path
@@ -45,29 +45,69 @@ pub struct Route {
 
 /// One route holder with the casts the server sends its data phase through
 /// (ADR-0231 §4). `router` is the proof every holder carries; the other three
-/// are the holder cast to each data-phase protocol when it registered, `None`
-/// where its rows do not cover that protocol. A route's published contract
+/// name each data-phase protocol's support, `Unsupported` where its rows do
+/// not cover that protocol. A route's published contract
 /// only grows (ADR-0231 §5), so a cast that held at registration holds for the
 /// route's life, and no request reads the registry to decide how to stream.
 /// The member's identity is `router`'s erased reference.
 #[derive(Clone, Copy)]
 pub struct RouteMember {
     pub router: ProtocolRef<HttpRouter>,
-    /// Present when the holder takes response-stream and websocket credit.
-    pub credit: Option<ProtocolRef<StreamCreditRouter>>,
-    /// Present when the holder takes a streamed upload; the reader streams a
+    /// Whether the holder takes response-stream and websocket credit.
+    pub credit: StreamCreditSupport,
+    /// Whether the holder takes a streamed upload; the reader streams a
     /// request body to it rather than buffering.
-    pub request_stream: Option<ProtocolRef<RequestStreamRouter>>,
-    /// Present when the holder takes an upgraded websocket's messages.
-    pub websocket: Option<ProtocolRef<WebSocketRouter>>,
+    pub request_stream: RequestStreamSupport,
+    /// Whether the holder takes an upgraded websocket's messages.
+    pub websocket: WebSocketSupport,
 }
+
+/// Whether a route holder covers the data-phase protocol `P`, decided once
+/// when it registers: `Supported` carries the proven reference the server
+/// sends that phase through, `Unsupported` says its rows do not cover `P`.
+pub enum ProtocolSupport<P> {
+    Supported(ProtocolRef<P>),
+    Unsupported,
+}
+
+impl<P> ProtocolSupport<P> {
+    /// The support a registration-time cast proves.
+    fn from_cast(cast: Option<ProtocolRef<P>>) -> Self {
+        cast.map_or(Self::Unsupported, Self::Supported)
+    }
+}
+
+impl<P> Clone for ProtocolSupport<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for ProtocolSupport<P> {}
+
+/// Response-stream and websocket credit (`StreamCreditRouter`): credit
+/// grants address the reference, and a holder without it is answered `502`.
+pub type StreamCreditSupport = ProtocolSupport<StreamCreditRouter>;
+
+/// A streamed upload (`RequestStreamRouter`): the reader streams to the
+/// reference, and a holder without it gets the buffered path.
+pub type RequestStreamSupport = ProtocolSupport<RequestStreamRouter>;
+
+/// An upgraded websocket (`WebSocketRouter`): inbound messages dispatch to
+/// the reference, and a holder without it is answered `502`.
+pub type WebSocketSupport = ProtocolSupport<WebSocketRouter>;
 
 impl RouteMember {
     /// Cast `router` to each data-phase protocol, three registry reads paid
     /// once per registration.
     pub fn cast<A, S, M: ReplyMode>(ctx: &NativeCtx<'_, A, S, M>, router: ProtocolRef<HttpRouter>) -> Self {
         let identity = router.erase();
-        Self { router, credit: ctx.cast(identity), request_stream: ctx.cast(identity), websocket: ctx.cast(identity) }
+        Self {
+            router,
+            credit: ProtocolSupport::from_cast(ctx.cast(identity)),
+            request_stream: ProtocolSupport::from_cast(ctx.cast(identity)),
+            websocket: ProtocolSupport::from_cast(ctx.cast(identity)),
+        }
     }
 }
 
@@ -132,7 +172,7 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 pub fn register_route(
     routes: &SharedRoutes,
     prefix: &str,
-    method: Option<HttpMethod>,
+    method: MethodFilter,
     holder: RouteMember,
     shared: bool,
 ) -> RegisterRouteResult {
@@ -155,7 +195,7 @@ pub fn register_route(
 pub fn unregister_route(
     routes: &SharedRoutes,
     prefix: &str,
-    method: Option<HttpMethod>,
+    method: MethodFilter,
     holder: ErasedActorRef,
 ) -> RegisterRouteResult {
     match normalize_prefix(prefix) {

@@ -33,7 +33,7 @@ use aether_data::ErasedActorPath;
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
-    HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
+    HttpResponseStreamOpen, HttpRouterResult, HttpServerRequest, HttpServerResponse, HttpStreamCredit, MethodFilter,
     RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_http::{ResponseSink, ResponseStream, WebSocketSink, WebSocketStream};
@@ -45,7 +45,11 @@ use aether_kinds::DropComponent;
 /// catch-all fixture in this module; the routed fixtures register their
 /// specific prefixes instead.
 fn bind_catch_all<A: DependsOn<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
-    ctx.send::<HttpServerCapability>(&RegisterRouteSelf { prefix: "/".to_string(), method: None, shared: false });
+    ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
+        prefix: "/".to_string(),
+        method: MethodFilter::Any,
+        shared: false,
+    });
 }
 
 pub struct HttpHandler;
@@ -421,7 +425,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/routed-stream".to_string(),
-            method: None,
+            method: MethodFilter::Any,
             shared: false,
         });
         Ok(())

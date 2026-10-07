@@ -268,7 +268,7 @@ struct Routed {
     /// The retained user method's name (also the glue's call target).
     fn_name: Ident,
     /// The HTTP-method identifier (`Get` / `any` / …) — the grouping key's
-    /// method half and the source of the `Option<HttpMethod>` filter token.
+    /// method half and the source of the `MethodFilter` token.
     method_ident: Ident,
     /// The parsed path template.
     template: Template,
@@ -305,7 +305,7 @@ struct Group<'a> {
     key: (String, String),
     /// The static head registered with the cap.
     static_head: String,
-    /// The `Option<HttpMethod>` filter token for the registration, the
+    /// The `MethodFilter` token for the registration, the
     /// handler's group selection, and the `Route` handed to the route.
     method_expr: TokenStream2,
     /// The group's routes, sorted most-literal-first.
@@ -454,16 +454,16 @@ fn attr_is_route(attr: &Attribute) -> bool {
 }
 
 /// Map a `#[http::route]` method identifier to its
-/// `Option<HttpMethod>` filter token: `any` → `None`, a variant name →
-/// `Some(HttpMethod::Variant)`.
+/// `MethodFilter` token: `any` → `MethodFilter::Any`, a variant name →
+/// `MethodFilter::Only(HttpMethod::Variant)`.
 fn method_filter_token(method: &Ident) -> syn::Result<TokenStream2> {
     if method == "any" {
-        return Ok(quote! { ::core::option::Option::None });
+        return Ok(quote! { ::aether_http::kinds::MethodFilter::Any });
     }
     let known = ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options"];
     if known.iter().any(|name| method == name) {
         return Ok(quote! {
-            ::core::option::Option::Some(::aether_http::kinds::HttpMethod::#method)
+            ::aether_http::kinds::MethodFilter::Only(::aether_http::kinds::HttpMethod::#method)
         });
     }
     Err(syn::Error::new(
@@ -650,7 +650,7 @@ fn emit_router_glue(groups: &[Group<'_>], first: &Routed) -> TokenStream2 {
             let __aether_path = __aether_request.path.clone();
             let __aether_segs: ::std::vec::Vec<&str> =
                 __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
-            let __aether_claims: [(&str, ::core::option::Option<::aether_http::kinds::HttpMethod>); #claim_count] =
+            let __aether_claims: [(&str, ::aether_http::kinds::MethodFilter); #claim_count] =
                 [#(#claims),*];
             let __aether_group = __aether_claims
                 .iter()
