@@ -18,16 +18,16 @@
 //! - **Entries, by the hash of the whole module file.** That hash is the
 //!   module's identity (ADR-0241 §2): its publication name when it is
 //!   content-addressed, its boot-once key, and what a load reports. An entry
-//!   holds the file's parsed manifest, asset catalog included, so two files
-//!   are two entries whatever they share.
-//! - **Compiled code, by the hash of the file's code**: the file with every
-//!   asset section removed ([`code`]). The compiler never reads
-//!   an asset section, so asset bundles packed from one build have one code
-//!   and share one compile, where keying the compile by the file would run
-//!   and keep one per bundle (iamacoffeepot/aether#7392). The bytes compiled
-//!   are the bytes hashed, so a hit never answers code compiled from other
-//!   input. A file with no asset section is its own code, and its code hash
-//!   is its file hash.
+//!   holds the file's manifest, the code-shared part plus its own asset
+//!   catalog, so two files are two entries whatever they share.
+//! - **Compiled code and its code-derived manifest, by the hash of the file's
+//!   code**: the file with every asset section removed ([`code`]). The
+//!   compiler never reads an asset section, so asset bundles packed from one
+//!   build have one code and share one compile and one kind/group parse,
+//!   where keying the compile by the file would run and keep one per bundle
+//!   (iamacoffeepot/aether#7392). The bytes compiled are the bytes hashed,
+//!   so a hit never answers code compiled from other input. A file with no
+//!   asset section is its own code, and its code hash is its file hash.
 //!
 //! ADR-0240 D5 and ADR-0241 §2: nothing is evicted by count or capacity. An
 //! entry is kept alive for as long as any holder (a trampoline, an in-flight
@@ -44,7 +44,7 @@ use aether_data::{Blob, BlobHash};
 use rustc_hash::FxHashMap;
 use wasmtime::Engine;
 
-use super::manifest::ModuleManifest;
+use super::manifest::{CodeManifest, ModuleManifest};
 use super::{Module, ModuleEntry, code};
 use crate::actor::native::BlobCheckIn;
 
@@ -62,16 +62,21 @@ struct Shared {
     compiled: LiveByHash<CompiledCode>,
 }
 
-/// One compile: the `wasmtime::Module` made from one code, shared by every
-/// module whose file carries that code. Built only by
-/// [`ModuleCache::check_in`].
+/// One code's shared value: the `wasmtime::Module` made from one code plus the
+/// code-derived manifest parsed from it, shared by every module whose file
+/// carries that code. Built only by [`ModuleCache::check_in`].
 pub(super) struct CompiledCode {
     module: wasmtime::Module,
+    manifest: Arc<CodeManifest>,
 }
 
 impl CompiledCode {
     pub(super) fn module(&self) -> &wasmtime::Module {
         &self.module
+    }
+
+    pub(super) fn manifest(&self) -> &Arc<CodeManifest> {
+        &self.manifest
     }
 }
 
@@ -85,12 +90,14 @@ impl ModuleCache {
     /// The module for `code`'s bytes.
     ///
     /// Returns the live module for the bytes' hash when one exists. Otherwise
-    /// it parses the manifest first, so a section it cannot read refuses
-    /// before any compile time is spent, then takes the compile of the
-    /// bytes' code, compiling only when no live module shares it. `code` is
-    /// read where it already sits in the store, or checked in once when it
-    /// is `Owned`, and is never kept, nor is any asset section's payload:
-    /// the bytes leave the store when the caller drops `code` (ADR-0163 §3).
+    /// it takes the code's shared value, compiling and parsing it only when
+    /// no live module shares it, so a section the shared part cannot read
+    /// refuses before any compile time is spent, and then indexes this file's
+    /// own assets, so a file the asset reader cannot read fails even when its
+    /// code is already shared. `code` is read where it already sits in the
+    /// store, or checked in once when it is `Owned`, and is never kept, nor
+    /// is any asset section's payload: the bytes leave the store when the
+    /// caller drops `code` (ADR-0163 §3).
     ///
     /// # Errors
     ///
@@ -104,32 +111,36 @@ impl ModuleCache {
             return Ok(Module { entry });
         }
 
-        let manifest = ModuleManifest::parse(stored.bytes())?;
-        let code = self.compiled_code(hash, stored.bytes())?;
-        let fresh = Arc::new(ModuleEntry { hash, code, manifest });
+        let file = stored.bytes();
+        let bytes = code::code_bytes(file)?;
+        // A file with no asset section is its own code, so the hash already
+        // taken of the file is the hash of its code.
+        let code_hash = match &bytes {
+            Cow::Borrowed(_) => hash,
+            Cow::Owned(stripped) => BlobHash::from_bytes(*blake3::hash(stripped).as_bytes()),
+        };
+
+        let compiled = self.compiled_code(code_hash, &bytes)?;
+        let assets = ModuleManifest::asset_index(file)?;
+        let manifest = ModuleManifest::from_parts(Arc::clone(compiled.manifest()), assets);
+        let fresh = Arc::new(ModuleEntry { hash, code: compiled, manifest });
 
         Ok(Module { entry: self.shared.entries.keep(hash, fresh) })
     }
 
-    /// The compile of `file`'s code: the live one when a module over the
-    /// same code is held, otherwise a fresh compile of exactly the bytes its
-    /// key hashes.
-    fn compiled_code(&self, file_hash: BlobHash, file: &[u8]) -> Result<Arc<CompiledCode>, String> {
-        let bytes = code::code_bytes(file)?;
-        // A file with no asset section is its own code, so the hash already
-        // taken of the file is the hash of its code.
-        let hash = match &bytes {
-            Cow::Borrowed(_) => file_hash,
-            Cow::Owned(stripped) => BlobHash::from_bytes(*blake3::hash(stripped).as_bytes()),
-        };
-
+    /// The shared value of the code hashed as `hash`: the live one when a
+    /// module over the same code is held, otherwise a fresh parse and compile
+    /// of exactly the bytes that hash names, the parse first.
+    fn compiled_code(&self, hash: BlobHash, code: &[u8]) -> Result<Arc<CompiledCode>, String> {
         if let Some(compiled) = self.shared.compiled.live(hash) {
             return Ok(compiled);
         }
 
-        let module = wasmtime::Module::new(&self.shared.engine, &bytes)
+        let manifest = Arc::new(CodeManifest::parse(code)?);
+        let module = wasmtime::Module::new(&self.shared.engine, code)
             .map_err(|error| format!("invalid wasm module: {error}"))?;
-        Ok(self.shared.compiled.keep(hash, Arc::new(CompiledCode { module })))
+
+        Ok(self.shared.compiled.keep(hash, Arc::new(CompiledCode { module, manifest })))
     }
 
     #[cfg(test)]

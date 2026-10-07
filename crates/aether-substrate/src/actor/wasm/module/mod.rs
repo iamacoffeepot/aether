@@ -4,13 +4,13 @@
 //! Checking code in through the engine's one [`ModuleCache`] derives
 //! everything the engine needs from the bytes once:
 //!
-//! - the compiled `wasmtime::Module`, once per code: the bytes without their
-//!   asset sections, so modules that differ only in their assets share one
-//!   compile;
-//! - the [`ModuleManifest`], every custom section the host reads (kinds,
-//!   exported and private actor groups, lineage, boot, namespace, the
-//!   no-default and content-addressed markers, and the asset catalog with
-//!   each asset's byte range), parsed once per content hash.
+//! - the compiled `wasmtime::Module` and the code-derived manifest, once per
+//!   code: the bytes without their asset sections, so modules that differ
+//!   only in their assets share one compile and one parse of the kinds,
+//!   exported and private actor groups, lineage, boot, namespace, and the
+//!   no-default and content-addressed markers;
+//! - the [`ModuleManifest`]'s per-file asset index, each asset's catalog entry
+//!   with its byte range, parsed once per file hash.
 //!
 //! The wasm bytes are used to compile and to parse, and are then let go:
 //! nothing here holds the code blob or any asset's payload, so the bytes
@@ -57,13 +57,18 @@ pub struct Module {
 }
 
 /// What a module's bytes are checked in as. Built only by
-/// [`ModuleCache::check_in`].
+/// [`ModuleCache::check_in`]: one entry per file hash, over one shared
+/// compile and code-derived manifest per code hash plus the file's own asset
+/// index.
 struct ModuleEntry {
     /// The hash of the whole file: the module's identity.
     hash: BlobHash,
-    /// The compile of the file's code, shared with every module whose file
-    /// differs from this one only in its asset sections.
+    /// The compile and code-derived manifest of the file's code, shared with
+    /// every module whose file differs from this one only in its asset
+    /// sections.
     code: Arc<cache::CompiledCode>,
+    /// The file's manifest: the shared code part cloned from `code`, plus the
+    /// file's own asset index.
     manifest: ModuleManifest,
 }
 
@@ -83,7 +88,8 @@ impl Module {
         self.entry.code.module()
     }
 
-    /// The module's custom sections, parsed once per hash.
+    /// The module's custom sections: the code-derived part shared with every
+    /// module over the same code, plus this file's own asset index.
     #[must_use]
     pub fn manifest(&self) -> &ModuleManifest {
         &self.entry.manifest

@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::ptr;
 use std::sync::Arc;
 
 use aether_data::{Blob, CONTENT_ADDRESSED_SECTION, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, wire};
@@ -228,6 +229,57 @@ fn a_bundle_shares_the_compile_of_its_assetless_build() {
     let bundled = check_in(&cache, &blobs, &bundle("slime"));
 
     assert!(same_compile(&bare, &bundled), "a bundle's code is the build it was packed from");
+    assert!(
+        ptr::eq(bare.manifest().kind_ids(), bundled.manifest().kind_ids()),
+        "the borrowed-code-hash path shares one code-derived manifest, not a second allocation"
+    );
+    assert!(
+        ptr::eq(bare.manifest().actors(), bundled.manifest().actors()),
+        "the bare module and its bundle share one group parse"
+    );
+}
+
+/// Two bundles over one code share their code-derived manifest, not just
+/// their compile: one compile, two entries with distinct hashes and catalogs,
+/// and pointer-shared kind and group state over distinct asset indexes. It
+/// catches a change that shares the compile but still clones kind descriptors
+/// per file, which the compile-sharing test above passes.
+#[test]
+fn bundles_over_one_code_share_the_code_derived_manifest() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let slime = check_in(&cache, &blobs, &bundle("slime"));
+    let dragon = check_in(&cache, &blobs, &bundle("a-much-longer-dragon"));
+
+    assert!(same_compile(&slime, &dragon), "one code is one compile");
+    assert_eq!(cache.compiled_len(), 1);
+    assert!(!same_entry(&slime, &dragon), "two files are two modules");
+    assert_ne!(slime.hash(), dragon.hash());
+    assert_eq!(slime.manifest().asset_catalog()[0].len, 5);
+    assert_eq!(dragon.manifest().asset_catalog()[0].len, 20);
+
+    assert!(ptr::eq(slime.manifest().kinds(), dragon.manifest().kinds()), "one code is one kind parse");
+    assert!(ptr::eq(slime.manifest().kind_ids(), dragon.manifest().kind_ids()), "one code is one kind-id set");
+    assert!(ptr::eq(slime.manifest().actors(), dragon.manifest().actors()), "one code is one group parse");
+    assert!(!Arc::ptr_eq(slime.manifest().assets(), dragon.manifest().assets()), "each file keeps its own asset index");
+}
+
+/// A file whose code is already shared still fails when its own asset
+/// sections are malformed: the hit path indexes each file's assets. It
+/// catches a hit path that skips per-file asset parsing and returns the
+/// sibling's catalog instead of refusing the duplicate.
+#[test]
+fn a_shared_code_hit_still_refuses_its_files_duplicate_asset() {
+    let (cache, blobs) = (cache(), BlobCheckIn::new(store()));
+
+    let _slime = check_in(&cache, &blobs, &bundle("slime"));
+
+    let wat = r#"(module (@custom "aether.asset.sprite" "slime") (@custom "aether.asset.sprite" "other") (func (export "noop")))"#;
+    let error =
+        cache.check_in(&blobs, &blobs.check_in(wasm(wat))).map(drop).expect_err("a duplicate asset fails its file");
+
+    assert!(error.contains("more than once"), "the refusal names the duplication: {error}");
+    assert!(error.contains("sprite"), "the refusal names the asset: {error}");
 }
 
 /// Modules whose code differs must not share a compile, whatever assets they
