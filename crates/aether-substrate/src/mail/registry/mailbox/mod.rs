@@ -4,7 +4,7 @@
 //! Each concern lives in a sibling: [`route`] the record itself,
 //! [`resolve`] the lookup walk, [`alias`] the inline-child addresses,
 //! [`birth`] the reservation a `Starting` route stands on,
-//! [`lineage_order`] where an actor stands in the tree by creation order,
+//! [`lineage`] where an actor stands in the tree by creation order,
 //! [`kinds`] the kind table, [`register`] the public claim surface,
 //! [`apply`] and [`staged`] the effect fold, [`commands`] the owner drain,
 //! and [`publish`] / [`inventory`] what a write publishes outward.
@@ -41,7 +41,7 @@ mod commands;
 mod dependency;
 mod inventory;
 mod kinds;
-mod lineage_order;
+mod lineage;
 mod proven;
 mod publish;
 mod register;
@@ -50,7 +50,7 @@ mod route;
 mod staged;
 
 pub use birth::{CapturedDisposition, RouteContinuation};
-pub use lineage_order::LineageOrder;
+pub use lineage::LineageOrder;
 pub use proven::{AdoptRefused, ChildRefused, ResolveLiveError};
 pub use resolve::RouteResolution;
 pub use route::RouteEndpoint;

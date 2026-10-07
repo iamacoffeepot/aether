@@ -2,7 +2,7 @@
 //!
 //! Each file is named for the module whose behaviour it exercises:
 //! [`register`], [`resolve`], [`kinds`], [`publish`], [`inventory`],
-//! [`birth`], [`lineage_order`], [`alias`], [`apply`], [`staged`] and
+//! [`birth`], [`lineage`], [`alias`], [`apply`], [`staged`] and
 //! [`commands`] mirror the `mailbox` siblings, while [`dispatch`], [`handlers`] and
 //! [`relay`] mirror the registry-level ones. [`support`] holds the
 //! fixtures more than one of them shares.
@@ -15,7 +15,7 @@ mod dispatch;
 mod handlers;
 mod inventory;
 mod kinds;
-mod lineage_order;
+mod lineage;
 mod publish;
 mod register;
 mod relay;

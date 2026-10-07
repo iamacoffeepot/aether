@@ -1,4 +1,4 @@
-//! Tests for [`super::super::mailbox::lineage_order`] — the birth serial a
+//! Tests for [`super::super::mailbox::lineage`] — the birth serial a
 //! route record carries, the order read from it, and the birth check that
 //! keeps that read total (ADR-0248 §5).
 
