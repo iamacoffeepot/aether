@@ -22,7 +22,7 @@
 //!   camera whose eye its outlines face, live in [`mesh`].
 //! - [`bundle::BundleComponent`] — the reference asset bundle (ADR-0163 §4):
 //!   carries a tile in a wasm custom section, makes it an engine resident in
-//!   the load window, draws it every frame, and destroys it symmetrically on
+//!   `wire`, draws it every frame, and destroys it symmetrically on
 //!   teardown. Selected by the `aether_kit@aether.kit.bundle` export;
 //!   it has no driver kinds, so no `kinds` submodule.
 //!

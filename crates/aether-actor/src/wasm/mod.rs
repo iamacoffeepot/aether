@@ -1284,13 +1284,21 @@ macro_rules! __export_internal {
                 <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
             // ADR-0247 rule 3: a failed `wire` fails the birth. The message
             // crosses the way a failed `init`'s does, and the non-zero code
-            // tells the host to read it.
+            // tells the host to read it. A rebuilt child whose `wire`
+            // refuses fails the export the same way, after running that
+            // child's `unwire`; a trap propagates as a trap does.
             match wired {
-                Ok(()) => 0,
                 Err(err) => {
                     $crate::wasm::stage_init_failure(err.message());
                     1
                 }
+                Ok(()) => match $crate::wasm::inline::wire_rebuilt_children(&__AETHER_INLINE) {
+                    Ok(()) => 0,
+                    Err(err) => {
+                        $crate::wasm::stage_init_failure(err.message());
+                        1
+                    }
+                },
             }
         }
 
@@ -2032,13 +2040,21 @@ macro_rules! __export_multi_internal {
             // view; the synthesized impl downgrades to `Single` per hook.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             // ADR-0247 rule 3: a failed `wire` fails the birth, reported the
-            // way the single-actor shim reports it.
+            // way the single-actor shim reports it. A rebuilt child whose
+            // `wire` refuses fails the export the same way, after running
+            // that child's `unwire`; a trap propagates as a trap does.
             match instance.erased_wire(&mut ctx) {
-                Ok(()) => 0,
                 Err(err) => {
                     $crate::wasm::stage_init_failure(err.message());
                     1
                 }
+                Ok(()) => match $crate::wasm::inline::wire_rebuilt_children(&__AETHER_INLINE) {
+                    Ok(()) => 0,
+                    Err(err) => {
+                        $crate::wasm::stage_init_failure(err.message());
+                        1
+                    }
+                },
             }
         }
 

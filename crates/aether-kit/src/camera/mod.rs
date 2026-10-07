@@ -174,7 +174,7 @@ impl WasmActor for CameraComponent {
     /// Take back what `on_dehydrate` saved. A replacement holds no viewers
     /// and says how many it lost; an instance reinstated after an aborted
     /// republish still holds its own.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         let Some(saved) = prior.decode_kind::<CameraState>() else {
             tracing::warn!(target: "aether_kit", "the saved camera state does not decode; starting from the config");
             return Ok(());
@@ -185,11 +185,6 @@ impl WasmActor for CameraComponent {
         let same_viewport = saved.viewport == self.viewport;
         if same_viewport {
             self.extent = saved.extent;
-        }
-        // A republish does not run `wire`, so a replacement whose config
-        // names another window asks for its size here.
-        if self.extent == Extent::Awaited {
-            Self::follow_window(ctx);
         }
 
         let held = u32::try_from(self.viewers.len()).unwrap_or(u32::MAX);

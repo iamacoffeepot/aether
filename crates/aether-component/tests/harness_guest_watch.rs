@@ -24,10 +24,10 @@
 //! installs has been handed none: its first departure reports
 //! [`FIRST_HANDED`], and what shows that it kept its predecessor's id is the
 //! tag, since the SDK stores a watch's context under the id and a departure
-//! whose id has no context runs no handler.
-//! A republish runs no `wire` on a candidate or on a rebuilt inline child
-//! (ADR-0114's amendment of 2026-07-08, ADR-0241 section 7), so a successor's
-//! `wired` list is empty.
+//! whose id has no context runs no handler. A republish wires the successor
+//! at prepare with its outbox held (ADR-0249 §3), so a successor whose `wire`
+//! watches holds that watch in its `wired` list, and a rebuilt inline child
+//! wires after its parent's `wire`.
 //!
 //! No scenario waits on a clock. A departure's notices are posted to the
 //! watchers in the order they registered, and every scenario registers the
@@ -58,15 +58,15 @@ use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SendTarget, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{
-    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, MonitorNotice, Publish,
-    PublishResult,
+    DropComponent, DropResult, InstanceConfig, ListComponents, ListComponentsResult, LoadComponent, MonitorNotice,
+    Publish, PublishResult,
 };
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::{BootError, MonitorHandle};
 use aether_test_fixtures_kinds::{
-    HookOutcome, WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold,
-    WatchLedgerConfig, WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider,
-    WatchRelease, WatchThrough,
+    HookOutcome, WIRE_REFUSAL, WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld,
+    WatchHold, WatchLedgerConfig, WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig,
+    WatchProvider, WatchRelease, WatchThrough,
 };
 use aether_test_fixtures_republish::{WatchClerk, WatchDesk, WatchLedger, WatchPeer};
 
@@ -667,11 +667,11 @@ fn a_provider_that_closes_while_prepared_is_reported_after_the_abort() {
 }
 
 /// A ledger whose `wire` watches the provider has its republish aborted
-/// `aborts` times, each of which runs its `wire` again, before the provider
+/// `aborts` times, none of which runs its `wire` again, before the provider
 /// closes.
 ///
-/// Catches a reinstated guest's `wire` adding a watch, and the watch table
-/// reaching the kept guest only after its `wire` ran.
+/// Catches an abort that rewires the kept guest, and the watch table
+/// reaching it only after that second `wire`.
 fn a_wire_watch_stands_through_aborted_republishes(aborts: usize) {
     let Some(family) = family() else {
         return;
@@ -691,7 +691,7 @@ fn a_wire_watch_stands_through_aborted_republishes(aborts: usize) {
     close_provider(&mut harness);
 
     let reported = report(&mut harness, &ledger);
-    assert_eq!(reported.wired, vec![watch; aborts + 1], "each rerun of wire got the standing id");
+    assert_eq!(reported.wired, vec![watch], "aborts run no wire");
     assert_eq!(reported.handled, [provider_departure(15, watch)]);
     assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the handler ran once");
 }
@@ -757,39 +757,154 @@ fn spawn_clerk(
 }
 
 /// Catches a child's watch registered under an alias with no route, whose
-/// notice is dropped, and one delivered to the parent. Then, across a
-/// republish of the desk: a child's context dropped from the composite
-/// bundle, and a notice the membrane hands to the parent or to no one. Also a rebuilt child's
-/// `wire` run by the republish.
+/// notice is dropped, and one delivered to the parent.
 #[test]
-fn a_clerk_that_watched_in_its_own_wire_reports_before_and_after_its_desks_republish() {
+fn a_clerk_that_watched_in_its_own_wire_reports_its_targets_departure() {
     let Some(family) = family() else {
         return;
     };
     let mut harness = pooled();
     let desk = load_desk(&mut harness, &family.v1, "a");
-    let first_target = load_desk(&mut harness, &family.v1, "b");
-    let second_target = load_desk(&mut harness, &family.v1, "c");
+    let target = load_desk(&mut harness, &family.v1, "b");
 
-    let (first_clerk, first_watch) = spawn_clerk(&mut harness, desk, "one", "b", 21);
-    let path = harness.actor_path(&first_target);
+    let (clerk, watch) = spawn_clerk(&mut harness, desk, "one", "b", 21);
+    let path = harness.actor_path(&target);
     drop_guest(&mut harness, &path);
 
-    assert_eq!(report(&mut harness, &first_clerk).handled, [provider_departure(21, first_watch)]);
-    assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the first clerk's handler ran once");
+    assert_eq!(report(&mut harness, &clerk).handled, [provider_departure(21, watch)]);
+    assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the clerk's handler ran once");
+}
 
-    let (second_clerk, _) = spawn_clerk(&mut harness, desk, "two", "c", 22);
+/// Catches, across a republish of the desk: a rebuilt child that never
+/// wires or wires twice, a child's context dropped from the composite
+/// bundle, and a notice the membrane hands to the parent or to no one.
+#[test]
+fn a_rebuilt_clerk_wires_once_and_reports_after_its_desks_republish() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pooled();
+    let desk = load_desk(&mut harness, &family.v1, "a");
+    let target = load_desk(&mut harness, &family.v1, "c");
+
+    let (clerk, _) = spawn_clerk(&mut harness, desk, "two", "c", 22);
     harness.publish(family.v2.clone()).unwrap_or_else(|error| panic!("v2 republishes v1: {error}"));
 
-    assert_eq!(
-        report(&mut harness, &second_clerk).wired,
-        Vec::<u32>::new(),
-        "a rebuilt clerk runs no wire, though its target is live",
-    );
+    assert_eq!(report(&mut harness, &clerk).wired, vec![FIRST_HANDED], "the rebuilt clerk wired once");
 
-    let path = harness.actor_path(&second_target);
+    let path = harness.actor_path(&target);
     drop_guest(&mut harness, &path);
 
-    assert_eq!(report(&mut harness, &second_clerk).handled, [provider_departure(22, FIRST_HANDED)]);
-    assert_eq!(harness.count_observed(WatchDeparture::NAME), 2, "the rebuilt clerk's handler ran once");
+    assert_eq!(report(&mut harness, &clerk).handled, [provider_departure(22, FIRST_HANDED)]);
+    assert_eq!(harness.count_observed(WatchDeparture::NAME), 1, "the rebuilt clerk's handler ran once");
+}
+
+/// Catches a rebuilt child's refused `wire` swallowed by the republish. The
+/// clerk's `wire` resolves its target, which closed before the republish, so
+/// the rebuilt clerk refuses, the group is refused naming the hook, and the
+/// kept desk still holds a clerk that answers (ADR-0249 §6).
+#[test]
+fn a_rebuilt_clerk_whose_wire_refuses_refuses_its_desks_republish() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pooled();
+    let desk = load_desk(&mut harness, &family.v1, "a");
+    let target = load_desk(&mut harness, &family.v1, "b");
+
+    let (clerk, _) = spawn_clerk(&mut harness, desk, "one", "b", 21);
+    let path = harness.actor_path(&target);
+    drop_guest(&mut harness, &path);
+
+    let error = refused_republish(&mut harness, &family.v2);
+
+    assert!(error.contains("wire failed"), "the refusal names the hook: {error}");
+    assert!(error.contains("no live actor stands at"), "the refusal carries the clerk's error: {error}");
+    // The kept desk's `on_rehydrate` rebuilt its clerk, which runs no `wire`:
+    // an abort wires nothing.
+    assert_eq!(report(&mut harness, &clerk).wired, Vec::<u32>::new(), "the reinstated desk's clerk ran no wire");
+}
+
+/// Catches a refused successor `wire` installed as live, or the old guest
+/// rewired by its abort. The ledger's `wire` refuses, so the group is
+/// refused with `wire failed` and the kept ledger's `wired` is unchanged.
+#[test]
+fn a_successor_wire_refusal_refuses_and_leaves_the_kept_ledger_untouched() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pooled();
+    let ledger = plain_ledger(&mut harness, &family.v1);
+    let path = harness.actor_path(&ledger);
+    let config = WatchLedgerConfig { target: None, tag: 0, outcome: HookOutcome::Refuses };
+    let configs = vec![InstanceConfig { path, config: config.encode_into_bytes() }];
+
+    let error = match harness.publish_configured(family.v2.clone(), configs) {
+        Err(SubstrateHarnessError::Publish(error)) => error,
+        other => panic!("the republish must be refused; got {other:?}"),
+    };
+
+    assert!(error.contains("wire failed"), "the refusal names the hook: {error}");
+    assert!(error.contains(WIRE_REFUSAL), "the refusal carries the fixture message: {error}");
+    assert_eq!(report(&mut harness, &ledger).wired, Vec::<u32>::new(), "the kept ledger ran no wire");
+}
+
+/// Catches a trapped successor `wire` aborting the engine instead of
+/// refusing the group. The ledger's `wire` traps, so the group is refused
+/// and the old guest stays live.
+#[test]
+fn a_successor_wire_trap_refuses_without_aborting_the_engine() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pooled();
+    let ledger = plain_ledger(&mut harness, &family.v1);
+    let path = harness.actor_path(&ledger);
+    let config = WatchLedgerConfig { target: None, tag: 0, outcome: HookOutcome::Traps };
+    let configs = vec![InstanceConfig { path, config: config.encode_into_bytes() }];
+
+    let error = match harness.publish_configured(family.v2.clone(), configs) {
+        Err(SubstrateHarnessError::Publish(error)) => error,
+        other => panic!("the republish must be refused; got {other:?}"),
+    };
+
+    assert!(error.contains("wire failed"), "the refusal names the hook: {error}");
+    assert_eq!(report(&mut harness, &ledger).wired, Vec::<u32>::new(), "the kept ledger ran no wire");
+}
+
+/// Catches the prepared close arm hanging or aborting. Holds a republish
+/// prepared on the pumped host and drops the harness: the prepared close
+/// unwires both guests and settles every chain.
+#[test]
+fn a_close_while_prepared_tears_down_cleanly() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pumped();
+    let _ = plain_ledger(&mut harness, &family.v1);
+
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let _replacing = harness.send_deferred(host, &publish(&family.v2));
+    harness.step_component_host_through::<Prepared>(1).expect("the ledger answers its prepare");
+
+    drop(harness);
+}
+
+/// Catches the prepared close arm aborting on a faulting hook. As above,
+/// with the peer configured to trap in `unwire`: both guests still unwire
+/// (the trap is logged and the close goes on) and the teardown settles.
+#[test]
+fn a_close_while_prepared_with_a_trapping_unwire_tears_down_cleanly() {
+    let Some(family) = family() else {
+        return;
+    };
+    let mut harness = pumped();
+    let _ = plain_ledger(&mut harness, &family.v1);
+    let _ = load_peer(&mut harness, &family.v1, WatchPeerConfig { trap_on_rehydrate: false, trap_on_unwire: true });
+
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let _replacing = harness.send_deferred(host, &publish(&family.v2));
+    harness.step_component_host_through::<Prepared>(1).expect("a member answers its prepare");
+
+    drop(harness);
 }

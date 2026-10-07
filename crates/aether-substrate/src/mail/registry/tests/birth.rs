@@ -17,13 +17,13 @@ use crate::mail::registry::effect::{
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::relay::RouteRelayLease;
 use crate::mail::registry::{
-    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id,
-    lineage_mailbox_id, noop_handler,
+    DropError, InboxHandler, MailboxEntry, OwnedDispatch, Registry, RouteContract, canonical_mailbox_id, noop_handler,
 };
 use crate::mail::{KindId, Mail, MailRef};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, SeizeHandle, WakeSink};
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 use super::support::{
     activation_barrier, inventory_subscription_fixture, prepared_test_spawn, starting_token, traced_unknown_mail,
@@ -251,7 +251,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     let initial_route_generation = registry.route_generation();
     let initial_mailbox_generation = registry.mailbox_generation();
     let name = "test.birth.starting_only";
-    let id = lineage_mailbox_id(name);
+    let id = canonical_id(name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::reserve_with_id(id, name.to_owned())]))
         .expect("owner accepts Starting reservation");

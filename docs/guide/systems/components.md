@@ -251,9 +251,7 @@ runs its `unwire` and is dropped. A `wire` that traps answers `Err` too, and
 the guest is released without running any more of its code. Either way no
 instance is left at the name, nothing the guest sent from `wire` leaves, and
 the name is free for another load. A boot manifest holding such a component
-fails the chassis build. One case aborts the engine instead: a guest that an
-aborted republish reinstated runs `wire` a second time, and a fault there has
-no birth to fail and no other guest to fall back to.
+fails the chassis build.
 
 In practice you drive this through the MCP harness — `publish(engine_id,
 selector, configs?)`, `spawn(engine_id, namespace, key?, parent?, config?)`,
@@ -513,28 +511,31 @@ not refused: it binds as a first publish.
 
 Then each member prepares: its inbox gate closes, so mail for it waits; the
 candidate instantiates behind the same binding with its outbox held, the old
-guest runs `unwire` and `on_dehydrate` and is kept, the correlation cursor,
-reply table, request contexts and watches move to the candidate, and it runs
-`on_rehydrate`. Once every member is ready the module publishes, and each member
-commits: its held mail leaves on a chain of its own, and the mail its gate queued
-reaches the candidate in order. `PublishResult::Ok { types }`, each republished
-type with its capabilities, comes once every commit's chain has settled. A
-component that leaves both state hooks at their defaults swaps cleanly and comes
-back fresh from `init`. Resident inline children are rebuilt from the module's
-exported types and its `export!` `private` list, each under its old alias; the
-`spawns(..)` check guarantees that list names every child a listed actor can
-spawn inline.
+guest runs `on_dehydrate` and is kept, the correlation cursor, reply table,
+request contexts and watches move to the candidate, and it runs `on_rehydrate`
+and then `wire`, still with its outbox held. Once every member is ready the
+module publishes, and each member commits: the old guest runs `unwire`, whose
+mail leaves at once, then drops, and the candidate's held mail leaves on a
+chain of its own, with the mail its gate queued reaching the candidate in
+order. `PublishResult::Ok { types }`, each republished type with its
+capabilities, comes once every commit's chain has settled. A component that
+leaves both state hooks at their defaults swaps cleanly and comes back fresh
+from `init`. Resident inline children are rebuilt from the module's exported
+types and its `export!` `private` list, each under its old alias, and wire
+after their parent's `wire`; the `spawns(..)` check guarantees that list names
+every child a listed actor can spawn inline.
 
 A refusal in any member's prepare (a failed `init`, an `on_dehydrate` that
 returned an error, a rejected state save, a carried context, a request's or a
 watch's, that the candidate does not declare
 ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
-§4), or a failed rehydrate), or a refused publish, aborts every member: each
-reinstates its old guest with its reply table, counters and watches, hands it back the
-state its `on_dehydrate` saved through its `on_rehydrate`, runs its `wire`
-again, and receives the mail its gate queued; nothing a candidate sent leaves.
-Only teardown outside that saved state and outside what `wire` rebuilds is not
-undone
+§4), a failed rehydrate, or a failed `wire`), or a refused publish, aborts
+every member: each unwires its candidate exactly when that candidate wired,
+discards it, reinstates its old guest, still wired, with its reply table,
+counters and watches, hands it back the state its `on_dehydrate` saved through
+its `on_rehydrate`, with no second `wire`, and receives the mail its gate
+queued; nothing a candidate sent leaves. Only teardown outside that saved state
+and outside what `wire` built is not undone
 ([ADR-0016](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0016-persistent-state-across-hot-reload.md) §4),
 so an `on_rehydrate` override should assign from `prior` rather than accumulate
 onto what the instance already holds.
@@ -549,12 +550,12 @@ saved state whether or not the component overrides `on_dehydrate`, so the
 successor's handler runs with the context its predecessor stored, under the id
 its predecessor was given. A watched actor that closes while the component is
 prepared is reported to the guest that wins: its notice waits at the inbox
-gate with the rest of the mail. A reinstated guest's `wire` runs again, and a
-watch it makes there finds the one standing and takes its id, so an aborted
-republish never doubles a watch. A successor whose handler for a watched type
-takes another context kind is refused when it no longer declares the old
-kind; one that still declares it gets an error in its log ring at the notice,
-and its handler does not run.
+gate with the rest of the mail. A successor's `wire` that watches finds the
+standing watch and takes its id, and an aborted republish never doubles a
+watch: the old guest never unwired, so it is still wired and runs no second
+`wire`. A successor whose handler for a watched type takes another context kind
+is refused when it no longer declares the old kind; one that still declares it
+gets an error in its log ring at the notice, and its handler does not run.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): each swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
@@ -869,8 +870,8 @@ the component's own table by the returned `WatchId`, and remove by
   target again afterwards is a new id.
 - **The host releases every watch** when the component closes, fails or traps
   in `wire`, or is dropped as a republish candidate, with none of its code
-  run. An inline child watches from its own `wire` like any actor and hears
-  its own notice.
+  run, unless its `wire` ran — then `unwire`. An inline child watches from
+  its own `wire` like any actor and hears its own notice.
 
 `watch` and `unwatch` are on `WasmCtx`, so a handler, `wire`, `unwire`, and
 `on_rehydrate` can call them; `init` and `on_dehydrate` cannot. A watch stands

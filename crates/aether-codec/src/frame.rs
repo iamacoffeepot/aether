@@ -30,7 +30,7 @@ use aether_data::wire;
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Maximum accepted frame body size, default. Bounded so a malformed
-/// length prefix cannot drive a reader into an OOM. 64 MiB is large
+/// length prefix cannot drive a reader into an OOM. 128 MiB is large
 /// enough that routine debug wasm cross-builds (typically 15-25 MiB
 /// for the medium-size components in this repo) ride the framing
 /// without tripping the OOM guard, but still small enough to defang a
@@ -39,7 +39,7 @@ use serde::{Serialize, de::DeserializeOwned};
 /// Embedders shipping bigger payloads raise the cap through the config
 /// member that pushes it in ([`install_max_frame_size`]) — the codec never
 /// reads the environment itself (ADR-0156 §6).
-pub const MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_FRAME_SIZE: usize = 128 * 1024 * 1024;
 
 /// Hard upper bound on the installed cap. Even a large
 /// [`install_max_frame_size`] push is clamped at 1 GiB so a runaway override
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn frame_too_large_rejected() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(100 * 1024 * 1024u32).to_le_bytes());
+        buf.extend_from_slice(&(200 * 1024 * 1024u32).to_le_bytes());
         let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("oversized frame must reject");
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
     }

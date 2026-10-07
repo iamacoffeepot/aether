@@ -32,13 +32,14 @@ impl Component {
     }
 
     /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
-    /// hook. It has two callers, both in the component trampoline: a
-    /// republish's prepare, which runs it before `on_dehydrate` on the guest
-    /// it may replace, and the trampoline's close, which runs it on the live
-    /// guest before the `Component` value drops, whichever exit closed the
-    /// trampoline (a `DropComponent`, an engine teardown, a birth cancelled
-    /// after `wire`). It returns nothing its caller could act on, so a guest
-    /// trap is logged here and the caller goes on: it never stalls a close.
+    /// hook. Its callers are now prepare-free: a republish's commit, which
+    /// runs it on the old guest before the held mail flushes, the
+    /// trampoline's close, which runs it on the live guest before the
+    /// `Component` value drops, whichever exit closed the trampoline (a
+    /// `DropComponent`, an engine teardown, a birth cancelled after `wire`),
+    /// and an abort or close while prepared unwiring a successor that wired.
+    /// It returns nothing its caller could act on, so a guest trap is logged
+    /// here and the caller goes on: it never stalls a close.
     pub fn unwire(&mut self) {
         if let Some(f) = self.unwire.clone()
             && let Err(e) = f.call(&mut self.store, self.self_mailbox_id)
@@ -131,10 +132,11 @@ impl Component {
 
     /// Move out the guest's reply table — its pending handles and the next
     /// handle it would issue — when the guest leaves its slot. The consumer
-    /// is the component trampoline, which takes it after `unwire`, which may
-    /// still answer handles, and `on_dehydrate`, which saves the ones it
-    /// carries, and hands it to the slot's next occupant through
-    /// [`Self::resume_replies`] (#6409).
+    /// is the component trampoline, which takes it after `on_dehydrate`,
+    /// which saves the ones it carries, and hands it to the slot's next
+    /// occupant through [`Self::resume_replies`] (#6409). The table moves
+    /// after `on_dehydrate`, and `unwire` at commit answers nothing since
+    /// its rows already moved (ADR-0249 §7).
     #[must_use]
     pub fn take_pending_replies(&mut self) -> PendingReplies {
         self.store.data_mut().take_pending_replies()

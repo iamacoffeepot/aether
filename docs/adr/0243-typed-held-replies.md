@@ -123,7 +123,8 @@ held.answer(ctx, &WatchHeadResult { .. });
      candidate in `PendingReplies` (#6409), so a ticket still resolves to
      its requester once the member commits. On abort, the table moves back
      to the reinstated old guest, so no ticket is orphaned by another
-     member's failure. The candidate does not re-register: the stored reply
+     member's failure. An `unwire` at commit answers no held reply: its rows
+     already moved to the successor at prepare (ADR-0249 §4). The candidate does not re-register: the stored reply
      is the kind the requester asked for, and a ticket claims only with a
      matching reply kind id, which hashes the kind's schema, so a candidate
      that changed `R` could not answer the slot and could not produce the
