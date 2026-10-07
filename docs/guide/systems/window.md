@@ -116,6 +116,20 @@ A window endpoint that closes while one of its commands is still in flight
 answers that command's `Err`. The manager answers a pending create's `Err` the
 same way.
 
+Two commands to the manager have no reply. `aether.window.take_key_focus`
+(`TakeKeyFocus { window, scope }`) makes the sending actor the key focus holder
+of the window it names, and `aether.window.release_key_focus`
+(`ReleaseKeyFocus { window }`) gives that up. The manager answers with two
+notices sent to the holder alone, never published to subscribers:
+`aether.window.key_focus_gained` and `aether.window.key_focus_lost`, each
+naming the window. While a window's slot is held, its key and text events go
+only to the key subscribers inside the holder's scope. A slot goes with its
+window: closing the window removes it and tells the holder. Key focus is
+distinct from `aether.window.focus`, which asks the operating system to bring
+a window forward; taking key focus neither raises nor focuses a window. The
+rules, the routing table, and who may take are in
+[Input streams](input.md#key-focus).
+
 `WindowSpec::name` is an immutable actor instance segment: it cannot be empty,
 contain whitespace or `:`, or duplicate a pending or live window name. The
 native actor tombstone also prevents reuse of a closed name during the same

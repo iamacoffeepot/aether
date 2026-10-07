@@ -3,9 +3,11 @@
 > **Governing ADRs:** [ADR-0021](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0021-input-stream-subscriptions.md)
 > (publish/subscribe routing),
 > [ADR-0068](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0068-input-subscribers-keyed-by-kindid.md)
-> (subscribers keyed by `KindId`), and
+> (subscribers keyed by `KindId`),
 > [ADR-0164](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0164-window-actor-owns-native-window-integration.md)
-> (window-owned input publication).
+> (window-owned input publication), and
+> [ADR-0248](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)
+> §9 (key focus).
 
 Keyboard, pointer, resize, text, and IME events originate at windows, so the
 window actor owns their translation and routing. There is no generic input
@@ -181,6 +183,120 @@ its mailbox id and therefore its subscriptions.
 If a kind has no matching subscribers, the event is dropped at its source. A
 fan-out copy retains the external event's lineage, so settlement and traces
 include every subscribed descendant.
+
+## Key focus
+
+Every key subscriber of a window is sent that window's keys, so a console that
+wants to be typed into must keep those keys from the camera controller beside
+it. It does that by taking **key focus**
+([ADR-0248 §9](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)).
+Key focus is not operating-system window focus: `aether.window.focus` asks the
+platform to bring a window forward and `aether.window.focus_changed` reports
+it, and taking key focus does neither.
+
+Each window has one key focus slot. It is empty, or it holds one actor and a
+scope. Taking it is ordinary mail to `aether.window`, and the sender is the
+holder:
+
+```rust
+// In an `#[actor(depends(WindowCapability))]` block that also handles
+// `KeyFocusGained` and `KeyFocusLost`.
+#[handler::event]
+fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+    if key.code == keycode::KEY_BACKQUOTE {
+        ctx.send::<WindowCapability>(&TakeKeyFocus { window: key.window, scope: KeyFocusScope::Actor });
+    }
+}
+```
+
+| Kind | Name | Fields |
+|---|---|---|
+| `TakeKeyFocus` | `aether.window.take_key_focus` | `window`, `scope` |
+| `ReleaseKeyFocus` | `aether.window.release_key_focus` | `window` |
+| `KeyFocusGained` | `aether.window.key_focus_gained` | `window` |
+| `KeyFocusLost` | `aether.window.key_focus_lost` | `window` |
+
+`window` is the window's canonical path, the one every window event carries in
+its own `window` field, `aether.window.list` reports, and `WindowSelector::One`
+takes. An actor usually has it in hand from the event that made it want the
+keys. `scope` is `KeyFocusScope::Actor`, the holder alone, or
+`KeyFocusScope::Subtree`, the holder and every actor beneath it in lineage.
+
+The rules of one window's slot:
+
+- **The latest take wins.** The actor it replaces is sent `KeyFocusLost` and
+  the sender `KeyFocusGained`, both naming the window. A take by the window's
+  holder changes its scope and sends nothing.
+- **A release empties the slot** and the holder is sent `KeyFocusLost`. Nothing
+  is handed back and there is no stack: an actor that wants key focus again
+  takes it again. A release from an actor that is not the holder changes
+  nothing.
+- **The holder's close empties every slot it holds**, and it is sent nothing.
+- **The window's close removes its slot**, and the holder is sent
+  `KeyFocusLost` after `WindowClosed` is published.
+- **A take cannot fail and has no reply.** Any window path is accepted, so a
+  boot component may take for `main` before the window opens.
+- **A window that loses operating-system focus keeps its slot**, so returning
+  to it finds its holder unchanged.
+
+An actor may hold key focus in several windows; each is taken, released and
+lost on its own, which is why every kind names its window. A slot belongs to
+one window: a holder in a tool panel leaves the keys of a document window where
+they were. An all-window subscriber is filtered event by event, by the slot of
+the window each event came from.
+
+While a window's slot is held, its four key kinds are sent only to the key
+subscribers inside the holder's scope. Key focus narrows who is sent an event;
+it subscribes nobody, so a holder still subscribes to the kinds it wants. A
+window whose slot is empty sends them to every subscriber.
+
+| Event | Sent to |
+|---|---|
+| `Key` for a code that is not down | the subscribers the slot admits; the window records the slot's holder and scope for that code |
+| `Key` for a code already down (a platform repeat) | the subscribers the press's record admits |
+| `KeyRelease` | the subscribers the press's record admits, and the record is removed; with no record, the slot as it is now |
+| `TextInput`, `ImePreedit` | the subscribers the slot admits as it is now |
+| every other published kind | every subscriber |
+
+So a key press owns its repeats and its release. A W held when a console takes
+key focus keeps repeating to the camera and its release reaches the camera. An
+Enter that makes a console release key focus on its press still sends its
+release to the console alone. A window that loses operating-system focus
+forgets which keys are down, because those releases never arrive.
+
+**Who may take.** The manager's take and release handlers state the
+`KeyFocusHolder` protocol as their sender (ADR-0231 §11): the two notices,
+each handled silently. `ctx.send::<WindowCapability>(&TakeKeyFocus { .. })`
+does not build for an actor that lacks a handler for either notice, and mail
+that arrives by any other route from a sender that does not cover the protocol,
+or with no actor sender, is refused before the handler runs. An MCP `send_mail`
+reaches the window with the RPC server as its sender, so **a session cannot
+take key focus**: mail the actor that should hold the keys, and let it take.
+
+**Across a republish.** A republish keeps the holder's mailbox, so the slot
+stands and its notices reach the successor. The successor is built fresh and
+does not remember holding key focus: carry the windows it holds through
+`on_dehydrate` and `on_rehydrate`, or send `ReleaseKeyFocus` for each from
+`on_rehydrate`, which changes nothing where it is not the holder.
+
+Limits:
+
+- A take is mail. It lands behind the events already queued at the window, so
+  the keystroke that opens a console delivers its own text to every `TextInput`
+  subscriber before the console's take arrives.
+- Text follows the slot as it is now. `TextInput` carries no key code, so a key
+  held while a console takes key focus keeps sending its `Key` repeats to the
+  camera and types its repeated text into the console.
+- A composition in progress is not handled. When a slot changes
+  mid-composition the old holder is sent `KeyFocusLost` and drops its own
+  composition; the platform's composition state is untouched.
+- A subscriber that joins a scope mid-press is sent a release without a press.
+- A window is named by its canonical path. A short path, or a path no window
+  stands at, takes a slot no key event is routed by.
+- Key focus does not move the operating system's focus. An actor that takes
+  key focus in a window that is not the focused one holds that slot and is sent
+  nothing until the window is focused.
+- The pointer is unaffected, and clicking away does not release key focus.
 
 ## Text and IME
 

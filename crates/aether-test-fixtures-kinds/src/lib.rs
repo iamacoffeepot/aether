@@ -419,6 +419,24 @@ pub struct FsContextDemuxReport {
 #[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
 pub struct UnsubscribeKeys;
 
+/// Ask a key probe to take key focus in `window` for itself alone, so a
+/// scenario drives a guest's own take: the probe mails the window the take,
+/// and the window reads the holder off the sender.
+#[aether_data::kind(name = "aether.test_fixtures.take_key_focus")]
+pub struct TakeKeyFocusAt {
+    pub window: ErasedActorPath,
+}
+
+/// Report a key probe emits for each key focus notice the window sends it:
+/// `gained` is `true` for `aether.window.key_focus_gained` and `false` for
+/// `aether.window.key_focus_lost`, and `window` is the window the notice
+/// named.
+#[aether_data::kind(name = "aether.test_fixture.key_focus_observed")]
+pub struct KeyFocusObserved {
+    pub window: ErasedActorPath,
+    pub gained: bool,
+}
+
 /// Configure the listener lineage used by the TCP load probe when it echoes
 /// frames received from accepted sessions. The probe binds that listener on
 /// `127.0.0.1:0` with itself as the consumer (`aether.tcp.bind_listener_self`)

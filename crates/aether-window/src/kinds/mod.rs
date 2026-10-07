@@ -8,8 +8,10 @@ use aether_kinds::{
 };
 use serde::{Deserialize, Serialize};
 
+mod key_focus;
 mod presentation;
 
+pub use key_focus::{KeyFocusGained, KeyFocusHolder, KeyFocusLost, KeyFocusScope, ReleaseKeyFocus, TakeKeyFocus};
 pub use presentation::{FrameRate, FrameRateError, WindowPresentation};
 
 /// Select one window, by its canonical actor path, or every current and

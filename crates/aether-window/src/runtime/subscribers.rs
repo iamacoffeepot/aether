@@ -13,7 +13,12 @@ use aether_kinds::{
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
-use crate::{WindowClosed, WindowFocus, WindowMenuActivated, WindowOpened, WindowSelector, WindowSubscription};
+use super::routing::key_focus::{KeyFocus, Reach, Take};
+use super::routing::{Route, Routed};
+use crate::{
+    KeyFocusHolder, KeyFocusLost, KeyFocusScope, WindowClosed, WindowFocus, WindowMenuActivated, WindowOpened,
+    WindowSelector, WindowSubscription,
+};
 
 /// The subscribers of one published kind `K`, each held as the
 /// `ProtocolRef<Subscriber<K>>` its events are sent through (ADR-0231 §8) and
@@ -85,10 +90,14 @@ pub trait Published: ActorMail + Sized + 'static {
     fn set_mut(subscribers: &mut WindowSubscribers) -> &mut KindSubscribers<Self>;
 }
 
-/// One subscriber's monitor and the rows it holds in the typed sets. The
-/// monitor is taken when the holder is created, so no holder is unwatched.
-struct Holder {
+/// One actor the window watches: its monitor, its canonical path, and the
+/// rows it holds in the typed sets. A subscriber has one, and so does an
+/// actor that takes key focus and subscribes to nothing. The monitor is taken
+/// and the path read when the record is created, so no record is unwatched,
+/// and the path, which an actor keeps for life, is never read again.
+struct Watched {
     _monitor: MonitorHandle,
+    path: ErasedActorPath,
     rows: HashSet<Row>,
 }
 
@@ -117,13 +126,16 @@ macro_rules! window_subscribers {
         /// Selector-aware subscriptions for events originating at windows:
         /// one [`KindSubscribers`] per published kind.
         ///
-        /// `holders` is the reverse index, keyed by each subscriber's erased
-        /// reference: its monitor and the exact rows it holds, so a departure
-        /// removes precisely that subscriber's rows without scanning anyone
-        /// else's.
+        /// `watched` is the reverse index, keyed by each watched actor's
+        /// erased reference: its monitor, its path, and the exact rows it
+        /// holds, so a departure removes precisely that actor's rows without
+        /// scanning anyone else's. `key_focus` is each window's key focus
+        /// slot and key records, which [`Self::publish`] routes the key and
+        /// text kinds by.
         pub struct WindowSubscribers {
             $($field: KindSubscribers<$kind>,)+
-            holders: HashMap<ErasedActorRef, Holder>,
+            watched: HashMap<ErasedActorRef, Watched>,
+            key_focus: KeyFocus,
         }
 
         $(impl Published for $kind {
@@ -138,7 +150,7 @@ macro_rules! window_subscribers {
 
         impl WindowSubscribers {
             pub fn new() -> Self {
-                Self { $($field: KindSubscribers::default(),)+ holders: HashMap::new() }
+                Self { $($field: KindSubscribers::default(),)+ watched: HashMap::new(), key_focus: KeyFocus::default() }
             }
 
             /// Prove an explicit subscription's path live (ADR-0231 §3: its
@@ -215,9 +227,9 @@ macro_rules! window_subscribers {
                 })+
             }
 
-            /// Decode `payload` as the published kind `kind` names and fan it
-            /// out to `window`'s subscribers of that kind: the synthetic
-            /// runtime's injected events.
+            /// Decode `payload` as the published kind `kind` names and
+            /// publish it for `window`: the synthetic runtime's injected
+            /// events.
             ///
             /// # Errors
             ///
@@ -225,7 +237,7 @@ macro_rules! window_subscribers {
             /// it; nothing is sent.
             #[cfg(feature = "synthetic")]
             pub fn publish_encoded<A, S, M: ReplyMode>(
-                &self,
+                &mut self,
                 ctx: &mut NativeCtx<'_, A, S, M>,
                 window: &ErasedActorPath,
                 kind: KindId,
@@ -234,7 +246,7 @@ macro_rules! window_subscribers {
                 $(if kind == <$kind as Kind>::ID {
                     let event = <$kind as Kind>::decode_from_bytes(payload)
                         .ok_or_else(|| format!("the payload does not decode as {}", <$kind as Kind>::NAME))?;
-                    ctx.fanout(self.recipients::<$kind>(window), &event);
+                    self.publish(ctx, window, &event);
                     return Ok(());
                 })+
                 Err(format!("aether.window does not publish {kind:?}"))
@@ -246,6 +258,17 @@ macro_rules! window_subscribers {
 published_window_kinds!(window_subscribers);
 
 impl WindowSubscribers {
+    /// The record of `actor`, created on its first subscription or its first
+    /// take of key focus: the one place an actor comes to be monitored, so
+    /// each has one monitor and its departure posts one notice.
+    fn watch<A, S, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, S, M>, actor: ErasedActorRef) -> &mut Watched {
+        self.watched.entry(actor).or_insert_with(|| Watched {
+            _monitor: ctx.monitor(actor),
+            path: ctx.actor_path(actor),
+            rows: HashSet::new(),
+        })
+    }
+
     /// Hold `subscriber` for `K` under `selector`, and monitor it on its
     /// first row.
     pub fn subscribe<K: Published, A, S, M: ReplyMode>(
@@ -254,15 +277,88 @@ impl WindowSubscribers {
         selector: WindowSelector,
         subscriber: ProtocolRef<Subscriber<K>>,
     ) {
-        let key = subscriber.erase();
         let row = Row::new(selector, K::ID);
 
         K::set_mut(self).insert(row.window.as_ref(), subscriber);
-        self.holders
-            .entry(key)
-            .or_insert_with(|| Holder { _monitor: ctx.monitor(key), rows: HashSet::new() })
-            .rows
-            .insert(row);
+        self.watch(ctx, subscriber.erase()).rows.insert(row);
+    }
+
+    /// Give `window`'s key focus slot to `holder` with `scope`, monitoring it
+    /// when this is the first the window has seen of it.
+    pub(super) fn take_key_focus<A, S, M: ReplyMode>(
+        &mut self,
+        ctx: &NativeCtx<'_, A, S, M>,
+        window: &ErasedActorPath,
+        holder: ProtocolRef<KeyFocusHolder>,
+        scope: KeyFocusScope,
+    ) -> Take {
+        let path = self.watch(ctx, holder.erase()).path.clone();
+
+        self.key_focus.take(window, holder, path, scope)
+    }
+
+    /// Empty `window`'s key focus slot when `sender` holds it, answering
+    /// whether it did.
+    pub(super) fn release_key_focus(&mut self, window: &ErasedActorPath, sender: ErasedActorRef) -> bool {
+        self.key_focus.release(window, sender)
+    }
+
+    /// Publish `event` for `window`: the one fan-out of the window manager,
+    /// which the desktop backend, the synthetic backend and the injected
+    /// path all call. The event's [`Route`] says which subscribers of its
+    /// kind are sent it, and what routing state it changes once sent.
+    pub(super) fn publish<K: Routed, A, S, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        window: &ErasedActorPath,
+        event: &K,
+    ) {
+        match event.route() {
+            Route::Everyone => ctx.fanout(self.recipients::<K>(window), event),
+            Route::KeyDown { code } => {
+                self.key_focus.press(window, code);
+                self.send_within(ctx, window, event, self.key_focus.pressed_under(window, code));
+            }
+            Route::KeyUp { code } => {
+                let reach = self.key_focus.lift(window, code);
+                self.send_within(ctx, window, event, reach.as_ref());
+            }
+            Route::Text => self.send_within(ctx, window, event, self.key_focus.reach(window)),
+            Route::Unfocused => {
+                ctx.fanout(self.recipients::<K>(window), event);
+                self.key_focus.forget_keys(window);
+            }
+            Route::Closed => {
+                ctx.fanout(self.recipients::<K>(window), event);
+                if let Some(holder) = self.key_focus.close(window) {
+                    ctx.send_to(holder, &KeyFocusLost { window: window.clone() });
+                }
+            }
+        }
+    }
+
+    /// Send `event` to `window`'s subscribers of `K` that `reach` admits, or
+    /// to all of them when there is no reach: the key was pressed, or the
+    /// text arrived, under an empty slot.
+    fn send_within<K: Published, A, S, M: ReplyMode>(
+        &self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        window: &ErasedActorPath,
+        event: &K,
+        reach: Option<&Reach>,
+    ) {
+        let Some(reach) = reach else {
+            return ctx.fanout(self.recipients::<K>(window), event);
+        };
+        let admitted = self.recipients::<K>(window).filter(|subscriber| self.admitted(reach, subscriber.erase()));
+
+        ctx.fanout(admitted, event);
+    }
+
+    /// Whether `reach` admits the watched actor `subscriber`, by the path
+    /// its record keeps.
+    fn admitted(&self, reach: &Reach, subscriber: ErasedActorRef) -> bool {
+        self.watched.get(&subscriber).is_some_and(|watched| reach.admits(&watched.path))
     }
 
     /// Remove `key`'s row for `K` under `selector`.
@@ -285,19 +381,21 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    /// Drop every subscription `subscriber` holds and release its monitor.
+    /// Drop every subscription `subscriber` holds, empty every key focus
+    /// slot it holds, and release its monitor.
     ///
     /// The caller is the `MonitorNotice` handlers, whose host-stamped sender
-    /// is the departed subscriber (ADR-0230). The holder index names exactly
+    /// is the departed actor (ADR-0230). The watched index names exactly
     /// the rows `subscriber` holds, so this removes those and touches
     /// nothing else.
     pub fn unsubscribe_all(&mut self, subscriber: ErasedActorRef) {
-        let Some(holder) = self.holders.remove(&subscriber) else {
+        let Some(watched) = self.watched.remove(&subscriber) else {
             return;
         };
-        for row in holder.rows {
+        for row in watched.rows {
             self.remove_row(row, subscriber);
         }
+        self.key_focus.forget(subscriber);
     }
 
     /// The subscribers of `K` events from `window`, one per actor.
@@ -309,8 +407,8 @@ impl WindowSubscribers {
     }
 
     fn remove(&mut self, row: Row, key: ErasedActorRef) {
-        if let Some(holder) = self.holders.get_mut(&key) {
-            holder.rows.remove(&row);
+        if let Some(watched) = self.watched.get_mut(&key) {
+            watched.rows.remove(&row);
         }
         self.remove_row(row, key);
     }
@@ -326,8 +424,8 @@ pub mod fixture {
 
     use aether_actor::{ActorPath, ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, ReplyMode, Root};
     use aether_data::{ErasedActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
-    use aether_kinds::{Key, MouseButton, MouseMove, MouseWheel, WindowSize};
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, TextInput, WindowSize};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
     use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::chassis::error::BootError;
     #[cfg(feature = "desktop")]
@@ -342,7 +440,10 @@ pub mod fixture {
     use crate::runtime::WindowBackend;
     #[cfg(feature = "desktop")]
     use crate::runtime::desktop::DesktopWindows;
-    use crate::{SubscribeWindow, SubscribeWindowResult, WindowFocus, WindowSelector, WindowSubscription};
+    use crate::{
+        KeyFocusGained, KeyFocusLost, KeyFocusScope, ReleaseKeyFocus, SubscribeWindow, SubscribeWindowResult,
+        TakeKeyFocus, WindowCapability, WindowFocus, WindowSelector, WindowSubscription,
+    };
 
     /// One published event a [`Watcher`] received: the watcher's key, the
     /// event, and the envelope's causal root and stamped sender.
@@ -370,16 +471,38 @@ pub mod fixture {
     #[aether_data::kind(name = "test.window.watcher.leave", copy, eq)]
     pub struct Leave;
 
+    /// Tells a [`Watcher`] to take key focus in `window` with `scope`: it
+    /// mails the window the take itself, as any holder does.
+    #[aether_data::kind(name = "test.window.watcher.take_key_focus", eq)]
+    pub struct TakeKeyFocusIn {
+        pub window: ErasedActorPath,
+        pub scope: KeyFocusScope,
+    }
+
+    /// Tells a [`Watcher`] to release its key focus in `window`.
+    #[aether_data::kind(name = "test.window.watcher.release_key_focus", eq)]
+    pub struct ReleaseKeyFocusIn {
+        pub window: ErasedActorPath,
+    }
+
+    /// Tells a [`Watcher`] to spawn one [`WatcherChild`] beneath itself,
+    /// keyed `key`.
+    #[aether_data::kind(name = "test.window.watcher.spawn_child", eq)]
+    pub struct SpawnChild {
+        pub key: String,
+    }
+
     /// A subscriber with a silent handler for every kind a window test
-    /// subscribes. Each handler reports a [`Receipt`] over the channel its
-    /// config carries; a report whose receiver has already dropped is
-    /// discarded, since a test that wants it awaits it.
+    /// subscribes, and for the two key focus notices. Each handler reports a
+    /// [`Receipt`] over the channel its config carries; a report whose
+    /// receiver has already dropped is discarded, since a test that wants it
+    /// awaits it.
     pub struct Watcher {
         key: String,
         report: Sender<Receipt>,
     }
 
-    #[aether_actor::actor(instanced, root)]
+    #[aether_actor::actor(instanced, root, depends(WindowCapability))]
     impl NativeActor for Watcher {
         const NAMESPACE: &'static str = "test.window.watcher";
         type Config = (String, Sender<Receipt>);
@@ -391,6 +514,52 @@ pub mod fixture {
         #[handler::event]
         fn on_key(&mut self, ctx: &mut NativeCtx<'_>, mail: Key) {
             self.record(ctx, &mail);
+        }
+
+        #[handler::event]
+        fn on_key_release(&mut self, ctx: &mut NativeCtx<'_>, mail: KeyRelease) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::event]
+        fn on_text_input(&mut self, ctx: &mut NativeCtx<'_>, mail: TextInput) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::tell]
+        fn on_key_focus_gained(&mut self, ctx: &mut NativeCtx<'_>, mail: KeyFocusGained) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::tell]
+        fn on_key_focus_lost(&mut self, ctx: &mut NativeCtx<'_>, mail: KeyFocusLost) {
+            self.record(ctx, &mail);
+        }
+
+        #[handler::tell]
+        fn on_take_key_focus_in(&mut self, ctx: &mut NativeCtx<'_>, mail: TakeKeyFocusIn) {
+            let _ = self;
+            ctx.send::<WindowCapability>(&TakeKeyFocus { window: mail.window, scope: mail.scope });
+        }
+
+        #[handler::tell]
+        fn on_release_key_focus_in(&mut self, ctx: &mut NativeCtx<'_>, mail: ReleaseKeyFocusIn) {
+            let _ = self;
+            ctx.send::<WindowCapability>(&ReleaseKeyFocus { window: mail.window });
+        }
+
+        #[handler::tell]
+        fn on_spawn_child(&mut self, ctx: &mut NativeCtx<'_>, mail: SpawnChild) {
+            let config = (format!("{}/{}", self.key, mail.key), self.report.clone());
+            ctx.spawn_child::<WatcherChild>(Subname::Named(&mail.key), config, ()).stage().expect("the child stages");
+        }
+
+        /// The child's birth holds the chain that asked for it, so the test's
+        /// send returns once the child is live.
+        #[handler(task)]
+        fn on_child_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<WatcherChild>>) {
+            let _ = self;
+            done.into_output().result.expect("the child is born");
         }
 
         #[handler::event]
@@ -427,19 +596,57 @@ pub mod fixture {
 
     impl Watcher {
         fn record<K: Kind, A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, aether_actor::Anyone, M>, mail: &K) {
-            let _ = self.report.send(Receipt {
-                watcher: self.key.clone(),
-                kind: K::ID,
-                payload: mail.encode_into_bytes(),
-                root: ctx.in_flight_root(),
-                sender: ctx.sender(),
-            });
+            report(&self.report, &self.key, ctx, mail);
+        }
+    }
+
+    /// Report `mail`, received by the fixture actor keyed `key`.
+    fn report<K: Kind, A, M: ReplyMode>(
+        report: &Sender<Receipt>,
+        key: &str,
+        ctx: &NativeCtx<'_, A, aether_actor::Anyone, M>,
+        mail: &K,
+    ) {
+        let _ = report.send(Receipt {
+            watcher: key.to_owned(),
+            kind: K::ID,
+            payload: mail.encode_into_bytes(),
+            root: ctx.in_flight_root(),
+            sender: ctx.sender(),
+        });
+    }
+
+    /// A key subscriber beneath a [`Watcher`]: the actor a subtree scope
+    /// admits with its parent. It reports as `<parent key>/<its key>`.
+    pub struct WatcherChild {
+        key: String,
+        report: Sender<Receipt>,
+    }
+
+    #[aether_actor::actor(instanced, child_of(Watcher))]
+    impl NativeActor for WatcherChild {
+        const NAMESPACE: &'static str = "test.window.watcher.child";
+        type Config = (String, Sender<Receipt>);
+
+        fn init((key, report): (String, Sender<Receipt>), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { key, report })
+        }
+
+        #[handler::event]
+        fn on_key(&mut self, ctx: &mut NativeCtx<'_>, mail: Key) {
+            report(&self.report, &self.key, ctx, &mail);
         }
     }
 
     /// The watcher keyed `key`, where [`Rig::watcher`] spawns it.
     pub fn watcher(key: &str) -> ActorPath<Watcher> {
         ActorPath::instance(&LoadName::new(key).expect("a valid key"))
+    }
+
+    /// The child keyed `key` beneath the watcher keyed `parent`, where
+    /// [`SpawnChild`] spawns it.
+    pub fn watcher_child(parent: &str, key: &str) -> ActorPath<WatcherChild> {
+        ActorPath::child(&watcher(parent), &LoadName::new(key).expect("a valid key")).expect("a valid child path")
     }
 
     /// The keys of `K`'s recipients from `window`.
@@ -574,6 +781,23 @@ pub mod fixture {
                 .collect()
         }
 
+        /// Tell `watcher` to take key focus in `window` with `scope`, and
+        /// answer the receipts the take delivered once its chain settles.
+        pub fn take(
+            &mut self,
+            watcher: ActorRef<Watcher>,
+            window: &ErasedActorPath,
+            scope: KeyFocusScope,
+        ) -> Vec<Receipt> {
+            self.send_to(watcher, &TakeKeyFocusIn { window: window.clone(), scope }).1
+        }
+
+        /// Tell `watcher` to release its key focus in `window`, and answer
+        /// the receipts the release delivered once its chain settles.
+        pub fn release(&mut self, watcher: ActorRef<Watcher>, window: &ErasedActorPath) -> Vec<Receipt> {
+            self.send_to(watcher, &ReleaseKeyFocusIn { window: window.clone() }).1
+        }
+
         /// Subscribe through the explicit `aether.window.subscribe`,
         /// answering the manager's reply.
         pub fn subscribe(&mut self, selector: WindowSelector, subscription: WindowSubscription) -> SubscribeWindowResult
@@ -585,7 +809,7 @@ pub mod fixture {
         }
     }
 
-    impl Rig<crate::WindowCapability> {
+    impl Rig<WindowCapability> {
         /// The manager booted with the synthetic backend.
         #[cfg(feature = "synthetic")]
         pub fn synthetic() -> Self {
@@ -606,7 +830,7 @@ pub mod fixture {
             &mut self,
             turn: impl FnOnce(
                 &mut DesktopWindows,
-                &mut NativeCtx<'_, crate::WindowCapability, aether_actor::Anyone, aether_actor::Single>,
+                &mut NativeCtx<'_, WindowCapability, aether_actor::Anyone, aether_actor::Single>,
             ) -> T,
         ) -> Option<T> {
             self.driver
