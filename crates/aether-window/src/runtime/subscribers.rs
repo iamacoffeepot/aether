@@ -314,22 +314,22 @@ impl WindowSubscribers {
         event: &K,
     ) {
         match event.route() {
-            Route::Everyone => ctx.fanout(self.recipients::<K>(window), event),
+            Route::Everyone => self.fan_out(ctx, window, event, None),
             Route::KeyDown { code } => {
                 self.key_focus.press(window, code);
-                self.send_within(ctx, window, event, self.key_focus.pressed_under(window, code));
+                self.fan_out(ctx, window, event, self.key_focus.pressed_under(window, code));
             }
             Route::KeyUp { code } => {
                 let reach = self.key_focus.lift(window, code);
-                self.send_within(ctx, window, event, reach.as_ref());
+                self.fan_out(ctx, window, event, reach.as_ref());
             }
-            Route::Text => self.send_within(ctx, window, event, self.key_focus.reach(window)),
+            Route::Text => self.fan_out(ctx, window, event, self.key_focus.reach(window)),
             Route::Unfocused => {
-                ctx.fanout(self.recipients::<K>(window), event);
+                self.fan_out(ctx, window, event, None);
                 self.key_focus.forget_keys(window);
             }
             Route::Closed => {
-                ctx.fanout(self.recipients::<K>(window), event);
+                self.fan_out(ctx, window, event, None);
                 if let Some(holder) = self.key_focus.close(window) {
                     ctx.send_to(holder, &KeyFocusLost { window: window.clone() });
                 }
@@ -338,19 +338,19 @@ impl WindowSubscribers {
     }
 
     /// Send `event` to `window`'s subscribers of `K` that `reach` admits, or
-    /// to all of them when there is no reach: the key was pressed, or the
-    /// text arrived, under an empty slot.
-    fn send_within<K: Published, A, S, M: ReplyMode>(
+    /// to all of them when there is no reach: the kind is not narrowed by
+    /// key focus, or the key was pressed, or the text arrived, under an empty
+    /// slot.
+    fn fan_out<K: Published, A, S, M: ReplyMode>(
         &self,
         ctx: &mut NativeCtx<'_, A, S, M>,
         window: &ErasedActorPath,
         event: &K,
         reach: Option<&Reach>,
     ) {
-        let Some(reach) = reach else {
-            return ctx.fanout(self.recipients::<K>(window), event);
-        };
-        let admitted = self.recipients::<K>(window).filter(|subscriber| self.admitted(reach, subscriber.erase()));
+        let admitted = self
+            .recipients::<K>(window)
+            .filter(|subscriber| reach.is_none_or(|reach| self.admitted(reach, subscriber.erase())));
 
         ctx.fanout(admitted, event);
     }
