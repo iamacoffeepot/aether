@@ -1,10 +1,16 @@
 //! ADR-0231 §11 happy path, both transports: a tell and a request, direct and
-//! deferred, each take `sender: ProtocolRef<P>`, the marker each emits names
-//! `P` as its sender requirement, and an actor that covers `P` sends every one
-//! of them through the flat verb, through an `ActorRef`, and up through its
-//! parent door, with nothing extra at the call site. A handler with no sender
-//! parameter requires `Anyone`, so the erased ctx still sends it through a
-//! reference.
+//! deferred, each name a protocol `P` as their ctx's sender, the marker each
+//! emits names `P` as its sender requirement, and an actor that covers `P`
+//! sends every one of them through the flat verb, through an `ActorRef`, and
+//! up through its parent door, with nothing extra at the call site. A handler
+//! whose ctx names no sender requires `Anyone`, so the erased ctx still sends
+//! it through a reference.
+//!
+//! In a stating handler `ctx.sender()` is a `ProtocolRef<P>`, bound here by
+//! type with no `Option` to unwrap and no cast, and the typed ctx passes to a
+//! helper generic over the sender, which a plain handler calls too. A typed
+//! ctx that still handed out an `Option`, or that no helper could take, fails
+//! this file.
 //!
 //! The native receiver compiles only its always-on half, as in
 //! `accepts_handler_intents_native.rs`: `runtime_feature` cfgs the
@@ -12,8 +18,8 @@
 //! `aether-substrate` dev-dependency.
 
 use aether_actor::{
-    ActorInitError, ActorRef, Anyone, Erased, HandlesKind, PathRefused, Pending, ProtocolRef, WasmActor, WasmCtx,
-    WasmInitCtx, actor, protocol,
+    ActorInitError, ActorRef, Anyone, Erased, ErasedActorRef, HandlesKind, PathRefused, Pending, ProtocolRef,
+    WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[aether_data::kind(name = "test.sender_param.take_focus", copy)]
@@ -62,29 +68,34 @@ impl WasmActor for Window {
     }
 
     #[handler::tell]
-    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _mail: TakeFocus, sender: ProtocolRef<FocusHolder>) {
-        ctx.send_to(sender, &FocusLost);
+    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: TakeFocus) {
+        let holder: ProtocolRef<FocusHolder> = ctx.sender();
+        note(ctx);
+        ctx.send_to(holder, &FocusLost);
     }
 
     #[handler::request]
-    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_>, _mail: DialSelf, sender: ProtocolRef<FocusHolder>) -> Dialed {
-        ctx.send_to(sender, &FocusLost);
+    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: DialSelf) -> Dialed {
+        ctx.send_to(ctx.sender(), &FocusLost);
         Dialed::Ok
     }
 
     #[handler::request]
-    fn on_bind_self(
-        &mut self,
-        _ctx: &mut WasmCtx<'_>,
-        _mail: BindSelf,
-        _sender: ProtocolRef<FocusHolder>,
-    ) -> Pending<Dialed> {
+    fn on_bind_self(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: BindSelf) -> Pending<Dialed> {
+        let _holder: ProtocolRef<FocusHolder> = ctx.sender();
         unimplemented!("a pass fixture is compiled, never dispatched")
     }
 
     #[handler::tell]
-    fn on_plain(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Plain) {}
+    fn on_plain(&mut self, ctx: &mut WasmCtx<'_, Self, Anyone>, _mail: Plain) {
+        let _sender: Option<ErasedActorRef> = ctx.sender();
+        note(ctx);
+    }
 }
+
+/// A helper a stating handler and a plain one both call: it takes a ctx of
+/// any sender.
+fn note<A, S>(_ctx: &mut WasmCtx<'_, A, S>) {}
 
 pub struct NativeWindow;
 
@@ -107,19 +118,18 @@ impl aether_substrate::actor::native::NativeActor for NativeWindow {
     #[handler::tell]
     fn on_take_focus(
         _state: &mut Self::State,
-        ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
+        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, Self, FocusHolder>,
         _mail: TakeFocus,
-        sender: ProtocolRef<FocusHolder>,
     ) {
-        ctx.send_to(sender, &FocusLost);
+        let holder: ProtocolRef<FocusHolder> = ctx.sender();
+        ctx.send_to(holder, &FocusLost);
     }
 
     #[handler::request]
     fn on_dial_self(
         _state: &mut Self::State,
-        _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>,
+        _ctx: &mut aether_substrate::actor::native::NativeCtx<'_, Self, FocusHolder>,
         _mail: DialSelf,
-        _sender: ProtocolRef<FocusHolder>,
     ) -> aether_substrate::actor::native::Pending<Dialed> {
         unimplemented!("a pass fixture is compiled, never dispatched")
     }

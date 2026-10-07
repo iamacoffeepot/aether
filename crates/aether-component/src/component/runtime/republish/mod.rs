@@ -454,7 +454,7 @@ impl ComponentHostCapabilityState {
     /// the ctx's in-flight root: a request a committing candidate held and
     /// its commit flushed. Such a request runs at once rather than waiting
     /// for the republish it would otherwise hold open (see the module docs).
-    pub(super) fn committing_republish<A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, M>) -> Option<RepublishId> {
+    pub(super) fn committing_republish<A, S, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, S, M>) -> Option<RepublishId> {
         ctx.in_flight_root().and_then(|root| self.commit_roots.get(&root)).map(|commit| commit.republish)
     }
 }

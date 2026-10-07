@@ -28,8 +28,8 @@ impl BundleRoot {
     /// Cast `sender`, the root's spawn reply sender at `path`, to each role
     /// in `roles`. `Err` names the first declared role the root does not
     /// publish.
-    pub(super) fn cast<A, M: ReplyMode>(
-        ctx: &NativeCtx<'_, A, M>,
+    pub(super) fn cast<A, S, M: ReplyMode>(
+        ctx: &NativeCtx<'_, A, S, M>,
         sender: ErasedActorRef,
         roles: RootRoles,
         path: &ErasedActorPath,

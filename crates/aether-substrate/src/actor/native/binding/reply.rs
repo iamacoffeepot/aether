@@ -183,7 +183,7 @@ impl HeldLedger for NativeParkLedger<'_> {
 mod tests {
     use std::sync::mpsc;
 
-    use aether_actor::{ErasedActorRef, MailSender, OutboundReply, Unchecked};
+    use aether_actor::{Anyone, ErasedActorRef, MailSender, OutboundReply, Unchecked};
     use aether_kinds::Tick;
 
     use super::*;
@@ -218,7 +218,7 @@ mod tests {
         }
 
         #[handler::unchecked(reason = "test: replies more than once")]
-        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, ask: Ask) {
+        fn on_ask(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, ask: Ask) {
             for _ in 0..ask.replies {
                 ctx.reply(&Tick::default());
                 self.replied += 1;

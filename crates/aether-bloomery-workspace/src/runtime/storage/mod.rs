@@ -133,7 +133,7 @@ impl StorageDesk {
     /// Send every queued request through its task's source, and forget every
     /// task that has closed. A request from a task that has already closed is
     /// not sent.
-    pub fn drain<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>) {
+    pub fn drain<A, S, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) {
         while let Ok(message) = self.requests.try_recv() {
             let (ticket, seq, call) = match message {
                 Message::Close { ticket } => {

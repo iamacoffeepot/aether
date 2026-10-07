@@ -80,7 +80,9 @@ A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
 `ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
 consumer from the proven sender, so the actor never names its own position.
-Both handlers require `TcpConsumer` of their sender (ADR-0231 §11): the send
+Both handlers require `TcpConsumer` of their sender (ADR-0231 §11), which
+each states as its ctx's sender (`NativeCtx<'_, Self, TcpConsumer>`) and
+reads as the proven `ProtocolRef<TcpConsumer>` from `ctx.sender()`: the send
 builds only for an actor with silent handlers for `session_data` and
 `session_closed`, and an actor that lacks one gets a build error naming it.
 The engine casts the sender before the handler runs, so a `_self` kind that

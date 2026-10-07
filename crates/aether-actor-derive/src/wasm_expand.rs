@@ -8,9 +8,9 @@ use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, SenderArm, WatchHandlerFn,
     allow_abi_receiver, allow_context_by_value, attr_is_fallback, attr_is_handler, check_intent_signature,
     check_watch_signature, classify_handler_reply, ctx_names_actor, departed_watched_type, extract_handler_kind_type,
-    fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds,
-    reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result, sender_arm, silent_call,
-    validate_addressable_consts, validate_fallback_sig,
+    fill_ctx_actor, handler_cfgs, parse_handler_args, parse_handler_class, reject_ctx_sender,
+    reject_duplicate_handler_kinds, reject_duplicate_watched_types, rename_lifecycle_hooks, require_wire_result,
+    sender_arm, silent_call, validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -181,6 +181,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
                     }
                     validate_fallback_sig(&f.sig)?;
+                    reject_ctx_sender(
+                        &f.sig,
+                        "`#[fallback]`",
+                        "it catches mail no handler names, so no kind's send could carry the requirement",
+                    )?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
@@ -191,6 +196,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_rehydrate") {
                     // `on_dehydrate` takes a `WasmDropCtx`, which the fill leaves
                     // alone.
+                    reject_ctx_sender(&f.sig, "a lifecycle hook", "it dispatches no mail, so there is no sender")?;
                     fill_ctx_actor(&mut f.sig);
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
@@ -575,7 +581,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // is the single source of truth — adding a `#[handler]` automatically
     // updates senders' compile-time checks.
     // ADR-0231 §11: the marker names what the handler requires of its sender,
-    // read from its `sender: ProtocolRef<P>` parameter, which the typed sends
+    // read from its ctx's sender type argument, which the typed sends
     // bound the sending actor against.
     let handles_kind_impls = handlers.iter().map(|h| {
         let impl_generics_ts = quote! { #impl_generics };
@@ -851,7 +857,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         impl #impl_generics ::aether_actor::WasmDispatch<Self> for #self_ty #where_clause {
             fn dispatch(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #self_ty::__aether_dispatch(__aether_state, __aether_ctx, __aether_mail)
@@ -878,7 +884,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -908,7 +914,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
@@ -919,11 +925,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             // the same typed ctx (#6533) and upgrades the same way below.
             fn erased_wire(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
             ) -> ::core::result::Result<(), ::aether_actor::ActorInitError> {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single())
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>) {
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
             fn erased_on_dehydrate(
@@ -934,7 +940,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
                 <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(
@@ -1121,18 +1127,18 @@ fn build_dispatch_body(
         // `DISPATCH_HANDLED_HOLD`, so the substrate keeps the handle and
         // holds the requester's settlement for the `Held<R>` minted beside
         // the receipt.
-        // ADR-0231 §11: an arm whose handler takes `sender: ProtocolRef<P>`
-        // casts the inbound sender to `P` first and passes the proven
-        // reference as the fourth argument. A sender the cast refuses never
-        // reaches the handler: the helper logs it and answers a request, and
-        // the arm returns the code the helper hands back.
-        let SenderArm { prelude: prove_sender, argument: sender } =
-            sender_arm(h.sender.as_ref(), k, h.reply.manifest_kind(), &quote! { __aether_refused }).unwrap_or_default();
+        // ADR-0231 §11: an arm whose handler's ctx names a protocol `P` as its
+        // sender casts the inbound sender to `P` first and calls the handler
+        // with the ctx typed by `P`. A sender the cast refuses never reaches
+        // the handler: the helper logs it and answers a request, and the arm
+        // returns the code the helper hands back.
+        let SenderArm { prelude: prove_sender, ctx } =
+            sender_arm(h.sender.as_ref(), k, h.reply.manifest_kind(), &quote! { __aether_refused }, ctx);
         let (call, rc) = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => (
                 quote! {
                     #prove_sender
-                    let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded #sender);
+                    let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
                     ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
@@ -1144,7 +1150,7 @@ fn build_dispatch_body(
                 let call = silent_call(h.response_context.as_ref(), method, k, &rc, |context| {
                     quote! {
                         #prove_sender
-                        self.#method(#ctx.as_single(), __aether_decoded #context #sender);
+                        self.#method(#ctx.as_single(), __aether_decoded #context);
                     }
                 });
                 (call, rc)
@@ -1152,7 +1158,7 @@ fn build_dispatch_body(
             (HandlerClass::Single, HandlerReply::Deferred(_)) => (
                 quote! {
                     #prove_sender
-                    let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded #sender);
+                    let __aether_pending = self.#method(#ctx.as_single(), __aether_decoded);
                     __aether_ctx.__accept_pending(__aether_pending);
                 },
                 quote! { ::aether_actor::DISPATCH_HANDLED_HOLD },

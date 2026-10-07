@@ -60,7 +60,7 @@ impl Error for ResolvePathError {
     }
 }
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// Proven reference to a declared dependency (ADR-0230): mints an
     /// [`ActorRef`] for the position `R`'s resolver folds beneath this
     /// binding's scope, with no registry read — the load was refused unless `R` was `Live`, so the

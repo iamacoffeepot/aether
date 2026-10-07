@@ -1,4 +1,4 @@
-//! ADR-0231 §11: a handler that takes `sender: ProtocolRef<P>` requires `P` of
+//! ADR-0231 §11: a handler whose ctx names `P` as its sender requires `P` of
 //! whoever sends it that kind, and the typed sends check the sending actor
 //! against it. `Window`'s take of key focus requires `FocusHolder`. `Holder`
 //! handles both of its kinds, so its sends compile. `HalfHolder` lacks the
@@ -7,7 +7,7 @@
 //! an `E0277` naming that handler; a bound dropped from any of the four would
 //! let it take focus and warn-drop the notice that it lost it.
 
-use aether_actor::{ActorInitError, InlineChild, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+use aether_actor::{ActorInitError, InlineChild, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 
 #[aether_data::kind(name = "test.sender_rows.take_focus", copy)]
 struct TakeFocus;
@@ -38,8 +38,8 @@ impl WasmActor for Window {
     }
 
     #[handler::tell]
-    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _mail: TakeFocus, sender: ProtocolRef<FocusHolder>) {
-        ctx.send_to(sender, &FocusGained);
+    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: TakeFocus) {
+        ctx.send_to(ctx.sender(), &FocusGained);
     }
 }
 

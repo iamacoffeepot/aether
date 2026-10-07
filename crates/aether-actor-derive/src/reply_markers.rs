@@ -128,8 +128,8 @@ pub fn refusal_answer(class: HandlerClass, reply: &HandlerReply, kind_ty: &Type)
 }
 
 /// The type a handler's `HandlesKind<K>` marker and `Contract<K>` row name as
-/// `Sender` (ADR-0231 §11): the protocol `P` of its `sender: ProtocolRef<P>`
-/// parameter, or `Anyone` for a handler that takes none. Every emitter reads
+/// `Sender` (ADR-0231 §11): the protocol `P` its ctx names as its sender, or
+/// `Anyone` for a handler whose ctx names none. Every emitter reads
 /// this one mapping, so the marker the typed sends bound against and the row
 /// a protocol's coverage reads cannot name different requirements.
 pub fn sender_requirement_ty(sender: Option<&Type>) -> TokenStream2 {

@@ -3,7 +3,7 @@
 //! that answers it later.
 //!
 //! [`WasmCtx::hold`] mints the pair. The receipt goes back to the `#[actor]`
-//! macro, which accepts it through `WasmCtx::<A, Unchecked>::__accept_pending`
+//! macro, which accepts it through `WasmCtx::<A, S, Unchecked>::__accept_pending`
 //! and reports `DISPATCH_HANDLED_HOLD`, so the host keeps the dispatch's
 //! reply handle and holds the requester's settlement. The ticket is that
 //! reply handle. It lives in the actor's state, or travels by value in a
@@ -52,7 +52,7 @@ impl<R> Pending<R> {
     }
 
     /// Accept the receipt as returned from its handler. Reachable only from
-    /// `WasmCtx::<A, Unchecked>::__accept_pending`, which the `#[actor]` macro
+    /// `WasmCtx::<A, S, Unchecked>::__accept_pending`, which the `#[actor]` macro
     /// calls on the value a `-> Pending<R>` handler returns; a single handler
     /// never holds that view, so it cannot disarm its own receipt and
     /// declare a false row.
@@ -120,7 +120,7 @@ impl<R: ActorMail> Held<R> {
     ///
     /// `ctx` is the actor's own ctx, in any handler: a held reply answers on
     /// the actor that holds it (ADR-0243 §5).
-    pub fn answer<A, M: ReplyMode>(self, ctx: &mut WasmCtx<'_, A, M>, reply: &R) {
+    pub fn answer<A, S, M: ReplyMode>(self, ctx: &mut WasmCtx<'_, A, S, M>, reply: &R) {
         if self.ticket != NO_REPLY_HANDLE {
             let encoded = encode_guest(reply);
             mail::reply_mail(self.ticket, R::ID.0, &encoded.bytes, 1, ctx.mailbox);
@@ -186,7 +186,7 @@ impl<'de, R: ActorMail> WireDecode<'de> for Held<R> {
     }
 }
 
-impl<A> WasmCtx<'_, A, Single> {
+impl<A, S> WasmCtx<'_, A, S, Single> {
     /// Arm a deferred reply for the mail being dispatched (ADR-0243 §1, §6):
     /// return the [`Pending<R>`] receipt from the handler and keep the
     /// [`Held<R>`] to answer later, from this or any later handler.

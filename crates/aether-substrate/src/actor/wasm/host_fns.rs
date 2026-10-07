@@ -816,7 +816,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // apart.
     //
     // Its one caller is a guest dispatch arm that refuses a sender its
-    // handler's `sender: ProtocolRef<P>` requirement does not admit. The arm
+    // handler's ctx sender requirement does not admit. The arm
     // names that sender in the error it logs and in the `PathRefused` a
     // request's reply is built from, inside the same dispatch, before the
     // handler would have run, so no mail can serve the read. No guest ctx

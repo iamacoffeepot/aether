@@ -71,9 +71,9 @@ mod sent_sealed {
 /// sender, [`HandlesKind::Sender`].
 ///
 /// Every flat typed verb carries it beside [`SendableTo<R>`], with `A` the
-/// ctx's own actor, so a receiver that names `sender: ProtocolRef<P>` on its
-/// handler is sent that kind only by an actor with a handler for each of
-/// `P`'s kinds. A handler that takes no sender parameter requires
+/// ctx's own actor, so a receiver whose handler's ctx names a protocol `P`
+/// as its sender is sent that kind only by an actor with a handler for each
+/// of `P`'s kinds. A handler whose ctx names no sender requires
 /// [`Anyone`](crate::Anyone), which every `A` covers, so its sends build as
 /// before. Sealed: the one impl is the blanket below.
 ///

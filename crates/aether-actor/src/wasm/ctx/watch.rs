@@ -66,7 +66,7 @@ where
     }
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Watch `target` (ADR-0079 §8): when it closes, this actor's departure
     /// handler for the type it was watched through runs once and is handed
     /// the departed actor's reference, the returned id, and `context`.

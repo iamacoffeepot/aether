@@ -21,7 +21,7 @@ pub use aether_substrate::chassis::error::BootError;
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::{ProtocolRef, Single, runtime};
+use aether_actor::{Anyone, ProtocolRef, Single, runtime};
 // `MonitorNotice` is named by `on_monitor_notice`'s signature.
 use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
@@ -253,7 +253,11 @@ impl NativeActor for TcpListenerActor {
     /// we'll see the queue already drained on the second handler
     /// call and exit fast.
     #[handler::tell]
-    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: ConnectionReady) {
+    fn on_connection_ready(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
+        _mail: ConnectionReady,
+    ) {
         while let Ok((stream, peer)) = state.connection_rx.try_recv() {
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;

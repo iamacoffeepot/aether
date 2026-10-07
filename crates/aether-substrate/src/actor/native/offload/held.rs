@@ -126,7 +126,7 @@ impl<R: ActorMail> Held<R> {
     ///
     /// # Panics
     /// Panics when `ctx` belongs to another actor (ADR-0243 §5).
-    pub fn answer<M: ReplyMode, A>(self, ctx: &mut NativeCtx<'_, A, M>, reply: &R) {
+    pub fn answer<M: ReplyMode, A, S>(self, ctx: &mut NativeCtx<'_, A, S, M>, reply: &R) {
         let (id, ledger) = self.disarm();
         ctx.answer_held(id, &ledger, reply);
     }
@@ -149,20 +149,20 @@ impl<R: ActorMail> Held<R> {
     /// row, so handing to one does not compile (#6895):
     ///
     /// ```compile_fail,E0277
-    /// use aether_actor::{ErasedActorRef, Single};
+    /// use aether_actor::{Anyone, ErasedActorRef, Single};
     /// use aether_kinds::{Ping, Pong};
     /// use aether_substrate::actor::native::{Held, NativeCtx};
     ///
-    /// fn hand<A>(ctx: &mut NativeCtx<'_, A, Single>, held: Held<Pong>, target: ErasedActorRef) {
+    /// fn hand<A>(ctx: &mut NativeCtx<'_, A, Anyone, Single>, held: Held<Pong>, target: ErasedActorRef) {
     ///     held.hand_off(ctx, target, &Ping::default());
     /// }
     /// ```
     ///
     /// # Panics
     /// Panics when `ctx` belongs to another actor (ADR-0243 §5).
-    pub fn hand_off<K: ActorMail, I, A, M: ReplyMode>(
+    pub fn hand_off<K: ActorMail, I, A, S, M: ReplyMode>(
         self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         target: impl HandsOff<K, R, I>,
         payload: &K,
     ) {

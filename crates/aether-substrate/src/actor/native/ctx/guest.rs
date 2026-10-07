@@ -26,7 +26,7 @@ pub trait GuestHost: NativeActor {
     fn guest(state: &Self::State) -> Option<&ComponentCapabilities>;
 }
 
-impl<M: ReplyMode, A: GuestHost> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A: GuestHost, S> NativeCtx<'_, A, S, M> {
     /// Make this actor's accept set, cost rows, and published contract match
     /// what `A` declares for `state`. `Some`: the accept set becomes exactly
     /// the guest's, cost cells are seeded, reusing existing ones, for `A`'s

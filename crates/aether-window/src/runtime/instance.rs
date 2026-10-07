@@ -36,7 +36,7 @@ enum WindowForwardContext {
 
 impl WindowForwardContext {
     /// Answer the held request with its own command's `Err`, carrying `error`.
-    fn refuse<A, M: ReplyMode>(self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
+    fn refuse<A, S, M: ReplyMode>(self, ctx: &mut NativeCtx<'_, A, S, M>, error: String) {
         match self {
             Self::Close(held) => held.answer(ctx, &CloseWindowResult::Err { error }),
             Self::SetMode(held) => held.answer(ctx, &SetWindowModeResult::Err { error }),
@@ -70,7 +70,7 @@ fn forward<R: HeldReply>(
 /// `ApplyWindowCommandResult`, so a stray one must not stop it. A result whose
 /// variant does not match the stored context still answers the held request,
 /// with that request's own `Err` naming the mismatch, so the debt is paid.
-fn complete<A, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, M>, result: ApplyWindowCommandResult) {
+fn complete<A, S, M: ReplyMode>(ctx: &mut NativeCtx<'_, A, S, M>, result: ApplyWindowCommandResult) {
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
         return;
     };

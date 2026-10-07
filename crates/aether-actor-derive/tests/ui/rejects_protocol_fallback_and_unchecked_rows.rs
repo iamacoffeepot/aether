@@ -4,7 +4,8 @@
 //! unchecked protocol reference still sends only the kind it lists.
 
 use aether_actor::{
-    ActorInitError, CoveredBy, Mail, ProtocolRef, Unchecked, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
+    ActorInitError, Anyone, CoveredBy, Mail, ProtocolRef, Unchecked, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor,
+    protocol,
 };
 
 #[repr(C)]
@@ -71,7 +72,7 @@ impl WasmActor for UncheckedSingle {
     }
 
     #[handler::unchecked(reason = "test: an unchecked row covering a single row")]
-    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Self, Unchecked>, _mail: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Self, Anyone, Unchecked>, _mail: Ping) {}
 }
 
 struct UncheckedSilent;
@@ -85,7 +86,7 @@ impl WasmActor for UncheckedSilent {
     }
 
     #[handler::unchecked(reason = "test: an unchecked row covering a silent row")]
-    fn on_note(&mut self, _ctx: &mut WasmCtx<'_, Self, Unchecked>, _mail: Note) {}
+    fn on_note(&mut self, _ctx: &mut WasmCtx<'_, Self, Anyone, Unchecked>, _mail: Note) {}
 }
 
 fn assert_covered<P: CoveredBy<R>, R>() {}

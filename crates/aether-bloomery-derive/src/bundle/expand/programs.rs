@@ -167,7 +167,7 @@ fn expand_relay_handlers(live: &Ident, program: &TokenStream2) -> TokenStream2 {
         #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
         fn on_read_artifact(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
             request: #program::kinds::ReadArtifact,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};
@@ -214,7 +214,7 @@ fn expand_relay_handlers(live: &Ident, program: &TokenStream2) -> TokenStream2 {
         #[handler::unchecked(reason = "relays the request (ADR-0243 §8)")]
         fn on_api_call(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Unchecked>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
             request: #program::kinds::ApiCall,
         ) {
             use ::aether_actor::{MailSender, OutboundReply};
@@ -341,9 +341,9 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
         impl #invocation {
             #send_pending
 
-            fn reply_invoked<A, M: ::aether_actor::ReplyMode>(
+            fn reply_invoked<A, S, M: ::aether_actor::ReplyMode>(
                 &self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, A, M>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, A, S, M>,
                 invoked: &#program::Invoked,
             ) {
                 if let Some(parent) = self.parent {
@@ -447,9 +447,9 @@ fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
 fn expand_send_pending(program: &TokenStream2) -> TokenStream2 {
     let resume = resume_after_poll(program);
     quote! {
-        fn send_pending<M: ::aether_actor::ReplyMode>(
+        fn send_pending<S, M: ::aether_actor::ReplyMode>(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, Self, M>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, Self, S, M>,
             pending: #program::__macro_internals::Pending,
         ) {
             use ::aether_actor::MailSender;

@@ -94,7 +94,7 @@ impl<R: HeldReply + Send + 'static> TaskQueue<R> {
     /// # Panics
     /// Takes this dispatch's one [`NativeCtx::hold`], so a handler that
     /// already holds a reply panics.
-    pub fn submit<F, A, M>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<R>
+    pub fn submit<F, A, S, M>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, work: F) -> Pending<R>
     where
         F: FnOnce() -> R + Send + 'static,
         M: ReplyMode,
