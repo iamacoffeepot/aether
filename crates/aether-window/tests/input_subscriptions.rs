@@ -16,6 +16,7 @@
 //! delivery is covered by the `substrate_harness` frame-loop scenarios.
 
 use std::fs;
+use std::mem;
 use std::path::Path;
 
 use aether_actor::{ActorRef, HeldReply, actor};
@@ -277,9 +278,19 @@ impl HeldReply for Departed {
 /// the dropping chain's settlement, so this is the signal a scenario waits on
 /// before it reads what the departure changed.
 struct DepartureWatcher {
-    watch: Option<MonitorHandle>,
-    departed: bool,
-    waiting: Option<Held<Departed>>,
+    state: Departure,
+}
+
+/// Where a [`DepartureWatcher`] is in its one watch.
+enum Departure {
+    /// No `Watch` has arrived.
+    Unwatched,
+    /// The component is watched and nobody has asked after it.
+    Watching(MonitorHandle),
+    /// The component is watched and `held` is answered when it departs.
+    Awaited { _monitor: MonitorHandle, held: Held<Departed> },
+    /// The component's notice arrived.
+    Departed,
 }
 
 #[actor(singleton, root)]
@@ -288,31 +299,34 @@ impl NativeActor for DepartureWatcher {
     type Config = ();
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { watch: None, departed: false, waiting: None })
+        Ok(Self { state: Departure::Unwatched })
     }
 
     #[handler::tell]
     fn on_watch(&mut self, ctx: &mut NativeCtx<'_>, Watch { target }: Watch) {
         let proven = ctx.resolve_path(&target).expect("the watched component is live");
-        self.watch = Some(ctx.monitor(proven));
+        self.state = Departure::Watching(ctx.monitor(proven));
     }
 
     #[handler::request]
     fn on_await_departure(&mut self, ctx: &mut NativeCtx<'_>, _await: AwaitDeparture) -> Pending<Departed> {
         let (pending, held) = ctx.hold::<Departed>();
-        if self.departed {
-            held.answer(ctx, &Departed { notified: true });
-        } else {
-            self.waiting = Some(held);
-        }
+
+        self.state = match mem::replace(&mut self.state, Departure::Departed) {
+            Departure::Watching(monitor) => Departure::Awaited { _monitor: monitor, held },
+            Departure::Departed => {
+                held.answer(ctx, &Departed { notified: true });
+                Departure::Departed
+            }
+            Departure::Unwatched => panic!("AwaitDeparture arrived before any Watch"),
+            Departure::Awaited { .. } => panic!("a second AwaitDeparture arrived while one is held"),
+        };
         pending
     }
 
     #[handler::event]
     fn on_monitor_notice(&mut self, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
-        drop(self.watch.take());
-        self.departed = true;
-        if let Some(held) = self.waiting.take() {
+        if let Departure::Awaited { held, .. } = mem::replace(&mut self.state, Departure::Departed) {
             held.answer(ctx, &Departed { notified: true });
         }
     }
