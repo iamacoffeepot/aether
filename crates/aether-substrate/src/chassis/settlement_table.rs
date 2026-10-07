@@ -1,5 +1,5 @@
-//! Lock-free open-addressing settlement table (spike for
-//! iamacoffeepot/aether#1059 — drop the per-hop settlement stripe mutex).
+//! Lock-free open-addressing settlement table — the production settlement
+//! authority (ADR-0080 / ADR-0086).
 //!
 //! [`super::settlement_counter::SettlementCounter`] guards its
 //! `root -> CounterCell` map with a striped `Mutex`; the producer harness
@@ -7,9 +7,11 @@
 //! ~67 ns per `Sent`+`Finished` pair under that lock versus ~4 ns on the
 //! bare [`CounterCell`] atomic. The lock guards only the *map structure*
 //! (insert-on-first-event, drop-on-settle); the per-root count is already
-//! a lock-free atomic word. This table removes the lock by making the map
-//! itself lock-free, so every `record_*` call is a probe plus a bare
-//! atomic — the ~4 ns floor on every access, not just a cached one.
+//! a lock-free atomic word. This table makes the map itself lock-free, so
+//! every unspilled `record_*` call is a probe plus a bare atomic — the ~4 ns
+//! floor on every access, not just a cached one — with a gated cold
+//! spillover absorbing peak concurrent live roots beyond the fast-path
+//! slots (see below).
 //!
 //! **Why this is tractable here when general lock-free open addressing is
 //! not.** Two workload invariants (ADR-0080 / ADR-0086) collapse the two
@@ -58,10 +60,10 @@
 //! so no handler can be running under it to emit a further send; the only
 //! same-key recurrence is an actor reload minting the id afresh, which is
 //! temporally separated from the old chain's settle and goes through the
-//! clean `TOMBSTONE -> CLAIMING -> OCCUPIED` claim path. Promotion past
-//! this spike must either (a) confirm this invariant holds on every
-//! settlement path, or (b) add re-open robustness (a linked
-//! decrement-and-tombstone), which is the genuinely hard lock-free piece.
+//! clean `TOMBSTONE -> CLAIMING -> OCCUPIED` claim path. Soundness beyond
+//! this table rests on that invariant holding on every settlement path;
+//! re-open robustness (a linked decrement-and-tombstone) is the genuinely
+//! hard lock-free piece, deliberately not built.
 //!
 //! **Enforcement (not just documented).** The contract is guarded in code,
 //! release-active and fail-fast (ADR-0063): claiming a slot asserts its
@@ -77,10 +79,40 @@
 //! probing", so probe chains stay intact across reclaim, and a settled
 //! slot is recycled in place by the next insert that probes to it — the
 //! table doesn't fill from churn, only from *peak concurrent live roots*
-//! (self-bounding per ADR-0086). Resize / overflow-to-a-cold-slot is a
-//! follow-up; this spike sizes the table generously and treats a full
-//! probe sweep as a fail-fast (it cannot happen at the occupancy the
-//! stress tests or realistic fleets reach).
+//! (self-bounding per ADR-0086). A full probe sweep with no reusable slot
+//! does not panic: the root spills into the cold overflow instead (see
+//! below). `DEFAULT_SLOTS` therefore sizes the lock-free fast path, while
+//! peak concurrent live roots beyond it spill instead of panicking —
+//! capacity is no longer a correctness boundary.
+//!
+//! **Gated cold spillover.** The overflow is a `HashMap<MailId, CounterCell>`
+//! under a poison-fail-fast `Mutex`, holding the excess roots'
+//! `CounterCell`s from spill until they settle; `spilled` counts the roots
+//! currently resident there. Every path that would otherwise lock reads the
+//! gate first: a `spilled` load of zero skips the mutex entirely, so no lock
+//! is taken while nothing has spilled. The overflow mutex is taken only
+//! while roots are spilled (never on the unspilled hot path, per the gate),
+//! and the `spilled` atomic costs one `Acquire` load per table miss. The
+//! insert raises the gate with `Release` and stores the map entry under the
+//! mutex; the settle removes the entry and lowers the gate with `Release`
+//! under the same mutex, so the gate is never below the overflow length; every gated path reads the gate with
+//! `Acquire`, so the decision to skip the lock happens-after the insert it
+//! might otherwise miss. A stale-high gate only costs a useless lock, never
+//! correctness; the full-sweep insert locks unconditionally rather than
+//! consulting the gate, so a stale gate read never skips the authoritative
+//! check.
+//!
+//! **Why the mutex and the atomic do not belong to an actor.** The threads
+//! touching them are every thread that records settlement — dispatcher
+//! workers, producers sending through the handle hooks, offload workers,
+//! pumped-slot drivers, harness threads — arbitrary producer threads with
+//! no single owning actor across a fan-out that spans many actors.
+//! Settlement accounting is the convergence point below the actor layer, the
+//! same grain as the table's own atomics. Funneling each accounting event
+//! through an owning actor's mailbox would put settlement back on a mail hop
+//! on the frame's critical path and serialize wide fan-out accounting
+//! through one actor — the design ADR-0086 §Decision 1 explicitly rejected
+//! in favor of atomics.
 //!
 //! **Probe bound (iamacoffeepot/aether#7126).** Because slots never return
 //! to `EMPTY`, churn eventually leaves no `EMPTY` anywhere, and a probe that
@@ -95,7 +127,10 @@
 //! bound only grows, and it tracks the peak clustering of *live* roots, not
 //! the number of roots the table has ever held.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::{Mutex, MutexGuard};
 
 use aether_data::{MailId, MailboxId};
 
@@ -118,7 +153,8 @@ const VERSION_UNIT: u64 = 1 << 2;
 /// Default slot count (power of two). ~16K slots at 32 bytes each is
 /// ~512 KB — orders of magnitude above the peak concurrent live-root
 /// count a single substrate reaches (dozens–hundreds), so probe chains
-/// stay near length 1 and the table never fills.
+/// stay near length 1. Peak concurrent live roots beyond this spill into
+/// the cold overflow instead of panicking.
 const DEFAULT_SLOTS: usize = 1 << 14;
 
 /// A single open-addressing slot: the version-tagged state word, the
@@ -160,7 +196,7 @@ fn with_state(sv: u64, new_state: u64) -> u64 {
 
 /// Lock-free open-addressing `MailId -> CounterCell` table. Drop-in for
 /// [`super::settlement_counter::SettlementCounter`]: same `record_*` /
-/// `live_roots` / `held_open` surface, no lock on any path.
+/// `live_roots` / `held_open` surface, no lock on any unspilled path.
 #[derive(Debug)]
 pub struct SettlementTable {
     slots: Box<[Slot]>,
@@ -169,6 +205,16 @@ pub struct SettlementTable {
     /// Every lookup probes at most `max_probe + 1` slots (see the module's
     /// probe-bound note). Only ever grows.
     max_probe: AtomicUsize,
+    /// Cold spillover for roots beyond the fast-path slots: the excess
+    /// roots' `CounterCell`s, insert-on-spill and drop-on-settle. Taken
+    /// only while roots are spilled (never on the unspilled hot path —
+    /// every gated path skips the mutex on a zero `spilled` load).
+    overflow: Mutex<HashMap<MailId, CounterCell>>,
+    /// Roots currently resident in `overflow`. Raised under the overflow
+    /// lock on insert, lowered under the same lock on removal, so it is never
+    /// below the overflow length; gated paths read it first with `Acquire`
+    /// and skip the mutex entirely on zero.
+    spilled: AtomicUsize,
 }
 
 impl SettlementTable {
@@ -189,6 +235,8 @@ impl SettlementTable {
             #[allow(clippy::cast_possible_truncation)]
             mask: n as u64 - 1,
             max_probe: AtomicUsize::new(0),
+            overflow: Mutex::new(HashMap::new()),
+            spilled: AtomicUsize::new(0),
         }
     }
 
@@ -255,39 +303,90 @@ impl SettlementTable {
         slot.sv.store((claiming_sv & !STATE_MASK) | STATE_OCCUPIED, Ordering::Release);
     }
 
-    /// Find the cell for `root`, inserting it if absent. Never returns a
+    /// Claim `root` in the table only, inserting if absent. Returns `None`
+    /// on a full sweep (every slot live or claiming) so the caller can
+    /// spill into the cold overflow instead of panicking. Never returns a
     /// borrow tied to anything but `&self` — slots live for the table's
     /// lifetime and never move, so the reference stays valid through any
     /// concurrent reclaim of *other* slots.
-    ///
-    /// # Panics
-    /// Panics if no slot in the table is reusable — the table is saturated.
-    /// This spike sizes the table so that cannot happen; production sizing +
-    /// cold-overflow is a follow-up.
-    fn cell_for(&self, root: MailId) -> &CounterCell {
-        // A present key lies within the probe bound, so a miss here means
-        // `root` is new. Unique keys mean no concurrent same-key insert can
-        // land between this miss and the claim below.
-        if let Some(slot) = self.find_slot(root) {
-            return &slot.cell;
-        }
+    fn try_table_cell(&self, root: MailId) -> Option<&CounterCell> {
         let home = self.home(root);
         loop {
-            let Some((target, distance)) = self.first_reusable(home) else {
-                panic!(
-                    "settlement table saturated ({} slots); resize / cold-overflow is unimplemented \
-                     (iamacoffeepot/aether#1059 spike)",
-                    self.slots.len()
-                );
-            };
+            let (target, distance) = self.first_reusable(home)?;
             // Raise the bound before the key is published, so every lookup
             // that happens-after the publish probes far enough to find it.
             self.max_probe.fetch_max(distance, Ordering::Release);
             if self.try_claim(target, root) {
-                return &self.slots[target].cell;
+                return Some(&self.slots[target].cell);
             }
             // Lost the slot to another key's claim → re-probe.
         }
+    }
+
+    /// Lock the cold overflow, poison-fail-fast per ADR-0063 (same contract
+    /// as the striped counter's stripe lock).
+    #[inline]
+    fn lock_overflow(&self) -> MutexGuard<'_, HashMap<MailId, CounterCell>> {
+        self.overflow.lock().expect("settlement table overflow mutex poisoned; fail-fast per ADR-0063")
+    }
+
+    /// Whether any root is spilled. Every path that would otherwise lock the
+    /// overflow reads this first and skips the mutex when it is `false`.
+    /// `Acquire` pairs with the `Release` updates in [`Self::spill`] and
+    /// [`Self::lower_spilled`], so a thread that learned of a spilled root
+    /// from the thread that spilled it also sees the raised count.
+    #[inline]
+    fn any_spilled(&self) -> bool {
+        self.spilled.load(Ordering::Acquire) != 0
+    }
+
+    /// Spill `root` into the overflow and apply `step` to its cell, under the
+    /// overflow lock. Called only after a full table sweep. It locks without
+    /// reading `spilled` first, because a stale read must never skip the
+    /// authoritative check. The count is raised before the entry is inserted,
+    /// so it is never below the overflow length.
+    fn spill(&self, root: MailId, step: impl Fn(&CounterCell)) {
+        let mut overflow = self.lock_overflow();
+        match overflow.entry(root) {
+            Entry::Occupied(entry) => step(entry.get()),
+            Entry::Vacant(entry) => {
+                self.spilled.fetch_add(1, Ordering::Release);
+                step(entry.insert(CounterCell::zero()));
+            }
+        }
+    }
+
+    /// Apply `step` to `root`'s overflow cell under the overflow lock.
+    /// `false` when the overflow holds no such root.
+    fn raise_spilled(&self, root: MailId, step: impl Fn(&CounterCell)) -> bool {
+        let overflow = self.lock_overflow();
+        let cell = overflow.get(&root);
+        if let Some(cell) = cell {
+            step(cell);
+        }
+        let counted = cell.is_some();
+        drop(overflow);
+        counted
+    }
+
+    /// Apply the decrement `step` to `root`'s overflow cell under the overflow
+    /// lock, and remove the entry under the same lock when it settles.
+    /// Returns whether the root settled; `false` when the overflow holds no
+    /// such root, which is the orphan decrement.
+    fn lower_spilled(&self, root: MailId, step: impl Fn(&CounterCell) -> bool) -> bool {
+        let mut overflow = self.lock_overflow();
+        let Some(cell) = overflow.get(&root) else {
+            return false;
+        };
+        let settled = step(cell);
+        if settled {
+            overflow.remove(&root);
+            self.spilled.fetch_sub(1, Ordering::Release);
+        }
+        // The count is lowered before the lock is released, so it is never
+        // below the overflow length.
+        drop(overflow);
+        settled
     }
 
     /// The first `EMPTY` or `TOMBSTONE` slot probing from `home`, with its
@@ -378,29 +477,50 @@ impl SettlementTable {
     }
 
     /// Record a `Sent` for `root` (`in_flight += 1`). Inserts the slot on
-    /// first event.
+    /// first event, spilling into the cold overflow on a full sweep.
     pub fn record_sent(&self, root: MailId) {
-        self.cell_for(root).add_in_flight();
+        self.raise(root, CounterCell::add_in_flight);
     }
 
     /// Record a settlement `HoldOpen` for `root` (`held_open += 1`).
+    /// Symmetric with [`Self::record_sent`].
     pub fn record_hold_open(&self, root: MailId) {
-        self.cell_for(root).add_held_open();
+        self.raise(root, CounterCell::add_held_open);
+    }
+
+    /// Apply the increment `step` to `root`'s cell, wherever the root lives.
+    /// A root already in the table is counted there with no lock. Otherwise
+    /// the overflow is checked before any table claim, and only while roots
+    /// are spilled, so a spilled root is never given a second cell in the
+    /// table. A root in neither store claims a table slot, or spills when the
+    /// table is full.
+    fn raise(&self, root: MailId, step: impl Fn(&CounterCell)) {
+        if let Some(slot) = self.find_slot(root) {
+            step(&slot.cell);
+            return;
+        }
+
+        if self.any_spilled() {
+            let counted = self.raise_spilled(root, &step);
+            if counted {
+                return;
+            }
+        }
+
+        match self.try_table_cell(root) {
+            Some(cell) => step(cell),
+            None => self.spill(root, step),
+        }
     }
 
     /// Record a `Finished` for `root` (`in_flight -= 1`). Returns `true`
     /// iff the root just reached `(0,0)`; tombstones the slot on that
-    /// transition. An orphan `Finished` (no live slot) returns `false`.
+    /// transition, or removes the overflow entry under the overflow lock.
+    /// An orphan `Finished` (no live slot, no overflow entry) returns
+    /// `false`.
     #[must_use]
     pub fn record_finished(&self, root: MailId) -> bool {
-        let Some(slot) = self.find_slot(root) else {
-            return false;
-        };
-        let settled = slot.cell.sub_in_flight();
-        if settled {
-            Self::tombstone(slot);
-        }
-        settled
+        self.lower(root, CounterCell::sub_in_flight)
     }
 
     /// Record a hold `Release` for `root` (`held_open -= 1`). Returns
@@ -408,30 +528,51 @@ impl SettlementTable {
     /// [`Self::record_finished`].
     #[must_use]
     pub fn record_release(&self, root: MailId) -> bool {
-        let Some(slot) = self.find_slot(root) else {
-            return false;
-        };
-        let settled = slot.cell.sub_held_open();
-        if settled {
-            Self::tombstone(slot);
-        }
-        settled
+        self.lower(root, CounterCell::sub_held_open)
     }
 
-    /// Number of roots with a live (`OCCUPIED`) slot. For assertions; a
-    /// concurrent snapshot, exact only at quiescence.
+    /// Apply the decrement `step` to `root`'s cell, wherever the root lives,
+    /// and reclaim its place when it settles. With nothing spilled, a root
+    /// absent from the table is an orphan and no lock is taken.
+    fn lower(&self, root: MailId, step: impl Fn(&CounterCell) -> bool) -> bool {
+        if let Some(slot) = self.find_slot(root) {
+            let settled = step(&slot.cell);
+            if settled {
+                Self::tombstone(slot);
+            }
+            return settled;
+        }
+
+        self.any_spilled() && self.lower_spilled(root, step)
+    }
+
+    /// Number of live roots across both stores. For assertions; a
+    /// concurrent snapshot, exact only at quiescence. Sums the table
+    /// `OCCUPIED` count and the `spilled` gate (the overflow length once no
+    /// insert or removal is in progress) and never locks.
     #[must_use]
     pub fn live_roots(&self) -> usize {
-        self.slots.iter().filter(|s| s.sv.load(Ordering::Acquire) & STATE_MASK == STATE_OCCUPIED).count()
+        let table_live =
+            self.slots.iter().filter(|s| s.sv.load(Ordering::Acquire) & STATE_MASK == STATE_OCCUPIED).count();
+        let spilled = self.spilled.load(Ordering::Acquire);
+        table_live + spilled
     }
 
-    /// Current `held_open` count for `root` (0 if no live slot).
+    /// Current `held_open` count for `root` (0 if no live slot and no
+    /// overflow entry).
     #[must_use]
     pub fn held_open(&self, root: MailId) -> u32 {
-        self.find_slot(root).map_or(0, |slot| slot.cell.load().1)
+        if let Some(slot) = self.find_slot(root) {
+            return slot.cell.load().1;
+        }
+
+        if !self.any_spilled() {
+            return 0;
+        }
+        self.lock_overflow().get(&root).map_or(0, |cell| cell.load().1)
     }
 
-    /// Whether `root` still has a live slot — `in_flight > 0` or
+    /// Whether `root` is still live in either store — `in_flight > 0` or
     /// `held_open > 0`. The trace ring's eviction hint (issue 2076): a
     /// settled root is tombstoned, so `is_live == false` means the ring
     /// may reclaim that root's oldest entry instead of growing to retain
@@ -441,26 +582,41 @@ impl SettlementTable {
     /// slightly-early grow or slightly-late reclaim, never correctness.
     #[must_use]
     pub fn is_live(&self, root: MailId) -> bool {
-        self.find_slot(root).is_some()
+        if self.find_slot(root).is_some() {
+            return true;
+        }
+
+        self.any_spilled() && self.lock_overflow().contains_key(&root)
     }
 
     /// Snapshot every live root and its `(in_flight, held_open)` counts —
     /// the diagnostic surface a wedged settlement gate dumps so a genuine
     /// deadlock/livelock names its stuck roots instead of surfacing a bare
-    /// timeout (issue 2062). Walks the slots like [`Self::live_roots`]: a
-    /// concurrent snapshot, exact only at quiescence and best-effort under
-    /// churn (a slot whose occupant changes mid-read fails the seqlock and
-    /// is skipped). Bounded by the slot count.
+    /// timeout (issue 2062). Chains the table snapshot with the overflow
+    /// entries (locking only on a nonzero gate): a concurrent snapshot,
+    /// exact only at quiescence and best-effort under churn (a slot whose
+    /// occupant changes mid-read fails the seqlock and is skipped). A root
+    /// lives in exactly one store at a time, so the chain never double
+    /// counts.
     #[must_use]
     pub fn pending_roots(&self) -> Vec<(MailId, u32, u32)> {
-        self.slots
+        let mut pending: Vec<(MailId, u32, u32)> = self
+            .slots
             .iter()
             .filter_map(|slot| {
                 let (sender, correlation) = Self::read_key(slot)?;
                 let (in_flight, held_open) = slot.cell.load();
                 Some((MailId { sender: MailboxId(sender), correlation_id: correlation }, in_flight, held_open))
             })
-            .collect()
+            .collect();
+
+        if self.any_spilled() {
+            pending.extend(self.lock_overflow().iter().map(|(root, cell)| {
+                let (in_flight, held_open) = cell.load();
+                (*root, in_flight, held_open)
+            }));
+        }
+        pending
     }
 }
 
@@ -841,5 +997,152 @@ mod tests {
             "every chain settles exactly once"
         );
         assert_eq!(t.live_roots(), 0, "table fully reclaimed");
+    }
+
+    /// More concurrent live roots than a small table's slots must spill
+    /// into the cold overflow instead of panicking, then settle exactly
+    /// once with full reclaim. Catches the reported saturation panic.
+    #[test]
+    fn overflow_absorbs_beyond_capacity_and_settles_exactly_once() {
+        let t = SettlementTable::with_slots(16);
+        let total = 64u64;
+
+        for i in 0..total {
+            t.record_sent(root(1, i));
+        }
+
+        let spilled = t.spilled.load(Ordering::Acquire);
+        assert!(spilled > 0, "peak {total} over 16 slots must spill, spilled={spilled}");
+        assert_eq!(t.live_roots(), usize::try_from(total).unwrap());
+        assert_eq!(t.pending_roots().len(), usize::try_from(total).unwrap());
+        assert!(t.is_live(root(1, 0)));
+        assert!(t.is_live(root(1, total - 1)));
+
+        let mut fires = 0u64;
+        for i in 0..total {
+            if t.record_finished(root(1, i)) {
+                fires += 1;
+            }
+        }
+
+        assert_eq!(fires, total, "every root settles exactly once");
+        assert_eq!(t.live_roots(), 0);
+        assert!(t.pending_roots().is_empty());
+        assert_eq!(t.spilled.load(Ordering::Acquire), 0, "overflow fully drained");
+        assert_eq!(t.lock_overflow().len(), 0, "overflow map fully reclaimed");
+    }
+
+    /// A sliding settle window wider than the table forces table recycling
+    /// and overflow residency to interleave: spilled roots settle while
+    /// table slots free and recycle around them. Catches a root
+    /// double-counted across both stores (which would leak or misfire).
+    #[test]
+    fn overflow_interleaves_with_table_recycling() {
+        let t = SettlementTable::with_slots(16);
+        let window = 32u64;
+        let total = 500u64;
+        let mut fires = 0u64;
+
+        for i in 0..total {
+            t.record_sent(root(1, i));
+            if i >= window {
+                let old = root(1, i - window);
+                if t.record_finished(old) {
+                    fires += 1;
+                }
+                assert!(!t.is_live(old), "settled root leaves both stores");
+            }
+        }
+        for i in total - window..total {
+            if t.record_finished(root(1, i)) {
+                fires += 1;
+            }
+        }
+
+        assert_eq!(fires, total, "every root settles exactly once");
+        assert_eq!(t.live_roots(), 0);
+        assert!(t.pending_roots().is_empty(), "no root counted in either store after drain");
+        assert_eq!(t.spilled.load(Ordering::Acquire), 0, "overflow fully drained");
+    }
+
+    /// Concurrent private per-thread root streams through a tiny table race
+    /// overflow inserts and settle-removals on the shared cold mutex.
+    /// Catches a decrement routed to the wrong store under contention
+    /// (which would miss its fire or leak a live root).
+    #[test]
+    fn overflow_drains_exactly_once_under_threads() {
+        let t = Arc::new(SettlementTable::with_slots(16));
+        let threads = 8u64;
+        let per_thread = 200u64;
+        let total_fires = Arc::new(AtomicU32::new(0));
+
+        run_threads(threads, {
+            let t = Arc::clone(&t);
+            let total_fires = Arc::clone(&total_fires);
+            move |tid| {
+                for c in 0..per_thread {
+                    t.record_sent(root(tid + 1, c));
+                }
+                for c in 0..per_thread {
+                    if t.record_finished(root(tid + 1, c)) {
+                        total_fires.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            u64::from(total_fires.load(Ordering::Relaxed)),
+            threads * per_thread,
+            "every spilled chain settles exactly once"
+        );
+        assert_eq!(t.live_roots(), 0, "table plus spillover fully reclaimed");
+        assert!(t.pending_roots().is_empty());
+        assert_eq!(t.spilled.load(Ordering::Acquire), 0, "overflow fully drained");
+    }
+
+    /// No unspilled path takes the overflow mutex. The test holds the
+    /// private overflow lock while a worker drives the full eight-method
+    /// workload over hundreds of chains that never spill; completion (over
+    /// a generous multi-second rendezvous that turns a mutex-block hang
+    /// into a failure naming the gate) proves every gated path skipped the
+    /// lock on its zero gate. Catches a regression to an unconditional
+    /// overflow lock on the hot path.
+    #[test]
+    fn unspilled_paths_skip_overflow_mutex() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let t = Arc::new(SettlementTable::with_slots(64));
+        let guard = t.overflow.try_lock().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let worker = Arc::clone(&t);
+        thread::spawn(move || {
+            for c in 0..300u64 {
+                let r = root(99, c);
+                worker.record_sent(r);
+                worker.record_hold_open(r);
+                assert!(worker.is_live(r));
+                assert_eq!(worker.held_open(r), 1);
+                let _ = worker.live_roots();
+                let _ = worker.pending_roots();
+                assert!(!worker.record_finished(r));
+                assert!(worker.is_live(r));
+                assert!(worker.record_release(r));
+                assert!(!worker.is_live(r));
+            }
+            let _ = done_tx.send(());
+        });
+
+        let completed = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        assert!(
+            completed,
+            "unspilled workload blocked on the overflow mutex: gated paths must skip the lock on a zero gate"
+        );
+        drop(guard);
+        assert_eq!(t.live_roots(), 0);
+        assert!(t.pending_roots().is_empty());
+        assert_eq!(t.spilled.load(Ordering::Acquire), 0);
     }
 }
