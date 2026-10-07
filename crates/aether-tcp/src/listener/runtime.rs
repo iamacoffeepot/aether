@@ -22,6 +22,8 @@ pub use aether_substrate::chassis::error::BootError;
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
+use std::mem;
+
 use aether_actor::{ActorRef, Anyone, ErasedActorRef, ProtocolRef, Single, runtime};
 // `MonitorNotice` is named by `on_monitor_notice`'s signature.
 use aether_kinds::MonitorNotice;
@@ -53,8 +55,8 @@ pub struct TcpListenerState {
     /// Whether this listener still accepts, and what a `Close` waits for.
     pub accepting: Accepting,
     pub shutdown: Arc<AtomicBool>,
-    pub accept_start: Option<mpsc::Sender<()>>,
-    pub accept_thread: Option<JoinHandle<()>>,
+    /// Where the accept sidecar stands between parked, running, and stopped.
+    pub accept_sidecar: AcceptSidecar,
     pub connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
     pub next_subname: u64,
 }
@@ -93,6 +95,16 @@ impl Accepting {
     }
 }
 
+/// Where the accept sidecar stands between parked, running, and stopped.
+pub enum AcceptSidecar {
+    /// The thread was spawned in `init` and the gate is not yet released.
+    Parked { gate: mpsc::Sender<()>, thread: JoinHandle<()> },
+    /// `wire` released the gate and the thread is accepting.
+    Running { thread: JoinHandle<()> },
+    /// Shutdown was requested and the thread was joined.
+    Stopped,
+}
+
 /// Completion context for a staged accepted-connection birth, taken from the
 /// ctx in its task completion (ADR-0243 §9). The child's identity rides its
 /// `SpawnOutcome`; what this carries is the peer address the accept loop
@@ -105,19 +117,23 @@ pub struct AcceptedSessionContext {
 
 impl TcpListenerState {
     fn stop_accept_thread(&mut self) {
-        let Some(thread) = self.accept_thread.take() else {
-            self.accept_start.take();
-            return;
-        };
-        self.shutdown.store(true, Ordering::Release);
-        let was_parked = self.accept_start.take().is_some();
-        if !was_parked {
-            let addr_str = format!("127.0.0.1:{}", self.local_port);
-            if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-                let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
+        let sidecar = mem::replace(&mut self.accept_sidecar, AcceptSidecar::Stopped);
+        match sidecar {
+            AcceptSidecar::Parked { gate, thread } => {
+                drop(gate);
+                self.shutdown.store(true, Ordering::Release);
+                let _ = thread.join();
             }
+            AcceptSidecar::Running { thread } => {
+                self.shutdown.store(true, Ordering::Release);
+                let addr_str = format!("127.0.0.1:{}", self.local_port);
+                if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+                    let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
+                }
+                let _ = thread.join();
+            }
+            AcceptSidecar::Stopped => {}
         }
-        let _ = thread.join();
     }
 }
 
@@ -214,16 +230,20 @@ impl NativeActor for TcpListenerActor {
             sessions: HashMap::new(),
             accepting: Accepting::Open { unsettled: 0 },
             shutdown,
-            accept_start: Some(accept_start_tx),
-            accept_thread: Some(thread),
+            accept_sidecar: AcceptSidecar::Parked { gate: accept_start_tx, thread },
             connection_rx,
             next_subname: 0,
         })
     }
 
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        if let Some(start) = state.accept_start.take() {
-            let _ = start.send(());
+        let sidecar = mem::replace(&mut state.accept_sidecar, AcceptSidecar::Stopped);
+        match sidecar {
+            AcceptSidecar::Parked { gate, thread } => {
+                let _ = gate.send(());
+                state.accept_sidecar = AcceptSidecar::Running { thread };
+            }
+            other => state.accept_sidecar = other,
         }
         Ok(())
     }

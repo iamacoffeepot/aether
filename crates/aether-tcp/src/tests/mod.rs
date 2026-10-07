@@ -3,6 +3,7 @@
 #![allow(clippy::disallowed_methods, reason = "these tests boot a bare `TestChassis` through `Builder::new`")] // aether-suppression-request: pre-existing file-level allow whose reason is rewritten; the tests still build a bare chassis with the disallowed `Builder::new`
 
 use std::io::{Read, Write};
+use std::mem;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -15,8 +16,8 @@ use super::{
     TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{
-    ActorPath, Addressable, Anyone, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked,
-    Undeclared, actor,
+    ActorPath, Addressable, Anyone, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, Unchecked, Undeclared,
+    actor,
 };
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
@@ -159,9 +160,28 @@ const NESTED_CONSUMER_KEY: &str = "probe";
 /// itself at [`NESTED_CONSUMER_KEY`], handing it the capture channel, and
 /// signals its birth channel once the registry owner has decided the birth.
 struct ConsumerHost {
-    captures: Option<mpsc::Sender<CapturedSessionMail>>,
+    /// Whether the capture sender is still held or was handed to the nested child.
+    captures: StagedCaptures,
     born: mpsc::Sender<()>,
-    staged: Option<ErasedActorPath>,
+    /// Whether a nested birth is staged and awaiting completion.
+    staged: StagedBirth,
+}
+
+/// Whether the capture sender is still held or was handed to the nested child.
+enum StagedCaptures {
+    /// The capture sender is still held.
+    Pending(mpsc::Sender<CapturedSessionMail>),
+    /// The sender was handed to the nested child.
+    HandedOff,
+}
+
+/// Whether a nested birth is staged and awaiting completion.
+enum StagedBirth {
+    /// No birth is outstanding.
+    Idle,
+    /// A nested birth is staged and awaiting completion, carrying the staged
+    /// canonical path between `wire` and the task completion.
+    Awaiting(ErasedActorPath),
 }
 
 #[actor(singleton, root)]
@@ -175,24 +195,31 @@ impl NativeActor for ConsumerHost {
         (captures, born): (mpsc::Sender<CapturedSessionMail>, mpsc::Sender<()>),
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { captures: Some(captures), born, staged: None })
+        Ok(Self { captures: StagedCaptures::Pending(captures), born, staged: StagedBirth::Idle })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        let captures = self.captures.take().expect("wire runs once");
+        let captures = match mem::replace(&mut self.captures, StagedCaptures::HandedOff) {
+            StagedCaptures::Pending(captures) => captures,
+            StagedCaptures::HandedOff => panic!("wire runs once"),
+        };
         let receipt = ctx
             .spawn_child::<SessionConsumer>(Subname::Named(NESTED_CONSUMER_KEY), captures, ())
             .stage()
             .expect("the nested consumer stages");
-        self.staged = Some(receipt.canonical_name);
+        self.staged = StagedBirth::Awaiting(receipt.canonical_name);
         Ok(())
     }
 
     #[handler(task)]
     fn on_consumer_born(&mut self, _ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome<SessionConsumer>>) {
-        if self.staged.as_ref() == Some(&done.into_output().canonical_name) {
-            self.staged = None;
-            let _ = self.born.send(());
+        let canonical_name = done.into_output().canonical_name;
+        let staged = mem::replace(&mut self.staged, StagedBirth::Idle);
+        match staged {
+            StagedBirth::Awaiting(path) if path == canonical_name => {
+                let _ = self.born.send(());
+            }
+            other => self.staged = other,
         }
     }
 }
@@ -221,7 +248,6 @@ trait ForwardingBind {
 struct DataOnlyConsumer {
     replies: mpsc::Sender<BindListenerResult>,
     data_frames: usize,
-    me: Option<ProtocolRef<ForwardingBind>>,
 }
 
 #[actor(singleton, root, depends(TcpCapability))]
@@ -235,18 +261,18 @@ impl NativeActor for DataOnlyConsumer {
         replies: mpsc::Sender<BindListenerResult>,
         _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<Self, BootError> {
-        Ok(Self { replies, data_frames: 0, me: None })
-    }
-
-    fn wire(&mut self, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
-        let me = ctx.resolve_path(&ErasedActorPath::new(Self::NAMESPACE).expect("a canonical path"));
-        self.me = me.ok().and_then(|me| ctx.cast(me));
-        Ok(())
+        Ok(Self { replies, data_frames: 0 })
     }
 
     #[handler::tell]
     fn on_relay(&mut self, ctx: &mut NativeCtx<'_>, _mail: RelayBindSelf) {
-        ctx.send_to(self.me.expect("the consumer cast itself at wire"), &ForwardBindSelf);
+        let Ok(me) = ctx.resolve_path(&ErasedActorPath::new(Self::NAMESPACE).expect("a canonical path")) else {
+            return;
+        };
+        let Some(me) = ctx.cast::<ForwardingBind>(me) else {
+            return;
+        };
+        ctx.send_to(me, &ForwardBindSelf);
     }
 
     #[handler::unchecked(reason = "test: relays the self-bind, reply target pinned to this consumer")]
