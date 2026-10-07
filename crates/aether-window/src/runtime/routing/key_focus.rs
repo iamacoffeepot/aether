@@ -6,11 +6,11 @@
 //! reached only through the window manager's own state, inside one of its
 //! handlers or host turns.
 //!
-//! The table is keyed by the erased window path, because the events that
-//! read it (`Key`, `WindowFocus`, `WindowClosed`, an injected event) name
-//! their window as one. A take and a release name theirs as an
-//! `ActorPath<WindowInstance>`, which is erased here, at the lookup, and a
-//! held slot keeps the typed path so the notice a close sends carries it.
+//! The table is keyed by the typed window path, `ActorPath<WindowInstance>`,
+//! which every kind that reads or changes it names its window as: a take, a
+//! release, and the events (`Key`, `WindowFocus`, `WindowClosed`, an injected
+//! event). The caller of each function holds that path, so a slot keeps no
+//! copy of it.
 
 use std::collections::HashMap;
 use std::mem;
@@ -35,15 +35,7 @@ pub(in crate::runtime) enum Reach {
     /// a key that is down still says who it admits after its holder closes.
     /// `holder` is the proof the holder's notices are sent through while the
     /// slot is held; a key record's copy of it is never sent through.
-    /// `window` is the window the slot belongs to, the typed path its take
-    /// named, which the notice a close sends carries; a key record's copy of
-    /// it is never read.
-    Held {
-        window: ActorPath<WindowInstance>,
-        holder: ProtocolRef<KeyFocusHolder>,
-        path: ErasedActorPath,
-        scope: KeyFocusScope,
-    },
+    Held { holder: ProtocolRef<KeyFocusHolder>, path: ErasedActorPath, scope: KeyFocusScope },
 }
 
 impl Reach {
@@ -76,21 +68,6 @@ impl Reach {
             Self::Held { holder, .. } => Some(*holder),
         }
     }
-
-    /// The hold the slot is under: `None` when nobody holds it.
-    fn into_hold(self) -> Option<Hold> {
-        match self {
-            Self::Everyone => None,
-            Self::Held { window, holder, .. } => Some(Hold { window, holder }),
-        }
-    }
-}
-
-/// The hold a closing window's slot was under: its holder, and the window as
-/// the holder's take named it.
-pub(in crate::runtime) struct Hold {
-    pub(in crate::runtime) window: ActorPath<WindowInstance>,
-    pub(in crate::runtime) holder: ProtocolRef<KeyFocusHolder>,
 }
 
 /// Whether `path` names an actor beneath `ancestor`: `ancestor`'s path, then
@@ -139,11 +116,11 @@ pub(in crate::runtime) enum Take {
     Gained { replaced: Option<ProtocolRef<KeyFocusHolder>> },
 }
 
-/// Every window's key focus slot and key records, keyed by the erased window
+/// Every window's key focus slot and key records, keyed by the window's
 /// path. A window with no entry has a slot nobody holds and no key down.
 #[derive(Default)]
 pub(in crate::runtime) struct KeyFocus {
-    windows: HashMap<ErasedActorPath, WindowKeys>,
+    windows: HashMap<ActorPath<WindowInstance>, WindowKeys>,
 }
 
 impl KeyFocus {
@@ -157,8 +134,8 @@ impl KeyFocus {
         path: ErasedActorPath,
         scope: KeyFocusScope,
     ) -> Take {
-        let keys = self.windows.entry(window.as_erased().clone()).or_default();
-        let held = Reach::Held { window: window.clone(), holder, path, scope };
+        let keys = self.windows.entry(window.clone()).or_default();
+        let held = Reach::Held { holder, path, scope };
         let previous = mem::replace(&mut keys.slot, held);
 
         if previous.held_by(holder.erase()) {
@@ -170,7 +147,6 @@ impl KeyFocus {
     /// Empty `window`'s slot when `sender` holds it, answering whether it
     /// did. The window's key records are left as they are.
     pub(in crate::runtime) fn release(&mut self, window: &ActorPath<WindowInstance>, sender: ErasedActorRef) -> bool {
-        let window = window.as_erased();
         let Some(keys) = self.windows.get_mut(window) else {
             return false;
         };
@@ -184,10 +160,13 @@ impl KeyFocus {
         true
     }
 
-    /// Remove `window`'s slot and key records, answering the hold it was
-    /// under: `None` when nobody held it.
-    pub(in crate::runtime) fn close(&mut self, window: &ErasedActorPath) -> Option<Hold> {
-        self.windows.remove(window).and_then(|keys| keys.slot.into_hold())
+    /// Remove `window`'s slot and key records, answering the slot's holder:
+    /// `None` when nobody held it.
+    pub(in crate::runtime) fn close(
+        &mut self,
+        window: &ActorPath<WindowInstance>,
+    ) -> Option<ProtocolRef<KeyFocusHolder>> {
+        self.windows.remove(window).and_then(|keys| keys.slot.holder())
     }
 
     /// Empty every slot `departed` holds. Key records are left as they are:
@@ -204,7 +183,7 @@ impl KeyFocus {
 
     /// Record `code` going down at `window` under the slot as it is now,
     /// unless it is already down.
-    pub(in crate::runtime) fn press(&mut self, window: &ErasedActorPath, code: u32) {
+    pub(in crate::runtime) fn press(&mut self, window: &ActorPath<WindowInstance>, code: u32) {
         if let Some(keys) = self.windows.get_mut(window) {
             keys.press(code);
             return;
@@ -216,14 +195,14 @@ impl KeyFocus {
 
     /// The reach a key event for `code` at `window` is routed by: the record
     /// its press made, or the slot as it is now when no press is recorded.
-    pub(in crate::runtime) fn pressed_under(&self, window: &ErasedActorPath, code: u32) -> &Reach {
+    pub(in crate::runtime) fn pressed_under(&self, window: &ActorPath<WindowInstance>, code: u32) -> &Reach {
         self.windows.get(window).map_or(&Reach::Everyone, |keys| keys.routed_by(code))
     }
 
     /// Take the record of `code` going up at `window`, answering the reach it
     /// was pressed under, or the slot as it is now when no press was
     /// recorded.
-    pub(in crate::runtime) fn lift(&mut self, window: &ErasedActorPath, code: u32) -> Reach {
+    pub(in crate::runtime) fn lift(&mut self, window: &ActorPath<WindowInstance>, code: u32) -> Reach {
         let Some(keys) = self.windows.get_mut(window) else {
             return Reach::Everyone;
         };
@@ -232,13 +211,13 @@ impl KeyFocus {
     }
 
     /// The reach of `window`'s slot as it is now.
-    pub(in crate::runtime) fn reach(&self, window: &ErasedActorPath) -> &Reach {
+    pub(in crate::runtime) fn reach(&self, window: &ActorPath<WindowInstance>) -> &Reach {
         self.windows.get(window).map_or(&Reach::Everyone, |keys| &keys.slot)
     }
 
     /// Forget every key down at `window`, keeping its slot: the window lost
     /// operating-system focus, so those releases never arrive.
-    pub(in crate::runtime) fn forget_keys(&mut self, window: &ErasedActorPath) {
+    pub(in crate::runtime) fn forget_keys(&mut self, window: &ActorPath<WindowInstance>) {
         if let Some(keys) = self.windows.get_mut(window) {
             keys.down.clear();
         }

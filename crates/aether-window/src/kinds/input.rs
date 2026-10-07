@@ -2,11 +2,16 @@
 //!
 //! Every window-originated event starts with the canonical actor path of the
 //! window that produced it (`aether.window/aether.window.instance:main`), the
-//! same text `aether.window.list` reports. A path is heap text, so the family
-//! rides the structured wire path and none of its kinds is `Copy` or has a
-//! default.
+//! same text `aether.window.list` reports. The field is the typed window path,
+//! an `ActorPath<WindowInstance>`, the type every kind that names a window
+//! carries: an actor passes an event's `window` to a take of key focus, or
+//! compares it with a window path it holds, with no conversion. A path is heap
+//! text, so the family rides the structured wire path and none of its kinds is
+//! `Copy` or has a default.
 
-use aether_data::ErasedActorPath;
+use aether_actor::ActorPath;
+
+use crate::WindowInstance;
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys
@@ -14,7 +19,7 @@ use aether_data::ErasedActorPath;
 /// the substrate doesn't translate) produce no mail.
 #[aether_data::kind(name = "aether.key", eq)]
 pub struct Key {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub code: u32,
 }
 
@@ -24,7 +29,7 @@ pub struct Key {
 /// both kinds so they can clear state on release.
 #[aether_data::kind(name = "aether.key_release", eq)]
 pub struct KeyRelease {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub code: u32,
 }
 
@@ -39,7 +44,7 @@ pub struct KeyRelease {
 /// geometry needs no scale conversion.
 #[aether_data::kind(name = "aether.mouse_button", partial_eq)]
 pub struct MouseButton {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -53,7 +58,7 @@ pub struct MouseButton {
 /// `QuadSpace::Screen` speak.
 #[aether_data::kind(name = "aether.mouse_button_release", partial_eq)]
 pub struct MouseButtonRelease {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -67,7 +72,7 @@ pub struct MouseButtonRelease {
 /// `WindowSize` and `QuadSpace::Screen` speak.
 #[aether_data::kind(name = "aether.mouse_wheel", partial_eq)]
 pub struct MouseWheel {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub delta_x: f32,
     pub delta_y: f32,
     pub x: f32,
@@ -84,7 +89,7 @@ pub struct MouseWheel {
 /// from this kind, never toward it.
 #[aether_data::kind(name = "aether.mouse_move", partial_eq)]
 pub struct MouseMove {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub x: f32,
     pub y: f32,
 }
@@ -125,7 +130,7 @@ pub struct MouseMove {
 /// `aether.window.list` reply, then keeps them current from this kind.
 #[aether_data::kind(name = "aether.window_size", partial_eq)]
 pub struct WindowSize {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub width: u32,
     pub height: u32,
     /// Physical pixels per logical pixel, as the display reports it
@@ -154,7 +159,7 @@ pub struct WindowSize {
 /// window-tagged input family (`Kind::encode_into_bytes` → `encode_wire`).
 #[aether_data::kind(name = "aether.text_input", eq)]
 pub struct TextInput {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub text: String,
 }
 
@@ -168,7 +173,7 @@ pub struct TextInput {
 /// the desktop chassis only. Rides the structured wire path.
 #[aether_data::kind(name = "aether.ime_preedit", eq)]
 pub struct ImePreedit {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub text: String,
     pub cursor_begin: Option<u32>,
     pub cursor_end: Option<u32>,
@@ -191,7 +196,7 @@ pub struct ImePreedit {
 // packed bit mask. A two-variant-enum refactor would defeat that.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Modifiers {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,

@@ -13,7 +13,7 @@ use aether_data::{ActorMail, ErasedActorPath, Kind, KindId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::routing::key_focus::{Hold, KeyFocus, Reach, Take};
+use super::routing::key_focus::{KeyFocus, Reach, Take};
 use super::routing::{Route, Routed};
 use crate::{
     KeyFocusHolder, KeyFocusLost, KeyFocusScope, WindowClosed, WindowFocus, WindowInstance, WindowMenuActivated,
@@ -28,7 +28,7 @@ use crate::{
 /// naturally includes windows created later.
 pub struct KindSubscribers<K> {
     all: BTreeMap<ErasedActorRef, ProtocolRef<Subscriber<K>>>,
-    specific: HashMap<ErasedActorPath, BTreeMap<ErasedActorRef, ProtocolRef<Subscriber<K>>>>,
+    specific: HashMap<ActorPath<WindowInstance>, BTreeMap<ErasedActorRef, ProtocolRef<Subscriber<K>>>>,
 }
 
 impl<K> Default for KindSubscribers<K> {
@@ -38,26 +38,28 @@ impl<K> Default for KindSubscribers<K> {
 }
 
 impl<K> KindSubscribers<K> {
-    fn insert(&mut self, window: Option<&ErasedActorPath>, subscriber: ProtocolRef<Subscriber<K>>) {
-        let set = match window {
-            None => &mut self.all,
-            Some(window) => self.specific.entry(window.clone()).or_default(),
+    /// Hold `subscriber` in the set `selector` names.
+    fn insert(&mut self, selector: &WindowSelector, subscriber: ProtocolRef<Subscriber<K>>) {
+        let set = match selector {
+            WindowSelector::All => &mut self.all,
+            WindowSelector::One(window) => self.specific.entry(window.clone()).or_default(),
         };
         set.insert(subscriber.erase(), subscriber);
     }
 
-    /// Remove `key` from the set `window` selects, dropping a window's entry
+    /// Remove `key` from the set `selector` names, dropping a window's entry
     /// once it is empty.
-    fn remove(&mut self, window: Option<&ErasedActorPath>, key: ErasedActorRef) {
-        match window {
-            None => {
+    fn remove(&mut self, selector: &WindowSelector, key: ErasedActorRef) {
+        match selector {
+            WindowSelector::All => {
                 self.all.remove(&key);
             }
-            Some(window) => {
-                if self.specific.get_mut(window).is_some_and(|set| {
-                    set.remove(&key);
-                    set.is_empty()
-                }) {
+            WindowSelector::One(window) => {
+                let Some(set) = self.specific.get_mut(window) else {
+                    return;
+                };
+                set.remove(&key);
+                if set.is_empty() {
                     self.specific.remove(window);
                 }
             }
@@ -69,7 +71,7 @@ impl<K> KindSubscribers<K> {
     /// actor subscribed through both selectors receives one copy. Borrowed
     /// and copied out one reference at a time, with no allocation: it runs
     /// on every published event.
-    fn recipients(&self, window: &ErasedActorPath) -> impl Iterator<Item = ProtocolRef<Subscriber<K>>> {
+    fn recipients(&self, window: &ActorPath<WindowInstance>) -> impl Iterator<Item = ProtocolRef<Subscriber<K>>> {
         let specific = self.specific.get(window).into_iter().flatten();
 
         self.all
@@ -101,21 +103,12 @@ struct Watched {
     rows: HashSet<Row>,
 }
 
-/// One row of a subscriber's: the kind whose set holds it, and the window
-/// it selects, or every window.
+/// One row of a subscriber's: the kind whose set holds it, and which windows
+/// its subscription selects.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Row {
     kind: KindId,
-    window: Option<ErasedActorPath>,
-}
-
-impl Row {
-    fn new(selector: WindowSelector, kind: KindId) -> Self {
-        match selector {
-            WindowSelector::All => Self { kind, window: None },
-            WindowSelector::One(window) => Self { kind, window: Some(window) },
-        }
-    }
+    selector: WindowSelector,
 }
 
 /// Writes [`WindowSubscribers`], its [`Published`] impls, and each kind-id
@@ -223,7 +216,7 @@ macro_rules! window_subscribers {
             /// Remove `key` from the set `row` names.
             fn remove_row(&mut self, row: Row, key: ErasedActorRef) {
                 $(if row.kind == <$kind as Kind>::ID {
-                    self.$field.remove(row.window.as_ref(), key);
+                    self.$field.remove(&row.selector, key);
                 })+
             }
 
@@ -239,7 +232,7 @@ macro_rules! window_subscribers {
             pub fn publish_encoded<A, S, M: ReplyMode>(
                 &mut self,
                 ctx: &mut NativeCtx<'_, A, S, M>,
-                window: &ErasedActorPath,
+                window: &ActorPath<WindowInstance>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Result<(), String> {
@@ -277,9 +270,9 @@ impl WindowSubscribers {
         selector: WindowSelector,
         subscriber: ProtocolRef<Subscriber<K>>,
     ) {
-        let row = Row::new(selector, K::ID);
+        let row = Row { kind: K::ID, selector };
 
-        K::set_mut(self).insert(row.window.as_ref(), subscriber);
+        K::set_mut(self).insert(&row.selector, subscriber);
         self.watch(ctx, subscriber.erase()).rows.insert(row);
     }
 
@@ -310,7 +303,7 @@ impl WindowSubscribers {
     pub(super) fn publish<K: Routed, A, S, M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, S, M>,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
         event: &K,
     ) {
         match event.route() {
@@ -330,8 +323,8 @@ impl WindowSubscribers {
             }
             Route::Closed => {
                 self.fan_out(ctx, window, event, &Reach::Everyone);
-                if let Some(Hold { window, holder }) = self.key_focus.close(window) {
-                    ctx.send_to(holder, &KeyFocusLost { window });
+                if let Some(holder) = self.key_focus.close(window) {
+                    ctx.send_to(holder, &KeyFocusLost { window: window.clone() });
                 }
             }
         }
@@ -344,7 +337,7 @@ impl WindowSubscribers {
     fn fan_out<K: Published, A, S, M: ReplyMode>(
         &self,
         ctx: &mut NativeCtx<'_, A, S, M>,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
         event: &K,
         reach: &Reach,
     ) {
@@ -365,7 +358,7 @@ impl WindowSubscribers {
 
     /// Remove `key`'s row for `K` under `selector`.
     pub fn unsubscribe<K: Published>(&mut self, selector: WindowSelector, key: ErasedActorRef) {
-        self.remove(Row::new(selector, K::ID), key);
+        self.remove(Row { kind: K::ID, selector }, key);
     }
 
     pub fn unsubscribe_self<A, M: ReplyMode>(
@@ -379,7 +372,7 @@ impl WindowSubscribers {
              must use aether.window.unsubscribe with an explicit subscriber path"
                 .to_owned()
         })?;
-        self.remove(Row::new(selector, kind), subscriber);
+        self.remove(Row { kind, selector }, subscriber);
         Ok(())
     }
 
@@ -403,7 +396,7 @@ impl WindowSubscribers {
     /// The subscribers of `K` events from `window`, one per actor.
     pub fn recipients<K: Published>(
         &self,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
     ) -> impl Iterator<Item = ProtocolRef<Subscriber<K>>> {
         K::set(self).recipients(window)
     }
@@ -426,7 +419,7 @@ pub mod fixture {
 
     use crate::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, TextInput, WindowSize};
     use aether_actor::{ActorPath, ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, ReplyMode, Root};
-    use aether_data::{ErasedActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
+    use aether_data::{Kind, KindId, LoadName, SessionToken, Uuid};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
     use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::chassis::error::BootError;
@@ -654,7 +647,7 @@ pub mod fixture {
     /// The keys of `K`'s recipients from `window`.
     pub fn recipients<K: Published>(
         subscribers: &WindowSubscribers,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
     ) -> BTreeSet<ErasedActorRef> {
         subscribers.recipients::<K>(window).map(ProtocolRef::erase).collect()
     }
@@ -869,7 +862,7 @@ pub mod fixture {
         /// Inject `event` as published at `window` and answer the receipts
         /// its fan-out delivered.
         #[cfg(feature = "synthetic")]
-        pub fn inject<K: Kind>(&mut self, window: &ErasedActorPath, event: &K) -> Vec<Receipt> {
+        pub fn inject<K: Kind>(&mut self, window: &ActorPath<WindowInstance>, event: &K) -> Vec<Receipt> {
             self.send(&crate::InjectWindowEvent {
                 window: window.clone(),
                 kind: K::ID,
@@ -892,8 +885,8 @@ mod tests {
         SubscribeWindowResult, SubscribeWindowSelf, UnsubscribeWindow, UnsubscribeWindowSelf, WindowCapability,
     };
 
-    fn window(name: &str) -> ErasedActorPath {
-        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    fn window(name: &str) -> ActorPath<WindowInstance> {
+        WindowInstance::path(&aether_data::LoadName::new(name).expect("fixture window name"))
     }
 
     fn rig() -> Rig<WindowCapability> {
@@ -904,7 +897,7 @@ mod tests {
         WindowSubscription::Key(watcher(name).narrow())
     }
 
-    fn key_at(window: &ErasedActorPath) -> Key {
+    fn key_at(window: &ActorPath<WindowInstance>) -> Key {
         Key { window: window.clone(), code: 41 }
     }
 
