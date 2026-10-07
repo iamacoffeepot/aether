@@ -605,27 +605,55 @@ impl RpcServerState {
         let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };
-        if let Err(e) = write_frame(&mut conn.write_half, frame) {
-            let reason = match &e {
-                FrameError::Io(io_err)
-                    if matches!(
-                        io_err.kind(),
-                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::WriteZero
-                    ) =>
-                {
-                    "peer hung up"
-                }
-                FrameError::Io(_) => "write error",
-                _ => "frame encode error",
-            };
-            tracing::debug!(
-                target: "aether_substrate::rpc",
-                conn = conn_id,
-                error = %e,
-                "rpc frame write failed",
-            );
-            self.close_connection(conn_id, reason);
+        if let Err(error) = write_frame(&mut conn.write_half, frame) {
+            self.close_on_write_error(conn_id, &error);
         }
+    }
+
+    /// Write one `ReplyEvent`, failing its own call instead of the
+    /// connection when the encoded frame exceeds the cap. An
+    /// attachment-free reply passes `wire_payload` unwalked, so its
+    /// first size check is the frame encode here; an `EncodeTooLarge`
+    /// clears the call and answers it with `ReplyEnd FrameTooLarge`,
+    /// and the later settlement notice finds no entry and drops
+    /// silently. Any other write error closes the connection exactly
+    /// as [`Self::write_frame_to`] does.
+    pub fn write_reply_event(&mut self, correlation: u64, conn_id: ConnId, wire_cid: u64, envelope: ReplyEnvelope) {
+        let Some(conn) = self.connections.get_mut(&conn_id) else {
+            return;
+        };
+        match write_frame(&mut conn.write_half, &WireFrame::ReplyEvent { cid: wire_cid, envelope }) {
+            Ok(()) => {}
+            Err(FrameError::EncodeTooLarge { size, max }) => {
+                self.take_in_flight(correlation);
+                let error = RpcError::FrameTooLarge { size: size as u64, max: max as u64 };
+                self.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result: Err(error) });
+            }
+            Err(error) => self.close_on_write_error(conn_id, &error),
+        }
+    }
+
+    /// Close `conn_id` after a frame write to it failed, naming why.
+    fn close_on_write_error(&mut self, conn_id: ConnId, error: &FrameError) {
+        let reason = match error {
+            FrameError::Io(io_err)
+                if matches!(
+                    io_err.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::WriteZero
+                ) =>
+            {
+                "peer hung up"
+            }
+            FrameError::Io(_) => "write error",
+            _ => "frame encode error",
+        };
+        tracing::debug!(
+            target: "aether_substrate::rpc",
+            conn = conn_id,
+            error = %error,
+            "rpc frame write failed",
+        );
+        self.close_connection(conn_id, reason);
     }
 }
 
@@ -969,7 +997,7 @@ impl NativeActor for RpcServerCapability {
         let result = match ctx.wire_payload(env) {
             Ok(payload) => {
                 let envelope = ReplyEnvelope { kind: env.kind, payload };
-                state.write_frame_to(conn_id, &WireFrame::ReplyEvent { cid: wire_cid, envelope });
+                state.write_reply_event(correlation, conn_id, wire_cid, envelope);
                 return;
             }
             Err(InlineError::TooLarge { size, limit }) => {
