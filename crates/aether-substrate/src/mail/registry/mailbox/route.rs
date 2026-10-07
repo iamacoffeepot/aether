@@ -28,6 +28,11 @@ use super::{MailboxEntry, SeizeCell};
 pub(super) struct BirthSerial(u64);
 
 impl BirthSerial {
+    /// Below every serial [`Self::next`] hands out, which start at one. It
+    /// fills the slots of a `LineageOrder` past its depth, which nothing
+    /// reads, and no record carries it.
+    pub(super) const BEFORE_ANY: Self = Self(0);
+
     pub(super) fn next(counter: &mut u64) -> Self {
         *counter = counter.checked_add(1).unwrap_or_else(|| {
             tracing::error!("birth serial sequence exhausted; registry cannot keep lineage order");

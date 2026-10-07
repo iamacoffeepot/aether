@@ -40,14 +40,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ErasedActorRef, ReplyMode, runtime};
+use aether_actor::{ReplyMode, runtime};
 use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
 
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::registry::LineageOrder;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, MainPassRecord, RenderError, encode_png, map_capture_rgba, prepare_capture_copy,
@@ -143,7 +142,7 @@ pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::instances::{InstancesRegistry, StagedInstances};
 pub use self::material::MaterialBatch;
 pub use self::overlay::OverlayBatch;
-use self::overlay::OverlayFrame;
+use self::overlay::{OverlayFrame, Placement};
 use self::program::{DispatchResources, ProgramRegistry};
 use self::text::{FontParse, FontParseOutput, TextState};
 pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
@@ -765,13 +764,13 @@ impl RenderCapabilityState {
 
     /// Commit the frame's accumulators into the lists the record path reads.
     /// The overlay batches are sorted here, once, by the lineage order of the
-    /// actor that sent each (ADR-0248 §4), read through `lineage_order`; the
+    /// actor that sent each (ADR-0248 §4), read when the batch was filed; the
     /// sorted list then takes the same commit-or-replay outcome as the other
     /// two, so a replayed frame keeps its order.
-    fn commit_scene(&mut self, replay_cache_when_idle: bool, lineage_order: impl Fn(ErasedActorRef) -> LineageOrder) {
+    fn commit_scene(&mut self, replay_cache_when_idle: bool) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
-        let mut overlay = self.overlay_frame.commit(lineage_order);
+        let mut overlay = self.overlay_frame.commit();
         commit_or_replay(&mut overlay, &mut self.overlay_last_submitted, replay_cache_when_idle);
     }
 
@@ -970,6 +969,13 @@ fn canonical_window<M: ReplyMode, A, S>(
     ctx.resolve_path(window)
         .map(|target| ctx.actor_path(target))
         .map_err(|error| format!("capture_frame failed: window {window} does not resolve: {error}"))
+}
+
+/// Where the overlay draw `ctx` is handling lies in the frame's painter
+/// order (ADR-0248 §4): at its sender's place in the actor tree, or unplaced
+/// when the mail was pushed from outside the tree and has no sender.
+fn overlay_placement(ctx: &NativeCtx<'_, RenderCapability>) -> Placement {
+    ctx.sender().map_or(Placement::Unplaced, |sender| Placement::At(ctx.lineage_order(sender)))
 }
 
 fn deduplicate_windows(windows: Vec<ErasedActorPath>) -> BTreeSet<ErasedActorPath> {
@@ -1364,7 +1370,7 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("draw_textured_quads") {
             return;
         }
-        state.overlay_frame.file(ctx.sender(), OverlayBatch::textured(mail));
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::textured(mail));
     }
 
     /// `DrawScreenTriangles` (iamacoffeepot/aether#5504), on the owned
@@ -1377,7 +1383,7 @@ impl NativeActor for RenderCapability {
             return;
         }
         let batch = OverlayBatch::screen_triangles(mail, &mut state.textures);
-        state.overlay_frame.file(ctx.sender(), batch);
+        state.overlay_frame.file(overlay_placement(ctx), batch);
     }
 
     /// `DrawShapes` (ADR-0213), on the owned `overlay_frame` — rounded,
@@ -1389,7 +1395,7 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("draw_shapes") {
             return;
         }
-        state.overlay_frame.file(ctx.sender(), OverlayBatch::shapes(mail));
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::shapes(mail));
     }
 
     /// Register a font from the bytes of a TrueType or OpenType file.
@@ -1464,7 +1470,7 @@ impl NativeActor for RenderCapability {
         if quads.is_empty() {
             return;
         }
-        state.overlay_frame.file(ctx.sender(), OverlayBatch::glyphs(mail.clip, mail.space, quads));
+        state.overlay_frame.file(overlay_placement(ctx), OverlayBatch::glyphs(mail.clip, mail.space, quads));
     }
 
     /// `DrawMaterialTextured` (ADR-0140), on the owned material stream.
@@ -1583,7 +1589,7 @@ impl NativeActor for RenderCapability {
         if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
-        state.commit_scene(replay_cache_when_idle, |sender| ctx.lineage_order(sender));
+        state.commit_scene(replay_cache_when_idle);
         #[cfg(feature = "desktop")]
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
 
@@ -1917,7 +1923,7 @@ mod tests {
         assert_eq!(state.frame_vertices, [4, 5, 6], "fresh frame mail survives replacement");
         assert_eq!(state.pending_program_dispatches[0].program_id, 9, "fresh program dispatch survives replacement");
 
-        state.commit_scene(true, |_sender| unreachable!("this frame filed no overlay batch, so no sender is read"));
+        state.commit_scene(true);
         assert_eq!(state.last_submitted, [4, 5, 6], "the replacement frame commits fresh work, not the old cache");
     }
 
@@ -2224,10 +2230,7 @@ mod tests {
             [1, 2, 3, 4, 5],
             "the batches arrived in the order they were sent",
         );
-        render
-            .cap
-            .host_turn(|state, ctx| state.commit_scene(false, |sender| ctx.lineage_order(sender)))
-            .expect("the slot is live");
+        render.cap.host_turn(|state, _ctx| state.commit_scene(false)).expect("the slot is live");
         assert_eq!(
             render.read(|state| state.overlay_last_submitted.iter().map(shape_count).collect::<Vec<_>>()),
             [5, 3, 2, 4, 1],

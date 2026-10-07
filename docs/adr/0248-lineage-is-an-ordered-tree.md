@@ -178,7 +178,7 @@ Two paths do reuse a name. A `Starting` reservation that is cancelled removes it
 
 ### 7. Senders that are not ordinary actors
 
-The sort has no special case. A batch sorts where its sender's lineage order puts it. A batch with no sender has none, and the sort key is `Option<LineageOrder>` with `None` first, so it sorts behind everything and `LineageOrder` needs no public empty value. Read from the code, and proposed:
+The sort has no special case. A batch sorts where its sender's lineage order puts it. A batch with no sender has none, and that case has a name: the renderer files every batch at a `Placement`, `Unplaced` for mail with no sender and `At(LineageOrder)` for mail an actor sent, read once when the batch is filed. `Unplaced` is declared first, so it sorts behind everything and `LineageOrder` needs no public empty value. Read from the code, and proposed:
 
 | Draws from | Sender the renderer sees | Where it sorts (proposed) |
 |---|---|---|

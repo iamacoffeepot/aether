@@ -167,8 +167,8 @@ child's draws lie over its parent's, and a later sibling's over an earlier
 one's, where "later" is creation order and the root actors count as siblings.
 The order the mail reaches the renderer in plays no part, so two actors that
 draw on the same `Tick` lie the same way on every frame. The renderer files
-each batch under the mail's sender and sorts once, when the frame commits,
-reading each sender's place with `NativeCtx::lineage_order`. Nothing states an
+each batch at its sender's place, read with `NativeCtx::lineage_order` when
+the batch arrives, and sorts once, when the frame commits. Nothing states an
 order: there is no z-index, layer number, or reorder verb. An actor that must
 lie over another is created after it, or beneath a parent created after it;
 a parent that needs fixed places creates its layers first, as empty children

@@ -45,18 +45,30 @@ pub fn lineage_mailbox_id(path: &str) -> MailboxId {
 /// nested name's parent holds a record, and `Registry::lineage_order`, which
 /// reads one birth serial per prefix (ADR-0248 §5).
 pub(super) fn lineage_prefixes(path: &str) -> impl Iterator<Item = (&str, MailboxId)> {
-    path.split('/').scan((0, None), move |(end, carry), segment| {
+    path.split('/').scan((0, LineageFold::Root), move |(end, fold), segment| {
         let node = match segment.split_once(':') {
             Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
             None => ActorId::singleton(segment),
         };
-        let folded = carry.map_or(node.0, |parent| fold_lineage(parent, node));
         // A separator precedes every segment but the first.
-        *end += segment.len() + usize::from(carry.is_some());
-        *carry = Some(folded);
+        let (folded, separator) = match *fold {
+            LineageFold::Root => (node.0, 0),
+            LineageFold::Beneath { parent } => (fold_lineage(parent, node), 1),
+        };
+        *end += segment.len() + separator;
+        *fold = LineageFold::Beneath { parent: folded };
 
         Some((&path[..*end], MailboxId(with_tag(Tag::Mailbox, folded))))
     })
+}
+
+/// Where [`lineage_prefixes`] stands in a path: at its first segment, which
+/// is hashed alone, or beneath a parent whose untagged hash the next segment
+/// folds into.
+#[derive(Clone, Copy)]
+enum LineageFold {
+    Root,
+    Beneath { parent: u64 },
 }
 
 /// Categorise a native mailbox name for the inventory snapshot (issue 730).

@@ -16,6 +16,7 @@
 //! and would answer its readers one hop late.
 
 use std::cmp::Ordering;
+use std::fmt;
 
 use aether_actor::ErasedActorRef;
 use aether_data::MAX_SCOPE_PATH_DEPTH;
@@ -40,31 +41,52 @@ use super::route::BirthSerial;
 /// compares it, and copies it; it names no mailbox, it cannot be built from
 /// parts, and it is not a kind field, so it is never mailed. A value is
 /// meaningful only against others read from the same engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct LineageOrder {
-    /// The steps in use are `steps[..depth]`. The rest stay `None`, so the
-    /// derived equality agrees with the ordering below.
-    steps: [Option<BirthSerial>; MAX_SCOPE_PATH_DEPTH],
+    /// The steps in use are `steps[..depth]`, and every read goes through
+    /// [`Self::steps`]. The slots past `depth` hold
+    /// [`BirthSerial::BEFORE_ANY`] and are never compared or printed.
+    steps: [BirthSerial; MAX_SCOPE_PATH_DEPTH],
     depth: usize,
 }
 
 impl LineageOrder {
-    const ROOT: Self = Self { steps: [None; MAX_SCOPE_PATH_DEPTH], depth: 0 };
+    const ROOT: Self = Self { steps: [BirthSerial::BEFORE_ANY; MAX_SCOPE_PATH_DEPTH], depth: 0 };
 
-    /// This order one level deeper, at the child born with `serial`, or
-    /// `None` past the path depth cap.
-    fn beneath(mut self, serial: BirthSerial) -> Option<Self> {
-        *self.steps.get_mut(self.depth)? = Some(serial);
+    /// This order one level deeper, at the child born with `serial`.
+    ///
+    /// It has no failure to report. A step is taken per segment of a route's
+    /// canonical name, and that name is an `ErasedActorPath`, which is proven
+    /// to hold at most `MAX_SCOPE_PATH_DEPTH` segments when it is built.
+    fn beneath(mut self, serial: BirthSerial) -> Self {
+        self.steps[self.depth] = serial;
         self.depth += 1;
 
-        Some(self)
+        self
     }
 
-    fn steps(&self) -> &[Option<BirthSerial>] {
+    fn steps(&self) -> &[BirthSerial] {
         &self.steps[..self.depth]
     }
 }
 
+impl fmt::Debug for LineageOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("LineageOrder").field(&self.steps()).finish()
+    }
+}
+
+impl PartialEq for LineageOrder {
+    fn eq(&self, other: &Self) -> bool {
+        self.steps() == other.steps()
+    }
+}
+
+impl Eq for LineageOrder {}
+
+/// Slice order over the steps in use: step by step, and where one value's
+/// steps run out first that value sorts first, so a parent sorts before
+/// every actor beneath it.
 impl Ord for LineageOrder {
     fn cmp(&self, other: &Self) -> Ordering {
         self.steps().cmp(other.steps())
@@ -109,7 +131,7 @@ impl Registry {
                 routes.entry_for(&id).filter(|ancestor| ancestor.canonical_name.as_str() == prefix)?.born
             };
 
-            order.beneath(born)
+            Some(order.beneath(born))
         })
     }
 }
