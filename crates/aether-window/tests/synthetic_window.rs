@@ -17,7 +17,7 @@ use aether_window::{
     RequestWindowRedrawResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult,
     SetWindowMode, SetWindowModeResult, SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle,
     SetWindowTitleResult, WindowCapability, WindowCommand, WindowInstance, WindowMenu, WindowMode, WindowPresentation,
-    WindowSpec, window_path,
+    WindowSpec,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -81,7 +81,7 @@ fn create_replies_only_after_the_staged_child_is_live() {
     let Ok(CreateWindowResult::Ok { window }) = report.reply::<CreateWindowResult>("created") else {
         panic!("staged create succeeds");
     };
-    assert_eq!(window.path, window_path(&window_key("main")));
+    assert_eq!(window.path, WindowInstance::path(&window_key("main")));
 
     let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
         panic!("synthetic list succeeds");
@@ -328,7 +328,7 @@ fn unexpected_child_departure_closes_only_its_window() {
         ])
         .expect("unexpected child departure settles");
 
-    let second = window_path(&window_key("second"));
+    let second = WindowInstance::path(&window_key("second"));
 
     // The departure's own chain settles with `RetireWindow`, but the
     // `MonitorNotice` that prunes the capability's list (ADR-0079 §8)

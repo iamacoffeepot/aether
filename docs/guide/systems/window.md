@@ -60,9 +60,9 @@ window (see below). A window whose proof the caller holds takes them directly:
 lookup in actor code.
 
 ```rust
-use aether_kinds::{Key, WindowMode};
+use aether_kinds::WindowMode;
 use aether_window::{
-    CreateWindow, ListWindows, RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowPresentation,
+    CreateWindow, Key, ListWindows, RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowPresentation,
     WindowSizeRequest, WindowSpec,
 };
 
@@ -158,18 +158,20 @@ sit beside it:
 ```
 
 A window is named by the canonical actor path of its child,
-`aether.window/aether.window.instance:<name>`, an `ErasedActorPath` that
-`aether_window::window_path` writes from the actor types. That same path keys
-manager state, render targets, input events, and `WindowSelector::One`; no
-field carries the child's mailbox position (ADR-0230). `capture_frame` also
-accepts the short form `aether.window/:<name>`, which the render capability
-proves and canonicalizes when the request arrives.
+`aether.window/aether.window.instance:<name>`, an `ActorPath<WindowInstance>`
+that `WindowInstance::path` writes from the actor types. That same typed path
+keys manager state and render targets, and every window kind carries it: input
+events, `WindowSelector::One`, and `InjectWindowEvent`. A `One` selector and an
+injected event refuse the short form and any path that is not a window's at
+decode. No field carries the child's mailbox position (ADR-0230).
+`capture_frame` still accepts the short form `aether.window/:<name>`, which the
+render capability proves and canonicalizes when the request arrives.
 
 `WindowInfo` reports:
 
 ```rust
 pub struct WindowInfo {
-    pub path: ErasedActorPath,
+    pub path: ActorPath<WindowInstance>,
     pub name: String,
     pub title: String,
     pub mode: WindowMode,
@@ -512,8 +514,9 @@ Synthetic injection is not a production API: `aether.window.inject_event`
 exists only in a build that compiles the `synthetic` feature in, which no
 production chassis enables.
 
-To add a window-originated event, define the kind with a `window:
-ErasedActorPath` field, add it to the `published_window_kinds!` list in
+To add a window-originated event, define the kind in
+`crates/aether-window/src/kinds/input.rs` with a `window:
+ActorPath<WindowInstance>` field, add it to the `published_window_kinds!` list in
 `crates/aether-window/src/lib.rs`, which writes its `Publishes` impl,
 `WindowSubscription` variant, typed subscriber set, and dispatch arms, and emit
 it from window state. Do not add a chassis kind cache or a generic input

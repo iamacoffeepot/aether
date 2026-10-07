@@ -63,15 +63,17 @@ mod gesture;
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, ActorRef, PriorState, ReplyMode, ResolveError, WasmActor, WasmCtx, WasmDropCtx};
+use aether_actor::{
+    ActorInitError, ActorPath, ActorRef, PriorState, ReplyMode, ResolveError, WasmActor, WasmCtx, WasmDropCtx,
+};
 use aether_actor::{WasmInitCtx, actor};
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::Kind;
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_math::Vec2;
 use aether_render::{ViewProjection, ViewSubscribe, ViewUnsubscribe};
 use aether_window::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
-use aether_window::{WindowCapability, WindowFocus};
+use aether_window::{WindowCapability, WindowFocus, WindowInstance};
 
 use crate::camera::{CameraComponent, Pose, Where};
 use gesture::Input;
@@ -354,8 +356,8 @@ impl CameraController {
     }
 
     /// Whether `window` is the window whose input this controller reads.
-    fn reads(&self, window: &ErasedActorPath) -> bool {
-        self.config.window.as_erased() == window
+    fn reads(&self, window: &ActorPath<WindowInstance>) -> bool {
+        self.config.window == *window
     }
 
     /// Bring the gesture in line with what is held, after any change to the

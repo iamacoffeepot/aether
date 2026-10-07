@@ -12,16 +12,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use aether_data::ErasedActorPath;
+use aether_actor::ActorPath;
 
-use crate::WindowPresentation;
+use crate::{WindowInstance, WindowPresentation};
 
 /// One reading of the visible windows against an instant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct FrameSchedule {
     /// The visible windows whose next frame is due, which the loop asks to
     /// redraw and a frame may draw.
-    pub due: BTreeSet<ErasedActorPath>,
+    pub due: BTreeSet<ActorPath<WindowInstance>>,
     /// The earliest instant a capped window that is not yet due comes due.
     /// `None` when every visible window is already due or none is capped.
     pub wake: Option<Instant>,
@@ -33,13 +33,13 @@ pub(super) struct FrameSchedule {
 /// due at once.
 #[derive(Default)]
 pub(super) struct FramePacing {
-    due: BTreeMap<ErasedActorPath, Instant>,
+    due: BTreeMap<ActorPath<WindowInstance>, Instant>,
 }
 
 impl FramePacing {
     /// Which of the `visible` windows are due at `now`, and the earliest
     /// instant one of the rest comes due.
-    pub fn schedule(&self, visible: &[(ErasedActorPath, WindowPresentation)], now: Instant) -> FrameSchedule {
+    pub fn schedule(&self, visible: &[(ActorPath<WindowInstance>, WindowPresentation)], now: Instant) -> FrameSchedule {
         let mut schedule = FrameSchedule::default();
         for (path, presentation) in visible {
             let pending = match presentation {
@@ -61,8 +61,8 @@ impl FramePacing {
     /// `live` nor capped any more is forgotten.
     pub fn frame_drawn(
         &mut self,
-        live: &[(ErasedActorPath, WindowPresentation)],
-        drawn: &[ErasedActorPath],
+        live: &[(ActorPath<WindowInstance>, WindowPresentation)],
+        drawn: &[ActorPath<WindowInstance>],
         now: Instant,
     ) {
         let mut capped = BTreeMap::new();
@@ -104,8 +104,8 @@ mod tests {
     use super::*;
     use crate::FrameRate;
 
-    fn window(name: &str) -> ErasedActorPath {
-        crate::window_path(&aether_data::LoadName::new(name).expect("fixture window name"))
+    fn window(name: &str) -> ActorPath<WindowInstance> {
+        WindowInstance::path(&aether_data::LoadName::new(name).expect("fixture window name"))
     }
 
     fn capped(frames_per_second: u32) -> WindowPresentation {

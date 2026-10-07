@@ -107,8 +107,7 @@ as a dependency, spell your actor on the `wire` context, and name the publisher
 and the kind:
 
 ```rust
-use aether_kinds::{Key, WindowSize};
-use aether_window::WindowCapability;
+use aether_window::{Key, WindowCapability, WindowSize};
 
 #[actor(root, depends(WindowCapability))]
 impl WasmActor for Editor {
@@ -204,7 +203,7 @@ holder:
 // `ActorPath<WindowInstance>` the actor's config named.
 #[handler::event]
 fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-    let in_window = key.window == *self.window.as_erased();
+    let in_window = key.window == self.window;
     let opens = key.code == keycode::KEY_BACKQUOTE;
 
     if in_window && opens {
@@ -226,9 +225,9 @@ reports, and `WindowSelector::One` takes, typed as a window's. A path whose
 leaf is not `aether.window.instance` does not decode, so a take that names
 something that cannot be a window never reaches the window manager. An actor
 holds the typed path from its config, as the camera controller does, or writes
-it from the window's name with `WindowInstance::path(&name)`; the erased path
-an input event carries cannot be turned into it, so a holder compares the two
-with `as_erased()`. `scope` is `KeyFocusScope::Actor`, the holder alone, or
+it from the window's name with `WindowInstance::path(&name)`. Every window event
+carries the same typed path, so a holder takes for the window an event names by
+passing `key.window.clone()`, or compares the two paths directly. `scope` is `KeyFocusScope::Actor`, the holder alone, or
 `KeyFocusScope::Subtree`, the holder and every actor beneath it in lineage.
 
 The rules of one window's slot:
@@ -325,7 +324,7 @@ the platform's layout- and IME-resolved streams:
   per window and combine it with `Key`; `meta` is Command on macOS and the
   Windows/super key elsewhere.
 
-Editing commands still use the stable `aether_kinds::keycode` constants:
+Editing commands still use the stable `aether_window::keycode` constants:
 `KEY_BACKSPACE`, `KEY_DELETE`, the arrow keys, `KEY_HOME`, `KEY_END`,
 `KEY_PAGE_UP`, `KEY_PAGE_DOWN`, and `KEY_ENTER`.
 
@@ -342,7 +341,7 @@ the same selector-aware fan-out as desktop:
 
 ```rust
 let synthetic = harness.actor_ref::<WindowCapability>();
-let window = aether_window::window_path(&LoadName::new("main")?);
+let window = WindowInstance::path(&LoadName::new("main")?);
 let event = Key { window: window.clone(), code: keycode::KEY_W };
 let op = HarnessOp::window_event(&synthetic, window, &event);
 ```
@@ -363,7 +362,7 @@ window actor.
 For another window-originated stream:
 
 ```text
-define Kind { window: ErasedActorPath, ... }
+define Kind { window: ActorPath<WindowInstance>, ... }
     → translate the native event in aether-window
     → publish K::ID through WindowSelector routing
 ```

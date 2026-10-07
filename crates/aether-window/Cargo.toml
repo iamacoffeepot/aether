@@ -10,8 +10,10 @@ publish = false
 # the one `WindowCapability` manager identity and its `WindowInstance`
 # endpoint, whose runtime (`runtime/mod.rs`) runs the desktop or synthetic
 # backend `WindowParams` picks at boot. The crate also owns the public
-# multi-window request, reply, lifecycle, and selector surface; only the shared
-# `WindowMode` value lives in `aether-kinds`.
+# multi-window request, reply, lifecycle, and selector surface and the input
+# vocabulary (`Key`, mouse, `TextInput`, `WindowSize`, and the `keycode` /
+# `mouse_button` constants); only the shared `WindowMode` value lives in
+# `aether-kinds`.
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has an inbound
 # consumer: `aether-rpc`'s server test addresses `WindowCapability` to

@@ -32,8 +32,8 @@
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::fs;
 
-use aether_actor::{ActorRef, Addressable};
-use aether_data::{ErasedActorPath, Kind};
+use aether_actor::{ActorPath, ActorRef, Addressable};
+use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
@@ -42,21 +42,21 @@ use aether_kit::camera::controller::{CameraController, ControllerConfig};
 use aether_kit::camera::{CameraComponent, CameraConfig, Distance, Lens, Pitch, Pixels, Pose, Viewport, Where, Yaw};
 use aether_math::{Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
-use aether_window::WindowFocus;
 use aether_window::keycode::KEY_D;
 use aether_window::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, mouse_button};
+use aether_window::{WindowFocus, WindowInstance};
 
 /// Capture surface — a 4:3 frame, which the camera's fixed viewport matches.
 const WINDOW_WIDTH: u32 = 128;
 const WINDOW_HEIGHT: u32 = 96;
 
 /// The window the default controller config reads.
-fn test_window() -> ErasedActorPath {
+fn test_window() -> ActorPath<WindowInstance> {
     window_named("main")
 }
 
-fn window_named(name: &str) -> ErasedActorPath {
-    aether_window::window_path(&aether_data::LoadName::new(name).expect("a valid window name"))
+fn window_named(name: &str) -> ActorPath<WindowInstance> {
+    WindowInstance::path(&aether_data::LoadName::new(name).expect("a valid window name"))
 }
 
 /// Spawn the `aether_kit` export `R` as the instance `main` with init-config

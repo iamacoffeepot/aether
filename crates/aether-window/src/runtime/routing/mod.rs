@@ -128,11 +128,11 @@ mod tests {
     }
 
     fn key(window: &ActorPath<WindowInstance>, code: u32) -> Key {
-        Key { window: window.as_erased().clone(), code }
+        Key { window: window.clone(), code }
     }
 
     fn key_release(window: &ActorPath<WindowInstance>, code: u32) -> KeyRelease {
-        KeyRelease { window: window.as_erased().clone(), code }
+        KeyRelease { window: window.clone(), code }
     }
 
     fn gained(window: &ActorPath<WindowInstance>) -> KeyFocusGained {
@@ -181,13 +181,13 @@ mod tests {
 
         let taken = rig.take(console, &main, Actor);
         assert_eq!(heard(&taken), [("console", gained(&main))]);
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 41))), ["console"]);
-        let text = TextInput { window: main.as_erased().clone(), text: "a".to_owned() };
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &text)), ["console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 41))), ["console"]);
+        let text = TextInput { window: main.clone(), text: "a".to_owned() };
+        assert_eq!(receivers(&rig.inject(&main, &text)), ["console"]);
 
         let released = rig.release(console, &main);
         assert_eq!(heard(&released), [("console", lost(&main))]);
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 42))), ["camera", "console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 42))), ["camera", "console"]);
     }
 
     /// Fails if every window shares one slot, if a take in one window
@@ -201,26 +201,22 @@ mod tests {
         let (first, second) = (window("first"), window("second"));
 
         rig.take(a, &first, Actor);
-        assert_eq!(receivers(&rig.inject(first.as_erased(), &key(&first, 1))), ["a"]);
-        assert_eq!(receivers(&rig.inject(second.as_erased(), &key(&second, 1))), ["a", "b"]);
+        assert_eq!(receivers(&rig.inject(&first, &key(&first, 1))), ["a"]);
+        assert_eq!(receivers(&rig.inject(&second, &key(&second, 1))), ["a", "b"]);
 
         let taken = rig.take(b, &second, Actor);
         assert_eq!(heard(&taken), [("b", gained(&second))]);
         assert!(heard::<KeyFocusLost>(&taken).is_empty(), "the first window's holder keeps its slot");
-        assert_eq!(receivers(&rig.inject(first.as_erased(), &key(&first, 2))), ["a"]);
-        assert_eq!(receivers(&rig.inject(second.as_erased(), &key(&second, 2))), ["b"]);
+        assert_eq!(receivers(&rig.inject(&first, &key(&first, 2))), ["a"]);
+        assert_eq!(receivers(&rig.inject(&second, &key(&second, 2))), ["b"]);
 
         let taken = rig.take(a, &second, Actor);
         assert_eq!(heard(&taken), [("a", gained(&second))]);
         assert_eq!(heard(&taken), [("b", lost(&second))]);
         let released = rig.release(a, &first);
         assert_eq!(heard(&released), [("a", lost(&first))]);
-        assert_eq!(
-            receivers(&rig.inject(second.as_erased(), &key(&second, 3))),
-            ["a"],
-            "the second window's slot stands"
-        );
-        assert_eq!(receivers(&rig.inject(first.as_erased(), &key(&first, 3))), ["a", "b"]);
+        assert_eq!(receivers(&rig.inject(&second, &key(&second, 3))), ["a"], "the second window's slot stands");
+        assert_eq!(receivers(&rig.inject(&first, &key(&first, 3))), ["a", "b"]);
     }
 
     /// Fails if a slot is applied to only one of the two selector sets, or if
@@ -229,13 +225,13 @@ mod tests {
     fn a_slot_narrows_both_selector_sets_of_its_own_window_only() {
         let mut rig = Rig::synthetic();
         let (held, other) = (window("held"), window("other"));
-        let holder = key_subscriber(&mut rig, "holder", &WindowSelector::One(held.as_erased().clone()));
+        let holder = key_subscriber(&mut rig, "holder", &WindowSelector::One(held.clone()));
         key_subscriber(&mut rig, "outsider", &All);
 
         rig.take(holder, &held, Actor);
 
-        assert_eq!(receivers(&rig.inject(held.as_erased(), &key(&held, 1))), ["holder"]);
-        assert_eq!(receivers(&rig.inject(other.as_erased(), &key(&other, 1))), ["outsider"]);
+        assert_eq!(receivers(&rig.inject(&held, &key(&held, 1))), ["holder"]);
+        assert_eq!(receivers(&rig.inject(&other, &key(&other, 1))), ["outsider"]);
     }
 
     /// Fails if a slot outlives its window, if a window's close empties the
@@ -266,12 +262,8 @@ mod tests {
 
         assert!(matches!(rig.reply::<CloseWindowResult>(), CloseWindowResult::Ok), "the window closes");
         assert_eq!(heard(&closed), [("holder", lost(&main))]);
-        assert_eq!(
-            receivers(&rig.inject(side.as_erased(), &key(&side, 1))),
-            ["holder"],
-            "the other window's slot stands"
-        );
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 1))), ["holder", "other"]);
+        assert_eq!(receivers(&rig.inject(&side, &key(&side, 1))), ["holder"], "the other window's slot stands");
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 1))), ["holder", "other"]);
     }
 
     /// Fails if a window's slot is dropped with its key records when the
@@ -284,10 +276,10 @@ mod tests {
         let main = window("main");
         rig.take(holder, &main, Actor);
 
-        rig.inject(main.as_erased(), &WindowFocus { window: main.as_erased().clone(), focused: false });
-        rig.inject(main.as_erased(), &WindowFocus { window: main.as_erased().clone(), focused: true });
+        rig.inject(&main, &WindowFocus { window: main.clone(), focused: false });
+        rig.inject(&main, &WindowFocus { window: main.clone(), focused: true });
 
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 1))), ["holder"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 1))), ["holder"]);
     }
 
     /// Fails if a subtree scope leaves out the holder's child, if the prefix
@@ -305,11 +297,11 @@ mod tests {
         let main = window("main");
 
         rig.take(pan, &main, Subtree);
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 1))), ["pan", "pan/knob"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 1))), ["pan", "pan/knob"]);
 
         let retaken = rig.take(pan, &main, Actor);
         assert!(retaken.is_empty(), "the holder taking again is told nothing");
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 2))), ["pan"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 2))), ["pan"]);
     }
 
     /// Fails if a replaced holder is not told, if the slot is a stack that
@@ -328,12 +320,12 @@ mod tests {
         assert_eq!(heard(&taken), [("second", gained(&main))]);
 
         assert!(rig.release(first, &main).is_empty(), "a release by the replaced holder changes nothing");
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 1))), ["second"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 1))), ["second"]);
 
         let released = rig.release(second, &main);
         assert_eq!(heard(&released), [("second", lost(&main))]);
         assert!(heard::<KeyFocusGained>(&released).is_empty(), "key focus is not handed back");
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 2))), ["first", "second"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 2))), ["first", "second"]);
     }
 
     /// Fails if a slot outlives its holder: once the holder's departure is
@@ -349,11 +341,11 @@ mod tests {
 
         rig.send_to(holder, &Leave);
         rig.pump_until("the departure notice", |state| {
-            recipients::<Key>(state.subscribers(), first.as_erased()) == BTreeSet::from([survivor.erase()])
+            recipients::<Key>(state.subscribers(), &first) == BTreeSet::from([survivor.erase()])
         });
 
-        assert_eq!(receivers(&rig.inject(first.as_erased(), &key(&first, 1))), ["survivor"]);
-        assert_eq!(receivers(&rig.inject(second.as_erased(), &key(&second, 1))), ["survivor"]);
+        assert_eq!(receivers(&rig.inject(&first, &key(&first, 1))), ["survivor"]);
+        assert_eq!(receivers(&rig.inject(&second, &key(&second, 1))), ["survivor"]);
     }
 
     /// Fails if a key held when key focus changes is stuck for whoever was
@@ -365,22 +357,14 @@ mod tests {
         key_subscriber(&mut rig, "camera", &All);
         let console = key_subscriber(&mut rig, "console", &All);
         let main = window("main");
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 17))), ["camera", "console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 17))), ["camera", "console"]);
 
         rig.take(console, &main, Actor);
 
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 17))), ["camera", "console"], "the repeat");
-        assert_eq!(
-            receivers(&rig.inject(main.as_erased(), &key_release(&main, 17))),
-            ["camera", "console"],
-            "the release"
-        );
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 30))), ["console"], "a new code");
-        assert_eq!(
-            receivers(&rig.inject(main.as_erased(), &key(&main, 17))),
-            ["console"],
-            "the same code, pressed again"
-        );
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 17))), ["camera", "console"], "the repeat");
+        assert_eq!(receivers(&rig.inject(&main, &key_release(&main, 17))), ["camera", "console"], "the release");
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 30))), ["console"], "a new code");
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 17))), ["console"], "the same code, pressed again");
     }
 
     /// Fails if the release of a key is sent to subscribers that were never
@@ -392,11 +376,11 @@ mod tests {
         let console = key_subscriber(&mut rig, "console", &All);
         let main = window("main");
         rig.take(console, &main, Actor);
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 28))), ["console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 28))), ["console"]);
 
         rig.release(console, &main);
 
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key_release(&main, 28))), ["console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key_release(&main, 28))), ["console"]);
     }
 
     /// Fails if a key record is kept past a release that never arrives: a
@@ -408,11 +392,11 @@ mod tests {
         key_subscriber(&mut rig, "camera", &All);
         let console = key_subscriber(&mut rig, "console", &All);
         let main = window("main");
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 17))), ["camera", "console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 17))), ["camera", "console"]);
 
-        rig.inject(main.as_erased(), &WindowFocus { window: main.as_erased().clone(), focused: false });
+        rig.inject(&main, &WindowFocus { window: main.clone(), focused: false });
         rig.take(console, &main, Actor);
 
-        assert_eq!(receivers(&rig.inject(main.as_erased(), &key(&main, 17))), ["console"]);
+        assert_eq!(receivers(&rig.inject(&main, &key(&main, 17))), ["console"]);
     }
 }
