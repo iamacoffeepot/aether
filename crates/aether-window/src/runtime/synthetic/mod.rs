@@ -9,7 +9,8 @@ use aether_substrate::{MonitorHandle, Subname};
 
 use super::WindowSpawnKey;
 use super::manager::{RoutableWindow, WindowCommands};
-use super::subscribers::{Published, WindowSubscribers};
+use super::routing::Routed;
+use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
     RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowPresentationResult,
@@ -96,8 +97,8 @@ impl SyntheticWindows {
         }
     }
 
-    fn publish<K: Published, A>(&self, ctx: &mut NativeCtx<'_, A>, window: &ErasedActorPath, event: &K) {
-        ctx.fanout(self.subscribers.recipients::<K>(window), event);
+    fn publish<K: Routed, A>(&mut self, ctx: &mut NativeCtx<'_, A>, window: &ErasedActorPath, event: &K) {
+        self.subscribers.publish(ctx, window, event);
     }
 
     /// Promote an authoritatively applied child into the live window set and

@@ -46,7 +46,8 @@ use self::input::{
 use self::menu::{apply_menu, parse_menu_item_id};
 use super::WindowSpawnKey;
 use super::manager::{RoutableWindow, WindowCommands};
-use super::subscribers::{Published, WindowSubscribers};
+use super::routing::Routed;
+use super::subscribers::WindowSubscribers;
 use crate::{
     ApplyWindowCommandResult, CloseWindowResult, CreateWindowResult, FocusWindowResult, RequestWindowRedrawResult,
     RetireWindow, SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowPresentationResult,
@@ -1039,13 +1040,13 @@ impl DesktopWindows {
         WindowSize { window: path.clone(), width, height, scale_factor }
     }
 
-    fn publish<K: Published, A>(
-        &self,
+    fn publish<K: Routed, A>(
+        &mut self,
         ctx: &mut NativeCtx<'_, A, Anyone, Single>,
         window: &ErasedActorPath,
         event: &K,
     ) {
-        ctx.fanout(self.subscribers.recipients::<K>(window), event);
+        self.subscribers.publish(ctx, window, event);
     }
 }
 
@@ -1618,5 +1619,52 @@ mod tests {
         assert_eq!(recorded[0].event::<WindowFocus>(), Some(WindowFocus { window: window.clone(), focused: true }));
         assert_eq!(recorded[1].event::<WindowFocus>(), Some(WindowFocus { window, focused: false }));
         assert!(recorded[2].event::<WindowSize>().is_some(), "the repeated loss published nothing before the resize");
+    }
+
+    /// Fails if the desktop backend fans its events out without the shared
+    /// publish, so a held key focus slot narrows injected events and not the
+    /// ones winit raises. The trailing resize, which goes to everyone, is the
+    /// settled marker: each watcher's receipts arrive in the order they were
+    /// sent, so an outsider that was sent the text reports it before its
+    /// resize.
+    #[test]
+    fn a_held_slot_narrows_the_text_winit_raises() {
+        let mut rig = rig();
+        let holder = rig.watcher("holder");
+        rig.watcher("outsider");
+        for name in ["holder", "outsider"] {
+            for subscription in [
+                WindowSubscription::TextInput(watcher(name).narrow()),
+                WindowSubscription::WindowSize(watcher(name).narrow()),
+            ] {
+                assert!(matches!(rig.subscribe(crate::WindowSelector::All, subscription), SubscribeWindowResult::Ok));
+            }
+        }
+        let (window, winit_id) =
+            rig.desktop_turn(|state, _ctx| insert_scaled_window(state, 1.0)).expect("the desktop manager is live");
+        let held = WindowInstance::path(&aether_data::LoadName::new("main").expect("fixture window name"));
+        assert_eq!(held.as_erased(), &window, "the take names the window winit raises for");
+        rig.take(holder, &held, crate::KeyFocusScope::Actor);
+
+        rig.desktop_turn(|state, ctx| {
+            state.window_event(winit_id, WindowEvent::Ime(Ime::Commit("a".to_owned())), ctx);
+            state.window_event(winit_id, WindowEvent::Resized(PhysicalSize::new(800, 600)), ctx);
+        })
+        .expect("the desktop manager is live");
+
+        let recorded = rig.receipts(3);
+        assert_eq!(received::<TextInput>(&recorded), ["holder"]);
+        assert_eq!(received::<WindowSize>(&recorded), ["holder", "outsider"]);
+    }
+
+    /// The keys of the watchers that received a `K` among `receipts`, sorted.
+    fn received<K: Kind>(receipts: &[Receipt]) -> Vec<&str> {
+        let mut watchers = receipts
+            .iter()
+            .filter(|receipt| receipt.event::<K>().is_some())
+            .map(|receipt| receipt.watcher.as_str())
+            .collect::<Vec<_>>();
+        watchers.sort_unstable();
+        watchers
     }
 }

@@ -19,7 +19,7 @@ pub mod wire_corpus;
 
 use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, LoadName, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -418,6 +418,27 @@ pub struct FsContextDemuxReport {
 /// position. Fieldless: the window cap reads the subscriber off the sender.
 #[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
 pub struct UnsubscribeKeys;
+
+/// Ask a key probe to take key focus in the window named `window` for itself
+/// alone, so a scenario drives a guest's own take: the probe writes the
+/// window's typed path from the name and mails the window the take, and the
+/// window reads the holder off the sender. The field is the name because
+/// this crate does not depend on the window's, so it cannot spell the typed
+/// path the take carries.
+#[aether_data::kind(name = "aether.test_fixtures.take_key_focus")]
+pub struct TakeKeyFocusAt {
+    pub window: LoadName,
+}
+
+/// Report a key probe emits for each key focus notice the window sends it:
+/// `gained` is `true` for `aether.window.key_focus_gained` and `false` for
+/// `aether.window.key_focus_lost`, and `window` is the window the notice
+/// named.
+#[aether_data::kind(name = "aether.test_fixture.key_focus_observed")]
+pub struct KeyFocusObserved {
+    pub window: ErasedActorPath,
+    pub gained: bool,
+}
 
 /// Configure the listener lineage used by the TCP load probe when it echoes
 /// frames received from accepted sessions. The probe binds that listener on

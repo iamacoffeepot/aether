@@ -293,6 +293,9 @@ fn publish<K: Kind>(
 ```
 
 `recipients` unions and deduplicates the `All` and `One(window)` sets.
+For key and text events (`Key`, `KeyRelease`, `TextInput`, `ImePreedit`) this
+rule is narrowed by the window's key focus slot while one is held: see
+ADR-0248 §9.
 Subscribe, unsubscribe, reflexive subscribe, explicit-mailbox subscribe, bulk
 unsubscribe, validation, and monitor cleanup preserve the current
 `aether.input` semantics.

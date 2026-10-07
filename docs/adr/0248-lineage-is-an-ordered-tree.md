@@ -9,7 +9,7 @@ Two gaps met in one case: a debug overlay over a scene. The overlay must always 
 
 **Screen-space draws from two actors have no order.** The three overlay verbs (`aether.render.draw_textured_quads`, `draw_shapes`, `draw_screen_triangles`) each push one batch onto a single vector, `overlay_frame` in `RenderCapabilityState` (`crates/aether-render/src/runtime/mod.rs`), in the order the render capability received the mail, and that vector is the painter order. A lifecycle stage is broadcast to its subscribers as one burst that the scheduler may spread over several workers, so two actors that draw in the same stage reach the renderer in an order that can differ from frame to frame.
 
-**Input goes to every subscriber.** Both window backends publish through one line, `ctx.fanout(self.subscribers.recipients::<K>(window), event)` (`crates/aether-window/src/runtime/desktop/mod.rs`, `crates/aether-window/src/runtime/synthetic/mod.rs`), and `recipients` is the whole subscriber set for that window. With a camera controller live, typing into a console also moves the camera, and a wheel over a scrolling panel also zooms the scene behind it.
+**Input goes to every subscriber.** Both window backends publish through one line, `ctx.fanout(self.subscribers.recipients::<K>(window), event)` (`crates/aether-window/src/runtime/desktop/mod.rs`, `crates/aether-window/src/runtime/synthetic/mod.rs`), and the injected path, `publish_encoded` in `crates/aether-window/src/runtime/subscribers.rs`, which carries every injected input event, is a third site with the same line. `recipients` is the whole subscriber set for that window. With a camera controller live, typing into a console also moves the camera, and a wheel over a scrolling panel also zooms the scene behind it.
 
 **Text was filed under the wrong actor.** When this ADR was first written, text was drawn by a capability of its own: `aether.text` turned a text draw into glyph quads and sent them to the renderer itself, so every glyph batch arrived as mail from `aether.text`, one hop after the shapes the same actor sent. §10 removes that capability.
 
@@ -32,7 +32,7 @@ Issues #7513 (draw order) and #7514 (input) hold earlier code reading. Where the
 - **Position.** The opaque, comparable value a reader gets for one actor: where it stands in the whole tree.
 - **Layer.** An empty child created only to hold a place in its parent's sequence. Content is created beneath it.
 - **Member.** An actor that has stated a pointer region to the window (section 8).
-- **Key focus.** The one slot in the window that narrows who hears keys (section 9). It is separate from the sequence. Plain "focus" is not used for it: at this mailbox `aether.window.focus` (`FocusWindow`) and `aether.window.focus_changed` (`WindowFocus`) already name operating-system window focus.
+- **Key focus.** The one slot each window has that narrows who hears that window's keys (section 9). It is separate from the sequence. Plain "focus" is not used for it: at this mailbox `aether.window.focus` (`FocusWindow`) and `aether.window.focus_changed` (`WindowFocus`) already name operating-system window focus.
 
 ## Decision
 
@@ -86,7 +86,7 @@ What a layer needs from the engine today, read from the code:
 Mail sent in an order is not processed in that order, so no rule here sequences deliveries.
 
 - **Drawing.** Every actor draws during the frame in any order. The renderer commits the frame when the engine-only `Frame` mail arrives (`on_frame` → `commit_scene`), and the driver sends `Frame` only after the frame's stages have settled (`run_frame_advance` then `send_render_and_drain` in `crates/aether-chassis-desktop/src/driver/mod.rs`). At that commit the renderer groups the batches by sender (`ctx.sender()`, stamped by the host) and sorts the groups by position.
-- **Input.** Each pointer event has one recipient, and key events are routed by the key focus slot, so there is nothing to order.
+- **Input.** Each pointer event has one recipient, and key events are routed by the key focus slot of the window they arrive for, so there is nothing to order.
 
 ```rust
 // main: one vector, receipt order
@@ -205,64 +205,110 @@ Events that are neither pointer nor key events keep the ADR-0164 §4 fan-out: `M
 
 ### 9. Key focus
 
-Key focus is separate from the sequence. It is state the window holds: one slot, which is empty or holds one actor and a scope. There is no stack and no history.
+Key focus is separate from the sequence. It is state the window manager holds: one slot for each window, which is empty or holds one actor and a scope. There is no stack and no history. A key event arrives for one window and is routed by that window's slot alone, so a holder in one window leaves the keys of every other window where they were, and a subscriber to all windows is filtered event by event, by the slot of the window each event came from.
 
-- **An actor takes key focus for itself only**, never for another actor, with one of two scopes: itself alone, or itself and everything beneath it.
-- **The latest take wins.** A descendant may take key focus while an ancestor holds it for the subtree; the slot then holds the descendant.
-- **Keys go to every key subscriber inside the holder's scope.** When the slot is empty, every key subscriber hears keys, which is today's behaviour. Key events are `Key`, `KeyRelease`, `TextInput` and `ImePreedit`.
+- **An actor takes key focus for itself only**, never for another actor, in one window, with one of two scopes: itself alone, or itself and everything beneath it.
+- **The latest take in a window wins.** A descendant may take key focus while an ancestor holds it for the subtree; that window's slot then holds the descendant.
+- **Keys go to every key subscriber inside the holder's scope.** When a window's slot is empty, every key subscriber hears its keys, which is today's behaviour. Key events are `Key`, `KeyRelease`, `TextInput` and `ImePreedit`.
 - **A release, or the holder's close, empties the slot.** Key focus is never handed back. A parent whose child gives it up takes it again itself if it needs it, and the child tells its parent by ordinary mail.
+- **A slot goes when its window closes**, and its holder is told.
+- **An actor may hold key focus in several windows.** Each is taken, released and lost on its own.
 - **Nothing takes key focus merely to receive keys.** Taking it means everyone outside the scope stops hearing them.
-- **The window tells an actor when it gains key focus and when it loses it.**
+- **The window tells an actor when it gains key focus and when it loses it**, and in which window.
 - **The pointer is unaffected.** A press goes to the frontmost member under it by position, whoever holds key focus.
 
-| Moment | Slot | Hears keys |
+| Moment | The window's slot | Hears that window's keys |
 |---|---|---|
 | Playing | empty | every key subscriber: the camera controller |
 | The console opens and takes key focus, itself alone | console | the console |
 | The console closes or releases | empty | every key subscriber |
 
-The kinds, proposed. They follow the mailbox's existing shape (a sender-acting command, as `aether.window.subscribe_self` is, and published notices, as `aether.window.focus_changed` is) and carry "key" in the name to stay clear of `aether.window.focus`:
+The kinds. A take is plain mail to `aether.window`, and its sender is the holder: there is no ctx verb for it and no constructor. The commands and the notices all name the window by an `ActorPath<WindowInstance>`, the canonical path every window event carries, typed so that a path whose leaf is not a window's does not decode, and they carry "key" in the name to stay clear of `aether.window.focus`:
 
 ```rust
-// plan (proposed)
-#[aether_data::kind(name = "aether.window.take_key_focus", copy, eq)]
+// crates/aether-window/src/kinds/key_focus.rs
+#[aether_data::kind(name = "aether.window.take_key_focus", eq)]
 pub struct TakeKeyFocus {
+    pub window: ActorPath<WindowInstance>,
     pub scope: KeyFocusScope,
 }
 
 pub enum KeyFocusScope {
-    Actor,
-    Subtree,
+    Actor,   // the holder alone
+    Subtree, // the holder and everything beneath it in lineage
 }
 
-#[aether_data::kind(name = "aether.window.release_key_focus", copy, eq)]
-pub struct ReleaseKeyFocus;
+#[aether_data::kind(name = "aether.window.release_key_focus", eq)]
+pub struct ReleaseKeyFocus {
+    pub window: ActorPath<WindowInstance>,
+}
 
-#[aether_data::kind(name = "aether.window.key_focus_gained", copy, eq)]
-pub struct KeyFocusGained;
+#[aether_data::kind(name = "aether.window.key_focus_gained", eq)]
+pub struct KeyFocusGained {
+    pub window: ActorPath<WindowInstance>,
+}
 
-#[aether_data::kind(name = "aether.window.key_focus_lost", copy, eq)]
-pub struct KeyFocusLost;
+#[aether_data::kind(name = "aether.window.key_focus_lost", eq)]
+pub struct KeyFocusLost {
+    pub window: ActorPath<WindowInstance>,
+}
+
+#[aether_actor::protocol]
+pub trait KeyFocusHolder {
+    fn gained(mail: KeyFocusGained);
+    fn lost(mail: KeyFocusLost);
+}
+
+// a holder, which declares depends(WindowCapability) and handles both notices
+// `self.window` is the typed path its config named, or `WindowInstance::path(&name)`
+ctx.send::<WindowCapability>(&TakeKeyFocus { window: self.window.clone(), scope: KeyFocusScope::Actor });
 ```
 
-The taker is the mail's sender, so a take with no local sender is refused, as `subscribe_self` refuses one. A release from an actor that is not the holder changes nothing.
-
-How the window routes keys today, and what the slot needs, read from `crates/aether-window/src/runtime/subscribers.rs`:
-
-- Every published kind has its own `KindSubscribers<K>`: one map of subscribers to all windows and one per window, both keyed by the subscriber's `ErasedActorRef`. `recipients(window)` chains the two, and `publish` hands the whole iterator to `ctx.fanout`. There is no filter between the table and the send.
-- The table holds references, with no path beside them. The window can read a subscriber's canonical path with `NativeCtx::actor_path`, one probe of the route view.
-- A subscriber is inside a subtree scope when the holder's canonical path is a prefix of the subscriber's ending on a segment boundary. The same test on `Position` values is a prefix test.
-- The window already monitors every subscriber (`Holder` and its `MonitorHandle`) and drops its rows on the notice. The slot's holder is watched the same way, which is how the holder's close empties the slot.
+The take's handler and the release's handler state `KeyFocusHolder` as their sender, on the ctx type (ADR-0231 §11):
 
 ```rust
-// main: crates/aether-window/src/runtime/desktop/mod.rs
-ctx.fanout(self.subscribers.recipients::<K>(window), event);
-
-// plan: for the four key kinds only
-ctx.fanout(self.subscribers.recipients::<K>(window).filter(|subscriber| self.key_focus.admits(subscriber)), event);
+// crates/aether-window/src/runtime/mod.rs
+#[handler::tell]
+fn on_take_key_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, KeyFocusHolder>, mail: TakeKeyFocus) {
+    let holder = ctx.sender(); // ProtocolRef<KeyFocusHolder>, proven before this handler runs
+    ..
+}
 ```
 
-Whether `admits` reads paths on every key event or keeps the admitted set, rebuilt on a take, a release and a subscribe, is an implementation choice; the set is the cheaper read.
+So the send builds only for an actor that handles both notices, and the engine casts the sender to the protocol before the handler runs: mail with no actor sender, or from a sender that does not cover it, never reaches the handler. Mail sent through MCP arrives with `aether.rpc.server` as its sender, so a session cannot take key focus; it mails the actor that should hold the keys, and that actor takes.
+
+A take cannot fail, so it has no reply; `KeyFocusGained` confirms a first take. The typed path proves what the path names and nothing about liveness: any window path is accepted, as `WindowSelector::One` accepts any path for a subscription, so an actor may take for a window that has not opened yet, and a path that is not a window's is refused at decode, before the handler. A slot for a window path no window stands at narrows nothing and goes when its holder releases or closes. The input kinds name their window as an erased path, because `aether-kinds` sits beneath `aether-window` and cannot name `WindowInstance`, and no erased path can be made typed outside decode (ADR-0230 §4); a holder therefore gets the typed path from its config or writes it from the window's name, and compares it with an event's through `as_erased()`.
+
+What each mail does to the slot of the window it names. No mail touches another window's slot.
+
+| Mail | That window's slot before | After | Sent |
+|---|---|---|---|
+| take by that window's holder | the sender | the sender, with the new scope | nothing |
+| take by another actor | empty or held | the sender | `KeyFocusLost` to the actor replaced, then `KeyFocusGained` to the sender, both naming the window |
+| release by that window's holder | the sender | empty | `KeyFocusLost` to the sender, naming the window |
+| release by anyone else, or with the slot empty | any | unchanged | nothing |
+| the window closes | any | gone, with the window's key records | `KeyFocusLost` naming the window to its holder, after `WindowClosed` is published |
+| a holder closes | every slot it holds | empty | nothing |
+
+How the window routes, read from `crates/aether-window/src/runtime/`:
+
+- Every published kind has its own `KindSubscribers<K>`: one map of subscribers to all windows and one per window, both keyed by the subscriber's `ErasedActorRef`. `recipients(window)` chains the two.
+- **The three fan-out sites share one publish.** The desktop backend, the synthetic backend and the injected path all call `WindowSubscribers::publish`, the only `ctx.fanout` in the window's runtime. Each published kind states a `Route` through the `Routed` trait (`routing/mod.rs`), and `publish` reads it: the four key kinds are filtered by the slot of the window the event is for, `WindowFocus` with `focused: false` and `WindowClosed` also clear routing state after they are sent, and every other kind goes to every subscriber.
+- The window keeps one record for each actor it watches, a subscriber or a holder: its monitor, its rows, and its canonical path, read once with `NativeCtx::actor_path` when the record is created. A path is for life (section 6), so it is never read again.
+- A subscriber is inside a subtree scope when the holder's canonical path is a prefix of the subscriber's ending on a step boundary: `pan` is a textual prefix of `panel` and is not its ancestor. The test reads two stored paths and no registry state.
+- That one record's monitor is how the holder's close empties its slots: the departure that drops an actor's rows also empties every slot it holds.
+
+```rust
+// before: three sites, each the whole set
+ctx.fanout(self.subscribers.recipients::<K>(window), event);
+
+// now: one site, on the subscription table
+self.subscribers.publish(ctx, window, event);
+```
+
+**A key press owns its repeats and its release.** For each key that is down, the window records the slot's value at the press: nothing when the slot was empty, or the holder's path and scope. A repeat and the release are routed by that record, and the release removes it; a release with no record is routed by the slot as it is then. A release of key focus, and a holder's close, leave the records alone. A window that loses operating-system focus forgets its key records, because those releases never arrive, and keeps its slot. `TextInput` carries no key code, so a repeat's text follows the slot as it is now: a key held while a console takes key focus keeps sending its `Key` repeats where the press went and types its repeated text into the console.
+
+A slot stands across a republish of its holder: the mailbox and its route record stay, no departure is posted, and a published contract only grows, so the successor still handles both notices. The successor is built fresh and does not remember holding key focus; its author carries that across, or releases.
 
 ### 10. The renderer draws text
 
@@ -314,7 +360,7 @@ The renderer's turn now pays for layout and for rasterising a glyph it has not s
 
 ## Open questions
 
-**1. A key held, or a composition in progress, when key focus changes.** A subscriber that heard a key go down and then falls outside the scope never hears it come up. Options: the window remembers who was sent each key-down and sends them the release, as it does for a button press; or a subscriber treats `KeyFocusLost`, and a take by another actor, as the release of everything it holds. The second does not reach a subscriber that never held key focus, such as the camera controller. Lean: the window remembers, so the rule for keys is the rule for buttons. What happens to an `ImePreedit` composition when the slot changes is not decided.
+**1. A composition in progress when key focus changes.** The held key is decided (section 9): the window records the slot's value at each key-down and routes that key's repeats and its release by the record, so the rule for keys is the rule for buttons. What happens to an `ImePreedit` composition when the slot changes is not decided: today the old holder is sent `KeyFocusLost` and drops its own composition, and the platform's composition state is untouched.
 
 **2. Session draws.** Section 7 puts MCP, capture and harness draws behind every component with no special case. The alternative is one stated place for them in front of everything, which is a special case in the renderer's sort. Lean: no special case.
 
@@ -325,8 +371,6 @@ The renderer's turn now pays for layout and for rasterising a glyph it has not s
 **5. The pointer region and its kind.** A rectangle or the whole window; a drawn shape is not a rectangle. Lean: those two only, and a list of rectangles when a case needs it. The kind name is not settled.
 
 **6. A shared layer type.** Content must declare `child_of(..)` naming its layer's type (section 3). Whether the engine ships one layer type for content to name, and in which crate, is not decided.
-
-**7. One slot for the application or one per window.** Keys arrive for one window, and subscriptions are per window or for all. The decision says one slot. Lean: one for the application, held by the manager `aether.window`, matching the one sequence per application under Limits.
 
 ## Not verified
 
