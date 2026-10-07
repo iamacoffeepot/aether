@@ -208,6 +208,11 @@ std::thread_local! {
     /// config bytes, so the by-tag spawn test can assert the passed
     /// bytes were threaded through decode → init.
     static STUB_INIT_CONFIG: Cell<Option<u32>> = const { Cell::new(None) };
+    /// How many times [`StubChild::init`] has run, so the resident-spawn
+    /// tests can prove a repeated spawn built no second child.
+    static STUB_INIT_COUNT: Cell<u32> = const { Cell::new(0) };
+    /// How many times a [`StubChild`] has run its `wire`, for the same tests.
+    static STUB_WIRE_COUNT: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Config for [`StubChild`] carrying an observable `value`, so a by-tag
@@ -220,9 +225,11 @@ struct StubConfig {
 
 /// Inline child whose `init` records its decoded config `value` into the
 /// thread-local, so the by-tag host-unit test reads back what was
-/// threaded. Its dispatch / lifecycle hooks are unreachable — the tests
-/// only spawn it, never mail it.
-struct StubChild;
+/// threaded, and keeps it as its state. Its dispatch answers that value as
+/// its return code, so a test can read the state of the child that stands.
+struct StubChild {
+    value: u32,
+}
 
 impl Addressable for StubChild {
     const NAMESPACE: &'static str = "test.inline.stub_child";
@@ -238,7 +245,8 @@ impl crate::Lifecycle<Self> for StubChild {
 
     fn init(config: StubConfig, _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         STUB_INIT_CONFIG.set(Some(config.value));
-        Ok(Self)
+        STUB_INIT_COUNT.set(STUB_INIT_COUNT.get() + 1);
+        Ok(Self { value: config.value })
     }
 }
 
@@ -258,8 +266,8 @@ impl StubChild {
 }
 
 impl crate::WasmDispatch<Self> for StubChild {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _mail: Mail<'_>) -> u32 {
-        unreachable!("the by-tag spawn tests never dispatch the stub child")
+    fn dispatch(state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _mail: Mail<'_>) -> u32 {
+        state.value
     }
 }
 
@@ -268,9 +276,10 @@ impl ErasedWasmActor for StubChild {
         Self::NAMESPACE
     }
     fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _mail: Mail<'_>) -> u32 {
-        unreachable!("the by-tag spawn tests never dispatch the stub child")
+        self.value
     }
     fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) -> Result<(), ActorInitError> {
+        STUB_WIRE_COUNT.set(STUB_WIRE_COUNT.get() + 1);
         Ok(())
     }
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
@@ -318,8 +327,9 @@ fn stub_resolver(
     }
 }
 
-/// A resolver that panics if reached — the subname-validation-first
-/// tests install it to prove the guard runs before any resolver call.
+/// A resolver that panics if reached — the subname-validation-first and
+/// resident-name tests install it to prove the spawn answers before any
+/// resolver call.
 fn panicking_resolver(
     _registry: &Registry,
     _parent: u64,
@@ -328,7 +338,7 @@ fn panicking_resolver(
     _full_subname: &str,
     _config_bytes: &[u8],
 ) -> Result<MailboxId, SpawnError> {
-    panic!("the resolver must not run when subname validation fails")
+    panic!("the resolver must not run for a spawn that answers before it")
 }
 
 std::thread_local! {
@@ -456,7 +466,7 @@ impl ChildOf<NestingParent> for StubChild {
 // spawner's position in the child's.
 impl crate::Declared for NestingParent {
     type Depends = ();
-    type Spawns = (FailingChild, (SucceedingChild, ()));
+    type Spawns = (FailingChild, (SucceedingChild, (StubChild, ())));
     type Parents = ();
 }
 
@@ -468,6 +478,11 @@ impl crate::Spawns<FailingChild> for NestingParent {
 impl crate::Spawns<SucceedingChild> for NestingParent {
     type Index = crate::There<crate::Here>;
     type Placement = <SucceedingChild as ChildOf<Self>>::Index;
+}
+
+impl crate::Spawns<StubChild> for NestingParent {
+    type Index = crate::There<crate::There<crate::Here>>;
+    type Placement = <StubChild as ChildOf<Self>>::Index;
 }
 
 impl crate::Declared for LifecycleProbe {

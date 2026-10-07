@@ -17,6 +17,12 @@
 //! `on_rehydrate`. `republish_watch_reshaped` names nothing in this crate, so
 //! that [`WatchNote`], the ledger's context kind, is not a kind its module
 //! declares.
+//!
+//! The hooks pair's first version (issue 7535) is [`HooksV1Parent`] with its
+//! inline [`HooksV1Counter`], which `republish_hooks_v1` exports. They live
+//! here so a test can name the counter and reach it beneath its parent
+//! (issue 7536). `republish_hooks_v2` keeps its own two actors at the same
+//! namespaces.
 
 use std::collections::BTreeMap;
 use std::mem;
@@ -28,11 +34,11 @@ use aether_actor::{
 };
 use aether_data::LoadName;
 use aether_test_fixtures_kinds::{
-    CarriedRequest, CarriedRequestResult, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult,
-    HeldRequest, HeldRequestResult, HookOutcome, ReleaseCarried, SubstrateHarnessObserver, WIRE_REFUSAL, WatchAdmit,
-    WatchAdmitResult, WatchAuditor, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig,
-    WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease,
-    WatchThrough, WireCountQuery,
+    Bump, CarriedRequest, CarriedRequestResult, CountQuery, CountReport, DEHYDRATE_REFUSAL, GateConfig, GateProbe,
+    GateQuery, GateQueryResult, HeldRequest, HeldRequestResult, HookFaultConfig, HookOutcome, REHYDRATE_REFUSAL,
+    ReleaseCarried, SubstrateHarnessObserver, WIRE_REFUSAL, WatchAdmit, WatchAdmitResult, WatchAuditor,
+    WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig, WatchLedgerQuery, WatchLedgerReport,
+    WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease, WatchThrough, WireCountQuery,
 };
 
 /// The reply handles `ReplyHolder` has parked, with their tags, carried
@@ -529,5 +535,137 @@ impl WasmActor for WatchClerk {
 
         ctx.send::<SubstrateHarnessObserver>(&departure);
         self.handled.push(departure);
+    }
+}
+
+/// What `HooksV1Parent` carries across a republish: its count and the replies
+/// it holds.
+#[aether_data::kind(name = "aether.test_fixtures.republish_hooks_parent_state")]
+struct HooksV1ParentState {
+    count: u32,
+    held: Vec<Held<HeldRequestResult>>,
+}
+
+/// The hooks pair's first parent (issue 7535): it counts each `Bump`, holds a
+/// `HeldRequest`'s reply, and spawns one [`HooksV1Counter`] in `wire`. Its
+/// `on_dehydrate` follows `HookFaultConfig::dehydrate`. Its `on_rehydrate`
+/// follows `successor_rehydrate` on an instance that has not dehydrated, a
+/// republish's successor, and `reinstated_rehydrate` on the instance that
+/// has, which is handed its own state back after a refused republish.
+pub struct HooksV1Parent {
+    config: HookFaultConfig,
+    count: u32,
+    held: Vec<Held<HeldRequestResult>>,
+    /// Set once `on_dehydrate` has run on this instance.
+    dehydrated: bool,
+}
+
+#[actor(root, spawns(HooksV1Counter))]
+impl WasmActor for HooksV1Parent {
+    type Config = HookFaultConfig;
+    const NAMESPACE: &'static str = "test.republish.hooks.parent";
+
+    fn init(config: HookFaultConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(HooksV1Parent { config, count: 0, held: Vec::new(), dehydrated: false })
+    }
+
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
+        ctx.spawn_inline::<HooksV1Counter>(Subname::Named("counter"), &())
+            .map(drop)
+            .map_err(|error| ActorInitError::new(format!("the counter does not spawn: {error:?}")))
+    }
+
+    #[handler::tell]
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        self.count += 1;
+    }
+
+    #[handler::request]
+    fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        CountReport { count: self.count }
+    }
+
+    /// Hold the reply and never answer it: a test reads what its requester
+    /// receives when this instance closes.
+    #[handler::request]
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, _request: HeldRequest) -> Pending<HeldRequestResult> {
+        let (pending, held) = ctx.hold::<HeldRequestResult>();
+        self.held.push(held);
+        pending
+    }
+
+    /// Save the count and the held replies, or do what the config says in
+    /// their place. A save that fails gets the held replies back before the
+    /// error is returned, so the instance that keeps running still holds them.
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        self.dehydrated = true;
+        match self.config.dehydrate {
+            HookOutcome::Succeeds => {}
+            HookOutcome::Refuses => return Err(ActorInitError::new(DEHYDRATE_REFUSAL)),
+            HookOutcome::Traps => panic!("the fixture was told to trap in on_dehydrate"),
+        }
+
+        let state = HooksV1ParentState { count: self.count, held: mem::take(&mut self.held) };
+        let saved = ctx.save_state_kind(0, &state);
+        if saved.is_err() {
+            self.held = state.held;
+        }
+        saved
+    }
+
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
+        let outcome = if self.dehydrated {
+            self.config.reinstated_rehydrate
+        } else {
+            self.config.successor_rehydrate
+        };
+        match outcome {
+            HookOutcome::Succeeds => {}
+            HookOutcome::Refuses => return Err(ActorInitError::new(REHYDRATE_REFUSAL)),
+            HookOutcome::Traps => panic!("the fixture was told to trap in on_rehydrate"),
+        }
+
+        let HooksV1ParentState { count, held } =
+            prior.decode_kind::<HooksV1ParentState>().ok_or("the parent's saved state does not decode")?;
+        self.count = count;
+        self.held = held;
+        Ok(())
+    }
+}
+
+/// The hooks pair's first counter, `HooksV1Parent`'s inline child. It declares
+/// `type State`, so every dehydrate packs a child entry the successor has to
+/// rebuild, and it counts in the kind it saves, so its accessors move the
+/// state whole.
+pub struct HooksV1Counter {
+    state: CountReport,
+}
+
+#[actor(instanced, child_of(HooksV1Parent))]
+impl WasmActor for HooksV1Counter {
+    const NAMESPACE: &'static str = "test.republish.hooks.counter";
+
+    type State = CountReport;
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(HooksV1Counter { state: CountReport { count: 0 } })
+    }
+
+    fn dehydrate(&self) -> CountReport {
+        self.state.clone()
+    }
+
+    fn rehydrate(&mut self, state: CountReport) {
+        self.state = state;
+    }
+
+    #[handler::tell]
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        self.state.count += 1;
+    }
+
+    #[handler::request]
+    fn on_count(&mut self, _ctx: &mut WasmCtx<'_>, _query: CountQuery) -> CountReport {
+        self.state.clone()
     }
 }

@@ -19,7 +19,8 @@
 //! The registry is slot-shaped (take-out / dispatch / reinsert) so a
 //! running child can spawn or mutate siblings through `ctx` while it is
 //! itself dispatched — the registry borrow is never held across a child's
-//! `erased_dispatch`. The guest is single-threaded (ADR-0010 §5) and the
+//! `erased_dispatch`. A slot's life is one enum, [`slot::Seat`]: its child is
+//! seated, wired or not, or out on the stack of the caller running it. The guest is single-threaded (ADR-0010 §5) and the
 //! substrate serializes delivery under the run token, so an `UnsafeCell`
 //! with a blanket `Sync` impl is sound — the same argument that licenses
 //! [`crate::Slot`].
@@ -44,6 +45,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell, UnsafeCell};
+use core::mem;
 
 use aether_data::wire::{Encoder, LedgerEncoder};
 use aether_data::{__watch_id_number, Blob, Kind, KindId, MailboxId, RequestId, Source, WatchId};
@@ -58,13 +60,20 @@ use crate::wasm::{ActorInitError, ErasedWasmActor};
 
 mod bundle;
 pub mod compose;
+mod slot;
 mod tickets;
+mod unwire;
 
+pub(crate) use slot::{Child, Reinserted};
+pub(crate) use unwire::unwire_child;
+pub use unwire::unwire_children;
+
+use slot::Seat;
 use tickets::{ClaimLedger, ContextLedger, DehydrateLedger, HeldTickets};
 
-/// One inline child's slot. `actor` is `None` while the child is taken
-/// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
-/// The child's alias [`MailboxId`] is carried as the map key in
+/// One inline child's slot. `seat` says where the child is: seated at rest,
+/// wired or not, or out on the stack of the one caller running its handler
+/// or hook. The child's alias [`MailboxId`] is carried as the map key in
 /// [`Registry`]; there is no redundant `id` field here.
 ///
 /// ADR-0114 §5: the slot also records the metadata a `replace_component`
@@ -101,7 +110,21 @@ struct InlineSlot {
     /// the real config on reconstruct (`reconstruct_one_child`) instead of
     /// re-`init`ing a typed-config child from empty bytes (issue 2690).
     config_bytes: Vec<u8>,
-    actor: Option<Box<dyn ErasedWasmActor>>,
+    /// Where the child is, and whether it owes an `unwire`.
+    seat: Seat,
+}
+
+impl InlineSlot {
+    fn new(record: ChildRecord, seat: Seat) -> Self {
+        let ChildRecord { type_tag, full_subname, is_counter, parent, config_bytes } = record;
+        Self { type_tag, full_subname, is_counter, parent, config_bytes, seat }
+    }
+
+    /// Whether this slot is the child of `parent`, of type `type_tag`, named
+    /// `subname`: the three things its alias was folded from.
+    fn stands_at(&self, parent: MailboxId, type_tag: ActorTypeTag, subname: &str) -> bool {
+        self.parent == parent.0 && self.type_tag == type_tag.0 && self.full_subname == subname
+    }
 }
 
 /// An inline child's reconstruct record (ADR-0114 §5): what a slot keeps
@@ -592,8 +615,8 @@ impl Registry {
 
     /// Resolve the logical actor type at `mailbox`: the entry actor when it
     /// matches [`Self::self_id`], or an inline slot's recorded type tag at
-    /// any nested depth. Slot lookup is independent of whether its actor box
-    /// is resident or temporarily taken out for dispatch.
+    /// any nested depth. Slot lookup is independent of whether its child is
+    /// seated or out for a handler or hook.
     #[must_use]
     pub fn actor_type_tag(&self, mailbox: MailboxId) -> Option<ActorTypeTag> {
         if mailbox.0 == self.self_id.get() {
@@ -622,64 +645,83 @@ impl Registry {
         self.spawn_resolver.get()
     }
 
-    /// Register a freshly-spawned (or reconstructed) inline child under
-    /// `id`, recording the reconstruct metadata + the spawner's `parent` id
-    /// alongside the actor box. Replaces the actor + metadata if `id` is
-    /// already present (a re-spawn / rehydrate re-register of the same
-    /// alias). O(log n).
+    /// Seat a rebuilt inline child under `id` as [`Child::Unwired`]: a
+    /// republish's rebuild ran its `init` and `on_rehydrate` and no `wire`
+    /// (ADR-0114 §5). A slot already at `id` is replaced, record and child,
+    /// which is how the reinstated guest's rebuild after a refused republish
+    /// lays a saved child over the resident one. A spawn does not come here:
+    /// it calls [`Self::reserve`]. O(log n).
     pub(crate) fn insert_child(&self, id: MailboxId, record: ChildRecord, actor: Box<dyn ErasedWasmActor>) {
-        let ChildRecord { type_tag, full_subname, is_counter, parent, config_bytes } = record;
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
         let map = unsafe { &mut *self.inner.get() };
-        map.insert(id, InlineSlot { type_tag, full_subname, is_counter, parent, config_bytes, actor: Some(actor) });
+        map.insert(id, InlineSlot::new(record, Seat::Seated(Child::Unwired(actor))));
     }
 
-    /// Take the child out for dispatch, leaving its slot (and its
-    /// reconstruct metadata) intact but the actor box empty. Returns
-    /// `None` if `id` names no resident inline child (already taken out,
-    /// or never registered). The borrow drops before the returned box is
-    /// dispatched, so a child may re-enter the registry mid-dispatch.
-    /// O(log n).
-    pub(crate) fn take(&self, id: MailboxId) -> Option<Box<dyn ErasedWasmActor>> {
+    /// Make the slot of a child being spawned under `id`. The slot is born
+    /// [`Seat::Out`]: the fresh box stays on the spawn's stack until its
+    /// `wire` has run, and the slot is there meanwhile for the lookups a
+    /// nested spawn makes ([`Self::actor_type_tag`], [`Self::parent_of`]).
+    /// The spawn seats the child with [`Self::reinsert`]. O(log n).
+    pub(crate) fn reserve(&self, id: MailboxId, record: ChildRecord) {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
-        map.get_mut(&id).and_then(|s| s.actor.take())
+        map.insert(id, InlineSlot::new(record, Seat::Out));
     }
 
-    /// Put a child back after dispatch, into its existing slot (metadata
-    /// preserved). Pairs with [`Self::take`]; the slot is guaranteed to
-    /// exist because `take` left it in place with an empty actor box.
+    /// Take the seated child out for a handler or hook, leaving its slot
+    /// (and its reconstruct record) in place and [`Seat::Out`]. The caller
+    /// holds the [`Child`], and with it whether an `unwire` is owed, until it
+    /// hands it back through [`Self::reinsert`].
     ///
-    /// The lookup-then-set is deliberately a no-op when no slot matches `id`:
-    /// a child despawned mid-dispatch (its slot already
-    /// [`removed`](Self::remove) while it was taken out) has nowhere to go
-    /// back to, so the live box drops at end of scope rather than
-    /// re-entering the registry. This no-op is what makes self-despawn
-    /// fall out for free (ADR-0114) — no pending-removal flag. O(log n).
-    pub(crate) fn reinsert(&self, id: MailboxId, actor: Box<dyn ErasedWasmActor>) {
+    /// `None` has one meaning: no child is seated at `id`, because no slot
+    /// is there or the caller that took it still holds it. The borrow drops
+    /// before the returned child is run, so a child may re-enter the
+    /// registry mid-dispatch. O(log n).
+    pub(crate) fn take(&self, id: MailboxId) -> Option<Child> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
-        if let Some(slot) = map.get_mut(&id) {
-            slot.actor = Some(actor);
+        let slot = map.get_mut(&id)?;
+        match mem::replace(&mut slot.seat, Seat::Out) {
+            Seat::Seated(child) => Some(child),
+            Seat::Out => None,
+        }
+    }
+
+    /// Seat `child` in its slot, in the case the caller hands over (record
+    /// preserved). Pairs with [`Self::take`] and [`Self::reserve`], which
+    /// left the slot [`Seat::Out`].
+    ///
+    /// When no slot is at `id` the child was despawned while it was out, and
+    /// it comes back as [`Reinserted::Departed`]: the caller that holds it is
+    /// the one that closes it, running its `unwire` if it owes one, so the
+    /// registry keeps no pending-removal state. O(log n).
+    #[must_use]
+    pub(crate) fn reinsert(&self, id: MailboxId, child: Child) -> Reinserted {
+        // SAFETY: see [`Self::insert_child`].
+        let map = unsafe { &mut *self.inner.get() };
+        match map.get_mut(&id) {
+            Some(slot) => {
+                slot.seat = Seat::Seated(child);
+                Reinserted::Seated
+            }
+            None => Reinserted::Departed(child),
         }
     }
 
     /// Tear down the inline child registered under `id` (ADR-0114
-    /// teardown): remove its slot, dropping the resident
-    /// `Box<dyn ErasedWasmActor>` so the child's `Drop` runs. Returns
-    /// `true` if a slot was present, `false` if `id` named no inline child
+    /// teardown): remove its slot, dropping a seated child. Returns `true`
+    /// if a slot was present, `false` if `id` named no inline child
     /// (idempotent — a re-despawn of an already-gone alias is a clean
-    /// `false`, not an error). Backs [`WasmCtx::despawn_inline_child`].
-    /// O(log n).
+    /// `false`, not an error). Backs [`WasmCtx::despawn_inline_child`], which
+    /// takes a seated child out and runs its `unwire` first. O(log n).
     ///
-    /// If the child is currently taken out for dispatch (a self-despawn:
-    /// its slot's actor box is `None`, the live box held on the stack by
-    /// [`membrane_dispatch`]), removing the empty slot makes the matching
-    /// [`Self::reinsert`] find nothing and no-op, so the box drops at end
-    /// of dispatch instead of re-entering — the reentrant case the
-    /// slot-shaped take/reinsert design handles with no extra state.
+    /// A slot that is [`Seat::Out`] holds no child: its child is on the
+    /// stack of the caller running it (a child despawning itself, held by
+    /// [`membrane_dispatch`]). Removing that slot makes the matching
+    /// [`Self::reinsert`] answer [`Reinserted::Departed`], and that caller
+    /// closes the child once its handler has returned.
     pub(crate) fn remove(&self, id: MailboxId) -> bool {
         // SAFETY: see [`Self::insert_child`] — the borrow is taken fresh
         // and released before return, never spanning a dispatch.
@@ -687,13 +729,28 @@ impl Registry {
         map.remove(&id).is_some()
     }
 
+    /// The alias of the inline child standing beneath `parent`, as type
+    /// `type_tag`, at the resolved subname `subname`: the three things an
+    /// alias is folded from, which the guest cannot fold itself. `None` when
+    /// no slot matches. A name is resident when it has a slot, whichever
+    /// seat the slot is in, so a child that is out for its own handler is
+    /// still found. A scan like [`Self::child_of`], with the type compared
+    /// too.
+    #[must_use]
+    pub(crate) fn resident(&self, parent: MailboxId, type_tag: ActorTypeTag, subname: &str) -> Option<MailboxId> {
+        // SAFETY: see [`Self::insert_child`].
+        let map = unsafe { &*self.inner.get() };
+        map.iter().find(|(_, slot)| slot.stands_at(parent, type_tag, subname)).map(|(key, _)| *key)
+    }
+
     /// Snapshot the reconstruct metadata of every resident inline child
     /// (ADR-0114 §5 dehydrate walk). The actor boxes stay in the
     /// registry; the compose path reads each child's state through
     /// [`Self::with_child_mut`] keyed by the returned `id`. Children are
-    /// returned in [`MailboxId`] key order; the dehydrate/rehydrate walk
-    /// reconstructs each child independently by its own `alias_id` /
-    /// `type_tag` / `full_subname`, so order is irrelevant.
+    /// returned in [`MailboxId`] key order. The dehydrate/rehydrate walk
+    /// reconstructs each child by its own `alias_id` / `type_tag` /
+    /// `full_subname`, and a close unwires the children of one depth in the
+    /// reverse of this order ([`unwire_children`]).
     #[must_use]
     pub(crate) fn child_metas(&self) -> Vec<InlineChildMeta> {
         // SAFETY: see [`Self::insert_child`].
@@ -710,16 +767,19 @@ impl Registry {
             .collect()
     }
 
-    /// Run `f` against the child registered under `id` with a unique
-    /// mutable borrow held only for the call, returning its result (or
-    /// `None` if `id` names no resident child). Used by the dehydrate
+    /// Run `f` against the child seated under `id`, wired or not, with a
+    /// unique mutable borrow held only for the call, returning its result
+    /// (or `None` if no child is seated at `id`). Used by the dehydrate
     /// compose to drive each child's `erased_on_dehydrate` in place. The
     /// borrow drops before this returns, so it never spans a dispatch.
     /// O(log n).
     pub(crate) fn with_child_mut<R>(&self, id: MailboxId, f: impl FnOnce(&mut dyn ErasedWasmActor) -> R) -> Option<R> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
-        map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
+        match &mut map.get_mut(&id)?.seat {
+            Seat::Seated(child) => Some(f(child.actor_mut())),
+            Seat::Out => None,
+        }
     }
 
     /// The recorded parent of the inline child registered under `id`, or
@@ -851,6 +911,16 @@ impl Registry {
         let queue = unsafe { &*self.queue.get() };
         queue.len()
     }
+
+    /// Seat `actor` under `id` as a spawn leaves a child whose `wire`
+    /// returned `Ok`, by the two calls a spawn makes. For a host test that
+    /// needs a wired child and has no actor type to spawn.
+    #[cfg(test)]
+    pub(crate) fn seat_wired(&self, id: MailboxId, record: ChildRecord, actor: Box<dyn ErasedWasmActor>) {
+        self.reserve(id, record);
+        let seated = self.reinsert(id, Child::Wired(actor));
+        assert!(matches!(seated, Reinserted::Seated), "a slot just reserved takes its child");
+    }
 }
 
 /// Where a membrane dispatch came from, which decides whether the dispatched
@@ -872,7 +942,10 @@ enum DispatchOrigin {
 /// parent's own mailbox id, dispatch the parent (`dispatch_own`); otherwise
 /// take the inline child the producer addressed out of `registry`, dispatch
 /// it with a ctx self-identified as the child and carrying the same
-/// `registry` ([`WasmCtx::__new`]), and reinsert. An unrecognised recipient
+/// `registry` ([`WasmCtx::__new`]), and reinsert it in the case it was
+/// taken in. A child that despawned itself in its handler has no slot to go
+/// back to: it runs its `unwire`, if it wired, now that its dispatch has
+/// returned, and then drops (ADR-0249 §4). An unrecognised recipient
 /// falls back to the parent's dispatch — the existing unmatched path (the
 /// parent's `#[fallback]`, or the `DISPATCH_UNKNOWN_KIND` sentinel for a
 /// strict receiver), never a short-circuit drop.
@@ -930,8 +1003,10 @@ where
                 DispatchOrigin::Host => WasmCtx::__new(recipient, registry, source),
                 DispatchOrigin::Cluster => WasmCtx::__new_local_dispatch(recipient, registry, source),
             };
-            let rc = child.erased_dispatch(&mut ctx, mail);
-            registry.reinsert(id, child);
+            let rc = child.actor_mut().erased_dispatch(&mut ctx, mail);
+            if let Reinserted::Departed(departed) = registry.reinsert(id, child) {
+                drop(unwire_child(registry, id, departed));
+            }
             rc
         }
         // An alias whose child isn't resident (a race against teardown, or
@@ -1011,7 +1086,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainMode, ChildRecord, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
+    use super::{
+        ChainMode, Child, ChildRecord, Registry, Reinserted, RouteDecision, drain_cluster_queue, membrane_dispatch,
+    };
     use crate::blob::guest::EncodedGuestMail;
     use crate::blob::guest::tracked::tracked_blob;
     use crate::mail::{Mail, PriorState};
@@ -1106,19 +1183,19 @@ mod tests {
     }
 
     /// A child that despawns *itself* during its own dispatch — through the
-    /// `ctx`, whose inline registry the membrane threaded in — and bumps a
-    /// test-local drop counter (shared via [`Rc`]) when dropped, so the
-    /// reentrancy test can prove the box dropped (rather than being
-    /// reinserted) after it removed its own slot mid-dispatch. Carries its
-    /// own alias id so `erased_dispatch` can despawn the matching slot.
+    /// `ctx`, whose inline registry the membrane threaded in — and writes
+    /// each step of its close to a test-local log (shared via [`Rc`]): the
+    /// end of its handler, its `unwire`, and its drop. The reentrancy test
+    /// reads the log to prove the order they ran in. Carries its own alias
+    /// id so `erased_dispatch` can despawn the matching slot.
     struct SelfDespawningChild {
         id: ErasedActorRef,
-        drops: Rc<Cell<u32>>,
+        steps: Rc<RefCell<Vec<&'static str>>>,
     }
 
     impl Drop for SelfDespawningChild {
         fn drop(&mut self) {
-            self.drops.set(self.drops.get() + 1);
+            self.steps.borrow_mut().push("drop");
         }
     }
 
@@ -1133,9 +1210,10 @@ mod tests {
         ) -> u32 {
             // Self-despawn mid-dispatch through the threaded registry: this
             // box is currently taken out (held on the membrane's stack), so
-            // the ctx's despawn clears the empty slot and the membrane's
-            // `reinsert` will find nothing.
+            // the ctx's despawn removes the slot and the membrane's
+            // `reinsert` hands the child back as departed.
             ctx.despawn_inline_child(self.id);
+            self.steps.borrow_mut().push("handler returns");
             CHILD_CODE
         }
         fn erased_wire(
@@ -1144,7 +1222,9 @@ mod tests {
         ) -> Result<(), ActorInitError> {
             Ok(())
         }
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>) {
+            self.steps.borrow_mut().push("unwire");
+        }
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), ActorInitError> {
             Ok(())
         }
@@ -1207,23 +1287,42 @@ mod tests {
         unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, recipient) }
     }
 
-    /// Step 3 coverage: the slot-shaped registry round-trips a child
-    /// through insert → take → reinsert → take.
+    /// A child that is taken out and put back, by the registry's own verbs
+    /// or by a dispatch through the membrane, is seated in the case it left.
+    /// Catches a dispatch that reseats a wired child as unwired, which would
+    /// drop its `unwire` at the close.
     #[test]
     fn registry_insert_take_reinsert_round_trips() {
         let registry = Registry::new();
-        let id = MailboxId(0x1111);
+        let own = 0x1100_u64;
+        let wired = MailboxId(0x1111);
+        let rebuilt = MailboxId(0x1112);
 
-        assert!(registry.take(id).is_none(), "empty registry has no child");
-        registry.insert_child(
-            id,
-            ChildRecord { full_subname: String::from("widget"), ..ChildRecord::default() },
+        assert!(registry.take(wired).is_none(), "empty registry has no child");
+        registry.seat_wired(
+            wired,
+            ChildRecord { full_subname: String::from("wired"), ..ChildRecord::default() },
             Box::new(RecordingChild::new().0),
         );
-        let taken = registry.take(id).expect("insert then take returns the child");
-        assert!(registry.take(id).is_none(), "a taken-out slot is empty until reinsert");
-        registry.reinsert(id, taken);
-        assert!(registry.take(id).is_some(), "reinsert refills the slot for the next dispatch");
+        registry.insert_child(
+            rebuilt,
+            ChildRecord { full_subname: String::from("rebuilt"), ..ChildRecord::default() },
+            Box::new(RecordingChild::new().0),
+        );
+
+        let taken = registry.take(wired).expect("a seated child is taken");
+        assert!(registry.take(wired).is_none(), "a slot whose child is out has none to take until reinsert");
+        assert!(matches!(registry.reinsert(wired, taken), Reinserted::Seated), "a taken child goes back to its slot");
+
+        for id in [wired, rebuilt] {
+            let rc = membrane_dispatch(own, mail_to(id.0), &registry, NO_INBOUND_SOURCE, |_mail| OWN_CODE);
+            assert_eq!(rc, CHILD_CODE, "the reseated child handles its mail");
+        }
+
+        let wired_after = registry.take(wired).expect("the dispatched child was reseated");
+        let rebuilt_after = registry.take(rebuilt).expect("the dispatched child was reseated");
+        assert!(matches!(wired_after, Child::Wired(_)), "a wired child is reseated wired");
+        assert!(matches!(rebuilt_after, Child::Unwired(_)), "a child that never wired is reseated unwired");
     }
 
     /// A spawned child's slot carries its actor-type tag, resolved subname,
@@ -1378,24 +1477,25 @@ mod tests {
         assert_eq!(rc, OWN_CODE, "an unknown recipient falls back to the parent's unmatched path");
     }
 
-    /// Step 3 coverage: a child that despawns itself mid-dispatch drops
-    /// correctly. `membrane_dispatch` takes it out, the dispatch removes the
-    /// now-empty slot via `ctx.despawn_inline_child` (driving the same
-    /// registry the membrane threaded in), the membrane's `reinsert` finds
-    /// nothing and no-ops, and the live box drops at end of scope — proving
-    /// the slot-shaped take/reinsert handles the reentrant drop with no
-    /// pending-removal flag. A subsequent send to the same alias then falls
-    /// through to the parent's unmatched path.
+    /// A wired child that despawns itself mid-dispatch runs its `unwire`
+    /// once, after its handler has returned and before its box drops.
+    /// `membrane_dispatch` takes it out, the handler removes its own slot via
+    /// `ctx.despawn_inline_child` (driving the same registry the membrane
+    /// threaded in), and the membrane's `reinsert` hands the child back as
+    /// departed, so the membrane closes it. A subsequent send to the same
+    /// alias then falls through to the parent's unmatched path. Catches the
+    /// box dropped with no `unwire`, and an `unwire` run re-entrantly inside
+    /// the handler that asked for the despawn.
     #[test]
     fn membrane_self_despawn_drops_box_and_falls_through() {
         let registry = Registry::new();
         let own = 0x5000_u64;
         let child = 0x5001_u64;
-        let drops = Rc::new(Cell::new(0));
-        registry.insert_child(
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        registry.seat_wired(
             MailboxId(child),
             ChildRecord { full_subname: String::from("widget"), ..ChildRecord::default() },
-            Box::new(SelfDespawningChild { id: ErasedActorRef::new(MailboxId(child)), drops: Rc::clone(&drops) }),
+            Box::new(SelfDespawningChild { id: ErasedActorRef::new(MailboxId(child)), steps: Rc::clone(&steps) }),
         );
 
         // Dispatch the child; it despawns its own slot mid-dispatch.
@@ -1403,7 +1503,11 @@ mod tests {
             panic!("own dispatch must not run while the child is resident")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
-        assert_eq!(drops.get(), 1, "the self-despawned box dropped at end of dispatch, not reinserted");
+        assert_eq!(
+            steps.borrow().as_slice(),
+            ["handler returns", "unwire", "drop"],
+            "the departed child ran unwire once, after its handler and before its drop",
+        );
 
         // The alias is gone: a second send falls through to the parent's
         // unmatched path rather than re-dispatching a dropped child.

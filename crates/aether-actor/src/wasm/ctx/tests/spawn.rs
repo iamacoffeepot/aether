@@ -5,9 +5,10 @@
 use super::{
     __validate_inline_child_placement, ActorTypeTag, Addressable, ChildOf, FailingChild, LifecycleProbe,
     NO_INBOUND_SOURCE, NestingParent, PROBE_UNWIRE_COUNT, PROBE_WIRE_COUNT, PROBE_WIRE_FAILS, PROBE_WIRE_REFUSAL,
-    Registry, STUB_INIT_CONFIG, SpawnError, StubChild, StubConfig, SucceedingChild, WasmCtx, WasmPlacementFacts,
-    install_inline_child, panicking_resolver, stub_resolver,
+    Registry, STUB_INIT_CONFIG, STUB_INIT_COUNT, STUB_WIRE_COUNT, SpawnError, StubChild, StubConfig, SucceedingChild,
+    WasmCtx, WasmPlacementFacts, install_inline_child, panicking_resolver, stub_resolver,
 };
+use crate::mail::Mail;
 use crate::model::Anyone;
 use crate::model::Subname;
 use crate::model::ctx::{Erased, Unchecked};
@@ -16,6 +17,7 @@ use crate::wasm::__validate_inline_child_alias;
 use crate::wasm::inline::ChildRecord;
 use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child};
+use crate::wasm::inline::membrane_dispatch;
 use aether_data::{Kind, MailboxId};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -412,6 +414,90 @@ fn an_inline_child_whose_wire_fails_fails_its_spawn_and_is_unwired() {
     assert_eq!(PROBE_WIRE_COUNT.get(), 1, "the child's wire was entered once");
     assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "a child that entered wire runs its unwire");
     assert!(registry.take(probe).is_none(), "the failed child's slot is gone");
+}
+
+/// What a repeated spawn must leave behind: the one child the first spawn
+/// built, initialised once and wired once, still holding the `value` it was
+/// built with. The value is read from the child itself, through a dispatch
+/// to `resident`.
+fn assert_first_child_stands(registry: &Registry, parent: u64, resident: MailboxId, value: u32) {
+    assert_eq!(STUB_INIT_COUNT.get(), 1, "the repeated spawn ran no second init");
+    assert_eq!(STUB_WIRE_COUNT.get(), 1, "the repeated spawn ran no second wire");
+
+    // SAFETY: a zero-length mail frame spans no memory, and the stub child's
+    // dispatch reads no payload.
+    let mail = unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, resident.0) };
+    let held = membrane_dispatch(parent, mail, registry, NO_INBOUND_SOURCE, |_mail| {
+        panic!("the resident child handles its own mail")
+    });
+    assert_eq!(held, value, "the resident child kept the state it was first built with");
+}
+
+/// ADR-0249 §5: a typed spawn of a name at which a child of that type
+/// already stands answers that child's alias. The repeat passes a different
+/// config, and the host spawn fn is a panicking stub on this build, so the
+/// test also proves no host call is made. Catches the second `init` whose
+/// box replaced the resident child, which is what a `wire` run again after
+/// a refused republish did.
+#[test]
+fn a_typed_spawn_of_a_resident_name_answers_the_resident_child() {
+    let registry = Registry::new();
+    let parent = 0x9500_u64;
+    registry.set_self_id(parent);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    STUB_INIT_COUNT.set(0);
+    STUB_WIRE_COUNT.set(0);
+
+    let resident = install_inline_child::<StubChild>(
+        &registry,
+        MailboxId(0x9501),
+        ChildRecord {
+            type_tag: ActorTypeTag::of::<StubChild>().0,
+            full_subname: String::from("kept"),
+            parent,
+            ..ChildRecord::default()
+        },
+        StubConfig { value: 7 },
+    )
+    .expect("the first spawn installs");
+
+    let mut erased: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(parent, &registry, NO_INBOUND_SOURCE);
+    let again = erased
+        .__for_actor::<NestingParent>()
+        .spawn_inline::<StubChild>(Subname::Named("kept"), &StubConfig { value: 9 })
+        .expect("a spawn of a resident name answers the child that stands");
+
+    assert_eq!(again.id(), resident, "the repeated spawn answered the resident child's alias");
+    assert_first_child_stands(&registry, parent, resident, 7);
+}
+
+/// ADR-0249 §5: a by-tag spawn of a resident name answers the resident
+/// child before the resolver runs, which is where the by-tag path allocates
+/// its host alias; the repeat runs under a resolver that panics. Catches the
+/// second `init` over a resident child on the tag-selected path.
+#[test]
+fn a_by_tag_spawn_of_a_resident_name_answers_the_resident_child() {
+    let registry = Registry::new();
+    let parent = 0x9600_u64;
+    registry.set_self_id(parent);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    registry.set_spawn_resolver(stub_resolver);
+    STUB_INIT_COUNT.set(0);
+    STUB_WIRE_COUNT.set(0);
+
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(parent, &registry, NO_INBOUND_SOURCE);
+    let tag = ActorTypeTag::of::<StubChild>();
+    let resident = ctx
+        .spawn_inline_child_by_tag(tag, Subname::Named("kept"), &StubConfig { value: 7 }.encode_into_bytes())
+        .expect("the first spawn installs");
+
+    registry.set_spawn_resolver(panicking_resolver);
+    let again = ctx
+        .spawn_inline_child_by_tag(tag, Subname::Named("kept"), &StubConfig { value: 9 }.encode_into_bytes())
+        .expect("a spawn of a resident name answers the child that stands");
+
+    assert_eq!(again.id(), resident.id(), "the repeated spawn answered the resident child's alias");
+    assert_first_child_stands(&registry, parent, resident.id(), 7);
 }
 
 /// Issue 2746: a `replace_component` reconstruct runs `init` +

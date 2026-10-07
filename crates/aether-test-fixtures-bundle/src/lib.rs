@@ -27,6 +27,7 @@ mod held_carry;
 mod http_handler;
 mod inline_child;
 mod inline_context;
+mod inline_unwire;
 mod mat4_source;
 mod matrix_sweep;
 mod multi_actor;
@@ -59,6 +60,7 @@ pub use inline_child::{
     NestedLineageParent,
 };
 pub use inline_context::{InlineContextAsker, InlineContextHost};
+pub use inline_unwire::{UnwireChild, UnwireLeaf, UnwireParent};
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
@@ -113,6 +115,9 @@ aether_actor::export!(
         NestedLineageLeaf,
         InlineTagParent,
         InlineContextHost,
+        UnwireParent,
+        UnwireChild,
+        UnwireLeaf,
         Counter,
         Sidecar,
         RehydrateTrap,

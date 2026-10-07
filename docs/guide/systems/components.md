@@ -244,7 +244,8 @@ to bring the component back.
 
 The close is what releases the guest: it runs the guest's `unwire`, answers each
 reply the guest still holds with its registered `unanswered` value, and drops
-the instance. The drop request is answered `DropResult::Ok` once that is done,
+the instance. The guest's `unwire` runs on its inline children first, children
+before their parents and deepest first, and on the entry actor last. The drop request is answered `DropResult::Ok` once that is done,
 so a caller that reads `Ok` reads a released guest. Mail the guest sends from
 `unwire` starts its own chains, outside the drop's, and is on its recipients'
 inboxes before the drop answers. The same close runs when nobody drops the

@@ -1085,6 +1085,16 @@ has already closed, and spawning the same key beneath the same parent fails with
 `SpawnError::AliasAllocationFailed`. A parent that wants a fresh child after a
 despawn spawns it under a new key, such as `Subname::Counter`.
 
+A close runs `unwire` on what wired
+([ADR-0249](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0249-a-republish-wires-the-successor-and-unwires-the-old-guest-at-commit.md)
+§4, §6). A parent's close runs each inline child's `unwire` before the
+parent's own, deepest first. A child that despawns itself runs `unwire` when the
+handler that asked returns, and is dropped after it. Each child runs `unwire`
+once, and only if its `wire` returned `Ok`. Spawning a name whose child is
+standing is not a second birth: the spawn answers the child that stands,
+initialises and wires nothing, and ignores the config it was passed, so a
+`wire` that spawns a child is safe to run again (§5).
+
 A component can also run as several instances of one type: an `instanced` type
 loaded under different keys is an independent actor at each `NS:key`. The loader
 hosts every component in a native trampoline actor, spawned once per load, but

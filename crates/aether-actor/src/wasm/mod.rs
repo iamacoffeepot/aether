@@ -1299,9 +1299,15 @@ macro_rules! __export_internal {
         /// (on a replace) or the instance drop, on the dying instance
         /// (issue 584 Phase 2b, ADR-0079 amended). Mail-allowed — live
         /// peers are still addressable; sends to a dead peer warn-drop.
+        ///
+        /// Every inline child that wired runs its `unwire` first, children
+        /// before their parents and deepest first, and the entry actor's
+        /// hook runs last (ADR-0249 §6). The cascade holds no borrow of the
+        /// entry actor, which is taken only once it has returned.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            $crate::wasm::inline::unwire_children(&__AETHER_INLINE);
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
@@ -2036,9 +2042,17 @@ macro_rules! __export_multi_internal {
             }
         }
 
+        /// # Safety
+        /// Called by the substrate on the dying instance, as the
+        /// single-actor shim's `unwire` is. Every inline child that wired
+        /// runs its `unwire` first, children before their parents and
+        /// deepest first, and the entry actor's hook runs last (ADR-0249
+        /// §6). The cascade holds no borrow of the entry actor, which is
+        /// taken only once it has returned.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            $crate::wasm::inline::unwire_children(&__AETHER_INLINE);
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
