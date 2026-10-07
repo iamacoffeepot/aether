@@ -43,7 +43,9 @@ pub struct SpawnSubstrateArgs {
     /// follow-up `load_component`. The engine binds its RPC port only once
     /// every boot instance has loaded, and a boot component that fails to
     /// load (a name collision included) fails the spawn with a
-    /// `spawn_failed` entry. Spawn is single-host, so the substrate reads
+    /// `spawn_failed` entry. A desktop engine also binds only once its
+    /// window `main` can be mailed, and a `main` that fails fails the spawn
+    /// the same way. Spawn is single-host, so the substrate reads
     /// each staged wasm and schema-encoded config path itself. Empty
     /// (default) boots a bare engine.
     #[serde(default)]
@@ -72,7 +74,8 @@ pub struct SpawnSubstrateArgs {
 /// read at boot — the substrate boot path stays path-based, now fed by the
 /// registry rather than host build paths. The engine binds its RPC port only
 /// after every boot instance has answered its load, so a spec that fails to
-/// load fails the spawn.
+/// load fails the spawn. A desktop engine binds after its window `main` can
+/// be mailed as well.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentSpec {
     /// Registry selector for the component, resolved against the hub's

@@ -11,7 +11,8 @@
 //!   registry behind `--print-config` / known-key sweeps, the
 //!   chassis-wide boot knobs, and [`boot::boot_standard`], the shared
 //!   `Chassis::build` body a full-stack chassis parameterises by its
-//!   driver alone.
+//!   driver alone, with [`boot::boot_loaded`], the same body for a chassis
+//!   that opens the RPC bind gate itself.
 //! - [`cli`] — the per-chassis clap roots and per-cap overlay
 //!   composition (ADR-0090 unit d), plus `chassis_cli!` — the root's
 //!   `ChassisCli` impl and flag-parity test.
@@ -54,9 +55,10 @@ pub mod signal_driver;
 pub mod tick;
 pub mod window;
 
+pub use aether_rpc::RpcBindGate;
 pub use aether_substrate::chassis::{BuildProvenance, PreludeAction, PreludeFlags};
 pub use boot::{
-    boot_standard, build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
+    boot_loaded, boot_standard, build_provenance, chassis_residual_knobs, hub_residual_knobs, resolve_teardown_budget,
     run_describe_prelude,
 };
 pub use component_config::{ConfigJsonError, encode_config_json};

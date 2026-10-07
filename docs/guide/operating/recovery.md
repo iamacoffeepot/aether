@@ -36,6 +36,7 @@ in [Inspect and debug](inspect-and-debug.md).
 | component selector does not resolve | registry `list_components` | `upload_component`, then use returned hash/name |
 | spawn returns an allocated id in its error | `list_engines(show: "dead")` for that id | preserve matching `spawn_failed` detail |
 | spawn fails on a boot component | the `spawn_failed` row for the returned id | read the substrate stderr it carries for the failing component and host error; nothing to terminate |
+| desktop spawn fails on its window `main` | the `spawn_failed` row for the returned id | read the substrate stderr it carries for why the window or the port failed; nothing to terminate |
 | heartbeat age climbs | confirm heartbeat is enabled, then repeat one read-only check | stop mutations, collect evidence, terminate only if owned |
 | engine disappears | recently-dead reason/detail | branch on terminated/crashed/evicted/spawn_failed |
 | “unknown kind” or param encode error | explicit-engine `describe_kinds` for the exact name | correct schema, engine, or component load state |
@@ -95,6 +96,13 @@ component that fails to load is a startup failure, not a half-booted engine: the
 substrate exits nonzero naming the component and the host's error, and the
 spawn fails with a `spawn_failed` entry whose detail carries that stderr. The
 child is already gone, so there is nothing to terminate.
+
+A desktop substrate also waits for its window `main` before it binds: the port
+appears once that window can be mailed. A `main` that cannot be created,
+attached to the renderer, or given its actor is a startup failure too, as is a
+port that cannot be bound once the window is live. The substrate shuts down,
+exits nonzero with `the desktop engine did not become reachable` and the cause,
+and the spawn fails the same way.
 
 Check common boot causes in this order:
 

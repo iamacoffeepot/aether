@@ -30,7 +30,7 @@ use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
 use super::driver::{DesktopDriverCapability, DesktopDriverConfig};
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, boot_loaded, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
 };
 
 use crate::cli::DesktopCli;
@@ -51,14 +51,19 @@ impl Chassis for DesktopChassis {
     type Driver = DesktopDriverCapability;
     type Env = CommonEnv;
 
-    /// Build the desktop chassis through the shared [`boot_standard`] body,
+    /// Build the desktop chassis through the shared [`boot_loaded`] body,
     /// declaring only the desktop driver: construct the Start-stage runtime
     /// handle (the winit event loop), resolve the window + render driver knobs,
     /// and wrap the composed boot in a [`DesktopDriverCapability`]. Returns a
     /// [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the winit event
     /// loop.
+    ///
+    /// The RPC port is not bound when this returns. The boot components have
+    /// loaded, but the window `main` is created by the event loop `run`
+    /// starts, so the driver binds the port once that window is live (issue
+    /// #7546).
     fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
-        boot_standard(env, |env: &mut CommonEnv| {
+        boot_loaded(env, |env: &mut CommonEnv| {
             // ADR-0155 §4: the winit `EventLoop` is a Start-stage runtime
             // handle, not config — construct it here on the boot path (`main()`
             // calls this on the chassis main thread, where winit's `!Send`
@@ -161,8 +166,9 @@ impl BootableChassis for DesktopChassis {
     /// so the manifest roster can never drift from what boots. Composes the
     /// common caps plus the audio / clipboard / render / substrate-harness /
     /// lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3). The
-    /// RPC server is composed held: `boot_standard` binds it only after every
-    /// boot component has loaded (issue #6413). Returns the composed builder
+    /// RPC server is composed held: the driver binds it once the boot window
+    /// is live, which is after every boot component has loaded (issues #6413
+    /// and #7546). Returns the composed builder
     /// before the driver is installed:
     /// [`Chassis::build`] adds the desktop driver and starts (the driver's
     /// `aether.window` claim rides its Claim-stage hook either way), while the

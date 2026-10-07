@@ -1053,13 +1053,14 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// autoload list out of the env, compose through [`composed`], sweep the
 /// process env against the composed known-key set, and install the driver.
 ///
-/// The order after that is build, load, bind (issue #6413): once the chain is
+/// The order after that is build, then load (issue #6413): once the chain is
 /// built, every boot component is loaded in list order and each must answer
-/// its load `Ok` before the next is sent; only then does the RPC server's
-/// bind gate open. Until it opens a dial is refused, so a caller that reaches
-/// the engine can address every boot component. With no boot components the
-/// gate opens straight after the build, and a chassis with no RPC port
-/// publishes no gate and binds nothing.
+/// its load `Ok` before the next is sent. The RPC server's bind gate is still
+/// held when this returns, so a dial is still refused: the caller opens the
+/// published [`RpcBindGate`] once everything a caller may address is live.
+/// [`boot_standard`] is this body plus that open, for a chassis whose roster
+/// is complete when its boot components have loaded. A chassis with no RPC
+/// port publishes no gate.
 ///
 /// The one genuinely per-chassis seam is the driver, and it straddles
 /// composition: a driver's config resolves off `env.base.sources` *before*
@@ -1077,11 +1078,11 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// fails (a driver config member that will not parse, ADR-0090 §4), when the
 /// chassis's `compose` delta fails, when an unknown `AETHER_*` key fails the
 /// sweep, when the builder fails to boot the composed chain, when a boot
-/// component fails to load (naming the component and the host's error), when
-/// a boot component's load does not answer within
+/// component fails to load (naming the component and the host's error), or
+/// when a boot component's load does not answer within
 /// [`ChassisBootConfig::boot_load_budget`] (naming the component and how many
-/// loaded before it), or when the RPC port cannot be bound.
-pub fn boot_standard<C, P, D>(mut env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
+/// loaded before it).
+pub fn boot_loaded<C, P, D>(mut env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
 where
     C: BootableChassis<Base = ChassisBase, Env = CommonEnv>,
     P: FnOnce(&mut CommonEnv) -> Result<D, BootError>,
@@ -1114,8 +1115,30 @@ where
     validate_env(&builder.config_manifest().known_keys(&C::residual_knobs()))?;
 
     // `boot` moves into the driver, after `compose` finished borrowing it.
-    let built = builder.driver(install_driver(boot)).build()?;
-    let built = load_boot_components(built, autoload, load_budget)?;
+    load_boot_components(builder.driver(install_driver(boot)).build()?, autoload, load_budget)
+}
+
+/// [`boot_loaded`], then the bind: the [`Chassis::build`] body of a chassis
+/// whose roster is complete once its boot components have loaded.
+///
+/// The order is build, load, bind (issue #6413): only after every boot
+/// component has answered its load `Ok` does the RPC server's bind gate open.
+/// Until it opens a dial is refused, so a caller that reaches the engine can
+/// address every boot component. With no boot components the gate opens
+/// straight after the build, and a chassis with no RPC port publishes no gate
+/// and binds nothing.
+///
+/// # Errors
+///
+/// Returns [`BootError`] when [`boot_loaded`] fails, or when the RPC port
+/// cannot be bound.
+pub fn boot_standard<C, P, D>(env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
+where
+    C: BootableChassis<Base = ChassisBase, Env = CommonEnv>,
+    P: FnOnce(&mut CommonEnv) -> Result<D, BootError>,
+    D: FnOnce(SubstrateBoot) -> C::Driver,
+{
+    let built = boot_loaded(env, plan_driver)?;
     if let Some(gate) = built.handle::<RpcBindGate>() {
         gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
     }
@@ -1183,8 +1206,11 @@ pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<Pr
 /// a resolved port does not bind during `build`, and the composer owns opening
 /// the published [`RpcBindGate`] once everything a caller may address is live,
 /// so a dial before then is refused and reachable means ready.
-/// [`boot_standard`] opens it after the boot components have loaded, and the
-/// Bloomery's `build_mounted` after mounting its journal owner and driver.
+/// [`boot_standard`] opens it after the boot components have loaded; the
+/// desktop chassis builds through [`boot_loaded`], which leaves it held, and
+/// its driver opens it once the window `main` is live as well; and the
+/// Bloomery's `build_mounted` opens it after mounting its journal owner and
+/// driver.
 ///
 /// `aether.inventory` is not composed here: it rides [`ChassisBase`] on every
 /// chassis, so an engine a caller can reach over RPC can always be driven

@@ -48,6 +48,10 @@ pub trait DesktopWindowIntegration {
 
     fn request_shutdown(&mut self);
 
+    /// The boot window can be mailed. The chassis makes the engine reachable
+    /// here. An `Err` says why it could not, and fails the run.
+    fn boot_window_live(&mut self) -> Result<(), String>;
+
     fn drain_available(&mut self);
 
     fn capture_deadline(&self) -> Option<Instant>;
@@ -82,13 +86,18 @@ pub struct DesktopWindowApplication<I> {
     /// The instant each capped window's next frame is due.
     pacing: FramePacing,
     shutdown_requested: bool,
+    /// Why the engine never became reachable, when its boot window failed or
+    /// the chassis could not make it reachable: the first reason seen. The
+    /// chassis reads it after the loop exits and fails the run with it.
+    boot_failure: Option<String>,
 }
 
 impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
     pub fn new(mut window_slot: DesktopWindowSlot, integration: I, initial_window: WindowSpec) -> Self {
+        let name = initial_window.name.clone();
         let _ = window_slot.host_turn(|state, _ctx| {
-            if state.queue_initial_window(initial_window).is_err() {
-                state.pending_host_effects.push(WindowHostEffect::LastWindowClosed);
+            if let Err(reason) = state.queue_initial_window(initial_window) {
+                state.fail_initial_window(&name, &reason);
             }
         });
         Self {
@@ -97,6 +106,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
             pending_dirty: BTreeSet::new(),
             pacing: FramePacing::default(),
             shutdown_requested: false,
+            boot_failure: None,
         }
     }
 
@@ -116,15 +126,25 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         &mut self.integration
     }
 
+    /// Why the engine never became reachable: the boot window's failure, or
+    /// the chassis's own from [`DesktopWindowIntegration::boot_window_live`].
+    /// `None` while the boot window is pending and once it is live and
+    /// reachable. The application has already requested shutdown when this is
+    /// `Some`.
+    #[must_use]
+    pub fn boot_failure(&self) -> Option<&str> {
+        self.boot_failure.as_deref()
+    }
+
     fn apply_work(
         &mut self,
         event_loop: &ActiveEventLoop,
         actions: Vec<WindowHostAction>,
         effects: Vec<WindowHostEffect>,
-    ) -> (BTreeSet<ErasedActorPath>, bool) {
+    ) -> (BTreeSet<ErasedActorPath>, WorkOutcome) {
         let mut dirty = BTreeSet::new();
-        let mut should_shutdown = false;
-        self.apply_effects(effects, &mut dirty, &mut should_shutdown);
+        let mut outcome = WorkOutcome::default();
+        self.apply_effects(effects, &mut dirty, &mut outcome);
 
         for action in actions {
             match action {
@@ -134,14 +154,14 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                             self.window_slot.host_turn(|state, _ctx| state.stage_created_window(path.clone(), window));
                         match staged {
                             Some(Ok(created)) => {
-                                self.apply_effects(vec![created], &mut dirty, &mut should_shutdown);
+                                self.apply_effects(vec![created], &mut dirty, &mut outcome);
                             }
                             Some(Err(error)) => {
                                 let effects = self
                                     .window_slot
                                     .host_turn(|state, ctx| state.fail_window_creation(ctx, path, error))
                                     .unwrap_or_default();
-                                self.apply_effects(effects, &mut dirty, &mut should_shutdown);
+                                self.apply_effects(effects, &mut dirty, &mut outcome);
                             }
                             None => {}
                         }
@@ -152,20 +172,20 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                             .window_slot
                             .host_turn(|state, ctx| state.fail_window_creation(ctx, path, error))
                             .unwrap_or_default();
-                        self.apply_effects(effects, &mut dirty, &mut should_shutdown);
+                        self.apply_effects(effects, &mut dirty, &mut outcome);
                     }
                 },
                 WindowHostAction::Close { path } => {
-                    should_shutdown |= apply_simple_effect(
+                    outcome.record(apply_simple_effect(
                         &mut self.integration,
                         WindowHostEffect::Closing { path: path.clone() },
                         &mut dirty,
-                    );
+                    ));
                     let effects = self
                         .window_slot
                         .host_turn(|state, ctx| state.finish_window_close(&path, ctx))
                         .unwrap_or_default();
-                    self.apply_effects(effects, &mut dirty, &mut should_shutdown);
+                    self.apply_effects(effects, &mut dirty, &mut outcome);
                 }
                 WindowHostAction::SetPresentation { path, presentation } => {
                     let outcome = self.integration.set_presentation(&path, presentation);
@@ -176,14 +196,14 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
             }
         }
 
-        (dirty, should_shutdown)
+        (dirty, outcome)
     }
 
     fn apply_effects(
         &mut self,
         effects: Vec<WindowHostEffect>,
         dirty: &mut BTreeSet<ErasedActorPath>,
-        should_shutdown: &mut bool,
+        outcome: &mut WorkOutcome,
     ) {
         let mut effects = VecDeque::from(effects);
         while let Some(effect) = effects.pop_front() {
@@ -196,9 +216,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
                         .unwrap_or_default();
                     effects.extend(follow_up);
                 }
-                simple => {
-                    *should_shutdown |= apply_simple_effect(&mut self.integration, simple, dirty);
-                }
+                simple => outcome.record(apply_simple_effect(&mut self.integration, simple, dirty)),
             }
         }
     }
@@ -242,10 +260,15 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
             }
             host_turn(state, ctx);
         });
-        let (dirty, last_window_closed) = self.apply_work(event_loop, actions, effects);
+        let (dirty, outcome) = self.apply_work(event_loop, actions, effects);
         self.pending_dirty.extend(dirty);
 
-        if request_shutdown || last_window_closed {
+        let boot_failed = outcome.boot_failure.is_some();
+        let shuts_down = request_shutdown || outcome.last_window_closed || boot_failed;
+        if let Some(reason) = outcome.boot_failure {
+            self.boot_failure.get_or_insert(reason);
+        }
+        if shuts_down {
             request_shutdown_once(&mut self.integration, &mut self.shutdown_requested);
         }
 
@@ -439,11 +462,40 @@ impl WindowHostAction {
     }
 }
 
+/// What the application does next about one applied effect.
+#[derive(Debug, PartialEq, Eq)]
+enum Applied {
+    Nothing,
+    LastWindowClosed,
+    /// The engine will never be reachable, for the reason carried.
+    BootFailed(String),
+}
+
+/// What one turn's host work asks of the application.
+#[derive(Default)]
+struct WorkOutcome {
+    last_window_closed: bool,
+    /// The first boot failure the turn's effects reported.
+    boot_failure: Option<String>,
+}
+
+impl WorkOutcome {
+    fn record(&mut self, applied: Applied) {
+        match applied {
+            Applied::Nothing => {}
+            Applied::LastWindowClosed => self.last_window_closed = true,
+            Applied::BootFailed(reason) => {
+                self.boot_failure.get_or_insert(reason);
+            }
+        }
+    }
+}
+
 fn apply_simple_effect<I: DesktopWindowIntegration>(
     integration: &mut I,
     effect: WindowHostEffect,
     dirty: &mut BTreeSet<ErasedActorPath>,
-) -> bool {
+) -> Applied {
     match effect {
         WindowHostEffect::Created { .. } => unreachable!("created effects require actor completion"),
         WindowHostEffect::Closing { path } => integration.detach_window(&path),
@@ -451,9 +503,17 @@ fn apply_simple_effect<I: DesktopWindowIntegration>(
             dirty.insert(path);
         }
         WindowHostEffect::Occluded { path, occluded } => integration.window_occluded(&path, occluded),
-        WindowHostEffect::LastWindowClosed => return true,
+        WindowHostEffect::LastWindowClosed => return Applied::LastWindowClosed,
+        // A live boot window is the chassis's cue to make the engine
+        // reachable; a failed one is never offered to it.
+        WindowHostEffect::BootWindowSettled { outcome } => {
+            let reachable = outcome.and_then(|()| integration.boot_window_live());
+            if let Err(reason) = reachable {
+                return Applied::BootFailed(reason);
+            }
+        }
     }
-    false
+    Applied::Nothing
 }
 
 #[cfg(test)]
@@ -484,6 +544,8 @@ mod tests {
         calls: Vec<String>,
         /// The error every `set_presentation` is refused with, when set.
         refuses_presentation: Option<String>,
+        /// The error `boot_window_live` answers, when set.
+        refuses_boot: Option<String>,
     }
 
     impl DesktopWindowIntegration for SpyIntegration {
@@ -516,6 +578,11 @@ mod tests {
 
         fn request_shutdown(&mut self) {
             self.calls.push("shutdown".to_owned());
+        }
+
+        fn boot_window_live(&mut self) -> Result<(), String> {
+            self.calls.push("boot-live".to_owned());
+            self.refuses_boot.clone().map_or(Ok(()), Err)
         }
 
         fn drain_available(&mut self) {}
@@ -604,13 +671,73 @@ mod tests {
         let mut dirty = BTreeSet::new();
 
         apply_simple_effect(&mut integration, WindowHostEffect::Closing { path: window("d") }, &mut dirty);
-        let should_shutdown = apply_simple_effect(&mut integration, WindowHostEffect::LastWindowClosed, &mut dirty);
-        if should_shutdown {
+        let applied = apply_simple_effect(&mut integration, WindowHostEffect::LastWindowClosed, &mut dirty);
+        if applied == Applied::LastWindowClosed {
             let mut shutdown_requested = false;
             request_shutdown_once(&mut integration, &mut shutdown_requested);
         }
 
         assert_eq!(integration.calls, ["detach:d", "shutdown"]);
+    }
+
+    /// A live boot window asks the chassis once to make the engine reachable.
+    /// Fails if the settled window never reaches the chassis, which leaves
+    /// the RPC port unbound and the engine running unreachable.
+    #[test]
+    fn a_live_boot_window_asks_the_chassis_to_make_the_engine_reachable() {
+        let mut integration = SpyIntegration::default();
+        let mut dirty = BTreeSet::new();
+
+        let applied =
+            apply_simple_effect(&mut integration, WindowHostEffect::BootWindowSettled { outcome: Ok(()) }, &mut dirty);
+
+        assert_eq!(applied, Applied::Nothing);
+        assert_eq!(integration.calls, ["boot-live"]);
+    }
+
+    /// Fails if a chassis that cannot bind its port has the error swallowed:
+    /// the engine would keep running with a window and no way to reach it.
+    #[test]
+    fn a_chassis_that_cannot_make_the_engine_reachable_fails_the_boot() {
+        let mut integration =
+            SpyIntegration { refuses_boot: Some("port 8901 is taken".to_owned()), ..Default::default() };
+        let mut dirty = BTreeSet::new();
+
+        let applied =
+            apply_simple_effect(&mut integration, WindowHostEffect::BootWindowSettled { outcome: Ok(()) }, &mut dirty);
+
+        assert_eq!(applied, Applied::BootFailed("port 8901 is taken".to_owned()));
+        assert_eq!(integration.calls, ["boot-live"]);
+    }
+
+    /// Fails if a boot window that failed still has the chassis bind its
+    /// port, reporting ready an engine whose main window cannot be mailed, or
+    /// if its reason is dropped on the way to the run's error.
+    #[test]
+    fn a_failed_boot_window_fails_the_boot_without_asking_the_chassis() {
+        let mut integration = SpyIntegration::default();
+        let mut dirty = BTreeSet::new();
+        let failed = WindowHostEffect::BootWindowSettled { outcome: Err("render attach failed".to_owned()) };
+
+        let applied = apply_simple_effect(&mut integration, failed, &mut dirty);
+
+        assert_eq!(applied, Applied::BootFailed("render attach failed".to_owned()));
+        assert!(integration.calls.is_empty(), "the chassis was asked about a failed window: {:?}", integration.calls);
+    }
+
+    /// A turn keeps the first boot failure its effects report. Fails if a
+    /// later effect's reason replaces the one that names the cause, or if a
+    /// last-window shutdown in the same turn drops it.
+    #[test]
+    fn a_turn_keeps_its_first_boot_failure_beside_a_last_window_shutdown() {
+        let mut outcome = WorkOutcome::default();
+
+        outcome.record(Applied::BootFailed("first".to_owned()));
+        outcome.record(Applied::LastWindowClosed);
+        outcome.record(Applied::BootFailed("second".to_owned()));
+
+        assert!(outcome.last_window_closed);
+        assert_eq!(outcome.boot_failure.as_deref(), Some("first"));
     }
 
     #[test]

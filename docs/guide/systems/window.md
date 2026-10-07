@@ -127,6 +127,13 @@ apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
 
+A desktop engine is reachable only once `main` is live. The manager settles the
+boot window in the turn that promotes it, the chassis binds the RPC port on
+that same turn of the event loop, and so a caller that reaches the engine can
+mail `aether.window/:main` at once. A boot window that cannot be created,
+attached, or given its actor ends the run with an error naming the cause, even
+when a boot component has already opened another window.
+
 The eight child operations may also be addressed to the manager, which
 re-dispatches them at the sole window when exactly one is live and answers with
 that window's own reply. It is a convenience for the single-window engine, not a

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-20
 - **Amended (#6413):** 2026-09-23 — §3's resolved port gates whether a socket binds, and on the desktop and headless chassis it now also waits: the RPC server is composed held, and `boot_standard` opens its bind gate only after every boot component has answered its load `Ok`, so a dial before then is refused and a reachable engine has its boot components live. A boot component that fails to load aborts the boot with an error naming it.
+- **Amended (#7546):** 2026-10-06 — on the desktop chassis the bind gate also waits for the window `main` to be live: the chassis builds through `boot_loaded`, which leaves the gate held, and the desktop driver opens it on the winit thread in the turn the window manager settles the boot window, so a reachable desktop engine can be mailed at `aether.window/:main`. A boot window that cannot be created, attached, or given its actor, or a port that cannot then be bound, ends the run with an error naming the cause. The headless chassis binds as before.
 - **Amended (#6637):** 2026-09-24 — each boot load waits at most the chassis's boot-load budget (`AETHER_BOOT_LOAD_BUDGET_SECS`, default 20 s, never zero); a load that does not answer in time aborts the boot with an error naming the component and how many loaded before it.
 
 ## Context

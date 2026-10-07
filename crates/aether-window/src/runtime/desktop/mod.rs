@@ -155,11 +155,27 @@ pub enum WindowHostAction {
 /// Owned semantic changes produced by a window host turn.
 #[derive(Clone, Debug)]
 pub enum WindowHostEffect {
-    Created { path: ErasedActorPath, window: Arc<Window>, presentation: WindowPresentation },
-    Closing { path: ErasedActorPath },
-    Dirty { path: ErasedActorPath },
-    Occluded { path: ErasedActorPath, occluded: bool },
+    Created {
+        path: ErasedActorPath,
+        window: Arc<Window>,
+        presentation: WindowPresentation,
+    },
+    Closing {
+        path: ErasedActorPath,
+    },
+    Dirty {
+        path: ErasedActorPath,
+    },
+    Occluded {
+        path: ErasedActorPath,
+        occluded: bool,
+    },
     LastWindowClosed,
+    /// The boot window is live and can be mailed, or its creation failed for
+    /// the reason given. Raised exactly once per engine.
+    BootWindowSettled {
+        outcome: Result<(), String>,
+    },
 }
 
 /// A create still waiting on its native window, render attachment, or staged
@@ -170,7 +186,25 @@ struct PendingCreate {
     spec: WindowSpec,
     /// The `create_window` caller's held reply; the boot window has none.
     held: Option<Held<CreateWindowResult>>,
-    shutdown_on_failure: bool,
+    /// True for the one create [`DesktopWindows::queue_initial_window`]
+    /// queues. Its outcome settles the boot window, and its failure shuts the
+    /// application down when no other window is left.
+    boot_window: bool,
+}
+
+impl PendingCreate {
+    /// The boot window's settled outcome, when this create is the boot
+    /// window's; no other create settles it.
+    fn boot_settled(&self, outcome: Result<(), &str>) -> Option<WindowHostEffect> {
+        self.boot_window.then(|| boot_window_settled(&self.spec.name, outcome))
+    }
+}
+
+/// The effect that settles the boot window named `name`: live, or failed
+/// with `reason` under the window's name.
+fn boot_window_settled(name: &str, outcome: Result<(), &str>) -> WindowHostEffect {
+    let outcome = outcome.map_err(|reason| format!("boot window `{name}` failed: {reason}"));
+    WindowHostEffect::BootWindowSettled { outcome }
 }
 
 /// A window child that reached `Live`: the reference its spawn outcome proved,
@@ -376,7 +410,8 @@ impl DesktopWindows {
     }
 
     /// Reserve the boot window exactly once. Creation happens when the caller
-    /// realizes the returned host action.
+    /// realizes the returned host action, and the create's outcome reaches the
+    /// host as one [`WindowHostEffect::BootWindowSettled`].
     pub fn queue_initial_window(&mut self, spec: WindowSpec) -> Result<(), String> {
         if self.initial_window_reserved {
             return Ok(());
@@ -384,6 +419,13 @@ impl DesktopWindows {
         self.queue_create(spec, None, true).map_err(|(error, _)| error)?;
         self.initial_window_reserved = true;
         Ok(())
+    }
+
+    /// The boot window could not be reserved, so it will never be created:
+    /// settle it failed and ask for the shutdown an application with no
+    /// window takes.
+    fn fail_initial_window(&mut self, name: &str, reason: &str) {
+        self.pending_host_effects.extend([boot_window_settled(name, Err(reason)), WindowHostEffect::LastWindowClosed]);
     }
 
     /// Consume work accumulated by mail handlers and the current native
@@ -480,17 +522,20 @@ impl DesktopWindows {
             }
             Err(error) => {
                 self.remove_window(path);
+                let mut effects: Vec<_> = pending.boot_settled(Err(&error)).into_iter().collect();
                 if let Some(held) = pending.held.take() {
                     held.answer(ctx, &CreateWindowResult::Err { error });
                 }
-                self.failed_create_effects(pending.shutdown_on_failure)
+                effects.extend(self.failed_create_effects(pending.boot_window));
+                effects
             }
         }
     }
 
     /// Apply the authoritative result of a staged window child. Success
-    /// installs the monitor, promotes the window to `Live`, replies, and
-    /// publishes; every failure retires the applied child and rolls the create
+    /// installs the monitor, promotes the window to `Live`, replies,
+    /// publishes, and settles the boot window when the create is its own;
+    /// every failure retires the applied child and rolls the create
     /// back. A child that closed before this ran is promoted all the same,
     /// and its notice, which arrives after this handler returns, retires
     /// the window. Rollback effects go to the host-effect queue because this runs on
@@ -561,7 +606,7 @@ impl DesktopWindows {
         if info.width != 0 && info.height != 0 {
             self.publish(ctx, path, &self.window_size(path, info.width, info.height));
         }
-        Vec::new()
+        pending.boot_settled(Ok(())).into_iter().collect()
     }
 
     fn rollback_attached_create<A, M: ReplyMode>(
@@ -572,11 +617,12 @@ impl DesktopWindows {
         error: String,
     ) -> Vec<WindowHostEffect> {
         self.remove_window(path);
+        let mut effects = vec![WindowHostEffect::Closing { path: path.clone() }];
+        effects.extend(pending.boot_settled(Err(&error)));
         if let Some(held) = pending.held.take() {
             held.answer(ctx, &CreateWindowResult::Err { error });
         }
-        let mut effects = vec![WindowHostEffect::Closing { path: path.clone() }];
-        effects.extend(self.failed_create_effects(pending.shutdown_on_failure));
+        effects.extend(self.failed_create_effects(pending.boot_window));
         effects
     }
 
@@ -590,10 +636,12 @@ impl DesktopWindows {
         let Some(pending) = self.pending_creates.remove(path) else {
             return Vec::new();
         };
+        let mut effects: Vec<_> = pending.boot_settled(Err(&error)).into_iter().collect();
         if let Some(held) = pending.held {
             held.answer(ctx, &CreateWindowResult::Err { error });
         }
-        self.failed_create_effects(pending.shutdown_on_failure)
+        effects.extend(self.failed_create_effects(pending.boot_window));
+        effects
     }
 
     /// Finish a close after the integration detached native resources.
@@ -951,7 +999,7 @@ impl DesktopWindows {
         &mut self,
         spec: WindowSpec,
         held: Option<Held<CreateWindowResult>>,
-        shutdown_on_failure: bool,
+        boot_window: bool,
     ) -> Result<ErasedActorPath, (String, Option<Held<CreateWindowResult>>)> {
         let path = match crate::window_name(&spec.name) {
             Ok(name) => crate::window_path(&name),
@@ -963,7 +1011,7 @@ impl DesktopWindows {
             return Err((format!("window name `{}` is already in use", spec.name), held));
         }
         self.pending_host_actions.push_back(WindowHostAction::Create { path: path.clone(), spec: spec.clone() });
-        self.pending_creates.insert(path.clone(), PendingCreate { spec, held, shutdown_on_failure });
+        self.pending_creates.insert(path.clone(), PendingCreate { spec, held, boot_window });
         Ok(path)
     }
 
@@ -1149,6 +1197,29 @@ mod tests {
             },
         );
         window
+    }
+
+    /// Stage `name` as the manager holds a window between its native create
+    /// and its child's birth: present, and `Attaching`.
+    fn attaching(state: &mut DesktopWindows, name: &str) {
+        let window = insert_window(state, name, false);
+        state.windows.get_mut(&window).expect("the staged window").lifecycle = DesktopWindowLifecycle::Attaching;
+    }
+
+    /// Every boot-window outcome `effects` holds, in order.
+    fn boot_settlements(effects: &[WindowHostEffect]) -> Vec<Result<(), String>> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                WindowHostEffect::BootWindowSettled { outcome } => Some(outcome.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reason of every failed boot-window outcome `effects` holds.
+    fn boot_failures(effects: &[WindowHostEffect]) -> Vec<String> {
+        boot_settlements(effects).into_iter().filter_map(Result::err).collect()
     }
 
     #[test]
@@ -1424,7 +1495,8 @@ mod tests {
     }
 
     /// Fails if a boot window whose native create fails leaves its
-    /// reservation behind or leaves the application running with no window.
+    /// reservation behind, leaves the application running with no window, or
+    /// drops the reason the run is failed with.
     #[test]
     fn failed_initial_create_rolls_back_and_requests_shutdown() {
         let mut rig = rig();
@@ -1433,14 +1505,16 @@ mod tests {
             state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
             let effects = state.fail_window_creation(ctx, &path("main"), "native create failed".to_owned());
 
-            assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+            assert_eq!(boot_failures(&effects), ["boot window `main` failed: native create failed"]);
+            assert!(matches!(effects.as_slice(), [_, WindowHostEffect::LastWindowClosed]));
             assert!(state.pending_creates.is_empty());
         })
         .expect("the desktop manager is live");
     }
 
-    /// Fails if a boot window whose render attachment fails stays staged, or
-    /// the application keeps running with no window.
+    /// Fails if a boot window whose render attachment fails stays staged,
+    /// the application keeps running with no window, or the reason the run is
+    /// failed with is dropped.
     #[test]
     fn failed_attachment_removes_the_staged_initial_window_before_shutdown() {
         let mut rig = rig();
@@ -1451,11 +1525,87 @@ mod tests {
             state.windows.get_mut(&main).expect("staged window").lifecycle = DesktopWindowLifecycle::Attaching;
             let effects = state.finish_window_attachment(&main, Err("render attach failed".to_owned()), ctx);
 
-            assert!(matches!(effects.as_slice(), [WindowHostEffect::LastWindowClosed]));
+            assert_eq!(boot_failures(&effects), ["boot window `main` failed: render attach failed"]);
+            assert!(matches!(effects.as_slice(), [_, WindowHostEffect::LastWindowClosed]));
             assert!(!state.windows.contains_key(&main));
             assert!(state.pending_creates.is_empty());
         })
         .expect("the desktop manager is live");
+    }
+
+    /// A boot component may have opened a window before the boot window
+    /// fails. Fails if the live window makes the failure look survivable and
+    /// its reason is dropped: the engine would keep running and never become
+    /// reachable.
+    #[test]
+    fn a_boot_window_that_fails_beside_a_live_window_still_settles_failed() {
+        let mut rig = rig();
+
+        rig.desktop_turn(|state, ctx| {
+            insert_window(state, "tools", false);
+            state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+            attaching(state, "main");
+            let effects = state.finish_window_attachment(&path("main"), Err("render attach failed".to_owned()), ctx);
+
+            assert_eq!(boot_failures(&effects), ["boot window `main` failed: render attach failed"]);
+            assert_eq!(effects.len(), 1, "a window is still live, so nothing asks for the last-window shutdown");
+        })
+        .expect("the desktop manager is live");
+    }
+
+    /// The boot window settles live in the manager's turn that promotes it,
+    /// not when its birth is staged, and no other window settles it. The
+    /// child is born through the manager's own staged birth and the test
+    /// waits on the pump for it. Fails if the settle is raised while the
+    /// child is only staged, which is the reported failure: the engine binds
+    /// its port and mail to `aether.window/:main` is refused. Fails too if a
+    /// window that is not the boot window raises it, which would bind the
+    /// port while `main` is still attaching.
+    #[test]
+    fn the_boot_window_settles_live_once_its_child_is_born_and_no_other_window_does() {
+        let mut rig = rig();
+        let main = path("main");
+        let staged = rig
+            .desktop_turn(|state, ctx| {
+                state.queue_initial_window(spec("main", "boot")).expect("reserve boot window");
+                attaching(state, "main");
+                state.finish_window_attachment(&path("main"), Ok(()), ctx)
+            })
+            .expect("the desktop manager is live");
+        assert!(staged.is_empty(), "a staged birth settles nothing: {staged:?}");
+        let before = rig.read_desktop(|state| boot_settlements(&state.pending_host_effects));
+        assert_eq!(before, Some(Vec::new()), "the boot window is not settled before its child is born");
+
+        rig.pump_desktop_until("the boot window child's birth", |state| state.children.contains_key(&main));
+
+        let settled = rig
+            .desktop_turn(|state, _ctx| boot_settlements(&state.take_host_work().1))
+            .expect("the desktop manager is live");
+        assert_eq!(settled, [Ok(())], "the boot window settles live exactly once");
+        rig.send(&ListWindows);
+        let ListWindowsResult::Ok { windows } = rig.reply() else {
+            panic!("desktop manager list succeeds");
+        };
+        assert_eq!(windows.into_iter().map(|window| window.path).collect::<Vec<_>>(), [main]);
+        let child = rig.chassis().child::<WindowCapability, WindowInstance>(
+            rig.manager(),
+            aether_data::LoadName::new("main").expect("fixture window name"),
+        );
+        assert!(child.is_ok(), "the settled boot window's child is live, so its address can be mailed");
+
+        let tools = path("tools");
+        rig.push(&CreateWindow { spec: spec("tools", "Tools") });
+        rig.pump_desktop_until("the create's reservation", |state| state.pending_creates.contains_key(&tools));
+        rig.desktop_turn(|state, ctx| {
+            attaching(state, "tools");
+            state.finish_window_attachment(&path("tools"), Ok(()), ctx)
+        })
+        .expect("the desktop manager is live");
+        rig.pump_desktop_until("the second window child's birth", |state| state.children.contains_key(&tools));
+
+        assert!(matches!(rig.reply(), CreateWindowResult::Ok { .. }), "the second window opened");
+        let after = rig.read_desktop(|state| boot_settlements(&state.pending_host_effects));
+        assert_eq!(after, Some(Vec::new()), "a window that is not the boot window settles nothing");
     }
 
     /// A live window at a chosen display density, registered under winit's

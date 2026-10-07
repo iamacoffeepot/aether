@@ -7,9 +7,15 @@
 //! callbacks and native-window state; [`DesktopRenderIntegration`] supplies
 //! only render, lifecycle-settlement, and graceful-shutdown semantics.
 //!
+//! The driver also makes the engine reachable: `boot` takes the RPC server's
+//! held bind gate, and the integration opens it on the winit thread when the
+//! window application reports the boot window live, so a caller that reaches
+//! the engine can mail the window `main` (issue #7546).
+//!
 //! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`, emits
 //! the shutdown telemetry on exit, and hands the application, which owns both
-//! pumped slots, back to the chassis. Returning means the user closed the
+//! pumped slots, back to the chassis. It returns an error when the boot window
+//! failed or the port could not be bound. Returning means the user closed the
 //! window or the event loop exited cleanly; the `chassis_builder` then tears
 //! down every passive in reverse boot order via `BootedPassives::Drop`, and
 //! only then drops the application, which closes the render slot and then the
@@ -20,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
+use aether_chassis::RpcBindGate;
 use aether_data::{ErasedActorPath, Kind};
 use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -135,6 +142,11 @@ pub struct DesktopRenderIntegration {
     quit_requested: bool,
     /// Set after the lifecycle reaches its `Shutdown` terminal.
     terminal_reached: bool,
+    /// The RPC server's bind gate, present until the engine is reachable:
+    /// [`DesktopWindowIntegration::boot_window_live`] takes it and opens it
+    /// once the window `main` can be mailed. Absent from the start when the
+    /// chassis has no RPC port, which publishes no gate.
+    rpc_gate: Option<RpcBindGate>,
 }
 
 impl DesktopRenderIntegration {
@@ -327,6 +339,13 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
 
     fn request_shutdown(&mut self) {
         self.request_quit();
+    }
+
+    fn boot_window_live(&mut self) -> Result<(), String> {
+        let Some(gate) = self.rpc_gate.take() else {
+            return Ok(());
+        };
+        gate.open().map(drop).map_err(|error| format!("the RPC port could not be bound: {error}"))
     }
 
     fn drain_available(&mut self) {
@@ -528,6 +547,9 @@ impl DriverCapability for DesktopDriverCapability {
             frame: 0,
             quit_requested: false,
             terminal_reached: false,
+            // The composed capabilities booted before the driver, so a held
+            // RPC server has already published its gate.
+            rpc_gate: ctx.handle::<RpcBindGate>(),
         };
         let app = DesktopWindowApplication::new(window_slot, integration, initial_window);
 
@@ -576,6 +598,14 @@ impl DriverRunning for DesktopDriverRunning {
             triangles = total,
             "frame loop exited",
         );
-        (Ok(()), PumpedRoots::of(app))
+
+        // A boot window that failed, or a port that could not be bound once
+        // it was live, shut the loop down gracefully above; the run still
+        // failed, and its error names why the engine was never reachable.
+        let failure = app
+            .boot_failure()
+            .map(|reason| RunError::Other(format!("the desktop engine did not become reachable: {reason}").into()));
+        let result = failure.map_or(Ok(()), Err);
+        (result, PumpedRoots::of(app))
     }
 }
