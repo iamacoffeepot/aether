@@ -80,7 +80,7 @@ impl<O: Send + 'static> StagedTask<O> {
     /// # Panics
     /// Never in practice: only `start` takes the task's completion, and it
     /// consumes the task.
-    pub fn start<A, M, F>(mut self, ctx: &NativeCtx<'_, A, M>, work: F) -> RequestId
+    pub fn start<A, S, M, F>(mut self, ctx: &NativeCtx<'_, A, S, M>, work: F) -> RequestId
     where
         M: ReplyMode,
         F: FnOnce() -> O + Send + 'static,

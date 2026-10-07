@@ -8,7 +8,7 @@ use crate::model::ctx::reply_mode::ReplyMode;
 use crate::reference::{ErasedActorRef, ProtocolRef};
 use crate::wasm::bridge::address;
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Type an erased reference this actor already holds as the protocol `T`
     /// (ADR-0231 §4's guard cast): `Some` when the reference's route is
     /// `Live` and the rows it published answer `T`, `None` otherwise.

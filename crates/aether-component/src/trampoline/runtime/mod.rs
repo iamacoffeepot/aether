@@ -35,7 +35,7 @@ pub use std::sync::Arc;
 use super::WasmTrampoline;
 use crate::component::{Abort, Aborted, Commit, Committed, LoadDelivered, Prepare, Prepared, SpawnDelivered};
 pub use aether_actor::Local;
-use aether_actor::{Single, runtime};
+use aether_actor::{Anyone, Single, runtime};
 use aether_kinds::{ComponentCapabilities, SpawnResult};
 pub use aether_kinds::{DropComponent, DropResult, LoadResult};
 use aether_substrate::actor::native::ctx::GuestHost;
@@ -316,7 +316,7 @@ impl NativeActor for WasmTrampoline {
     /// and waits in order for the commit or abort to deliver it to the guest
     /// that wins. The trampoline's typed rows are never gated.
     #[fallback]
-    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, env: &Envelope) -> bool {
+    fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Anyone, Single>, env: &Envelope) -> bool {
         match &mut state.slot {
             Slot::Live(component) => WasmTrampolineState::deliver_to_guest(ctx, component, env),
             Slot::Prepared(prepared) => prepared.gated.push_back(ctx.take_inbound()),

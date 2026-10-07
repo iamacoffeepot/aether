@@ -360,7 +360,7 @@ impl CameraController {
     /// input: start one when input arrived while idle, end one when the
     /// last of it was released. A gesture that has asked waits for its
     /// answer either way.
-    fn settle<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
+    fn settle<S, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, S, M>) {
         let at_rest = self.input.at_rest();
         match self.gesture {
             Gesture::Idle if !at_rest => self.ask(ctx),
@@ -371,7 +371,7 @@ impl CameraController {
 
     /// Ask the camera where it is, to start a gesture from its answer. With
     /// no camera there is nothing to ask and no gesture starts.
-    fn ask<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>) {
+    fn ask<S, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, S, M>) {
         if let Some(camera) = self.link.camera() {
             ctx.send_to(camera, &Where);
             self.gesture = Gesture::Asked;

@@ -40,7 +40,7 @@ use aether_substrate::testing::{
     PumpedDriver, TestChassis, await_settled, await_signal, bare_substrate, boot_bare_test_chassis, registered_ref,
 };
 use aether_substrate::{
-    Addressable, BootError, Builder, Dispatch, Erased, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
+    Addressable, Anyone, BootError, Builder, Dispatch, Erased, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
     ReplyTarget, Unchecked,
 };
 use crossbeam_channel::Sender;
@@ -1328,7 +1328,7 @@ impl NativeActor for UncheckedReplyCap {
     }
 
     #[aether_actor::handler::unchecked(reason = "test: replies through ctx.reply")]
-    fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Erased, Unchecked>, ping: UncheckedPing) {
+    fn on_ping(&mut self, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, ping: UncheckedPing) {
         ctx.reply(&UncheckedAck { seq: ping.seq });
     }
 }

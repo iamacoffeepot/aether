@@ -5,6 +5,7 @@
 use aether_data::{ActorId, Kind, MailboxId};
 
 use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
+use crate::model::Anyone;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{Addressable, Instanced, NamespaceError, Subname, validate_namespace_segment};
@@ -100,7 +101,7 @@ pub enum SpawnError {
     UnknownActorTag(ActorTypeTag),
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// ADR-0114: spawn an **inline child** — a co-located child actor that
     /// shares this component's WASM instance, slot, and run-token, while
     /// being addressed and mailed like any actor. `C` is a
@@ -358,7 +359,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         // takes `None`, so `unwire` is skipped and the slot removal stays a
         // clean no-op-then-`false`/`true` per the existing contract.
         if let Some(mut taken) = self.inline.take(child) {
-            let mut unwire_ctx: WasmCtx<'_, Erased, Unchecked> =
+            let mut unwire_ctx: WasmCtx<'_, Erased, Anyone, Unchecked> =
                 WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
             taken.erased_unwire(&mut unwire_ctx);
         }
@@ -452,7 +453,7 @@ where
     // yields `Some` here (the box was just inserted); the `if let` is a
     // defensive no-op rather than an `expect`.
     if let Some(mut fresh) = registry.take(alias) {
-        let mut wire_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
+        let mut wire_ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
         if let Err(error) = fresh.erased_wire(&mut wire_ctx) {
             fresh.erased_unwire(&mut wire_ctx);
             drop(fresh);

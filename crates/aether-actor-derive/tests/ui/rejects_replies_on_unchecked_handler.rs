@@ -1,7 +1,7 @@
 //! ADR-0227: an unchecked handler can issue arbitrary replies and therefore emits
 //! `HandlesKind<K>` but no `Replies<K>` marker.
 
-use aether_actor::{Erased, Replies, Unchecked, WasmCtx, actor};
+use aether_actor::{Anyone, Erased, Replies, Unchecked, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -21,7 +21,7 @@ impl aether_actor::WasmActor for UncheckedProbe {
     }
 
     #[handler::unchecked(reason = "test: an unchecked handler emits no Replies marker")]
-    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _ping: Ping) {}
 }
 
 fn assert_replies<T: Replies<Ping>>() {}

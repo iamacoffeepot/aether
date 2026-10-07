@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 
-use aether_actor::{ReplyMode, Single};
+use aether_actor::{Anyone, ReplyMode, Single};
 use aether_substrate::actor::native::{Held, NativeCtx, TaskDone};
 
 use super::super::Loaded;
@@ -48,7 +48,7 @@ impl LoadQueue {
     /// Accept a load in the request's own turn: start `work` against `held`
     /// now when a slot is free, or queue both behind the loads already
     /// waiting.
-    pub fn submit<A, M, F>(&mut self, ctx: &mut NativeCtx<'_, A, M>, held: Held<Loaded>, work: F)
+    pub fn submit<A, S, M, F>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, held: Held<Loaded>, work: F)
     where
         M: ReplyMode,
         F: FnOnce() -> Loaded + Send + 'static,
@@ -63,7 +63,7 @@ impl LoadQueue {
 
     /// The load completion's body: answer the finished load's caller, then
     /// start the next waiting load in the freed slot.
-    pub fn complete<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>, done: TaskDone<Loaded>) {
+    pub fn complete<A>(&mut self, ctx: &mut NativeCtx<'_, A, Anyone, Single>, done: TaskDone<Loaded>) {
         done.resolve(ctx);
         self.running -= 1;
 
@@ -74,7 +74,7 @@ impl LoadQueue {
 
     /// Spawn one load's worker, attached to the debt `held` names, which
     /// holds no chain.
-    fn start<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, held: Held<Loaded>, work: Work) {
+    fn start<A, S, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, held: Held<Loaded>, work: Work) {
         let _dispatch = ctx.dispatch_blocking_held_with(held, (), work);
         self.running += 1;
     }

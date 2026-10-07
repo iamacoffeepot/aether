@@ -94,7 +94,7 @@ impl Host {
 
     /// Deliver the turn's inbound to the old guest, as the trampoline's
     /// fallback does.
-    fn deliver<A, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, M>) {
+    fn deliver<A, S, M: ReplyMode>(&mut self, ctx: &NativeCtx<'_, A, S, M>) {
         self.old.deliver(ctx.inbound().expect("a handler turn has its inbound")).expect("the old guest receives");
     }
 }

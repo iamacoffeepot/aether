@@ -5,7 +5,7 @@
 use super::{ActorTypeTag, NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::ctx::{Erased, Single, Unchecked};
-use crate::model::{Addressable, One};
+use crate::model::{Addressable, Anyone, One, Subscriber};
 use crate::reference::ErasedActorRef;
 use crate::wasm::inline::{ChildRecord, RouteDecision};
 use crate::wasm::{ActorInitError, WasmInitCtx};
@@ -72,7 +72,7 @@ fn deferred_arm_returns_hold() {
     let mail =
         unsafe { Mail::__from_ptr(DeferredAsk::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, handle, 0x10) };
 
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let rc = <Deferrer as crate::WasmDispatch<Deferrer>>::dispatch(&mut deferrer, &mut ctx, mail);
     assert_eq!(rc, crate::DISPATCH_HANDLED_HOLD);
 
@@ -134,7 +134,7 @@ fn undecodable_payload_for_a_known_kind_falls_to_the_strict_tail() {
         Mail::__from_ptr(Poke::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, NO_REPLY_HANDLE, 0x10)
     };
 
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let rc = <StrictProbe as crate::WasmDispatch<StrictProbe>>::dispatch(&mut probe, &mut ctx, mail);
 
     // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind
@@ -153,7 +153,7 @@ fn undecodable_payload_for_a_known_kind_falls_to_the_strict_tail() {
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
 }
 
@@ -161,13 +161,45 @@ fn local_dispatch_ctx_never_reads_host_reply_correlation() {
 /// `Unchecked` views have identical size + alignment. This is the
 /// invariant the `as_single` pointer reborrow rests on. The actor marker
 /// is layout-neutral too — the invariant the `__for_actor` / `erase`
-/// reborrows rest on (issue 6279).
+/// reborrows rest on (issue 6279). So is the sender marker, in each mode:
+/// the invariant the dispatch arm's `prove_sender` reborrow rests on
+/// (ADR-0231 §11).
 #[test]
 fn ffi_ctx_layout_identical_across_modes() {
-    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Unchecked>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Unchecked>>(),);
-    assert_eq!(size_of::<WasmCtx<'static, RootPeer, Unchecked>>(), size_of::<WasmCtx<'static, Erased, Unchecked>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, RootPeer, Unchecked>>(), align_of::<WasmCtx<'static, Erased, Unchecked>>(),);
+    type Proven = Subscriber<DeferredAsk>;
+
+    assert_eq!(
+        size_of::<WasmCtx<'static, Erased, Anyone, Single>>(),
+        size_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>(),
+    );
+    assert_eq!(
+        align_of::<WasmCtx<'static, Erased, Anyone, Single>>(),
+        align_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>(),
+    );
+    assert_eq!(
+        size_of::<WasmCtx<'static, RootPeer, Anyone, Unchecked>>(),
+        size_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>(),
+    );
+    assert_eq!(
+        align_of::<WasmCtx<'static, RootPeer, Anyone, Unchecked>>(),
+        align_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>(),
+    );
+    assert_eq!(
+        size_of::<WasmCtx<'static, Erased, Proven, Single>>(),
+        size_of::<WasmCtx<'static, Erased, Anyone, Single>>()
+    );
+    assert_eq!(
+        align_of::<WasmCtx<'static, Erased, Proven, Single>>(),
+        align_of::<WasmCtx<'static, Erased, Anyone, Single>>()
+    );
+    assert_eq!(
+        size_of::<WasmCtx<'static, Erased, Proven, Unchecked>>(),
+        size_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>()
+    );
+    assert_eq!(
+        align_of::<WasmCtx<'static, Erased, Proven, Unchecked>>(),
+        align_of::<WasmCtx<'static, Erased, Anyone, Unchecked>>()
+    );
 }
 
 /// ADR-0114 addressing amendment: a ctx typed by a child-only actor resolves
@@ -196,11 +228,11 @@ fn ctx_parent_resolves_and_routes_in_place() {
     )
     .expect("a succeeding init installs the inline child");
 
-    let root_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let root_ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
     let child = root_ctx.child_as::<SucceedingChild>("widget").expect("the widget resolves by subname and tag");
     assert_eq!(child.id(), widget, "child_as resolves to the alias id");
 
-    let mut child_ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(widget.0, &registry, NO_INBOUND_SOURCE);
+    let mut child_ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(widget.0, &registry, NO_INBOUND_SOURCE);
     let parent = child_ctx.__for_actor::<SucceedingChild>().parent();
     assert_eq!(parent.reference(), ErasedActorRef::new(MailboxId(root)), "the parent resolves to the recorded parent");
 

@@ -13,7 +13,7 @@ use aether_data::Blob;
 use super::NativeCtx;
 use crate::actor::native::offload::check_in::BlobCheckIn;
 
-impl<A, M: ReplyMode> NativeCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> NativeCtx<'_, A, S, M> {
     /// Check `bytes` into the engine blob store and hold them as a `Shared`
     /// [`Blob`]. Equal bytes are resident once. The bytes stay resident while
     /// any clone of the value lives.

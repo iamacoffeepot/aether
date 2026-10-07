@@ -1,5 +1,6 @@
-//! Issue 7532: a handler that takes `sender: ProtocolRef<P>` runs only for a
-//! sender the engine casts to `P` first (ADR-0231 §11), driven through real
+//! Issues 7532 and 7545: a handler whose ctx names a protocol `P` as its
+//! sender runs only for a sender the engine casts to `P` first, and reads
+//! that proven reference from `ctx.sender()` (ADR-0231 §11), driven through real
 //! dispatch against a native receiver and a guest one.
 //!
 //! Each receiver is a gate: its [`SenderGateTake`] tell and its [`SenderGateDial`]
@@ -29,7 +30,7 @@ use std::fs;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use aether_actor::{
-    ActorRef, Addressable, HandlesKind, PathRefusal, PathRefused, ProtocolRef, Unchecked, Undeclared, actor,
+    ActorRef, Addressable, Anyone, HandlesKind, PathRefusal, PathRefused, ProtocolRef, Unchecked, Undeclared, actor,
 };
 use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -60,20 +61,15 @@ impl NativeActor for NativeGate {
     }
 
     #[handler::tell]
-    fn on_take(&mut self, ctx: &mut NativeCtx<'_>, take: SenderGateTake, sender: ProtocolRef<SenderGateGrantee>) {
+    fn on_take(&mut self, ctx: &mut NativeCtx<'_, Self, SenderGateGrantee>, take: SenderGateTake) {
         self.takes += 1;
-        ctx.send_to(sender, &SenderGateGranted { tag: take.tag });
+        ctx.send_to(ctx.sender(), &SenderGateGranted { tag: take.tag });
     }
 
     #[handler::request]
-    fn on_dial(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        dial: SenderGateDial,
-        sender: ProtocolRef<SenderGateGrantee>,
-    ) -> SenderGateDialed {
+    fn on_dial(&mut self, ctx: &mut NativeCtx<'_, Self, SenderGateGrantee>, dial: SenderGateDial) -> SenderGateDialed {
         self.dials += 1;
-        ctx.send_to(sender, &SenderGateGranted { tag: dial.tag });
+        ctx.send_to(ctx.sender(), &SenderGateGranted { tag: dial.tag });
 
         SenderGateDialed::Ok { tag: dial.tag }
     }
@@ -183,7 +179,7 @@ impl NativeActor for Relay {
     }
 
     #[handler::unchecked(reason = "test: relays a gate kind, reply target pinned to this relay")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _forward: Forward) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _forward: Forward) {
         let RelayToGate { gate, dial } = self.relaying.take().expect("a relay was asked for");
         let (kind, bytes) = if dial {
             (<SenderGateDial as Kind>::ID, SenderGateDial { tag: RELAYED_TAG }.encode_into_bytes())

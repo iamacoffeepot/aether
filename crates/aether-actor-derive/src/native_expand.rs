@@ -9,11 +9,11 @@ use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, IntentParameters, NativeActorHandlerFn, NativeActorTaskHandlerFn,
     NativeFallbackFn, SenderArm, TaskReplyMode, allow_abi_receiver, allow_context_by_value, attr_is_fallback,
-    attr_is_handler, check_intent_signature, classify_handler_reply, classify_task_reply_mode,
+    attr_is_handler, check_intent_signature, classify_handler_reply, classify_task_reply_mode, ctx_sender,
     erase_unless_ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor,
-    handler_cfgs, parse_handler_args, parse_handler_class, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
-    require_wire_result, rewrite_self_state_first_param, sender_arm, sender_parameter, silent_call, types_token_eq,
-    validate_addressable_consts, validate_native_fallback_sig,
+    handler_cfgs, parse_handler_args, parse_handler_class, reject_ctx_sender, reject_duplicate_handler_kinds,
+    rename_lifecycle_hooks, require_wire_result, rewrite_self_state_first_param, sender_arm, silent_call,
+    types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -218,6 +218,11 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             }
                             let (output_ty, context_ty, is_borrow) = extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
+                            reject_ctx_sender(
+                                &f.sig,
+                                "a `#[handler(task)]` completion",
+                                "it dispatches no mail, so there is no sender",
+                            )?;
                             fill_ctx_actor(&mut f.sig);
                             allow_abi_receiver(&mut f);
                             task_handlers.push(NativeActorTaskHandlerFn { method: f, output_ty, context_ty, mode });
@@ -228,6 +233,11 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per native actor"));
                     }
                     validate_native_fallback_sig(&f.sig, is_split)?;
+                    reject_ctx_sender(
+                        &f.sig,
+                        "`#[fallback]`",
+                        "it catches mail no handler names, so no kind's send could carry the requirement",
+                    )?;
                     f.attrs.remove(idx);
                     fill_ctx_actor(&mut f.sig);
                     allow_abi_receiver(&mut f);
@@ -241,6 +251,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     }
                     init_method = Some(f);
                 } else if f.sig.ident == "wire" || f.sig.ident == "unwire" {
+                    reject_ctx_sender(&f.sig, "a lifecycle hook", "it dispatches no mail, so there is no sender")?;
                     fill_ctx_actor(&mut f.sig);
                     lifecycle_methods.push(f);
                 } else {
@@ -481,12 +492,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         // under the actor actually running. Only a handler that spells `Erased`
         // gets the `erase()`d view, and with it no spawn surface at all.
         let erase = erase_unless_ctx_names_actor(&h.method.sig);
-        // ADR-0231 §11: an arm whose handler takes `sender: ProtocolRef<P>`
-        // casts the inbound sender to `P` first and passes the proven
-        // reference as the fourth argument. A sender the cast refuses never
-        // reaches the handler: the helper logs it and answers a request or
-        // the opted-in reply target, and the arm reports the mail handled.
-        let SenderArm { prelude: prove_sender, argument: sender } = sender_arm(
+        // ADR-0231 §11: an arm whose handler's ctx names a protocol `P` as its
+        // sender casts the inbound sender to `P` first and calls the handler
+        // with the ctx typed by `P`. A sender the cast refuses never reaches
+        // the handler: the helper logs it and answers a request or the
+        // opted-in reply target, and the arm reports the mail handled.
+        let SenderArm { prelude: prove_sender, ctx } = sender_arm(
             h.sender.as_ref(),
             kind_ty,
             h.reply.manifest_kind(),
@@ -496,13 +507,13 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     ::core::option::Option::Some(())
                 }
             },
-        )
-        .unwrap_or_default();
+            quote! { __aether_ctx },
+        );
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
                 #prove_sender
                 let __aether_reply = #self_ty::#method_ident(
-                    __aether_state, __aether_ctx.as_single() #erase, __aether_decoded #sender);
+                    __aether_state, #ctx.as_single() #erase, __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
             // ADR-0243 §10: a response arm takes its stored context before the
@@ -516,14 +527,14 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     quote! {
                         #prove_sender
                         #self_ty::#method_ident(
-                            __aether_state, __aether_ctx.as_single() #erase, __aether_decoded #context #sender);
+                            __aether_state, #ctx.as_single() #erase, __aether_decoded #context);
                     }
                 },
             ),
             (HandlerClass::Single, HandlerReply::Deferred(_)) => quote! {
                 #prove_sender
                 let __aether_pending = #self_ty::#method_ident(
-                    __aether_state, __aether_ctx.as_single() #erase, __aether_decoded #sender);
+                    __aether_state, #ctx.as_single() #erase, __aether_decoded);
                 __aether_ctx.__accept_pending(__aether_pending);
             },
             (HandlerClass::Unchecked, _) => quote! {
@@ -694,7 +705,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         quote! {
             fn dispatch_fallback(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
                 #self_ty::#method_ident(__aether_state, __aether_ctx.as_single() #erase, __aether_env);
@@ -947,7 +958,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // `Unchecked` ctx; the arms downgrade per handler class.
             fn dispatch(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Unchecked>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
@@ -999,7 +1010,7 @@ struct HandlerMarker {
     reason: Option<syn::LitStr>,
     cfgs: Vec<syn::Attribute>,
     /// What the handler requires of its sender (ADR-0231 §11): the protocol
-    /// of its `sender: ProtocolRef<P>` parameter.
+    /// its ctx names as its sender.
     sender: Option<Type>,
 }
 
@@ -1810,7 +1821,7 @@ fn harvest_native_actor_impl(
         let handler_reply = classify_handler_reply(&f.sig.output);
         // ADR-0231 §11: the sender requirement is read as the kind is, and
         // judged with the rest of the signature where `#[runtime]` expands.
-        let sender = sender_parameter(&f.sig).cloned();
+        let sender = ctx_sender(&f.sig).map_err(remap)?.cloned();
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
         // the markers this identity emits so both halves strip together.

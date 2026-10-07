@@ -63,8 +63,8 @@ pub use model::{
     Contract, Contracts, CoveredBy, CoversRows, Declared, DependencyLink, DependencyList, DependencyResolver,
     DependsOn, Gap, HandlesKind, Here, Instanced, Lifecycle, ListIndex, Many, NAMESPACE_SEGMENT_MAX_LEN,
     NamespaceError, One, Protocol, Publisher, Publishes, Replies, ReplyShape, Resolve, Root, Row, RowAt, RowIndex,
-    RowReply, RowSet, SendableTo, SentBy, Silent, SilentRow, Singleton, Subname, Subscriber, There, Undeclared,
-    WatchTarget, Watchable, Watches, declared_dependencies, root_mailbox, validate_namespace_segment,
+    RowReply, RowSet, SendableTo, SenderRequirement, SentBy, Silent, SilentRow, Singleton, Subname, Subscriber, There,
+    Undeclared, WatchTarget, Watchable, Watches, declared_dependencies, root_mailbox, validate_namespace_segment,
 };
 pub use path::{ActorPath, PathRefusal, PathRefused, ProtocolPath, ResolveError, TypedPath};
 #[doc(hidden)]

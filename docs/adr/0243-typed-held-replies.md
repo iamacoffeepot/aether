@@ -31,7 +31,7 @@ A deferred reply is a typed pair. The handler returns the receipt, and the oblig
 ```rust
 // main: untyped debt, unchecked handler, Undeclared row
 #[handler::unchecked(reason = "…")]
-fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Unchecked>, m: WatchHead) {
+fn on_watch_head(.., ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, m: WatchHead) {
     let reply: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
     self.watchers.park(reply);
 }

@@ -4,7 +4,7 @@
 //! `502` path), and one that holds its reply and forwards to a peer that never
 //! answers (the request-timeout `504` path).
 
-use aether_actor::{Unchecked, actor};
+use aether_actor::{Anyone, Unchecked, actor};
 use aether_substrate::actor::native::{Erased, Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::chassis::error::BootError;
 
@@ -153,7 +153,7 @@ impl NativeActor for SilentPeer {
     // Unchecked and never answered: the forwarding handler's held reply keeps the
     // request's chain open, so the server answers `504` at its timeout.
     #[handler::unchecked(reason = "test: holds the reply unanswered so the server times out")]
-    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Unchecked>, _ask: Ask) {}
+    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, _ask: Ask) {}
 }
 
 /// Holds the request's reply and forwards an [`Ask`] to [`SilentPeer`] with

@@ -11,7 +11,7 @@
 //! dispatch decodes it. The accepted unchecked path is resolved and receives a
 //! typed send through its protocol reference.
 
-use aether_actor::{Addressable, ErasedActorRef, ProtocolPath, Row, Unchecked, Undeclared};
+use aether_actor::{Addressable, Anyone, ErasedActorRef, ProtocolPath, Row, Unchecked, Undeclared};
 use aether_data::{ErasedActorPath, Kind, wire};
 
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Subname};
@@ -54,7 +54,7 @@ impl NativeActor for Keeper {
     }
 
     #[handler::unchecked(reason = "test: a cast-only receiver exercising the unchecked row")]
-    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: Poke) {
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, mail: Poke) {
         self.pokes.push(mail.seq);
     }
 

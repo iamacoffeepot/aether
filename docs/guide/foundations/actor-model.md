@@ -337,8 +337,8 @@ handler's mail arrives:
 
 | Attribute | Its mail is | Return | Parameters |
 |---|---|---|---|
-| `#[handler::request]` | a request it must answer | `O` or `Pending<O>` | 3, or 4 with its sender requirement |
-| `#[handler::tell]` | a command that needs no answer | none | 3, or 4 with its sender requirement |
+| `#[handler::request]` | a request it must answer | `O` or `Pending<O>` | 3 |
+| `#[handler::tell]` | a command that needs no answer | none | 3 |
 | `#[handler::event]` | a publication it subscribed to | none | 3 |
 | `#[handler::response]` | the answer to this actor's own request | none | 3, or 4 with its stored context |
 
@@ -365,8 +365,8 @@ handler runs either way and receives the take as it is. A `response` with no
 fourth parameter may still call `ctx.take_context` itself, for example to try
 several context kinds in turn.
 
-A `tell` or a `request` states what its sender must handle as a fourth
-parameter, `sender: ProtocolRef<P>`
+A `tell` or a `request` states what its sender must handle in its ctx type,
+as the ctx's sender: the ctx's type arguments are receiver, sender, mode
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §11).
 A receiver that mails its sender back later, such as a session that delivers
 frames to whoever dialed it, needs the sender to handle those kinds, and this
@@ -374,28 +374,34 @@ is where it says so:
 
 ```rust
 #[handler::tell]
-fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _take: TakeFocus, sender: ProtocolRef<FocusHolder>) {
-    self.holder = Some(sender);
-    ctx.send_to(sender, &FocusGained);
+fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _take: TakeFocus) {
+    let holder = ctx.sender(); // ProtocolRef<FocusHolder>
+    self.holder = Some(holder);
+    ctx.send_to(holder, &FocusGained);
 }
 ```
 
-The one parameter drives two checks. At build time, an actor sends this kind
+The one type argument drives two checks. At build time, an actor sends this kind
 with the plain `ctx.send::<Window>(&TakeFocus)` only when it has a handler for
 each of `FocusHolder`'s kinds; one that lacks a handler gets an error naming
 it, and nothing is added at the call site. At receipt, the engine casts the
-sender to `FocusHolder` before the handler runs and hands it the proven
-reference, so the handler never writes `ctx.cast`. Mail the build cannot see,
+sender to `FocusHolder` before the handler runs, and `ctx.sender()` is then
+the proven `ProtocolRef<FocusHolder>`, with no `Option` and no `ctx.cast`. Mail the build cannot see,
 such as a call relayed from MCP or mail with no sender, fails that cast and
 never reaches the handler: the refusal is logged in the receiver's log, a tell
 relayed by `aether.rpc.server` ends its call with the refusal, and a request
 is answered with its own reply, built from a `PathRefused` naming the sender,
-so a request that takes a sender replies a kind that is `From<PathRefused>`.
+so a request that states a sender replies a kind that is `From<PathRefused>`.
 A kind whose handler requires something of its sender is not sent through a
 `ProtocolRef`: a protocol's rows are covered only by handlers that ask
-nothing. The parameter is refused on an `event`, a `response`, an unchecked
-handler, a `Departed<W>` handler, a batched `&[K]` handler, and a handler in a
-set.
+nothing. A handler that states nothing keeps `Anyone`, whose `ctx.sender()`
+is an `Option<ErasedActorRef>`. A helper that a stating handler passes its
+ctx to takes the sender as a type parameter, as it takes the actor:
+`fn dial<A, S>(ctx: &mut NativeCtx<'_, A, S>, ..)`. A sender is refused on an
+`event`, a `response`, an unchecked handler, a `Departed<W>` handler, a
+batched `&[K]` handler, a handler in a set, a `#[fallback]`, a task
+completion, and a lifecycle hook, and a reply mode written in the sender's
+position is refused with the corrected spelling.
 
 The **unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
 ctx and issues its own replies by hand (`ctx.reply` / `ctx.reply_to`), which the
@@ -557,10 +563,12 @@ MCP and RPC boundary.
 
 The class marker rides on the context type — a `request`, `tell`, `event`, or
 `response` handler's `WasmCtx<'_>`
-is `WasmCtx<'_, Self, Single>` and an unchecked handler holds
-`WasmCtx<'_, Self, Unchecked>` — which is what makes a stray `ctx.reply` in
-any of the four a compile error. The actor is the first parameter, the reply
-mode the second, and a ctx that omits its actor is typed by it: `#[actor]`
+is `WasmCtx<'_, Self, Anyone, Single>` and an unchecked handler holds
+`WasmCtx<'_, Self, Anyone, Unchecked>` — which is what makes a stray `ctx.reply` in
+any of the four a compile error. The ctx's type arguments are receiver,
+sender, mode: the actor is the first, the sender the handler requires
+(`Anyone` when it states none) the second, and the reply mode the third. A
+ctx that omits its actor is typed by it: `#[actor]`
 fills in `Self`, so the ctx reaches only the actors the handler's actor
 declares with `depends(R)`. Spelling `Erased` in that slot
 (`WasmCtx<'_, Erased>`) asks for the untyped view. One call deeper the class
@@ -588,14 +596,14 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 }
 
 #[handler::unchecked(reason = "example: the same helper from the unchecked class")]
-fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Unchecked>, _r: Redraw) {
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Anyone, Unchecked>, _r: Redraw) {
     announce(&mut ctx.sends(), self.renderer, &self.frame);        // Unchecked — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
 ```
 
 `reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
-is recovered on the reply — stay on `WasmCtx<'_, A, M>`, so a helper that needs
+is recovered on the reply — stay on `WasmCtx<'_, A, S, M>`, so a helper that needs
 those still states which class it belongs to. That's the line: the reply class
 is load-bearing exactly where the reply is.
 
@@ -888,8 +896,8 @@ type, and can spawn an `Instanced` native actor when that child declares
 `ChildOf<Parent>` for the actor doing the spawning:
 `ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
 from the ctx. A handler opts into the call by naming its own actor in its ctx
-signature — `ctx: &mut NativeCtx<'_, Self, Single>`, or
-`NativeCtx<'_, Self, Unchecked>` for an unchecked handler — and the `#[actor]`
+signature — `ctx: &mut NativeCtx<'_, Self, Anyone, Single>`, or
+`NativeCtx<'_, Self, Anyone, Unchecked>` for an unchecked handler — and the `#[actor]`
 macro hands such a handler a ctx typed by the actor being dispatched. Every
 other handler keeps the plain `NativeCtx<'_>` and reaches no spawn surface, so
 a birth cannot be placed under a parent other than the one running.

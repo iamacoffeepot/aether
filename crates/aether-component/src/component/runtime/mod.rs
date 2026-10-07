@@ -43,7 +43,7 @@ use aether_kinds::{
 // module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
 // close `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ErasedActorRef, ProtocolRef, Single};
+use aether_actor::{Anyone, ErasedActorRef, ProtocolRef, Single};
 use aether_data::ErasedActorPath;
 use aether_data::{MailId, MailboxCategory};
 
@@ -166,7 +166,7 @@ pub struct LoadedGuest {
 }
 
 /// The host's own ctx, in either reply mode.
-type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, M>;
+type HostCtx<'a, M> = NativeCtx<'a, ComponentHostCapability, Anyone, M>;
 
 /// The rows the component host controls a guest through: its trampoline's
 /// own framework rows, never the guest's published surface. A guest birth
@@ -267,7 +267,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_module_published(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Self, Single>,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
         done: TaskDone<RegistryBatchResult>,
     ) {
         state.finish_publish(ctx, done);
@@ -280,7 +280,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_guest_born(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Self, Single>,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
         done: TaskDone<GuestOutcome<GuestControl>>,
     ) {
         state.finish_guest_birth(ctx, done);

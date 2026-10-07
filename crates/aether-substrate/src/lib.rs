@@ -69,8 +69,9 @@ pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;
 pub use actor::native::ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
 // ADR-0112: the per-handler ctx reply-mode markers, re-exported next to
-// `NativeCtx` so chassis / harness code naming `NativeCtx<'_, Erased, Unchecked>`
-// reaches them without an `aether_actor` import.
+// `NativeCtx` so chassis / harness code naming `NativeCtx<'_, Erased, Anyone, Unchecked>`
+// reaches them without an `aether_actor` import. `Anyone`, the sender of a
+// ctx that states none (ADR-0231 §11), rides with them.
 pub use actor::native::envelope::Envelope;
 pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 // iamacoffeepot/aether#2311 (composed): the identity actor trait plus the
@@ -83,7 +84,7 @@ pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry};
 #[cfg(feature = "wasm")]
 pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::{Addressable, root_mailbox};
-pub use aether_actor::{ReplyMode, Single, Unchecked};
+pub use aether_actor::{Anyone, ReplyMode, Single, Unchecked};
 pub use aether_derive::{Config, StageArgv};
 #[cfg(feature = "wasm")]
 pub use boot::SubstrateBoot;

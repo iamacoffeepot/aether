@@ -51,9 +51,9 @@ pub struct RoutableWindow {
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-pub(super) fn route_to_sole_window<K: ActorMail, A, I, M: ReplyMode>(
+pub(super) fn route_to_sole_window<K: ActorMail, A, S, I, M: ReplyMode>(
     windows: &[RoutableWindow],
-    ctx: &mut NativeCtx<'_, A, M>,
+    ctx: &mut NativeCtx<'_, A, S, M>,
     mail: &K,
 ) -> Result<(), String>
 where

@@ -30,7 +30,7 @@ use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// ADR-0080 §12 spawn primitive: run `f` on a worker thread named for
     /// this actor, holding this handler's in-flight chain open until the
     /// worker exits.

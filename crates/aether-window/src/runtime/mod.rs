@@ -6,7 +6,7 @@
 //! compiles both `desktop` (for the desktop chassis) and `synthetic` (for the
 //! harnesses) into one crate, and only the composer knows which it wants.
 
-use aether_actor::{OutboundReply, PathRefused, Unchecked, runtime};
+use aether_actor::{Anyone, OutboundReply, PathRefused, Unchecked, runtime};
 use aether_data::ErasedActorPath;
 use aether_kinds::MonitorNotice;
 use aether_substrate::actor::native::{Erased, Pending, SpawnOutcome, TaskDone};
@@ -254,7 +254,7 @@ impl NativeActor for WindowCapability {
 
     /// Close the sole window.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: CloseWindow) {
+    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: CloseWindow) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&CloseWindowResult::Err { error });
         }
@@ -262,7 +262,7 @@ impl NativeActor for WindowCapability {
 
     /// Change the sole window's presentation mode.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowMode) {
+    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: SetWindowMode) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowModeResult::Err { error });
         }
@@ -272,7 +272,7 @@ impl NativeActor for WindowCapability {
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
     fn on_set_presentation(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Erased, Unchecked>,
+        ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>,
         mail: SetWindowPresentation,
     ) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
@@ -282,7 +282,7 @@ impl NativeActor for WindowCapability {
 
     /// Change the sole window's title.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowTitle) {
+    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: SetWindowTitle) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowTitleResult::Err { error });
         }
@@ -290,7 +290,7 @@ impl NativeActor for WindowCapability {
 
     /// Install the sole window's native menu bar.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowMenu) {
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: SetWindowMenu) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowMenuResult::Err { error });
         }
@@ -298,7 +298,11 @@ impl NativeActor for WindowCapability {
 
     /// Set the sole window's pointer shape.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: SetWindowCursor) {
+    fn on_set_cursor(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>,
+        mail: SetWindowCursor,
+    ) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&SetWindowCursorResult::Err { error });
         }
@@ -306,7 +310,7 @@ impl NativeActor for WindowCapability {
 
     /// Bring the sole window to the foreground.
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, mail: FocusWindow) {
+    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, mail: FocusWindow) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {
             ctx.reply(&FocusWindowResult::Err { error });
         }
@@ -316,7 +320,7 @@ impl NativeActor for WindowCapability {
     #[handler::unchecked(reason = "forwards to the sole window with the requester's reply pinned")]
     fn on_request_redraw(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Erased, Unchecked>,
+        ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>,
         mail: RequestWindowRedraw,
     ) {
         if let Err(error) = route_to_sole_window(&state.routable_windows(), ctx, &mail) {

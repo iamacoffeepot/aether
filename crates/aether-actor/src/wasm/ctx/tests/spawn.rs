@@ -8,6 +8,7 @@ use super::{
     Registry, STUB_INIT_CONFIG, SpawnError, StubChild, StubConfig, SucceedingChild, WasmCtx, WasmPlacementFacts,
     install_inline_child, panicking_resolver, stub_resolver,
 };
+use crate::model::Anyone;
 use crate::model::Subname;
 use crate::model::ctx::{Erased, Unchecked};
 use crate::reference::ErasedActorRef;
@@ -100,7 +101,7 @@ fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
     registry.set_spawn_resolver(stub_resolver);
     STUB_INIT_CONFIG.set(None);
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let config_bytes = StubConfig { value: 0x1234_5678 }.encode_into_bytes();
     let alias = ctx
         .spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("tagged"), &config_bytes)
@@ -140,7 +141,7 @@ fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {
     STUB_INIT_CONFIG.set(None);
 
     let spawner = 0x5AFE_u64;
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(spawner, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(spawner, &registry, NO_INBOUND_SOURCE);
     let alias = ctx
         .spawn_inline_child_by_tag(
             ActorTypeTag::of::<StubChild>(),
@@ -164,7 +165,7 @@ fn spawn_inline_child_by_tag_unknown_tag_errors_and_inserts_nothing() {
     let registry = Registry::new();
     registry.set_spawn_resolver(stub_resolver);
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let unknown = ActorTypeTag(0xFFFF_FFFF_FFFF_FFFF);
     let result = ctx.spawn_inline_child_by_tag(unknown, Subname::Named("tagged"), &[]);
     assert!(
@@ -182,7 +183,7 @@ fn by_tag_spawn_rejects_zero_host_alias_before_init() {
     registry.set_spawn_resolver(zero_alias_resolver);
     STUB_INIT_CONFIG.set(None);
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let result = ctx.spawn_inline_child_by_tag(
         ActorTypeTag::of::<StubChild>(),
         Subname::Named("tagged"),
@@ -211,7 +212,7 @@ fn spawn_inline_child_by_tag_rejects_bad_subname_before_resolver() {
     let registry = Registry::new();
     registry.set_spawn_resolver(panicking_resolver);
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     let result = ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("bad:name"), &[]);
     assert!(
         matches!(result, Err(SpawnError::SubnameInvalid(_))),
@@ -375,7 +376,7 @@ fn despawn_inline_child_runs_unwire() {
     .expect("the probe installs");
     assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once");
 
-    let ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
     let removed = ctx.despawn_inline_child(ErasedActorRef::new(probe));
     assert!(removed, "despawning a resident child returns true");
     assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once");
@@ -448,7 +449,7 @@ fn reconstruct_does_not_run_wire() {
 fn spawn_inline_rejects_unavailable_parent_identity_before_host_call() {
     let registry = Registry::new();
     registry.set_self_id(0x7010);
-    let mut erased: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x7010, &registry, NO_INBOUND_SOURCE);
+    let mut erased: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x7010, &registry, NO_INBOUND_SOURCE);
     let ctx = erased.__for_actor::<NestingParent>();
 
     let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());
@@ -471,7 +472,7 @@ fn spawn_inline_accepts_any_recorded_parent_type() {
     let registry = Registry::new();
     registry.set_self_id(0x7020);
     registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
-    let mut erased: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new(0x7020, &registry, NO_INBOUND_SOURCE);
+    let mut erased: WasmCtx<'_, Erased, Anyone, Unchecked> = WasmCtx::__new(0x7020, &registry, NO_INBOUND_SOURCE);
     let ctx = erased.__for_actor::<LifecycleProbe>();
 
     let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::Single;
+use aether_actor::{Anyone, Single};
 use aether_substrate::actor::native::{NativeCtx, PumpedSlot};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{DriverCtx, MailboxWakeSlot};
@@ -49,7 +49,7 @@ impl DesktopWindowSlot {
     /// misses.
     pub(super) fn host_turn<R>(
         &mut self,
-        turn: impl FnOnce(&mut DesktopWindows, &mut NativeCtx<'_, WindowCapability, Single>) -> R,
+        turn: impl FnOnce(&mut DesktopWindows, &mut NativeCtx<'_, WindowCapability, Anyone, Single>) -> R,
     ) -> Option<R> {
         self.slot
             .host_turn(|state, ctx| match &mut state.backend {

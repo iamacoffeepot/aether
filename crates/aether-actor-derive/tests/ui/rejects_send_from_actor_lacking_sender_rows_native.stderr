@@ -12,23 +12,23 @@ warning: unexpected `cfg` condition value: `native-sender-rows`
    = note: this warning originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `Half` has no contract row for `Closed`
-  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:91:28
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:90:28
    |
-91 |         ctx.send::<Dialer>(&DialSelf);
+90 |         ctx.send::<Dialer>(&DialSelf);
    |             ----           ^^^^^^^^^ no handler for `Closed` on this target
    |             |
    |             required by a bound introduced by this call
    |
 help: the trait `Contract<Closed>` is not implemented for `Half`
-  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:79:1
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:78:1
    |
-79 | struct Half;
+78 | struct Half;
    | ^^^^^^^^^^^
    = note: a `#[fallback]` does not count as handling a kind
 help: `Half` implements trait `Contract<K>`
-  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:81:1
+  --> tests/ui/rejects_send_from_actor_lacking_sender_rows_native.rs:80:1
    |
-81 | #[actor(root, depends(Dialer))]
+80 | #[actor(root, depends(Dialer))]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    | |
    | `Contract<Data>`
@@ -37,9 +37,9 @@ help: `Half` implements trait `Contract<K>`
    = note: required for `Half` to implement `CoversRows<(Row<Data, Silent>, Row<Closed, Silent>)>`
    = note: required for `Consumer` to implement `CoveredBy<Half>`
    = note: required for `DialSelf` to implement `SentBy<Half, Dialer>`
-note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
    |
    |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &(impl SendableTo<R> + SentBy<A, R>))
-   |                                                                                              ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+   |                                                                                              ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, S, M>>::send`
    = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

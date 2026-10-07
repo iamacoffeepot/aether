@@ -120,7 +120,7 @@ impl<const FAIL: bool> NativeActor for Cap<FAIL> {
 impl<const FAIL: bool> Dispatch<Self> for Cap<FAIL> {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
