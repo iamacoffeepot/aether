@@ -86,10 +86,34 @@ pub struct DesktopWindowApplication<I> {
     /// The instant each capped window's next frame is due.
     pacing: FramePacing,
     shutdown_requested: bool,
-    /// Why the engine never became reachable, when its boot window failed or
-    /// the chassis could not make it reachable: the first reason seen. The
-    /// chassis reads it after the loop exits and fails the run with it.
-    boot_failure: Option<String>,
+    /// Whether the engine became reachable. The chassis reads it after the
+    /// loop exits and fails a run that did not.
+    boot: BootState,
+}
+
+/// How far the engine got toward being reachable. The boot window settles
+/// once, so the state leaves `Pending` once and then stays.
+enum BootState {
+    /// The boot window has not settled: nothing can reach the engine yet.
+    Pending,
+    /// The boot window is live and the chassis made the engine reachable.
+    Reachable,
+    /// The engine will never be reachable, for the reason carried: the boot
+    /// window failed, or the chassis could not make the engine reachable.
+    Failed(String),
+}
+
+impl BootState {
+    /// Record the boot window's settled outcome. The first one stands.
+    fn settle(&mut self, outcome: Result<(), String>) {
+        if !matches!(self, Self::Pending) {
+            return;
+        }
+        *self = match outcome {
+            Ok(()) => Self::Reachable,
+            Err(reason) => Self::Failed(reason),
+        };
+    }
 }
 
 impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
@@ -106,7 +130,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
             pending_dirty: BTreeSet::new(),
             pacing: FramePacing::default(),
             shutdown_requested: false,
-            boot_failure: None,
+            boot: BootState::Pending,
         }
     }
 
@@ -126,14 +150,19 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         &mut self.integration
     }
 
-    /// Why the engine never became reachable: the boot window's failure, or
-    /// the chassis's own from [`DesktopWindowIntegration::boot_window_live`].
-    /// `None` while the boot window is pending and once it is live and
-    /// reachable. The application has already requested shutdown when this is
-    /// `Some`.
+    /// Whether the engine became reachable. `None` means one thing: the boot
+    /// window has not settled, so nothing has been able to reach the engine.
+    /// `Some(Ok(()))` is a live boot window the chassis made reachable, and
+    /// `Some(Err(reason))` is the boot window's failure or the chassis's own
+    /// from [`DesktopWindowIntegration::boot_window_live`], for which the
+    /// application has already requested shutdown.
     #[must_use]
-    pub fn boot_failure(&self) -> Option<&str> {
-        self.boot_failure.as_deref()
+    pub fn boot_outcome(&self) -> Option<Result<(), &str>> {
+        match &self.boot {
+            BootState::Pending => None,
+            BootState::Reachable => Some(Ok(())),
+            BootState::Failed(reason) => Some(Err(reason)),
+        }
     }
 
     fn apply_work(
@@ -263,10 +292,10 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         let (dirty, outcome) = self.apply_work(event_loop, actions, effects);
         self.pending_dirty.extend(dirty);
 
-        let boot_failed = outcome.boot_failure.is_some();
+        let boot_failed = matches!(outcome.boot_settled, Some(Err(_)));
         let shuts_down = request_shutdown || outcome.last_window_closed || boot_failed;
-        if let Some(reason) = outcome.boot_failure {
-            self.boot_failure.get_or_insert(reason);
+        if let Some(settled) = outcome.boot_settled {
+            self.boot.settle(settled);
         }
         if shuts_down {
             request_shutdown_once(&mut self.integration, &mut self.shutdown_requested);
@@ -467,16 +496,18 @@ impl WindowHostAction {
 enum Applied {
     Nothing,
     LastWindowClosed,
-    /// The engine will never be reachable, for the reason carried.
-    BootFailed(String),
+    /// The boot window settled: the engine is reachable, or never will be
+    /// for the reason carried.
+    BootSettled(Result<(), String>),
 }
 
 /// What one turn's host work asks of the application.
 #[derive(Default)]
 struct WorkOutcome {
     last_window_closed: bool,
-    /// The first boot failure the turn's effects reported.
-    boot_failure: Option<String>,
+    /// The boot window's outcome, in the one turn that settles it: the
+    /// first the turn's effects reported.
+    boot_settled: Option<Result<(), String>>,
 }
 
 impl WorkOutcome {
@@ -484,8 +515,8 @@ impl WorkOutcome {
         match applied {
             Applied::Nothing => {}
             Applied::LastWindowClosed => self.last_window_closed = true,
-            Applied::BootFailed(reason) => {
-                self.boot_failure.get_or_insert(reason);
+            Applied::BootSettled(outcome) => {
+                self.boot_settled.get_or_insert(outcome);
             }
         }
     }
@@ -507,10 +538,7 @@ fn apply_simple_effect<I: DesktopWindowIntegration>(
         // A live boot window is the chassis's cue to make the engine
         // reachable; a failed one is never offered to it.
         WindowHostEffect::BootWindowSettled { outcome } => {
-            let reachable = outcome.and_then(|()| integration.boot_window_live());
-            if let Err(reason) = reachable {
-                return Applied::BootFailed(reason);
-            }
+            return Applied::BootSettled(outcome.and_then(|()| integration.boot_window_live()));
         }
     }
     Applied::Nothing
@@ -691,7 +719,7 @@ mod tests {
         let applied =
             apply_simple_effect(&mut integration, WindowHostEffect::BootWindowSettled { outcome: Ok(()) }, &mut dirty);
 
-        assert_eq!(applied, Applied::Nothing);
+        assert_eq!(applied, Applied::BootSettled(Ok(())));
         assert_eq!(integration.calls, ["boot-live"]);
     }
 
@@ -706,7 +734,7 @@ mod tests {
         let applied =
             apply_simple_effect(&mut integration, WindowHostEffect::BootWindowSettled { outcome: Ok(()) }, &mut dirty);
 
-        assert_eq!(applied, Applied::BootFailed("port 8901 is taken".to_owned()));
+        assert_eq!(applied, Applied::BootSettled(Err("port 8901 is taken".to_owned())));
         assert_eq!(integration.calls, ["boot-live"]);
     }
 
@@ -721,7 +749,7 @@ mod tests {
 
         let applied = apply_simple_effect(&mut integration, failed, &mut dirty);
 
-        assert_eq!(applied, Applied::BootFailed("render attach failed".to_owned()));
+        assert_eq!(applied, Applied::BootSettled(Err("render attach failed".to_owned())));
         assert!(integration.calls.is_empty(), "the chassis was asked about a failed window: {:?}", integration.calls);
     }
 
@@ -732,12 +760,30 @@ mod tests {
     fn a_turn_keeps_its_first_boot_failure_beside_a_last_window_shutdown() {
         let mut outcome = WorkOutcome::default();
 
-        outcome.record(Applied::BootFailed("first".to_owned()));
+        outcome.record(Applied::BootSettled(Err("first".to_owned())));
         outcome.record(Applied::LastWindowClosed);
-        outcome.record(Applied::BootFailed("second".to_owned()));
+        outcome.record(Applied::BootSettled(Err("second".to_owned())));
 
         assert!(outcome.last_window_closed);
-        assert_eq!(outcome.boot_failure.as_deref(), Some("first"));
+        assert_eq!(outcome.boot_settled, Some(Err("first".to_owned())));
+    }
+
+    /// The boot state leaves `Pending` once. Fails if a later outcome turns
+    /// a failed boot reachable, which would have the run report success for
+    /// an engine nothing could reach, or replaces the reason that names the
+    /// cause.
+    #[test]
+    fn the_boot_state_keeps_its_first_settled_outcome() {
+        let mut failed = BootState::Pending;
+        failed.settle(Err("first".to_owned()));
+        failed.settle(Ok(()));
+        failed.settle(Err("second".to_owned()));
+        assert!(matches!(&failed, BootState::Failed(reason) if reason == "first"));
+
+        let mut reachable = BootState::Pending;
+        reachable.settle(Ok(()));
+        reachable.settle(Err("late".to_owned()));
+        assert!(matches!(reachable, BootState::Reachable));
     }
 
     #[test]

@@ -15,7 +15,8 @@
 //! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`, emits
 //! the shutdown telemetry on exit, and hands the application, which owns both
 //! pumped slots, back to the chassis. It returns an error when the boot window
-//! failed or the port could not be bound. Returning means the user closed the
+//! failed, the port could not be bound, or the loop exited before the boot
+//! window was live. Returning means the user closed the
 //! window or the event loop exited cleanly; the `chassis_builder` then tears
 //! down every passive in reverse boot order via `BootedPassives::Drop`, and
 //! only then drops the application, which closes the render slot and then the
@@ -142,10 +143,10 @@ pub struct DesktopRenderIntegration {
     quit_requested: bool,
     /// Set after the lifecycle reaches its `Shutdown` terminal.
     terminal_reached: bool,
-    /// The RPC server's bind gate, present until the engine is reachable:
-    /// [`DesktopWindowIntegration::boot_window_live`] takes it and opens it
-    /// once the window `main` can be mailed. Absent from the start when the
-    /// chassis has no RPC port, which publishes no gate.
+    /// The RPC server's bind gate, which
+    /// [`DesktopWindowIntegration::boot_window_live`] opens once the window
+    /// `main` can be mailed. `None` when the chassis has no RPC port, which
+    /// publishes no gate.
     rpc_gate: Option<RpcBindGate>,
 }
 
@@ -342,7 +343,7 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
     }
 
     fn boot_window_live(&mut self) -> Result<(), String> {
-        let Some(gate) = self.rpc_gate.take() else {
+        let Some(gate) = &self.rpc_gate else {
             return Ok(());
         };
         gate.open().map(drop).map_err(|error| format!("the RPC port could not be bound: {error}"))
@@ -599,13 +600,43 @@ impl DriverRunning for DesktopDriverRunning {
             "frame loop exited",
         );
 
-        // A boot window that failed, or a port that could not be bound once
-        // it was live, shut the loop down gracefully above; the run still
-        // failed, and its error names why the engine was never reachable.
-        let failure = app
-            .boot_failure()
-            .map(|reason| RunError::Other(format!("the desktop engine did not become reachable: {reason}").into()));
-        let result = failure.map_or(Ok(()), Err);
+        let result = run_result(app.boot_outcome());
         (result, PumpedRoots::of(app))
+    }
+}
+
+/// The result of a run whose event loop exited cleanly, from the boot outcome
+/// the application ended with. A boot window that failed, or a port that
+/// could not be bound once it was live, shut the loop down gracefully; the run
+/// still failed, and its error names why the engine was never reachable. A
+/// loop that exited with the boot window unsettled never opened the port, so
+/// it is a failed run too: whoever started the engine is still waiting to
+/// reach it.
+fn run_result(boot_outcome: Option<Result<(), &str>>) -> Result<(), RunError> {
+    let unreachable = match boot_outcome {
+        Some(Ok(())) => return Ok(()),
+        Some(Err(reason)) => reason,
+        None => "the event loop exited before the boot window was live",
+    };
+    Err(RunError::Other(format!("the desktop engine did not become reachable: {unreachable}").into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quit that lands while the boot window is still pending exits the
+    /// loop cleanly with the port never opened. Fails if that run reports
+    /// success, which leaves its spawner waiting on an engine that has
+    /// already gone, or if a failed boot loses its reason.
+    #[test]
+    fn a_run_that_was_never_reachable_fails_and_says_why() {
+        let pending = run_result(None).expect_err("an unsettled boot window is a failed run").to_string();
+        let failed =
+            run_result(Some(Err("port 8901 is taken"))).expect_err("a failed boot is a failed run").to_string();
+
+        assert!(pending.contains("exited before the boot window was live"), "{pending}");
+        assert!(failed.contains("port 8901 is taken"), "{failed}");
+        assert!(run_result(Some(Ok(()))).is_ok(), "a reachable engine that quit is a clean run");
     }
 }

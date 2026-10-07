@@ -184,20 +184,18 @@ pub enum WindowHostEffect {
 /// authoritative [`SpawnOutcome`] lands.
 struct PendingCreate {
     spec: WindowSpec,
-    /// The `create_window` caller's held reply; the boot window has none.
-    held: Option<Held<CreateWindowResult>>,
-    /// True for the one create [`DesktopWindows::queue_initial_window`]
-    /// queues. Its outcome settles the boot window, and its failure shuts the
-    /// application down when no other window is left.
-    boot_window: bool,
+    origin: CreateOrigin,
 }
 
-impl PendingCreate {
-    /// The boot window's settled outcome, when this create is the boot
-    /// window's; no other create settles it.
-    fn boot_settled(&self, outcome: Result<(), &str>) -> Option<WindowHostEffect> {
-        self.boot_window.then(|| boot_window_settled(&self.spec.name, outcome))
-    }
+/// Who asked for a create, which is who its outcome goes to.
+enum CreateOrigin {
+    /// The one create [`DesktopWindows::queue_initial_window`] queues. It has
+    /// no caller: its outcome settles the boot window, and its failure shuts
+    /// the application down when no other window is left.
+    Boot,
+    /// A `create_window` request. Its outcome answers the caller's held
+    /// reply, and settles nothing.
+    Requested(Held<CreateWindowResult>),
 }
 
 /// The effect that settles the boot window named `name`: live, or failed
@@ -335,8 +333,9 @@ impl DesktopWindows {
     /// Queue a create for the application's next host turn; `held` is
     /// answered once the window's child birth is authoritative.
     pub(super) fn create<A>(&mut self, ctx: &mut NativeCtx<'_, A>, spec: WindowSpec, held: Held<CreateWindowResult>) {
-        if let Err((error, Some(held))) = self.queue_create(spec, Some(held), false) {
-            held.answer(ctx, &CreateWindowResult::Err { error });
+        match self.free_window_path(&spec.name) {
+            Ok(path) => self.queue_create(path, spec, CreateOrigin::Requested(held)),
+            Err(error) => held.answer(ctx, &CreateWindowResult::Err { error }),
         }
     }
 
@@ -416,7 +415,7 @@ impl DesktopWindows {
         if self.initial_window_reserved {
             return Ok(());
         }
-        self.queue_create(spec, None, true).map_err(|(error, _)| error)?;
+        self.queue_create(self.free_window_path(&spec.name)?, spec, CreateOrigin::Boot);
         self.initial_window_reserved = true;
         Ok(())
     }
@@ -485,14 +484,14 @@ impl DesktopWindows {
         attachment: Result<(), String>,
         ctx: &mut NativeCtx<'_, WindowCapability, Single>,
     ) -> Vec<WindowHostEffect> {
-        let Some(mut pending) = self.pending_creates.remove(path) else {
+        let Some(pending) = self.pending_creates.remove(path) else {
             return Vec::new();
         };
         match attachment {
             Ok(()) => {
                 // ADR-0168 §3: this runs on a `PumpedSlot::host_turn`, which
                 // carries no chain, so the staged birth takes no settlement
-                // hold — and is ordered anyway. `pending.held` is the
+                // hold — and is ordered anyway. A requested create carries the
                 // `create_window` request's held reply (ADR-0243 §1), whose
                 // ledger entry keeps the request's settlement hold until
                 // `finish_window_child_spawn` answers it, so the request's
@@ -503,16 +502,15 @@ impl DesktopWindows {
                 // the window's path as its completion context, since that path
                 // is what the reservation is keyed by.
                 let birth = ctx.spawn_child::<WindowInstance>(Subname::Named(&pending.spec.name), (), ());
-                let birth = if pending.held.is_some() {
-                    birth.ordered_by(OrderingDevice::RetainedReplyDebt)
-                } else {
-                    birth
+                let birth = match &pending.origin {
+                    CreateOrigin::Requested(_) => birth.ordered_by(OrderingDevice::RetainedReplyDebt),
+                    CreateOrigin::Boot => birth,
                 };
                 if let Err((error, _)) = birth.stage_with(WindowSpawnKey { path: path.clone() }) {
                     return self.rollback_attached_create(
                         ctx,
                         path,
-                        &mut pending,
+                        pending,
                         format!("failed to spawn window child: {error:?}"),
                     );
                 }
@@ -522,12 +520,7 @@ impl DesktopWindows {
             }
             Err(error) => {
                 self.remove_window(path);
-                let mut effects: Vec<_> = pending.boot_settled(Err(&error)).into_iter().collect();
-                if let Some(held) = pending.held.take() {
-                    held.answer(ctx, &CreateWindowResult::Err { error });
-                }
-                effects.extend(self.failed_create_effects(pending.boot_window));
-                effects
+                self.fail_create(ctx, pending, error)
             }
         }
     }
@@ -546,19 +539,16 @@ impl DesktopWindows {
         path: &ErasedActorPath,
         outcome: &SpawnOutcome<WindowInstance>,
     ) {
-        let Some(mut pending) = self.pending_creates.remove(path) else {
+        let Some(pending) = self.pending_creates.remove(path) else {
             if let Ok(child) = &outcome.result {
                 ctx.send_to(child, &RetireWindow);
             }
             return;
         };
         let effects = match &outcome.result {
-            Err(error) => self.rollback_attached_create(
-                ctx,
-                path,
-                &mut pending,
-                format!("failed to spawn window child: {error:?}"),
-            ),
+            Err(error) => {
+                self.rollback_attached_create(ctx, path, pending, format!("failed to spawn window child: {error:?}"))
+            }
             // The reservation is keyed by the path consumers address, so a
             // child that path does not prove dooms it rather than publishing
             // a window nobody can reach: retire the child and roll back
@@ -568,13 +558,13 @@ impl DesktopWindows {
                 self.rollback_attached_create(
                     ctx,
                     path,
-                    &mut pending,
+                    pending,
                     format!("spawned window child {child:?} is not the window at {path}"),
                 )
             }
             Ok(child) => {
                 let monitor = ctx.monitor(*child);
-                self.promote_attached_window(ctx, path, *child, monitor, &mut pending)
+                self.promote_attached_window(ctx, path, *child, monitor, pending)
             }
         };
         self.pending_host_effects.extend(effects);
@@ -586,7 +576,7 @@ impl DesktopWindows {
         path: &ErasedActorPath,
         child: ActorRef<WindowInstance>,
         monitor: ActorMonitorHandle,
-        pending: &mut PendingCreate,
+        pending: PendingCreate,
     ) -> Vec<WindowHostEffect> {
         let Some(state) = self.windows.get_mut(path) else {
             let error = format!("window {path} disappeared during attachment");
@@ -599,31 +589,54 @@ impl DesktopWindows {
         state.commands = Some(child.narrow::<WindowCommands>());
         self.shutdown_when_idle = false;
         let info = state.info(path);
-        if let Some(held) = pending.held.take() {
-            held.answer(ctx, &CreateWindowResult::Ok { window: info.clone() });
-        }
+        let settled = match pending.origin {
+            CreateOrigin::Boot => Some(boot_window_settled(&pending.spec.name, Ok(()))),
+            CreateOrigin::Requested(held) => {
+                held.answer(ctx, &CreateWindowResult::Ok { window: info.clone() });
+                None
+            }
+        };
         self.publish(ctx, path, &WindowOpened { window: info.clone() });
         if info.width != 0 && info.height != 0 {
             self.publish(ctx, path, &self.window_size(path, info.width, info.height));
         }
-        pending.boot_settled(Ok(())).into_iter().collect()
+        settled.into_iter().collect()
     }
 
     fn rollback_attached_create<A, M: ReplyMode>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         path: &ErasedActorPath,
-        pending: &mut PendingCreate,
+        pending: PendingCreate,
         error: String,
     ) -> Vec<WindowHostEffect> {
         self.remove_window(path);
         let mut effects = vec![WindowHostEffect::Closing { path: path.clone() }];
-        effects.extend(pending.boot_settled(Err(&error)));
-        if let Some(held) = pending.held.take() {
-            held.answer(ctx, &CreateWindowResult::Err { error });
-        }
-        effects.extend(self.failed_create_effects(pending.boot_window));
+        effects.extend(self.fail_create(ctx, pending, error));
         effects
+    }
+
+    /// Give a failed create's `error` to whoever asked for it, which
+    /// consumes the create: the boot window settles failed and asks for the
+    /// shutdown an application with no window takes, and a requested create
+    /// answers its caller.
+    fn fail_create<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        pending: PendingCreate,
+        error: String,
+    ) -> Vec<WindowHostEffect> {
+        match pending.origin {
+            CreateOrigin::Boot => {
+                let mut effects = vec![boot_window_settled(&pending.spec.name, Err(&error))];
+                effects.extend(self.failed_create_effects(true));
+                effects
+            }
+            CreateOrigin::Requested(held) => {
+                held.answer(ctx, &CreateWindowResult::Err { error });
+                self.failed_create_effects(false)
+            }
+        }
     }
 
     /// Fail a queued create before a native window could be staged.
@@ -636,12 +649,7 @@ impl DesktopWindows {
         let Some(pending) = self.pending_creates.remove(path) else {
             return Vec::new();
         };
-        let mut effects: Vec<_> = pending.boot_settled(Err(&error)).into_iter().collect();
-        if let Some(held) = pending.held {
-            held.answer(ctx, &CreateWindowResult::Err { error });
-        }
-        effects.extend(self.failed_create_effects(pending.boot_window));
-        effects
+        self.fail_create(ctx, pending, error)
     }
 
     /// Finish a close after the integration detached native resources.
@@ -995,24 +1003,23 @@ impl DesktopWindows {
         should_shutdown.then_some(WindowHostEffect::LastWindowClosed).into_iter().collect()
     }
 
-    fn queue_create(
-        &mut self,
-        spec: WindowSpec,
-        held: Option<Held<CreateWindowResult>>,
-        boot_window: bool,
-    ) -> Result<ErasedActorPath, (String, Option<Held<CreateWindowResult>>)> {
-        let path = match crate::window_name(&spec.name) {
-            Ok(name) => crate::window_path(&name),
-            Err(error) => return Err((error, held)),
-        };
-        if self.pending_creates.values().any(|pending| pending.spec.name == spec.name)
-            || self.windows.values().any(|window| window.name == spec.name)
-        {
-            return Err((format!("window name `{}` is already in use", spec.name), held));
+    /// The path a new window named `name` takes, or why it can take none:
+    /// the name is not a window name, or a pending or present window has it.
+    fn free_window_path(&self, name: &str) -> Result<ErasedActorPath, String> {
+        let path = crate::window_path(&crate::window_name(name)?);
+        let pending = self.pending_creates.values().any(|pending| pending.spec.name == name);
+        let present = self.windows.values().any(|window| window.name == name);
+        if pending || present {
+            return Err(format!("window name `{name}` is already in use"));
         }
-        self.pending_host_actions.push_back(WindowHostAction::Create { path: path.clone(), spec: spec.clone() });
-        self.pending_creates.insert(path.clone(), PendingCreate { spec, held, boot_window });
         Ok(path)
+    }
+
+    /// Reserve `path`, which [`Self::free_window_path`] answered for `spec`,
+    /// and queue the native create for the application's next host turn.
+    fn queue_create(&mut self, path: ErasedActorPath, spec: WindowSpec, origin: CreateOrigin) {
+        self.pending_host_actions.push_back(WindowHostAction::Create { path: path.clone(), spec: spec.clone() });
+        self.pending_creates.insert(path, PendingCreate { spec, origin });
     }
 
     fn queue_close(
@@ -1224,11 +1231,12 @@ mod tests {
 
     #[test]
     fn window_paths_name_the_named_children_and_actions_remain_ordered() {
-        let mut state = test_state();
-        assert!(state.queue_create(spec("first", "First"), None, false).is_ok());
-        assert!(state.queue_create(spec("second", "Second"), None, false).is_ok());
+        let mut rig = rig();
+        rig.push(&CreateWindow { spec: spec("first", "First") });
+        rig.push(&CreateWindow { spec: spec("second", "Second") });
+        rig.pump_desktop_until("both reservations", |state| state.pending_creates.len() == 2);
 
-        let (actions, _) = state.take_host_work();
+        let (actions, _) = rig.desktop_turn(|state, _ctx| state.take_host_work()).expect("the desktop manager is live");
         assert!(matches!(&actions[0], WindowHostAction::Create { path: created, .. } if *created == path("first")));
         assert!(matches!(&actions[1], WindowHostAction::Create { path: created, .. } if *created == path("second")));
     }
@@ -1247,26 +1255,31 @@ mod tests {
 
     #[test]
     fn duplicate_pending_and_live_names_are_rejected() {
-        let mut pending = test_state();
-        assert!(pending.queue_create(spec("tools", "Tools"), None, false).is_ok());
-        assert!(pending.queue_create(spec("tools", "Other title"), None, false).is_err());
+        let mut pending = rig();
+        let tools = path("tools");
+        pending.push(&CreateWindow { spec: spec("tools", "Tools") });
+        pending.pump_desktop_until("the create's reservation", |state| state.pending_creates.contains_key(&tools));
+        pending.send(&CreateWindow { spec: spec("tools", "Other title") });
+        assert!(matches!(pending.reply(), CreateWindowResult::Err { .. }), "a pending name is taken");
 
-        let mut live = test_state();
-        insert_window(&mut live, "tools", false);
-        assert!(live.queue_create(spec("tools", "Other title"), None, false).is_err());
-        assert!(live.pending_host_actions.is_empty());
+        let mut live = rig();
+        live.desktop_turn(|state, _ctx| insert_window(state, "tools", false)).expect("the desktop manager is live");
+        live.send(&CreateWindow { spec: spec("tools", "Other title") });
+        assert!(matches!(live.reply(), CreateWindowResult::Err { .. }), "a live name is taken");
+        assert_eq!(live.read_desktop(|state| state.pending_host_actions.is_empty()), Some(true));
     }
 
     #[test]
     fn distinct_valid_names_are_reserved_independently() {
-        let mut state = test_state();
-        assert!(state.queue_create(spec("main", "Game"), None, false).is_ok());
-        assert!(state.queue_create(spec("palette", "Tools"), None, false).is_ok());
+        let mut rig = rig();
+        rig.push(&CreateWindow { spec: spec("main", "Game") });
+        rig.push(&CreateWindow { spec: spec("palette", "Tools") });
+        rig.pump_desktop_until("both reservations", |state| state.pending_creates.len() == 2);
 
-        assert_eq!(
-            state.pending_creates.values().map(|pending| pending.spec.name.as_str()).collect::<BTreeSet<_>>(),
-            BTreeSet::from(["main", "palette"]),
-        );
+        let reserved = rig.read_desktop(|state| {
+            state.pending_creates.values().map(|pending| pending.spec.name.clone()).collect::<BTreeSet<_>>()
+        });
+        assert_eq!(reserved, Some(BTreeSet::from(["main".to_owned(), "palette".to_owned()])));
     }
 
     #[test]
