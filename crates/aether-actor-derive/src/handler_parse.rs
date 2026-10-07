@@ -1262,6 +1262,11 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, b
             // it trips `clippy::needless_pass_by_value` on the now-inherent
             // copy, as the trait-impl method never did.
             m.attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
+            // The hook returns the republish's result whether or not this
+            // actor's can fail (ADR-0249 §1), as `wire` above returns the
+            // birth's: one that only ever returns `Ok(())` trips
+            // `clippy::unnecessary_wraps` on the now-inherent copy.
+            m.attrs.push(syn::parse_quote!(#[allow(clippy::unnecessary_wraps)]));
         } else {
             continue;
         }
