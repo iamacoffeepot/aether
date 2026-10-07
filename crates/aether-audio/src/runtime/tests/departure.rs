@@ -2,6 +2,9 @@ use super::super::event::TrackStart;
 use super::*;
 use aether_actor::ErasedActorRef;
 
+/// 0.6 seconds at the 48 kHz test rate: longer than any release envelope.
+const RELEASE_TAIL_SAMPLES: usize = 28_800;
+
 fn sender(name: &str, registry: &Registry) -> ErasedActorRef {
     registered_ref(registry, name, noop_handler())
 }
@@ -67,9 +70,7 @@ fn departed_sender_voice_releases_while_other_sender_sustains() {
     assert!(synth.has_voice_with_pitch(60), "the releasing voice must still be present");
     assert!(synth.has_voice_with_pitch(72), "the survivor must keep sounding");
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let release_samples = (0.6 * TEST_RATE) as usize;
-    let mut tail = vec![0.0f32; release_samples];
+    let mut tail = vec![0.0f32; RELEASE_TAIL_SAMPLES];
     synth.fill(&mut tail, 1);
     assert_eq!(synth.voice_count(), 1, "the departed voice must retire, leaving the survivor");
     assert!(synth.has_voice_with_pitch(72), "the survivor must keep sounding");
@@ -156,9 +157,7 @@ fn departed_sender_gain_holds_through_tail_then_prunes() {
     assert_eq!(synth.voice_count(), 1, "the departed voice must still release");
     assert_eq!(synth.sender_gain_count(), 2, "the row must live while the voice still references it");
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let release_samples = (0.6 * TEST_RATE) as usize;
-    let mut rest = vec![0.0f32; release_samples];
+    let mut rest = vec![0.0f32; RELEASE_TAIL_SAMPLES];
     synth.fill(&mut rest, 1);
     assert_eq!(synth.voice_count(), 0, "the departed voice must retire");
     assert_eq!(synth.sender_gain_count(), 1, "the departed row must prune once nothing references it");
