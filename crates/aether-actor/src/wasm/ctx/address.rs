@@ -48,7 +48,7 @@ impl fmt::Display for ResolvePathError {
 
 impl Error for ResolvePathError {}
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Prove an [`ErasedActorPath`] that arrived in this component's config or in a
     /// payload, and hand back the proven reference (ADR-0230 §3). The guest
     /// twin of the native `NativeCtx::resolve_path`: the host expands and

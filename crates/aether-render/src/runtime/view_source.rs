@@ -48,9 +48,9 @@ impl RenderCapabilityState {
     /// request naming the source already followed keeps the hold
     /// and subscribes again, which a source answers with its current view;
     /// that is how a viewer rejoins a source that lost its subscribers.
-    pub(super) fn follow_view<A, M: ReplyMode>(
+    pub(super) fn follow_view<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: &ProtocolPath<ViewSource>,
     ) -> ViewFromResult {
         let source = match ctx.resolve(path) {

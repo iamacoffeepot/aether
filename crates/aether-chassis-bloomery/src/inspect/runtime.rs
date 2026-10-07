@@ -149,7 +149,12 @@ impl InspectState {
 
     /// Perform one `Artifact` job's step: send its reads or its query, or
     /// answer its held reply and drop the job.
-    fn perform_artifact<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, job: u64, step: artifact::Step) {
+    fn perform_artifact<M: ReplyMode, A, S>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        job: u64,
+        step: artifact::Step,
+    ) {
         match step {
             artifact::Step::Read(digests) => {
                 for digest in digests {
@@ -174,7 +179,7 @@ impl InspectState {
 
     /// Perform one `Events` job's step: send its page read or its query, or
     /// answer its held reply and drop the job.
-    fn perform_events<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, job: u64, step: events::Step) {
+    fn perform_events<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, job: u64, step: events::Step) {
         match step {
             events::Step::Read(page) => {
                 let _ = ctx.send_to_with_context(self.journal, &page, EventsTicket(job));

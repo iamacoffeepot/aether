@@ -34,10 +34,11 @@ use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor,
 /// dispatcher thread (so a bind failure answers `Err` at once), then stage
 /// the bound listener over the already-proven `consumer`. Its task
 /// completion registers the monitor, commits the supervisor entry, and
-/// answers `held` only after authoritative activation.
-fn bind_listener(
+/// answers `held` only after authoritative activation. It takes a ctx of any
+/// sender `S`, since `on_bind_self` states one and `on_bind` does not.
+fn bind_listener<S>(
     state: &mut TcpCapabilityState,
-    ctx: &mut NativeCtx<'_, TcpCapability>,
+    ctx: &mut NativeCtx<'_, TcpCapability, S>,
     held: Held<BindListenerResult>,
     addr: String,
     name: Option<String>,
@@ -82,10 +83,11 @@ fn bind_listener(
 /// The shared body of `on_connect` and `on_connect_self`: park the caller's
 /// held reply under a fresh connect id, then dial `addr` on a one-shot
 /// transport thread that wakes the cap with `ConnectReady`. The session it
-/// stages delivers to the already-proven `consumer`.
-fn dial<A>(
+/// stages delivers to the already-proven `consumer`. It takes a ctx of any
+/// sender `S`, since `on_connect_self` states one and `on_connect` does not.
+fn dial<A, S>(
     state: &mut TcpCapabilityState,
-    ctx: &mut NativeCtx<'_, A>,
+    ctx: &mut NativeCtx<'_, A, S>,
     held: Held<ConnectResult>,
     addr: String,
     name: Option<String>,
@@ -275,10 +277,10 @@ impl NativeActor for TcpCapability {
     /// Dial `mail.addr` with the sender as the session's consumer, as
     /// [`Self::on_connect`] does with an explicit consumer.
     ///
-    /// The `sender` parameter is the requirement (ADR-0231 §11): an actor
-    /// sends this kind only when it covers [`TcpConsumer`], and the engine
-    /// casts the sender before this handler runs, so nothing is dialed for a
-    /// sender that would warn-drop the session's frames or its close notice.
+    /// The ctx's sender is the requirement (ADR-0231 §11): an actor sends
+    /// this kind only when it covers [`TcpConsumer`], and the engine casts
+    /// the sender before this handler runs, so nothing is dialed for a sender
+    /// that would warn-drop the session's frames or its close notice.
     ///
     /// # Agent
     /// Reply: `ConnectResult`. A sender whose published rows do not handle
@@ -289,12 +291,12 @@ impl NativeActor for TcpCapability {
     #[handler::request]
     fn on_connect_self(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Self, TcpConsumer>,
         mail: ConnectSelf,
-        sender: ProtocolRef<TcpConsumer>,
     ) -> Pending<ConnectResult> {
         let (pending, held) = ctx.hold::<ConnectResult>();
-        dial(state, ctx, held, mail.addr, mail.name, Some(sender));
+        let consumer = ctx.sender();
+        dial(state, ctx, held, mail.addr, mail.name, Some(consumer));
         pending
     }
 
@@ -374,10 +376,10 @@ impl NativeActor for TcpCapability {
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr` whose consumer
     /// is the sender, as [`Self::on_bind`] does with an explicit consumer.
     ///
-    /// The `sender` parameter is the requirement (ADR-0231 §11): an actor
-    /// sends this kind only when it covers [`TcpConsumer`], and the engine
-    /// casts the sender before this handler runs, so nothing is bound for a
-    /// sender that would warn-drop its sessions' frames or close notices.
+    /// The ctx's sender is the requirement (ADR-0231 §11): an actor sends
+    /// this kind only when it covers [`TcpConsumer`], and the engine casts
+    /// the sender before this handler runs, so nothing is bound for a sender
+    /// that would warn-drop its sessions' frames or close notices.
     ///
     /// # Agent
     /// Reply: `BindListenerResult`. A sender whose published rows do not
@@ -388,12 +390,12 @@ impl NativeActor for TcpCapability {
     #[handler::request]
     fn on_bind_self(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, Self, TcpConsumer>,
         mail: BindListenerSelf,
-        sender: ProtocolRef<TcpConsumer>,
     ) -> Pending<BindListenerResult> {
         let (pending, held) = ctx.hold::<BindListenerResult>();
-        bind_listener(state, ctx, held, mail.addr, mail.name, Some(sender));
+        let consumer = ctx.sender();
+        bind_listener(state, ctx, held, mail.addr, mail.name, Some(consumer));
         pending
     }
 

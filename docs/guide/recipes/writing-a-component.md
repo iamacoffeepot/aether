@@ -64,8 +64,10 @@ aether_actor::export!(public = [Echo]);
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
-with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+with `depends(R)`. The ctx's type arguments are receiver, sender, mode: the actor first, the
+sender the handler requires second (`Anyone` when it states none), and the
+reply mode third (`WasmCtx<'_, Self, Anyone, Unchecked>`); spell
+`WasmCtx<'_, Erased>` for the untyped view.
 
 The contracts are visible in the types:
 

@@ -42,7 +42,7 @@ use crate::mail::{BoundaryMail, Source};
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// Reply to an explicit [`Source`] under an explicit `(root, parent)`
     /// lineage rather than the inbound's own sender / this ctx's in-flight
     /// chain. The ADR-0093 hold-until-resolve path reaches for this:
@@ -208,7 +208,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The ctx's own actor must cover what the target's handler requires of
     /// its sender (ADR-0231 §11): nothing for most handlers, and the protocol
-    /// `P` for one that takes `sender: ProtocolRef<P>`. An erased ctx names no
+    /// `P` for one whose ctx names `P` as its sender. An erased ctx names no
     /// actor, so it does not send such a kind:
     ///
     /// ```compile_fail,E0277
@@ -259,7 +259,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// and buffered push.
     ///
     /// ```
-    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Anyone, Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::Ping;
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -268,7 +268,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn detached(ctx: &mut NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
+    /// fn detached(ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
     ///     let _mail_id = ctx.send_detached_to(target, mail);
     /// }
     /// ```
@@ -345,7 +345,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]` (`A: DependsOn<R>`), and only for a kind `R`
     /// handles; the turbofish names only `R`. When `R`'s handler for the kind
-    /// takes `sender: ProtocolRef<P>`, it compiles only when this actor has a
+    /// names a protocol `P` as its sender, it compiles only when this actor has a
     /// handler for each of `P`'s kinds (`SentBy<A, R>`, ADR-0231 §11); the
     /// call site is the same line either way. It sends through the proof
     /// [`Self::actor_ref`] mints, so it lands exactly where the dependency's
@@ -566,7 +566,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// An unchecked protocol row is a valid relay target:
     ///
     /// ```
-    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Anyone, Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::Ping;
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -575,7 +575,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn forward(ctx: &NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
+    /// fn forward(ctx: &NativeCtx<'_, Erased, Anyone, Unchecked>, target: ProtocolRef<Pings>, mail: &Ping) {
     ///     ctx.forward_to(target, mail);
     /// }
     /// ```
@@ -583,7 +583,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// A kind outside the target's protocol is rejected at compile time:
     ///
     /// ```compile_fail,E0277
-    /// use aether_actor::{Erased, Unchecked, ProtocolRef, Undeclared, protocol};
+    /// use aether_actor::{Anyone, Erased, Unchecked, ProtocolRef, Undeclared, protocol};
     /// use aether_kinds::{Ping, Pong};
     /// use aether_substrate::actor::native::NativeCtx;
     ///
@@ -592,7 +592,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///     fn ping(mail: Ping) -> Undeclared;
     /// }
     ///
-    /// fn wrong(ctx: &NativeCtx<'_, Erased, Unchecked>, target: ProtocolRef<Pings>, mail: &Pong) {
+    /// fn wrong(ctx: &NativeCtx<'_, Erased, Anyone, Unchecked>, target: ProtocolRef<Pings>, mail: &Pong) {
     ///     ctx.forward_to(target, mail);
     /// }
     /// ```
@@ -629,7 +629,7 @@ fn refuse_engine_only(kind: KindId) -> bool {
 // `shutdown` / `monitor` are inherent methods on `NativeCtx` that reach into
 // the substrate-internal spawner + actor registry.
 
-impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> MailSender for NativeCtx<'_, A, S, M> {
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
@@ -643,7 +643,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
 // unchecked-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for NativeCtx<'_, A, Unchecked> {
+impl<A, S> OutboundReply for NativeCtx<'_, A, S, Unchecked> {
     type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher

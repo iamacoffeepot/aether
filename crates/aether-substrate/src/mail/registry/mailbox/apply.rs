@@ -24,7 +24,9 @@ use super::birth::{PendingBirth, RouteContinuation};
 use super::kinds::KindSlot;
 use super::publish::Publication;
 use super::route::{BirthSerial, RouteEndpoint, RouteLifecycle, RouteRecord};
-use super::staged::{commit_staged, parent_stands, staged_kind, staged_pending_token, staged_route};
+use super::staged::{
+    commit_staged, parent_stands, staged_kind, staged_pending_token, staged_publications, staged_route,
+};
 use super::{CapturedDisposition, Inner, Registry, SeizeCell};
 
 impl Registry {
@@ -79,10 +81,9 @@ impl Registry {
         let mut prepared_cancellations = HashSet::<(MailboxId, ActivationToken)>::new();
         let mut promotions = Vec::<(MailboxId, RouteEndpoint)>::new();
         // The publication table as this batch has staged it: cloned at the
-        // batch's first admitted publish, installed only once the whole batch
-        // commits (ADR-0241 §4).
-        #[cfg(feature = "wasm")]
-        let mut staged_publications = None;
+        // batch's first admitted publish or first native hold, installed only
+        // once the whole batch commits (ADR-0241 §4).
+        let mut staged_publications_table = None;
 
         for effect in batch.effects {
             match effect {
@@ -129,11 +130,9 @@ impl Registry {
                     // this batch has staged it, binds that namespace to the
                     // birth's module. It holds no native namespace.
                     if let Some((namespace, module)) = commit.guest_publication() {
-                        #[cfg(feature = "wasm")]
-                        let publications = staged_publications.as_ref().unwrap_or(&inner.publications);
-                        #[cfg(not(feature = "wasm"))]
-                        let publications = &inner.publications;
-                        if !publications.binds(namespace, module) {
+                        let binds =
+                            staged_publications(staged_publications_table.as_ref(), inner).binds(namespace, module);
+                        if !binds {
                             let namespace = namespace.to_owned();
                             drop(commit.reject_at_home(PreparedSpawnFailure::GuestNotPublished { namespace }));
                             return Err(RegistryEffectError::ActivationRejected);
@@ -141,15 +140,18 @@ impl Registry {
                     }
                     // ADR-0241 §3: the birth holds its namespace in the
                     // publication table as this batch has staged it, so a
-                    // second type sharing the namespace is refused.
+                    // second type sharing the namespace is refused, and a
+                    // refused batch leaves no hold behind: the staged table
+                    // is installed only when the batch commits.
                     if let Some((namespace, born)) = commit.native_type() {
-                        #[cfg(feature = "wasm")]
-                        let publications = staged_publications.as_mut().unwrap_or(&mut inner.publications);
-                        #[cfg(not(feature = "wasm"))]
-                        let publications = &mut inner.publications;
-                        if let Err(refusal) = publications.hold(namespace, born) {
-                            drop(commit.reject_at_home(PreparedSpawnFailure::NativeHold(refusal)));
-                            return Err(RegistryEffectError::ActivationRejected);
+                        let held =
+                            staged_publications(staged_publications_table.as_ref(), inner).held_by(namespace, born);
+                        if !held {
+                            let table = staged_publications_table.get_or_insert_with(|| inner.publications.clone());
+                            if let Err(refusal) = table.hold(namespace, born) {
+                                drop(commit.reject_at_home(PreparedSpawnFailure::NativeHold(refusal)));
+                                return Err(RegistryEffectError::ActivationRejected);
+                            }
                         }
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
@@ -494,7 +496,7 @@ impl Registry {
                 #[cfg(feature = "wasm")]
                 RegistryEffect::PublishModule(module) => {
                     let surface = ModuleSurface::of(&module);
-                    let table = staged_publications.as_ref().unwrap_or(&inner.publications);
+                    let table = staged_publications(staged_publications_table.as_ref(), inner);
                     let admitted = admit(
                         module.hash(),
                         &surface,
@@ -503,7 +505,10 @@ impl Registry {
                     )
                     .map_err(RegistryEffectError::Admission)?;
                     if admitted != Admitted::Unchanged {
-                        staged_publications.get_or_insert_with(|| inner.publications.clone()).publish(module, surface);
+                        staged_publications_table
+                            .get_or_insert_with(|| inner.publications.clone())
+                            .publish(module, surface);
+                        publication.addresses_dirty = true;
                     }
                     applied.push(RegistryApplied::Published);
                 }
@@ -512,12 +517,8 @@ impl Registry {
 
         inner.next_activation_token = next_activation_token;
         inner.next_birth_serial = next_birth_serial;
-        let mut continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
-        #[cfg(feature = "wasm")]
-        if let Some(publications) = staged_publications {
-            inner.publications = publications;
-            publication.addresses_dirty = true;
-        }
+        let mut continuations =
+            commit_staged(inner, staged_routes, staged_kinds, staged_pending, staged_publications_table);
         // The promoted route is Live now, so the mail parked behind its
         // `Starting` reservation continues to the endpoint the caller thread
         // just wired — in the order the owner observed it, ahead of anything

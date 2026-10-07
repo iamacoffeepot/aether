@@ -102,9 +102,9 @@ mod table {
                 /// Prove an explicit subscription's path live (ADR-0231 §3:
                 /// its decode already proved the path covers the stage) and
                 /// hold the proof, answering its key for the caller to watch.
-                pub fn subscribe<A, M: ReplyMode>(
+                pub fn subscribe<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     subscription: &LifecycleSubscription,
                 ) -> Result<ErasedActorRef, ResolveError> {
                     match subscription {
@@ -120,9 +120,9 @@ mod table {
                 /// with no live actor holds nothing to remove: a closed
                 /// subscriber already left every stage through its
                 /// `MonitorNotice`.
-                pub fn unsubscribe<A, M: ReplyMode>(
+                pub fn unsubscribe<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     subscription: &LifecycleSubscription,
                 ) {
                     match subscription {
@@ -138,9 +138,9 @@ mod table {
                 /// and hold it. `false` when `stage` is not a published stage
                 /// or the sender's published rows do not handle it silently or
                 /// manually, and nothing is held.
-                pub fn subscribe_sender<A, M: ReplyMode>(
+                pub fn subscribe_sender<A, S, M: ReplyMode>(
                     &mut self,
-                    ctx: &NativeCtx<'_, A, M>,
+                    ctx: &NativeCtx<'_, A, S, M>,
                     stage: KindId,
                     sender: ErasedActorRef,
                 ) -> bool {
@@ -181,8 +181,8 @@ mod table {
             /// counts each child against the advance's root (ADR-0080 §6).
             /// `tick` is what the `Tick` stage broadcasts; every other stage
             /// ignores it.
-            pub fn broadcast_to_subscribers<A, M: ReplyMode>(
-                ctx: &mut NativeCtx<'_, A, M>,
+            pub fn broadcast_to_subscribers<A, S, M: ReplyMode>(
+                ctx: &mut NativeCtx<'_, A, S, M>,
                 subscribers: &StageSubscribers,
                 stage: KindId,
                 tick: Tick,

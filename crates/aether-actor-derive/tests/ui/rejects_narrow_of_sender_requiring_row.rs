@@ -10,8 +10,7 @@
 //! refused the same way.
 
 use aether_actor::{
-    ActorInitError, ActorPath, ActorRef, HandsOff, PathRefused, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor,
-    protocol,
+    ActorInitError, ActorPath, ActorRef, HandsOff, PathRefused, WasmActor, WasmCtx, WasmInitCtx, actor, protocol,
 };
 
 #[aether_data::kind(name = "test.narrow_sender.take_focus", copy)]
@@ -59,13 +58,13 @@ impl WasmActor for Window {
     }
 
     #[handler::tell]
-    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _mail: TakeFocus, sender: ProtocolRef<FocusHolder>) {
-        ctx.send_to(sender, &FocusLost);
+    fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: TakeFocus) {
+        ctx.send_to(ctx.sender(), &FocusLost);
     }
 
     #[handler::request]
-    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_>, _mail: DialSelf, sender: ProtocolRef<FocusHolder>) -> Dialed {
-        ctx.send_to(sender, &FocusLost);
+    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_, Self, FocusHolder>, _mail: DialSelf) -> Dialed {
+        ctx.send_to(ctx.sender(), &FocusLost);
         Dialed::Ok
     }
 }

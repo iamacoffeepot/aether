@@ -136,7 +136,7 @@ use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, IntentParameters, allow_context_by_value, attr_is_fallback,
     attr_is_handler, check_intent_signature, classify_handler_reply, erase_unless_ctx_names_actor,
     extract_handler_kind_type, extract_native_actor_handler_kind, fill_ctx_actor, handler_cfgs, parse_handler_args,
-    parse_handler_class, reject_departed_handler, reject_duplicate_handler_kinds, reject_sender_parameter, silent_call,
+    parse_handler_class, reject_ctx_sender, reject_departed_handler, reject_duplicate_handler_kinds, silent_call,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{
@@ -165,10 +165,10 @@ impl SetTransport {
     fn dispatch_ctx(self) -> TokenStream2 {
         match self {
             Self::Wasm => quote! {
-                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Unchecked>
+                ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>
             },
             Self::Native => quote! {
-                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Unchecked>
+                ::aether_substrate::actor::native::NativeCtx<'_, Self, ::aether_actor::Anyone, ::aether_actor::Unchecked>
             },
         }
     }
@@ -377,10 +377,10 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // ADR-0231 §11: a set handler states nothing about its sender. The
         // requirement belongs to one actor's row, and a set's rows are pasted
         // onto every adopter through a bridge that carries no protocol path.
-        reject_sender_parameter(
+        reject_ctx_sender(
             &f.sig,
-            "a `#[handler_set]` handler",
-            "the set's rows are pasted onto every adopter, and the requirement is one actor's own",
+            "a `#[handler_set]` member",
+            "a set's rows are pasted onto every adopter, and a set states nothing about its sender",
         )?;
         let IntentParameters { response_context, .. } =
             intent.map(|i| check_intent_signature(i, &reply, &f.sig, false)).transpose()?.unwrap_or_default();

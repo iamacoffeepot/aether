@@ -365,8 +365,10 @@ impl WasmActor for Panel { /* … */ }
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 `WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
-with `depends(R)`. The actor is the first parameter, the reply mode the second
-(`WasmCtx<'_, Self, Unchecked>`); spell `WasmCtx<'_, Erased>` for the untyped view.
+with `depends(R)`. The ctx's type arguments are receiver, sender, mode: the actor first, the
+sender the handler requires second (`Anyone` when it states none), and the
+reply mode third (`WasmCtx<'_, Self, Anyone, Unchecked>`); spell
+`WasmCtx<'_, Erased>` for the untyped view.
 
 The one bound `RootManager: Spawns<Panel>` carries both proofs the spawn needs.
 `spawns(..)` is the rebuild manifest: every `export!` that lists the spawner
@@ -741,25 +743,28 @@ import, merge, and publish sequence through the two kind-checked references
 ### Requiring something of the sender
 
 A guest that will mail its sender back states what the sender must handle on
-the handler that takes the first mail, as a fourth parameter
+the handler that takes the first mail, as its ctx's sender, the second type
+argument
 ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
 §11):
 
 ```rust
 #[handler::request]
-fn on_dial(&mut self, ctx: &mut WasmCtx<'_>, dial: Dial, sender: ProtocolRef<Consumer>) -> Dialed {
-    self.consumers.push(sender);
-    ctx.send_to(sender, &Ready { tag: dial.tag });
+fn on_dial(&mut self, ctx: &mut WasmCtx<'_, Self, Consumer>, dial: Dial) -> Dialed {
+    let consumer = ctx.sender(); // ProtocolRef<Consumer>
+    self.consumers.push(consumer);
+    ctx.send_to(consumer, &Ready { tag: dial.tag });
     Dialed::Ok
 }
 ```
 
-`#[handler::tell]` and `#[handler::request]` take it. A component that sends
+`#[handler::tell]` and `#[handler::request]` state one. A component that sends
 `Dial` writes the plain `ctx.send::<Dialer>(&Dial { .. })`, which builds only
 when the component has a handler for each of `Consumer`'s kinds. The engine
-casts the sender to `Consumer` before `on_dial` runs and hands it the proven
-reference, so the handler holds a `ProtocolRef<Consumer>` without calling
-`ctx.cast`. A sender that reaches the guest another way and does not cover the
+casts the sender to `Consumer` before `on_dial` runs, so `ctx.sender()` there
+is a `ProtocolRef<Consumer>`, with no `Option` and no `ctx.cast`. A handler
+that states nothing keeps `Anyone`, whose `ctx.sender()` is an
+`Option<ErasedActorRef>`. A sender that reaches the guest another way and does not cover the
 protocol never runs the handler: a request is answered with the reply's
 `From<PathRefused>`, naming the sender, and a tell is refused, logged in the
 guest's log, and reported to a caller relayed through `aether.rpc.server`.

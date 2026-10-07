@@ -23,20 +23,19 @@
 //! [`MailboxId::CHASSIS_MAILBOX_ID`] through the
 //! registry's [`SettlementRegistry::fire_settled`] hook.
 //!
-//! ADR-0080 §6 framing: settlement is eventually-consistent, not
-//! transactional. Two races are handled here:
+//! Settlement is exact under the hold contract (ADR-0080 §6 resolution),
+//! and the registry handles two orderings:
 //!
 //! - **Subscribe-after-fire.** A gate may subscribe to a root that
 //!   already settled (the `Finished` event landed before the gate
 //!   site got around to subscribing). The registry tracks
 //!   already-fired roots in a small `HashSet`; subscribing to one
 //!   pre-fires the receiver immediately so the gate doesn't hang.
-//! - **Duplicate `fire_settled`.** Per ADR §6, settlement is a hint
-//!   — a root may report settled multiple times under retries or
-//!   late-arriving `Finished` events. The registry's `fire_settled`
-//!   is idempotent: subsequent calls for the same root after the
-//!   subscribers have drained are no-ops (the `HashSet` hit short-
-//!   circuits).
+//! - **Duplicate `fire_settled`.** A repeated `fire_settled` for a
+//!   recorded root wakes no one twice: subsequent calls for the same
+//!   root after the subscribers have drained are no-ops (the `HashSet`
+//!   hit short-circuits). A root fires twice only when a handler
+//!   breaks the hold contract.
 //!
 //! The registry is striped into independent mutex cells keyed by the
 //! root's correlation id, and each cell's `settled` set is bounded

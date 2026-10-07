@@ -71,7 +71,7 @@ impl NativeActor for AliasWatcher {
 impl Dispatch<Self> for AliasWatcher {
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -209,7 +209,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     impl Dispatch<Self> for Host {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

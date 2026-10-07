@@ -1,11 +1,11 @@
-//! ADR-0231 §11: a request whose handler takes `sender: ProtocolRef<P>` is
+//! ADR-0231 §11: a request whose ctx names a protocol `P` as its sender is
 //! answered by the engine when its sender does not cover `P`, with the reply
 //! built from a `PathRefused` naming the sender. A reply that is not
 //! `From<PathRefused>` fails to compile at the handler's return type; without
 //! the bound a refused request would be left unanswered and its caller would
 //! wait on a reply that never comes.
 
-use aether_actor::{ActorInitError, ProtocolRef, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
 
 #[aether_data::kind(name = "test.sender_reply.dial_self", copy)]
 struct DialSelf;
@@ -32,8 +32,8 @@ impl WasmActor for Dialer {
     }
 
     #[handler::request]
-    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_>, _mail: DialSelf, sender: ProtocolRef<Consumer>) -> Dialed {
-        ctx.send_to(sender, &Closed);
+    fn on_dial_self(&mut self, ctx: &mut WasmCtx<'_, Self, Consumer>, _mail: DialSelf) -> Dialed {
+        ctx.send_to(ctx.sender(), &Closed);
         Dialed
     }
 }

@@ -1042,16 +1042,17 @@ pub trait SenderGateGrantee {
     fn granted(mail: SenderGateGranted);
 }
 
-/// Issue 7532: a tell whose handler takes `sender: ProtocolRef<SenderGateGrantee>`.
-/// A gate that runs it mails the sender a [`SenderGateGranted`] carrying `tag`.
+/// Issue 7532: a tell whose handler names [`SenderGateGrantee`] as its ctx's
+/// sender. A gate that runs it mails the sender a [`SenderGateGranted`]
+/// carrying `tag`.
 #[aether_data::kind(name = "aether.test_fixtures.sender_gate.take", copy)]
 pub struct SenderGateTake {
     pub tag: u32,
 }
 
-/// Issue 7532: a request whose handler takes
-/// `sender: ProtocolRef<SenderGateGrantee>`. A gate that runs it mails the sender a
-/// [`SenderGateGranted`] carrying `tag` and answers [`SenderGateDialed::Ok`].
+/// Issue 7532: a request whose handler names [`SenderGateGrantee`] as its
+/// ctx's sender. A gate that runs it mails the sender a [`SenderGateGranted`]
+/// carrying `tag` and answers [`SenderGateDialed::Ok`].
 #[aether_data::kind(name = "aether.test_fixtures.sender_gate.dial", copy)]
 pub struct SenderGateDial {
     pub tag: u32,

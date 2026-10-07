@@ -363,9 +363,9 @@ impl RenderCapabilityState {
     /// actor's own: the first attachment installs the device, which answers
     /// every request that was waiting for one.
     #[cfg(feature = "desktop")]
-    pub fn attach_window<M: ReplyMode, A>(
+    pub fn attach_window<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: ErasedActorPath,
         window: Arc<Window>,
         present: SurfacePresent,
@@ -422,7 +422,11 @@ impl RenderCapabilityState {
     /// `ctx` is the render actor's own, which answers the failed capture's
     /// held reply.
     #[cfg(feature = "desktop")]
-    pub fn detach_window<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, path: &ErasedActorPath) -> bool {
+    pub fn detach_window<M: ReplyMode, A, S>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        path: &ErasedActorPath,
+    ) -> bool {
         let removed = self.targets.detach(path).is_some();
         if removed {
             self.fail_capture_for_detached_window(ctx, path);
@@ -431,9 +435,9 @@ impl RenderCapabilityState {
     }
 
     #[cfg(feature = "desktop")]
-    fn fail_capture_for_detached_window<M: ReplyMode, A>(
+    fn fail_capture_for_detached_window<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: &ErasedActorPath,
     ) {
         if self.pending_capture.as_ref().is_some_and(|pending| pending.window.as_ref() == Some(path)) {
@@ -471,9 +475,9 @@ impl RenderCapabilityState {
     /// resolve the similarity reference, and dispatch the pre-mails with
     /// their settlement bridged back here. `Err` is the message the caller
     /// is answered with; nothing has moved when it returns one.
-    fn accept_capture<M: ReplyMode>(
+    fn accept_capture<S, M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, RenderCapability, M>,
+        ctx: &NativeCtx<'_, RenderCapability, S, M>,
         mail: CaptureFrame,
     ) -> Result<AcceptedCapture, String> {
         self.device_recovery.refresh();
@@ -530,9 +534,9 @@ impl RenderCapabilityState {
     /// Publish the first render device, then answer every request that was
     /// waiting for one, in arrival order, each with the answer it gets now.
     /// `ctx` is the render actor's own, which answers the held replies.
-    fn install_first_device<M: ReplyMode, A>(
+    fn install_first_device<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         gpu: RenderGpu,
         wire_pipeline: Option<wgpu::RenderPipeline>,
     ) {
@@ -582,7 +586,7 @@ impl RenderCapabilityState {
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
     /// `attach_window`, never by a frame or a shared handle. `ctx` is the
     /// render actor's own, handed to the install.
-    fn ensure_offscreen_gpu_booted<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) {
+    fn ensure_offscreen_gpu_booted<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) {
         if !self.awaits_first_device() {
             return;
         }
@@ -666,7 +670,7 @@ impl RenderCapabilityState {
     /// canonical desktop target map are built off to the side; registry
     /// realizations are then switched in the same actor-owned commit. A
     /// failed device or surface acquisition is terminal.
-    fn recover_gpu_if_needed<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>) -> Result<(), String> {
+    fn recover_gpu_if_needed<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
             return Err(error);
@@ -705,9 +709,9 @@ impl RenderCapabilityState {
         Ok(())
     }
 
-    fn finish_failed_replacement<M: ReplyMode, A>(
+    fn finish_failed_replacement<M: ReplyMode, A, S>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         ticket: device::ReplacementTicket,
         reason: String,
     ) {
@@ -740,7 +744,7 @@ impl RenderCapabilityState {
         true
     }
 
-    fn fail_pending_capture_for_device<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, error: String) {
+    fn fail_pending_capture_for_device<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, error: String) {
         let Some(pending) = self.pending_capture.take() else {
             return;
         };
@@ -907,7 +911,7 @@ impl RenderCapabilityState {
         Ok(capture_meta)
     }
 
-    fn complete_capture<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, meta: CaptureMeta) {
+    fn complete_capture<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>, meta: CaptureMeta) {
         let pending = self.pending_capture.take().expect("capture metadata requires a pending capture");
         for item in pending.after_mails {
             let _ = ctx.deliver_detached(item);
@@ -959,8 +963,8 @@ fn discard_replay_cache<T>(last: &mut Vec<T>) {
 
 /// The canonical path of the live actor `window` names, or the capture error
 /// naming `window` when it does not prove.
-fn canonical_window<M: ReplyMode, A>(
-    ctx: &NativeCtx<'_, A, M>,
+fn canonical_window<M: ReplyMode, A, S>(
+    ctx: &NativeCtx<'_, A, S, M>,
     window: &ErasedActorPath,
 ) -> Result<ErasedActorPath, String> {
     ctx.resolve_path(window)

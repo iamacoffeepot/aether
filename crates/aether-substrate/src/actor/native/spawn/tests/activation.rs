@@ -17,7 +17,7 @@ use crate::config::{RegistryQueueCapacities, SettlementConfig};
 use crate::mail::registry::effect::{
     ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
 };
-use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, noop_handler};
+use crate::mail::registry::{NativeHoldRefusal, RegistryOwnerLease, RouteRelayLease, noop_handler};
 use crate::mail::{Mail, MailId};
 use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::lifecycle::{FatalAbortRecord, PanicAborter};
@@ -25,9 +25,9 @@ use crate::scheduler::WakeSink;
 use crate::testing::{await_event, await_signal, boot_authority};
 
 use super::support::{
-    ActivationClose, ActivationConfig, ActivationEvent, ActivationPoke, ActivationProbe, activation_fixture,
-    activation_parent, activation_sink, await_spawn_done, finalized_probe, prepared_probe,
-    prepared_probe_with_lifecycle_target,
+    ActivationClose, ActivationConfig, ActivationEvent, ActivationPoke, ActivationProbe, SharedFirst, SharedSecond,
+    activation_fixture, activation_parent, activation_sink, await_spawn_done, await_spawn_outcome, finalized_probe,
+    finalized_shared, prepared_probe, prepared_probe_with_lifecycle_target,
 };
 
 #[test]
@@ -179,6 +179,63 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
         drop(parent.reserve_child(key).expect("transactional rejection releases every parent key"));
     }
 
+    drop(owner);
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
+// Catches: a refused batch leaving the native namespace hold it took in the
+// committed publication table, so a type that was never born blocks every
+// other type sharing its namespace; and a fix that stops installing the hold
+// when a batch commits, so a second type is admitted beside the first.
+#[test]
+fn a_refused_batch_leaves_its_native_namespace_unheld() {
+    let (spawner, registry, mailer, pool) = activation_fixture();
+    let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let (parent, wakes) = activation_parent(&registry, &mailer, "test.activation.shared-parent");
+
+    let (held, held_dispatch) = finalized_shared::<SharedFirst>(&spawner, &parent, "held", 1);
+    let (occupied, occupied_dispatch) = finalized_shared::<SharedFirst>(&spawner, &parent, "occupied", 2);
+    registry
+        .try_register_inbox_with_id(&boot_authority(), occupied.id, occupied.canonical_name.to_string(), noop_handler())
+        .unwrap();
+    let refused = registry
+        .submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(held), RegistryEffect::PreparedSpawn(occupied)]))
+        .unwrap();
+    owner.run_once();
+    assert!(matches!(refused.wait(), Err(RegistryEffectError::Name(_))));
+    drop(await_spawn_outcome::<SharedFirst>(&parent, &wakes, held_dispatch));
+    drop(await_spawn_outcome::<SharedFirst>(&parent, &wakes, occupied_dispatch));
+
+    let (second, second_dispatch) = finalized_shared::<SharedSecond>(&spawner, &parent, "second", 3);
+    let admitted = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(second)])).unwrap();
+    owner.run_once();
+    let applied = admitted.wait().expect("the refused batch left the namespace unheld for the second type");
+    assert!(matches!(applied.as_slice(), [RegistryApplied::Starting { .. }]));
+    let second_done = await_spawn_outcome::<SharedSecond>(&parent, &wakes, second_dispatch);
+    assert!(second_done.output().result.is_ok());
+    drop(second_done);
+
+    let (third, third_dispatch) = finalized_shared::<SharedFirst>(&spawner, &parent, "third", 4);
+    let held_by_other = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(third)])).unwrap();
+    owner.run_once();
+    assert!(matches!(held_by_other.wait(), Err(RegistryEffectError::ActivationRejected)));
+    let third_done = await_spawn_outcome::<SharedFirst>(&parent, &wakes, third_dispatch);
+    assert!(matches!(third_done.output().result, Err(SpawnError::NativeHold(NativeHoldRefusal::HeldByOther { .. }))));
+    drop(third_done);
+
+    spawner.shutdown_instanced(&TeardownGate {
+        round_budget: frame_loop::DRAIN_BUDGET,
+        cumulative_cap: SettlementConfig::from_env().to_cap(),
+        abort_record: &FatalAbortRecord::new(),
+        aborter: &PanicAborter,
+    });
     drop(owner);
     assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
 }

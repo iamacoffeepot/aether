@@ -22,8 +22,9 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use aether_actor::{
-    ActorInitError, ActorPath, Departed, Erased, Held, NoContext, OutboundReply, Pending, PriorState, ProtocolRef,
-    ReplyHandle, Subname, Unchecked, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WatchId, WireCtx, actor,
+    ActorInitError, ActorPath, Anyone, Departed, Erased, Held, NoContext, OutboundReply, Pending, PriorState,
+    ProtocolRef, ReplyHandle, Subname, Unchecked, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WatchId, WireCtx,
+    actor,
 };
 use aether_data::LoadName;
 use aether_test_fixtures_kinds::{
@@ -59,14 +60,14 @@ impl WasmActor for ReplyHolder {
     }
 
     #[handler::unchecked(reason = "test: parks the reply target for a later release")]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Unchecked>, request: CarriedRequest) {
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, request: CarriedRequest) {
         if let Some(handle) = ctx.reply_target() {
             self.parked.push((handle, request.tag));
         }
     }
 
     #[handler::unchecked(reason = "test: answers parked requests from another handler")]
-    fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Unchecked>, _release: ReleaseCarried) {
+    fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _release: ReleaseCarried) {
         for (handle, tag) in self.parked.drain(..) {
             ctx.reply_to(handle, &CarriedRequestResult { tag });
         }

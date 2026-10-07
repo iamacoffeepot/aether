@@ -5,6 +5,7 @@
 // as any other architectural change.
 
 use core::str::from_utf8;
+use std::borrow::Cow;
 
 use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
 use aether_codec::frame::max_frame_size;
@@ -537,17 +538,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         caller.data_mut().init_failure = Some(msg);
     })?;
 
-    // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
+    // ADR-0081 §7: `log_event_p32` dispatches a guest `tracing::*` event
     // on the host side. `ForwardingSubscriber::event` calls this (via the
     // installed log sink) per event
     // (no buffer, no flush hop — the pre-ADR-0081 `LogBatch` route
-    // retired alongside `LogCapability`). The host re-emits via
-    // `emit_host_event` on the trampoline's dispatcher thread, where
-    // the `ActorAwareLayer` is already stamped against the
-    // trampoline's `ActorSlots` and lands the entry in the
-    // trampoline's `ActorLogRing`. Bytes are copied out of guest
-    // memory before the call returns; OOB or missing-memory drops
-    // silently.
+    // retired alongside `LogCapability`). The host checks the level
+    // before reading guest memory, then dispatches via
+    // `emit_host_event` on the trampoline's dispatcher thread: the
+    // filter and the stderr layer see the event, and the
+    // `ActorAwareLayer`, already stamped against the trampoline's
+    // `ActorSlots`, lands the entry in the trampoline's
+    // `ActorLogRing`. Text is borrowed from guest memory for the call;
+    // OOB or missing-memory drops silently.
     //
     // HOST_FN_OK: ADR-0081 §7 — log emission is intentionally a host
     // fn, not a mail sink. The mail surface is the *query* path
@@ -565,22 +567,25 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
+            if !log_install::guest_level_enabled(level) {
+                return;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return;
             };
             let data = memory.data(&caller);
-            let copy = |ptr: u32, len: u32| -> Option<String> {
+            let text = |ptr: u32, len: u32| -> Option<Cow<'_, str>> {
                 let start = ptr as usize;
                 let end = start.checked_add(len as usize)?;
                 if end > data.len() {
                     return None;
                 }
-                Some(String::from_utf8_lossy(&data[start..end]).into_owned())
+                Some(String::from_utf8_lossy(&data[start..end]))
             };
-            let Some(target) = copy(target_ptr, target_len) else {
+            let Some(target) = text(target_ptr, target_len) else {
                 return;
             };
-            let Some(message) = copy(message_ptr, message_len) else {
+            let Some(message) = text(message_ptr, message_len) else {
                 return;
             };
             log_install::emit_host_event(level, &target, &message);
@@ -816,7 +821,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // apart.
     //
     // Its one caller is a guest dispatch arm that refuses a sender its
-    // handler's `sender: ProtocolRef<P>` requirement does not admit. The arm
+    // handler's ctx sender requirement does not admit. The arm
     // names that sender in the error it logs and in the `PathRefused` a
     // request's reply is built from, inside the same dispatch, before the
     // handler would have run, so no mail can serve the read. No guest ctx

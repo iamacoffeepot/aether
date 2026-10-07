@@ -3,7 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
-use aether_actor::{ActorRef, Addressable, OutboundReply, Unchecked};
+use aether_actor::{ActorRef, Addressable, Anyone, OutboundReply, Unchecked};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, ErasedActorPath, Source, Uuid};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -89,13 +89,13 @@ impl NativeActor for UncheckedEngineRoute {
     }
 
     #[handler::unchecked(reason = "test: parks the forwarded call for a later completion")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: crate::ForwardEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _mail: crate::ForwardEnvelope) {
         self.pending.push_back(ctx.reply_target());
         self.forwards.send(()).expect("forward observer stays live");
     }
 
     #[handler::unchecked(reason = "test: completes a parked call from another handler")]
-    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: CompleteEngineRouteForTest) {
+    fn on_complete(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, mail: CompleteEngineRouteForTest) {
         let target = self.pending.pop_front().expect("a forwarded call is pending");
         ctx.reply_to(target, &EngineRouteReplyForTest { value: mail.value });
         ctx.reply_to(target, &crate::CallSettled::Ok);

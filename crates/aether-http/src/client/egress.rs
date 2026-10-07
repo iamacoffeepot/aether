@@ -107,9 +107,9 @@ impl<R: HeldReply + Send + 'static> PerSenderEgress<R> {
     /// # Panics
     /// Takes this dispatch's one [`NativeCtx::hold`], so a handler that
     /// already holds a reply panics.
-    pub fn submit<F, A, M>(
+    pub fn submit<F, A, S, M>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         sender: Option<ErasedActorRef>,
         work: F,
     ) -> Pending<R>

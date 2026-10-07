@@ -146,7 +146,11 @@ pub trait WasmDispatch<S> {
     /// Returns the dispatch result code the `receive` FFI shim relays.
     /// ADR-0112: the seam carries the most-permissive [`Unchecked`](crate::Unchecked)
     /// view; the synthesized dispatcher downgrades per handler class.
-    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>) -> u32;
+    fn dispatch(
+        state: &mut S,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+        mail: crate::Mail<'_>,
+    ) -> u32;
 }
 
 // Bare `Actor` collides with `model::Actor`; the `Wasm` prefix is the deliberate native-vs-wasm disambiguator.
@@ -390,8 +394,11 @@ pub trait ErasedWasmActor {
     /// ADR-0112: the object-safe seam carries the most-permissive
     /// [`Unchecked`](crate::Unchecked) view; the synthesized dispatcher
     /// downgrades per handler class.
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>, mail: crate::Mail<'_>)
-    -> u32;
+    fn erased_dispatch(
+        &mut self,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+        mail: crate::Mail<'_>,
+    ) -> u32;
 
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire). The synthesized
     /// impl upgrades the carried erased ctx to the actor, whose lifecycle ctx
@@ -400,11 +407,14 @@ pub trait ErasedWasmActor {
     ///
     /// # Errors
     /// The error the actor's `wire` returned.
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>) -> Result<(), ActorInitError>;
+    fn erased_wire(
+        &mut self,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
+    ) -> Result<(), ActorInitError>;
 
     /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire), upgrading
     /// the ctx the same way as [`Self::erased_wire`].
-    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>);
+    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
@@ -413,7 +423,7 @@ pub trait ErasedWasmActor {
     /// as [`Self::erased_wire`].
     fn erased_on_rehydrate(
         &mut self,
-        ctx: &mut WasmCtx<'_, crate::Erased, crate::Unchecked>,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Anyone, crate::Unchecked>,
         prior: crate::PriorState<'_>,
     );
 }

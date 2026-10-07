@@ -17,7 +17,7 @@ mod slot;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, ErasedActorRef, ProtocolRef, ReplyMode, Single};
+use aether_actor::{ActorRef, Anyone, ErasedActorRef, ProtocolRef, ReplyMode, Single};
 use aether_data::ErasedActorPath;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -441,7 +441,7 @@ impl DesktopWindows {
         &mut self,
         path: &ErasedActorPath,
         attachment: Result<(), String>,
-        ctx: &mut NativeCtx<'_, WindowCapability, Single>,
+        ctx: &mut NativeCtx<'_, WindowCapability, Anyone, Single>,
     ) -> Vec<WindowHostEffect> {
         let Some(mut pending) = self.pending_creates.remove(path) else {
             return Vec::new();
@@ -564,9 +564,9 @@ impl DesktopWindows {
         Vec::new()
     }
 
-    fn rollback_attached_create<A, M: ReplyMode>(
+    fn rollback_attached_create<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: &ErasedActorPath,
         pending: &mut PendingCreate,
         error: String,
@@ -581,9 +581,9 @@ impl DesktopWindows {
     }
 
     /// Fail a queued create before a native window could be staged.
-    pub fn fail_window_creation<A, M: ReplyMode>(
+    pub fn fail_window_creation<A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         path: &ErasedActorPath,
         error: String,
     ) -> Vec<WindowHostEffect> {
@@ -600,7 +600,7 @@ impl DesktopWindows {
     pub fn finish_window_close<A>(
         &mut self,
         path: &ErasedActorPath,
-        ctx: &mut NativeCtx<'_, A, Single>,
+        ctx: &mut NativeCtx<'_, A, Anyone, Single>,
     ) -> Vec<WindowHostEffect> {
         let close_held = self.windows.get_mut(path).and_then(|state| state.close_held.take());
         let existed = self.remove_window(path);
@@ -644,7 +644,7 @@ impl DesktopWindows {
         path: &ErasedActorPath,
         presentation: WindowPresentation,
         outcome: Result<(), String>,
-        ctx: &mut NativeCtx<'_, A, Single>,
+        ctx: &mut NativeCtx<'_, A, Anyone, Single>,
     ) {
         let Some(held) = self.presentation_helds.pop_front() else {
             return;
@@ -749,7 +749,7 @@ impl DesktopWindows {
     /// a predefined Quit, another library's menu — resolves to no window and
     /// is dropped rather than attributed to whichever window happens to parse
     /// out of it.
-    pub fn menu_activated<A>(&mut self, raw: &str, ctx: &mut NativeCtx<'_, A, Single>) {
+    pub fn menu_activated<A>(&mut self, raw: &str, ctx: &mut NativeCtx<'_, A, Anyone, Single>) {
         let Some((window, item)) = parse_menu_item_id(raw) else {
             return;
         };
@@ -762,7 +762,12 @@ impl DesktopWindows {
     /// Translate one native window event and publish typed input directly to
     /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
-    pub fn window_event<A>(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_, A, Single>) {
+    pub fn window_event<A>(
+        &mut self,
+        winit_id: WinitWindowId,
+        event: WindowEvent,
+        ctx: &mut NativeCtx<'_, A, Anyone, Single>,
+    ) {
         let Some(path) = self.winit_windows.get(&winit_id).cloned() else {
             return;
         };
@@ -1034,7 +1039,12 @@ impl DesktopWindows {
         WindowSize { window: path.clone(), width, height, scale_factor }
     }
 
-    fn publish<K: Published, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: &ErasedActorPath, event: &K) {
+    fn publish<K: Published, A>(
+        &self,
+        ctx: &mut NativeCtx<'_, A, Anyone, Single>,
+        window: &ErasedActorPath,
+        event: &K,
+    ) {
         ctx.fanout(self.subscribers.recipients::<K>(window), event);
     }
 }

@@ -149,7 +149,7 @@ impl Dispatch<Self> for CommitChild {
 
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {
@@ -254,7 +254,7 @@ impl Dispatch<Self> for CommitParent {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -302,7 +302,11 @@ impl CommitParent {
     /// draws from the spawner's monotonic sequence, so bursts never collide
     /// with each other and a name conflict cannot be mistaken for owner
     /// backpressure.
-    fn stage_burst(&mut self, ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>, count: u32) {
+    fn stage_burst(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
+        count: u32,
+    ) {
         for _ in 0..count {
             match ctx.spawn_child::<CommitChild>(Subname::Counter, (), ()).stage() {
                 Ok(_) => {

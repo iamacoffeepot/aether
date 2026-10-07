@@ -68,7 +68,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     impl Dispatch<Self> for ProbeCap {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -169,7 +169,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     impl Dispatch<Self> for LocalProbe {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -246,7 +246,7 @@ macro_rules! counting_cap {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 state: &mut Self,
-                _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+                _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
                 kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {

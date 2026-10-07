@@ -140,7 +140,7 @@ impl Dispatch<Self> for Relay {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, Self, aether_substrate::Unchecked>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Anyone, aether_substrate::Unchecked>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {

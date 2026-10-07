@@ -82,7 +82,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Grandchild {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -140,7 +140,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Parent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -291,7 +291,7 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
     impl Dispatch<Self> for NamedReturn {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -349,7 +349,7 @@ impl NativeActor for KeyedUnit {
 impl Dispatch<Self> for KeyedUnit {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

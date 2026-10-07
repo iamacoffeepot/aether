@@ -25,14 +25,14 @@ error[E0277]: `WindowCapability` does not publish `aether_kinds::Tick`
              Publishes<aether_window::WindowFocus>
              Publishes<aether_window::WindowMenuActivated>
              Publishes<aether_window::WindowOpened>
-note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/subscribe.rs
    |
    |     pub fn subscribe<P, K: Kind>(&mut self)
    |            --------- required by a bound in this associated function
    |     where
    |         P: Publishes<K> + Singleton + CallerAddressable,
-   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`
 
 error[E0277]: `LifecycleCapability` does not publish `aether_kinds::Key`
   --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:28:21
@@ -53,11 +53,11 @@ error[E0277]: `LifecycleCapability` does not publish `aether_kinds::Key`
              Publishes<aether_kinds::Render>
              Publishes<aether_kinds::Shutdown>
              Publishes<aether_kinds::Tick>
-note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/subscribe.rs
    |
    |     pub fn subscribe<P, K: Kind>(&mut self)
    |            --------- required by a bound in this associated function
    |     where
    |         P: Publishes<K> + Singleton + CallerAddressable,
-   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, S, M>>::subscribe`

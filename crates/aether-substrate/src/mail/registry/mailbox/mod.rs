@@ -184,8 +184,9 @@ struct Inner {
     /// Which code implements each published namespace (ADR-0241 §3): every
     /// native namespace the binary links from construction, and each module
     /// the owner's publish arm admitted. Module publications are written
-    /// only by that arm's commit; a native namespace's hold is written by
-    /// each native birth ([`Registry::hold_native`]).
+    /// only by that arm's commit, and so is the hold of an owner-applied
+    /// native birth; [`Registry::hold_native`] is the direct write the boot
+    /// paths take.
     publications: PublicationTable,
     route_publisher: DoubleBuffer<MailboxId, RouteRecord>,
     kind_publisher: ViewPublisher<KindTable>,
@@ -282,8 +283,8 @@ impl Registry {
     /// Hold `A`'s namespace for `A` in the publication table (ADR-0241 §3):
     /// admitted when the namespace is unheld or already held by `A`, refused
     /// when another type sharing it was born first. One read-modify under the
-    /// `Inner` lock. The prepared-spawn arm the owner applies holds through
-    /// the same table under the lock it already holds.
+    /// `Inner` lock. The prepared-spawn arm the owner applies stages its hold
+    /// in the batch's publication table, installed when the batch commits.
     pub(crate) fn hold_native<A: Addressable + 'static>(&self) -> Result<(), NativeHoldRefusal> {
         self.inner
             .lock()

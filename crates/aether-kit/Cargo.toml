@@ -72,6 +72,10 @@ aether-component = { path = "../aether-component" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+# The camera scenarios compose two native test actors beside the component
+# host: a viewer that closes without unsubscribing, and a watcher that says
+# when the viewer's departure has been posted. Both are `NativeActor`s.
+aether-substrate = { path = "../aether-substrate" }
 
 [lints]
 workspace = true

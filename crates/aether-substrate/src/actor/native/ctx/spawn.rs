@@ -22,7 +22,7 @@ use super::NativeCtx;
 /// The one surface that needs the ctx to name its actor: a birth's parent is
 /// the actor being dispatched, so the call exists only where that actor is in
 /// scope. An [`Erased`](super::Erased) ctx reaches none of this (issue 4158).
-impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A: NativeActor, S> NativeCtx<'_, A, S, M> {
     /// Spawn an instanced `C` as a child of `A`, the actor this ctx
     /// dispatches for. The `C: ChildOf<A>` bound enforces the ADR-0166
     /// permission, and
@@ -35,7 +35,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     ///
     /// The parent is the ctx's own actor, never a caller-supplied one
     /// (issue 4158): the `#[actor]` macro hands every handler whose ctx does
-    /// not spell `Erased` — `NativeCtx<'_>`, `NativeCtx<'_, Self, Unchecked>` —
+    /// not spell `Erased` — `NativeCtx<'_>`, `NativeCtx<'_, Self, Anyone, Unchecked>` —
     /// a ctx typed by the actor it is dispatching for (ADR-0231 §7). A parent that
     /// disagrees with the executing binding is therefore not a runtime
     /// error to check but a state with no spelling.
@@ -137,7 +137,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
 
 /// The dependency read: every declarable dependency is a root singleton, so
 /// it takes no placement and the erased ctx reaches it too.
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// The namespace of the first declared dependency with no `Live` route,
     /// or `None` when every entry is live. Every entry is a root singleton
     /// (ADR-0241 §5), so its `One` entry folds from the root wherever the

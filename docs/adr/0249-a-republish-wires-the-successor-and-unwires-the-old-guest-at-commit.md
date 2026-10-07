@@ -595,9 +595,10 @@ add one, because no door in the tree needs it:
   unsubscribe in `unwire` from a publisher that releases on close.
 - **A publisher of state that answers a subscribe with its current value**
   loses nothing across the window: the successor's subscribe is answered
-  with the latest value. The kit camera is this case, and it does not watch
-  its viewers, so `aether.kit.mesh` and `aether.kit.camera-controller` are
-  right to unsubscribe in `unwire`.
+  with the latest value. The kit camera is this case: it answers a subscribe
+  with its current view, and it also releases a viewer when the viewer
+  closes. `aether.kit.mesh` and `aether.kit.camera-controller` still
+  unsubscribe in `unwire`, which stays correct.
 
 A publisher of events that neither releases on close nor replays would be
 exposed. None exists in the tree, and one that is written should release on
