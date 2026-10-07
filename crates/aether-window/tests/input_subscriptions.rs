@@ -19,17 +19,18 @@ use std::fs;
 use std::mem;
 use std::path::Path;
 
-use aether_actor::{ActorRef, HeldReply, actor};
+use aether_actor::{ActorPath, ActorRef, HeldReply, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, MonitorNotice, TextInput};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::{BootError, MonitorHandle};
 use aether_test_fixtures_bundle::{KeyProbe, Probe};
 use aether_test_fixtures_kinds::{KeyFocusObserved, KeyObserved, TakeKeyFocusAt, TextInputObserved, UnsubscribeKeys};
-use aether_window::{WindowCapability, window_path};
+use aether_window::{Key, TextInput};
+use aether_window::{WindowCapability, WindowInstance};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
@@ -37,8 +38,8 @@ const KEY_CODE: u32 = 65;
 /// The window the injected events claim to come from. The synthetic runtime
 /// fans an injection out by selector without checking the window is live, so
 /// no window is created for it.
-fn test_window() -> ErasedActorPath {
-    window_path(&test_window_name())
+fn test_window() -> ActorPath<WindowInstance> {
+    WindowInstance::path(&test_window_name())
 }
 
 /// The name of [`test_window`], which a guest writes the typed path from.

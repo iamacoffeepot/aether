@@ -1,16 +1,22 @@
 //! Public wire vocabulary for the `aether.window` manager.
 
-use aether_actor::{HeldReply, PathRefused, ProtocolPath, Subscriber};
-use aether_data::{ErasedActorPath, KindId};
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowMode, WindowSize,
-};
+use aether_actor::{ActorPath, HeldReply, PathRefused, ProtocolPath, Subscriber};
+use aether_data::KindId;
+use aether_kinds::WindowMode;
 use serde::{Deserialize, Serialize};
 
+use crate::WindowInstance;
+
+mod input;
 mod key_focus;
+pub mod keycode;
+pub mod mouse_button;
 mod presentation;
 
+pub use input::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
+};
 pub use key_focus::{KeyFocusGained, KeyFocusHolder, KeyFocusLost, KeyFocusScope, ReleaseKeyFocus, TakeKeyFocus};
 pub use presentation::{FrameRate, FrameRateError, WindowPresentation};
 
@@ -19,9 +25,15 @@ pub use presentation::{FrameRate, FrameRateError, WindowPresentation};
 ///
 /// `All` is prospective: a subscription using it also observes matching
 /// events from windows created after the subscription is installed.
-#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+///
+/// `One` holds the typed window path every window event carries. A path that
+/// is not a canonical window path, the short form `aether.window/:main`
+/// included, does not decode, so a request that carries one never reaches the
+/// manager. Liveness is not checked: a path for a window that has not opened
+/// is accepted, and selects that window's events once it does.
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WindowSelector {
-    One(ErasedActorPath),
+    One(ActorPath<WindowInstance>),
     All,
 }
 
@@ -43,11 +55,11 @@ pub struct WindowSpec {
 }
 
 /// Public state for one live window. `path` is the window's canonical actor
-/// path (`aether.window/aether.window.instance:main`), the text every
-/// window-originated event carries and `capture_frame` takes.
+/// path (`aether.window/aether.window.instance:main`), the typed path every
+/// window-originated event carries, whose text `capture_frame` takes.
 #[derive(aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WindowInfo {
-    pub path: ErasedActorPath,
+    pub path: ActorPath<WindowInstance>,
     pub name: String,
     pub title: String,
     pub mode: WindowMode,
@@ -223,10 +235,10 @@ impl HeldReply for SetWindowMenuResult {
 /// Published when a native menu item is chosen, carrying the window whose
 /// menu owns the item and the caller's own [`WindowMenuItem::id`].
 ///
-/// Routed by the same selector-aware subscription family as [`aether_kinds::Key`].
+/// Routed by the same selector-aware subscription family as [`Key`].
 #[aether_data::kind(name = "aether.window.menu_activated", eq)]
 pub struct WindowMenuActivated {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub id: u32,
 }
 
@@ -500,10 +512,16 @@ impl From<PathRefused> for SubscribeWindowResult {
 ///
 /// The runtime deliberately has one handler for this envelope rather than a
 /// handler or cached id for every public window event kind.
+///
+/// `window` is the window the event is published for, as a typed window path.
+/// A path that is not a canonical window path, the short form
+/// `aether.window/:main` included, does not decode, so the injection never
+/// reaches the manager. Liveness is not checked: an event may be injected for
+/// a window that has not opened.
 #[cfg(feature = "synthetic")]
 #[aether_data::kind(name = "aether.window.inject_event", eq)]
 pub struct InjectWindowEvent {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub kind: KindId,
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
@@ -518,12 +536,12 @@ pub struct WindowOpened {
 /// Published after a window and its native resources are detached.
 #[aether_data::kind(name = "aether.window.closed", eq)]
 pub struct WindowClosed {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
 }
 
 /// Published when a window gains or loses input focus.
 #[aether_data::kind(name = "aether.window.focus_changed", eq)]
 pub struct WindowFocus {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub focused: bool,
 }

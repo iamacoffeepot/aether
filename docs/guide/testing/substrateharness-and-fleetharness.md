@@ -344,7 +344,7 @@ use a separate generic convenience constructor, sent through the synthetic
 window capability's reference:
 
 ```rust
-let window = window_path(&LoadName::new("main")?);
+let window = WindowInstance::path(&LoadName::new("main")?);
 HarnessOp::window_event(&synthetic, window.clone(), &Key { window, code: keycode });
 ```
 

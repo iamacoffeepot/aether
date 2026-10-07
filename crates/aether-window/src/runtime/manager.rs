@@ -1,14 +1,14 @@
 //! Root-command routing: the command view a manager retains of each window
 //! child, and the forward of a root-addressed command to the sole window.
 
-use aether_actor::{Protocol, ProtocolRef, ReplyMode, RowAt, protocol};
-use aether_data::{ActorMail, ErasedActorPath};
+use aether_actor::{ActorPath, Protocol, ProtocolRef, ReplyMode, RowAt, protocol};
+use aether_data::ActorMail;
 use aether_substrate::actor::native::NativeCtx;
 
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
-    SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult,
+    SetWindowPresentation, SetWindowPresentationResult, SetWindowTitle, SetWindowTitleResult, WindowInstance,
 };
 
 /// The eight command rows a concrete window endpoint exposes, each naming the
@@ -32,7 +32,7 @@ pub trait WindowCommands {
 /// the window (the desktop closing interval); it remains in cardinality and
 /// is refused for liveness when it is the sole entry.
 pub struct RoutableWindow {
-    pub path: ErasedActorPath,
+    pub path: ActorPath<WindowInstance>,
     pub target: Option<ProtocolRef<WindowCommands>>,
 }
 
@@ -71,7 +71,7 @@ where
             ));
         }
     };
-    ctx.resolve_path(&window.path).map_err(|error| {
+    ctx.resolve_path(window.path.as_erased()).map_err(|error| {
         format!("{} reached the aether.window root, but window {} is not live: {error}", K::NAME, window.path)
     })?;
     let target = window
@@ -88,7 +88,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
-    use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability, WindowInstance};
+    use crate::{CreateWindow, CreateWindowResult, RetireWindow, WindowCapability};
     use crate::{WindowMode, WindowPresentation, WindowSpec};
 
     /// The sole window's child departs while a root command for it is
@@ -126,7 +126,7 @@ mod tests {
         let SetWindowTitleResult::Err { error } = rig.reply::<SetWindowTitleResult>() else {
             panic!("a dead child remains listed until its monitor notice, but cannot receive a root command");
         };
-        assert!(error.contains(window.path.as_str()), "the refusal names the window: {error}");
+        assert!(error.contains(&window.path.to_string()), "the refusal names the window: {error}");
         assert!(error.contains("not live"), "the refusal says why: {error}");
     }
 }

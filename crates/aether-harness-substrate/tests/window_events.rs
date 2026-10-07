@@ -1,15 +1,15 @@
 use aether_actor::{ActorPath, ActorRef, actor};
-use aether_data::{ErasedActorPath, Kind, LoadName};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness};
-use aether_kinds::{Key, MouseMove};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx};
 use aether_test_fixtures_kinds::SubstrateHarnessObserver;
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, UnsubscribeWindow, WindowCapability, WindowInstance,
-    WindowMode, WindowPresentation, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
+    WindowMode, WindowPresentation, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription,
 };
+use aether_window::{Key, MouseMove};
 
 /// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
 /// path narrows to a subscriber of each, that forward every event to the
@@ -51,17 +51,17 @@ fn moves() -> WindowSubscription {
     WindowSubscription::MouseMove(ActorPath::<Relay>::root().narrow())
 }
 
-fn window(name: &str) -> ErasedActorPath {
-    window_path(&LoadName::new(name).expect("window name"))
+fn window(name: &str) -> ActorPath<WindowInstance> {
+    WindowInstance::path(&LoadName::new(name).expect("window name"))
 }
 
 /// Inject a `Key` press as coming from the window at `window`.
-fn key_from(synthetic: ActorRef<WindowCapability>, window: &ErasedActorPath, code: u32) -> HarnessOp {
+fn key_from(synthetic: ActorRef<WindowCapability>, window: &ActorPath<WindowInstance>, code: u32) -> HarnessOp {
     HarnessOp::window_event(&synthetic, window.clone(), &Key { window: window.clone(), code })
 }
 
 /// Inject a `MouseMove` as coming from the window at `window`.
-fn move_from(synthetic: ActorRef<WindowCapability>, window: &ErasedActorPath, x: f32, y: f32) -> HarnessOp {
+fn move_from(synthetic: ActorRef<WindowCapability>, window: &ActorPath<WindowInstance>, x: f32, y: f32) -> HarnessOp {
     HarnessOp::window_event(&synthetic, window.clone(), &MouseMove { window: window.clone(), x, y })
 }
 
@@ -86,8 +86,8 @@ fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
 fn assert_window_lifecycle(
     created: &ExecutionResult,
     result: &ExecutionResult,
-    first_path: &ErasedActorPath,
-    second_path: &ErasedActorPath,
+    first_path: &ActorPath<WindowInstance>,
+    second_path: &ActorPath<WindowInstance>,
 ) {
     assert_eq!(
         created.reply::<ListWindowsResult>("initial").expect("initial list reply"),

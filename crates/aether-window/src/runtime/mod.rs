@@ -6,8 +6,7 @@
 //! compiles both `desktop` (for the desktop chassis) and `synthetic` (for the
 //! harnesses) into one crate, and only the composer knows which it wants.
 
-use aether_actor::{Anyone, OutboundReply, PathRefused, Unchecked, runtime};
-use aether_data::ErasedActorPath;
+use aether_actor::{ActorPath, Anyone, OutboundReply, PathRefused, Unchecked, runtime};
 use aether_kinds::MonitorNotice;
 use aether_substrate::actor::native::{Erased, Pending, SpawnOutcome, TaskDone};
 
@@ -69,7 +68,7 @@ enum WindowBackend {
 /// backend.
 #[aether_data::kind(name = "aether.window.spawn_key")]
 struct WindowSpawnKey {
-    path: ErasedActorPath,
+    path: ActorPath<WindowInstance>,
 }
 
 impl WindowCapabilityState {

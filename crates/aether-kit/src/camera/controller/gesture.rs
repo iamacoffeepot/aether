@@ -13,9 +13,9 @@
 use core::f32::consts::FRAC_PI_2;
 use core::mem;
 
-use aether_kinds::{keycode, mouse_button};
 use aether_math::{Quat, Vec2, Vec3};
 use aether_render::ViewProjection;
+use aether_window::{keycode, mouse_button};
 
 use super::kinds::ControllerConfig;
 use crate::camera::pose::pixel_ray;

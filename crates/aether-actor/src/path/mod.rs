@@ -19,6 +19,7 @@
 //! proofs: a path names, a reference sends.
 
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::{Hash, Hasher};
 
@@ -31,7 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The value, kind-field, encode, and serialize traits both typed paths
 /// share, over the text alone and with no bound on the phantom parameter.
-/// `Clone`, `PartialEq`, `Eq`, and `Hash` compare the text. `Debug` prints
+/// `Clone`, `PartialEq`, `Eq`, `PartialOrd`, `Ord`, and `Hash` compare the text. `Debug` prints
 /// `Name("text")`, because a path is a name, not a position, and `Display`
 /// prints the text. The kind-field, encode, and serialize traits delegate to
 /// [`ErasedActorPath`]'s. Each type writes its own decodes beside it, over
@@ -53,6 +54,18 @@ macro_rules! typed_path_traits {
         }
 
         impl<$param> Eq for $name<$param> {}
+
+        impl<$param> PartialOrd for $name<$param> {
+            fn partial_cmp(&self, other: &Self) -> Option<super::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl<$param> Ord for $name<$param> {
+            fn cmp(&self, other: &Self) -> super::Ordering {
+                self.path.cmp(&other.path)
+            }
+        }
 
         impl<$param> super::Hash for $name<$param> {
             fn hash<H: super::Hasher>(&self, state: &mut H) {

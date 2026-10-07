@@ -4,7 +4,7 @@
 //! stability guarantee across winit versions (the enum's repr is
 //! `#[repr(u32)]` but variant ordering is not a public contract).
 //!
-//! The substrate maps `winit::keyboard::KeyCode → u32` via the
+//! The desktop window backend maps `winit::keyboard::KeyCode → u32` via the
 //! per-variant constants below; components match on these constants.
 //! Unmapped keys (any winit variant not listed here) produce no mail.
 //!

@@ -27,11 +27,12 @@ pub enum KeyFocusScope {
 
 /// Take key focus in `window` for the sending actor, with `scope`.
 ///
-/// `window` is the window's canonical path, the text every window event,
-/// `aether.window.list` and `aether.window.opened` carry, typed as a window's:
-/// a path whose leaf is not `aether.window.instance` does not decode, so a
-/// take for something that cannot be a window never reaches the manager. A
-/// guest writes it with [`WindowInstance::path`]. The type proves what the
+/// `window` is the window's canonical path, the typed path every window
+/// event, `aether.window.list` and `aether.window.opened` carry: an event's
+/// `window` is the path to pass, and [`WindowInstance::path`] writes the same
+/// path from a window's name. A path whose leaf is not
+/// `aether.window.instance` does not decode, so a take for something that
+/// cannot be a window never reaches the manager. The type proves what the
 /// path names and nothing about liveness, so any window path is accepted and
 /// an actor may take for a window that has not opened yet. The latest take in
 /// a window wins: the actor it replaces is sent [`KeyFocusLost`] and the

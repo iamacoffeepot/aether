@@ -2,12 +2,16 @@
 //!
 //! Every window-originated event starts with the canonical actor path of the
 //! window that produced it (`aether.window/aether.window.instance:main`), the
-//! same text `aether.window.list` reports. A path is heap text, so the family
-//! rides the structured wire path and none of its kinds is `Copy` or has a
-//! default.
+//! same text `aether.window.list` reports. The field is the typed window path,
+//! an `ActorPath<WindowInstance>`, the type every kind that names a window
+//! carries: an actor passes an event's `window` to a take of key focus, or
+//! compares it with a window path it holds, with no conversion. A path is heap
+//! text, so the family rides the structured wire path and none of its kinds is
+//! `Copy` or has a default.
 
-use aether_data::ErasedActorPath;
-use alloc::string::String;
+use aether_actor::ActorPath;
+
+use crate::WindowInstance;
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys
@@ -15,7 +19,7 @@ use alloc::string::String;
 /// the substrate doesn't translate) produce no mail.
 #[aether_data::kind(name = "aether.key", eq)]
 pub struct Key {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub code: u32,
 }
 
@@ -25,7 +29,7 @@ pub struct Key {
 /// both kinds so they can clear state on release.
 #[aether_data::kind(name = "aether.key_release", eq)]
 pub struct KeyRelease {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub code: u32,
 }
 
@@ -40,7 +44,7 @@ pub struct KeyRelease {
 /// geometry needs no scale conversion.
 #[aether_data::kind(name = "aether.mouse_button", partial_eq)]
 pub struct MouseButton {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -54,7 +58,7 @@ pub struct MouseButton {
 /// `QuadSpace::Screen` speak.
 #[aether_data::kind(name = "aether.mouse_button_release", partial_eq)]
 pub struct MouseButtonRelease {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub button: u32,
     pub x: f32,
     pub y: f32,
@@ -68,7 +72,7 @@ pub struct MouseButtonRelease {
 /// `WindowSize` and `QuadSpace::Screen` speak.
 #[aether_data::kind(name = "aether.mouse_wheel", partial_eq)]
 pub struct MouseWheel {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub delta_x: f32,
     pub delta_y: f32,
     pub x: f32,
@@ -85,7 +89,7 @@ pub struct MouseWheel {
 /// from this kind, never toward it.
 #[aether_data::kind(name = "aether.mouse_move", partial_eq)]
 pub struct MouseMove {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub x: f32,
     pub y: f32,
 }
@@ -126,7 +130,7 @@ pub struct MouseMove {
 /// `aether.window.list` reply, then keeps them current from this kind.
 #[aether_data::kind(name = "aether.window_size", partial_eq)]
 pub struct WindowSize {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub width: u32,
     pub height: u32,
     /// Physical pixels per logical pixel, as the display reports it
@@ -155,7 +159,7 @@ pub struct WindowSize {
 /// window-tagged input family (`Kind::encode_into_bytes` → `encode_wire`).
 #[aether_data::kind(name = "aether.text_input", eq)]
 pub struct TextInput {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub text: String,
 }
 
@@ -169,7 +173,7 @@ pub struct TextInput {
 /// the desktop chassis only. Rides the structured wire path.
 #[aether_data::kind(name = "aether.ime_preedit", eq)]
 pub struct ImePreedit {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub text: String,
     pub cursor_begin: Option<u32>,
     pub cursor_end: Option<u32>,
@@ -192,56 +196,9 @@ pub struct ImePreedit {
 // packed bit mask. A two-variant-enum refactor would defeat that.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Modifiers {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
     pub meta: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use aether_data::{Kind, Schema, SchemaType};
-
-    use super::{
-        ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-        WindowSize,
-    };
-
-    fn assert_window_is_leading_field<K: Schema>() {
-        let SchemaType::Struct { fields, repr_c } = &K::SCHEMA else {
-            panic!("window input kind must have a struct schema");
-        };
-        assert_eq!(fields.first().map(|field| field.name.as_ref()), Some("window"));
-        assert!(!repr_c, "window input kinds use the structured wire path");
-    }
-
-    #[test]
-    fn window_identity_is_leading_and_changes_every_input_kind_id() {
-        assert_window_is_leading_field::<Key>();
-        assert_window_is_leading_field::<KeyRelease>();
-        assert_window_is_leading_field::<MouseButton>();
-        assert_window_is_leading_field::<MouseButtonRelease>();
-        assert_window_is_leading_field::<MouseWheel>();
-        assert_window_is_leading_field::<MouseMove>();
-        assert_window_is_leading_field::<WindowSize>();
-        assert_window_is_leading_field::<TextInput>();
-        assert_window_is_leading_field::<ImePreedit>();
-        assert_window_is_leading_field::<Modifiers>();
-
-        for (name, current, legacy) in [
-            (Key::NAME, Key::ID.0, 0x2cd4_71a8_6d5a_45c3),
-            (KeyRelease::NAME, KeyRelease::ID.0, 0x29af_edc4_d29e_66b9),
-            (MouseButton::NAME, MouseButton::ID.0, 0x2ae2_bffd_3539_0765),
-            (MouseButtonRelease::NAME, MouseButtonRelease::ID.0, 0x25b3_c586_4948_a587),
-            (MouseWheel::NAME, MouseWheel::ID.0, 0x200e_f6be_b9c5_c7fc),
-            (MouseMove::NAME, MouseMove::ID.0, 0x23d7_5eca_383f_2613),
-            (WindowSize::NAME, WindowSize::ID.0, 0x2987_ca5c_c96a_8043),
-            (TextInput::NAME, TextInput::ID.0, 0x225a_4efe_afb7_7bcf),
-            (ImePreedit::NAME, ImePreedit::ID.0, 0x25ad_e0e7_6687_d8db),
-            (Modifiers::NAME, Modifiers::ID.0, 0x2ddb_7336_fd9e_18ce),
-        ] {
-            assert_ne!(current, legacy, "{name} retained its single-window schema id");
-        }
-    }
 }

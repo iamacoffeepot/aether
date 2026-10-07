@@ -66,11 +66,12 @@ pub use kinds::*;
 
 use aether_actor::{ActorInitError, ActorPath, Departed, NoContext, PriorState, ReplyMode, Sends, Subscriber};
 use aether_actor::{WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
-use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_kinds::{Tick, WindowSize};
+use aether_data::{Kind, LoadName};
+use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
 use aether_render::{ViewProjection, ViewSubscribe, ViewUnsubscribe, ViewportExtent};
-use aether_window::{ListWindows, ListWindowsResult, WindowCapability, WindowOpened};
+use aether_window::WindowSize;
+use aether_window::{ListWindows, ListWindowsResult, WindowCapability, WindowInstance, WindowOpened};
 
 use pose::Gliding;
 use viewers::Viewers;
@@ -436,7 +437,7 @@ impl CameraComponent {
     /// Take `width` by `height` as the viewport's size when `window` is the
     /// one this camera follows, and publish if that changed the view. A zero
     /// size, a minimised window, keeps the last one.
-    fn resize(&mut self, sends: &mut Sends<'_, Self>, window: &ErasedActorPath, width: u32, height: u32) {
+    fn resize(&mut self, sends: &mut Sends<'_, Self>, window: &ActorPath<WindowInstance>, width: u32, height: u32) {
         let Viewport::Window(followed) = &self.viewport else {
             return;
         };
@@ -444,7 +445,7 @@ impl CameraComponent {
             return;
         };
 
-        let ours = followed.as_erased() == window;
+        let ours = followed == window;
         let changed = self.extent != Extent::Known(extent);
         if ours && changed {
             self.extent = Extent::Known(extent);

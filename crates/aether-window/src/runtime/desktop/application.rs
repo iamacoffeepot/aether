@@ -12,9 +12,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::{Window, WindowId as WinitWindowId};
 
-use aether_data::ErasedActorPath;
+use aether_actor::ActorPath;
 
-use crate::{WindowMode, WindowPresentation, WindowSpec};
+use crate::{WindowInstance, WindowMode, WindowPresentation, WindowSpec};
 
 use super::pacing::{FramePacing, FrameSchedule};
 use super::{
@@ -30,7 +30,7 @@ pub trait DesktopWindowIntegration {
     /// `presentation` asks. An `Err` fails the window's creation.
     fn attach_window(
         &mut self,
-        path: ErasedActorPath,
+        path: &ActorPath<WindowInstance>,
         window: Arc<Window>,
         presentation: WindowPresentation,
     ) -> Result<(), String>;
@@ -38,13 +38,17 @@ pub trait DesktopWindowIntegration {
     /// Reconfigure the attached window's surface for `presentation`. An
     /// `Err` names why the surface cannot serve it, and leaves the surface
     /// as it was.
-    fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String>;
+    fn set_presentation(
+        &mut self,
+        path: &ActorPath<WindowInstance>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String>;
 
-    fn detach_window(&mut self, path: &ErasedActorPath);
+    fn detach_window(&mut self, path: &ActorPath<WindowInstance>);
 
-    fn windows_dirty(&mut self, windows: &[ErasedActorPath]);
+    fn windows_dirty(&mut self, windows: &[ActorPath<WindowInstance>]);
 
-    fn window_occluded(&mut self, _path: &ErasedActorPath, _occluded: bool) {}
+    fn window_occluded(&mut self, _path: &ActorPath<WindowInstance>, _occluded: bool) {}
 
     fn request_shutdown(&mut self);
 
@@ -78,7 +82,7 @@ pub struct DesktopWindowApplication<I> {
     /// The pumped window actor. It closes when this application drops, which
     /// the chassis does after its passives (ADR-0160 §3).
     window_slot: DesktopWindowSlot,
-    pending_dirty: BTreeSet<ErasedActorPath>,
+    pending_dirty: BTreeSet<ActorPath<WindowInstance>>,
     /// The instant each capped window's next frame is due.
     pacing: FramePacing,
     shutdown_requested: bool,
@@ -121,7 +125,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         event_loop: &ActiveEventLoop,
         actions: Vec<WindowHostAction>,
         effects: Vec<WindowHostEffect>,
-    ) -> (BTreeSet<ErasedActorPath>, bool) {
+    ) -> (BTreeSet<ActorPath<WindowInstance>>, bool) {
         let mut dirty = BTreeSet::new();
         let mut should_shutdown = false;
         self.apply_effects(effects, &mut dirty, &mut should_shutdown);
@@ -182,14 +186,14 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
     fn apply_effects(
         &mut self,
         effects: Vec<WindowHostEffect>,
-        dirty: &mut BTreeSet<ErasedActorPath>,
+        dirty: &mut BTreeSet<ActorPath<WindowInstance>>,
         should_shutdown: &mut bool,
     ) {
         let mut effects = VecDeque::from(effects);
         while let Some(effect) = effects.pop_front() {
             match effect {
                 WindowHostEffect::Created { path, window, presentation } => {
-                    let attachment = self.integration.attach_window(path.clone(), Arc::clone(&window), presentation);
+                    let attachment = self.integration.attach_window(&path, Arc::clone(&window), presentation);
                     let follow_up = self
                         .window_slot
                         .host_turn(|state, ctx| state.finish_window_attachment(&path, attachment, ctx))
@@ -312,20 +316,20 @@ impl<I: DesktopWindowIntegration> ApplicationHandler<DesktopWindowUserEvent> for
 /// One live, unoccluded window: the handle the loop asks to redraw and the
 /// presentation that paces it.
 struct VisibleWindow {
-    path: ErasedActorPath,
+    path: ActorPath<WindowInstance>,
     window: Arc<Window>,
     presentation: WindowPresentation,
 }
 
 #[derive(Default)]
 struct WindowSnapshot {
-    live: Vec<(ErasedActorPath, WindowPresentation)>,
+    live: Vec<(ActorPath<WindowInstance>, WindowPresentation)>,
     visible: Vec<VisibleWindow>,
 }
 
 impl WindowSnapshot {
     /// The visible windows as the pacing schedule reads them.
-    fn visible_presentations(&self) -> Vec<(ErasedActorPath, WindowPresentation)> {
+    fn visible_presentations(&self) -> Vec<(ActorPath<WindowInstance>, WindowPresentation)> {
         self.visible.iter().map(|visible| (visible.path.clone(), visible.presentation)).collect()
     }
 
@@ -334,10 +338,10 @@ impl WindowSnapshot {
     /// forced.
     fn frame_windows(
         &self,
-        dirty: &BTreeSet<ErasedActorPath>,
-        due: &BTreeSet<ErasedActorPath>,
+        dirty: &BTreeSet<ActorPath<WindowInstance>>,
+        due: &BTreeSet<ActorPath<WindowInstance>>,
         force: bool,
-    ) -> Vec<ErasedActorPath> {
+    ) -> Vec<ActorPath<WindowInstance>> {
         if force {
             return self.live.iter().map(|(path, _)| path.clone()).collect();
         }
@@ -442,7 +446,7 @@ impl WindowHostAction {
 fn apply_simple_effect<I: DesktopWindowIntegration>(
     integration: &mut I,
     effect: WindowHostEffect,
-    dirty: &mut BTreeSet<ErasedActorPath>,
+    dirty: &mut BTreeSet<ActorPath<WindowInstance>>,
 ) -> bool {
     match effect {
         WindowHostEffect::Created { .. } => unreachable!("created effects require actor completion"),
@@ -465,18 +469,16 @@ mod tests {
     use super::super::tests::insert_window;
     use super::*;
     use crate::runtime::subscribers::fixture::Rig;
-    use crate::{
-        CreateWindow, ListWindows, ListWindowsResult, SetWindowPresentation, SetWindowPresentationResult,
-        WindowInstance,
-    };
+    use crate::{CreateWindow, ListWindows, ListWindowsResult, SetWindowPresentation, SetWindowPresentationResult};
 
-    fn window(name: &str) -> ErasedActorPath {
-        crate::window_path(&LoadName::new(name).expect("fixture window name"))
+    fn window(name: &str) -> ActorPath<WindowInstance> {
+        WindowInstance::path(&LoadName::new(name).expect("fixture window name"))
     }
 
     /// The window name a spy records: the key after the path's last `:`.
-    fn name(path: &ErasedActorPath) -> &str {
-        path.as_str().rsplit_once(':').map_or(path.as_str(), |(_, name)| name)
+    fn name(path: &ActorPath<WindowInstance>) -> String {
+        let text = path.to_string();
+        text.rsplit_once(':').map_or(text.as_str(), |(_, name)| name).to_owned()
     }
 
     #[derive(Default)]
@@ -489,28 +491,32 @@ mod tests {
     impl DesktopWindowIntegration for SpyIntegration {
         fn attach_window(
             &mut self,
-            path: ErasedActorPath,
+            path: &ActorPath<WindowInstance>,
             _window: Arc<Window>,
             _presentation: WindowPresentation,
         ) -> Result<(), String> {
-            self.calls.push(format!("attach:{}", name(&path)));
+            self.calls.push(format!("attach:{}", name(path)));
             Ok(())
         }
 
-        fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String> {
+        fn set_presentation(
+            &mut self,
+            path: &ActorPath<WindowInstance>,
+            presentation: WindowPresentation,
+        ) -> Result<(), String> {
             self.calls.push(format!("present:{}:{presentation:?}", name(path)));
             self.refuses_presentation.clone().map_or(Ok(()), Err)
         }
 
-        fn detach_window(&mut self, path: &ErasedActorPath) {
+        fn detach_window(&mut self, path: &ActorPath<WindowInstance>) {
             self.calls.push(format!("detach:{}", name(path)));
         }
 
-        fn windows_dirty(&mut self, windows: &[ErasedActorPath]) {
+        fn windows_dirty(&mut self, windows: &[ActorPath<WindowInstance>]) {
             self.calls.push(format!("dirty:{}", windows.iter().map(name).collect::<Vec<_>>().join(",")));
         }
 
-        fn window_occluded(&mut self, path: &ErasedActorPath, occluded: bool) {
+        fn window_occluded(&mut self, path: &ActorPath<WindowInstance>, occluded: bool) {
             self.calls.push(format!("occluded:{}:{occluded}", name(path)));
         }
 

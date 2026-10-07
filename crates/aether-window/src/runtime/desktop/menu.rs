@@ -223,8 +223,10 @@ mod tests {
     #[test]
     fn only_ids_this_module_minted_resolve_to_a_window_and_item() {
         for (name, item) in [("main", 0), ("tools", u32::MAX), ("palette", 12)] {
-            let window = crate::window_path(&LoadName::new(name).expect("fixture window name"));
-            assert_eq!(parse_menu_item_id(&menu_item_id(&window, item)), Some((window, item)));
+            let window = crate::WindowInstance::path(&LoadName::new(name).expect("fixture window name"));
+            let id = menu_item_id(window.as_erased(), item);
+
+            assert_eq!(parse_menu_item_id(&id), Some((window.as_erased().clone(), item)));
         }
 
         for foreign in ["", "quit", "3", "3:", ":aether.window", "-3:aether.window", "x:aether.window", "3:two words"] {

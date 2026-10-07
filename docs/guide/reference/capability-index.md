@@ -54,7 +54,7 @@ capability crate boundary or are genuinely cross-cutting:
 |---|---|
 | engine/component control | MCP and hub control need the same selectors/results |
 | inventory queries | `aether-mcp` must query without depending on native capability implementation |
-| lifecycle/window control and window-originated events | substrate/chassis-wide stage, identity, or compatibility vocabulary |
+| lifecycle/window control | substrate/chassis-wide stage, identity, or compatibility vocabulary |
 | trace/log/cost tails | common evidence projected across processes |
 | utility/diagnostics | ping/pong, unresolved-mail and monitor notices |
 

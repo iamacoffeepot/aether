@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
-use aether_data::{ErasedActorPath, Kind};
+use aether_actor::{ActorPath, Addressable};
+use aether_data::Kind;
 use aether_kinds::{LifecycleAdvance, Quit, Tick};
 use aether_lifecycle::LifecycleCapability;
 use aether_render::{
@@ -39,7 +39,7 @@ use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{ChassisCtx, HubOutbound, SettlingInbox, SubstrateBoot, chassis::frame_loop, mail::MailId};
 use aether_window::{
     DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowSlot, INITIAL_WINDOW_NAME, WindowCapability,
-    WindowPresentation, WindowSizeRequest, WindowSpec,
+    WindowInstance, WindowPresentation, WindowSizeRequest, WindowSpec,
 };
 use crossbeam_channel::{Receiver, Sender};
 use winit::event_loop::EventLoop;
@@ -277,14 +277,14 @@ fn surface_present(presentation: WindowPresentation) -> SurfacePresent {
 impl DesktopWindowIntegration for DesktopRenderIntegration {
     fn attach_window(
         &mut self,
-        path: ErasedActorPath,
+        path: &ActorPath<WindowInstance>,
         window: Arc<Window>,
         presentation: WindowPresentation,
     ) -> Result<(), String> {
         let present = surface_present(presentation);
         let attachment = self
             .render_slot
-            .host_turn(|state, ctx| state.attach_window(ctx, path, window, present))
+            .host_turn(|state, ctx| state.attach_window(ctx, path.as_erased().clone(), window, present))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
         let attached = Instant::now();
@@ -293,15 +293,19 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         Ok(())
     }
 
-    fn set_presentation(&mut self, path: &ErasedActorPath, presentation: WindowPresentation) -> Result<(), String> {
+    fn set_presentation(
+        &mut self,
+        path: &ActorPath<WindowInstance>,
+        presentation: WindowPresentation,
+    ) -> Result<(), String> {
         let present = surface_present(presentation);
         self.render_slot
-            .host_turn(|state, _ctx| state.set_window_present(path, present))
+            .host_turn(|state, _ctx| state.set_window_present(path.as_erased(), present))
             .ok_or_else(|| "render actor is unavailable during a presentation change".to_owned())?
     }
 
-    fn detach_window(&mut self, path: &ErasedActorPath) {
-        if self.render_slot.host_turn(|state, ctx| state.detach_window(ctx, path)) == Some(false) {
+    fn detach_window(&mut self, path: &ActorPath<WindowInstance>) {
+        if self.render_slot.host_turn(|state, ctx| state.detach_window(ctx, path.as_erased())) == Some(false) {
             tracing::warn!(
                 target: "aether_substrate::render",
                 window = %path,
@@ -310,7 +314,7 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         }
     }
 
-    fn windows_dirty(&mut self, windows: &[ErasedActorPath]) {
+    fn windows_dirty(&mut self, windows: &[ActorPath<WindowInstance>]) {
         if self.terminal_reached {
             return;
         }
@@ -319,12 +323,13 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         let delta = self.frame_delta_limit.limit(measured);
         self.warn_of_uncounted(now, delta.uncounted_micros);
         self.terminal_reached = self.run_frame_advance(delta.counted_micros);
-        self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows: windows.to_vec() });
+        let windows = windows.iter().map(|window| window.as_erased().clone()).collect();
+        self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows });
         self.frame += 1;
     }
 
-    fn window_occluded(&mut self, path: &ErasedActorPath, occluded: bool) {
-        self.send_render_and_drain(&Occluded { window: path.clone(), occluded });
+    fn window_occluded(&mut self, path: &ActorPath<WindowInstance>, occluded: bool) {
+        self.send_render_and_drain(&Occluded { window: path.as_erased().clone(), occluded });
     }
 
     fn request_shutdown(&mut self) {
