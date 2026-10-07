@@ -483,15 +483,20 @@ argument of the send, monitor, or close it exists for.
   through an erased reference); #6907 (the rule governs code written
   against the engine, not the core's machinery).
 
-### R-0048: Write an Option only for a lookup that can miss or an absence with one plain meaning {#r-0048}
+### R-0048: Write an Option only for a lookup that can miss or a value that never existed and never will {#r-0048}
 
 `Option` is allowed in two places: the return of a lookup that can miss, and
-a field or parameter whose absence is a fact of the domain with exactly one
-meaning that no named case would say better. Every other use is nullable
-state and is not written:
+a value fixed when its owner is built and never changed afterwards, where
+`None` says the thing did not exist and will not exist. A value that is
+computed later, or that comes and goes over its owner's life, is never an
+`Option`: state that changes is an enum whose cases are named. Every other
+use is nullable state and is not written:
 
 - a `None` that selects a behaviour ("no holder, so everyone hears") is a
   named enum case;
+- a slot that is empty at some times and filled at others (a focus holder,
+  a pending request, a cached result) is an enum of its states, never an
+  `Option` that is assigned back and forth;
 - a `None` that means "not yet" (built in `init`, filled in `wire`) is fixed
   by building the value where it is first available, usually the handler of
   the actor that already has it;
