@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use aether_actor::{ActorRef, Addressable, HandlesKind, Many};
+use aether_actor::{ActorRef, Addressable, HandlesKind, Instanced, Many};
 use aether_data::{ActorId, Kind as _, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -120,6 +120,38 @@ impl NativeActor for ActivationProbe {
     }
 }
 
+/// Two native types sharing one namespace, so the table decides which of
+/// them this engine runs.
+pub(super) struct SharedFirst;
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for SharedFirst {
+    const NAMESPACE: &'static str = "test.activation.shared";
+    type Config = ();
+
+    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::tell]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {}
+}
+
+pub(super) struct SharedSecond;
+
+#[aether_actor::actor(instanced, root)]
+impl NativeActor for SharedSecond {
+    const NAMESPACE: &'static str = "test.activation.shared";
+    type Config = ();
+
+    fn init((): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[handler::tell]
+    fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _poke: ActivationPoke) {}
+}
+
 pub(super) fn activation_fixture() -> (Arc<Spawner>, Arc<Registry>, Arc<Mailer>, PoolHandle) {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
@@ -176,6 +208,42 @@ pub(super) fn activation_sink(
         }),
     );
     (Registry::declared_dependency::<PokeSink>(sink.id()), receiver)
+}
+
+/// A finalized birth of the shared-namespace probe `A`, staged the way a
+/// handler stages one: its hold is taken by the owner, never here.
+pub(super) fn finalized_shared<A>(
+    spawner: &Arc<Spawner>,
+    parent: &Arc<NativeBinding>,
+    name: &str,
+    correlation: u64,
+) -> (PreparedSpawnCommit, DispatchId)
+where
+    A: Instanced + NativeActor<Config = (), Params = ()> + Addressable,
+{
+    let key = ChildReservationKey::new(
+        parent.self_mailbox(),
+        ActorId::singleton(A::NAMESPACE),
+        ActorId::instanced(A::NAMESPACE, name),
+    );
+    let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
+    let identity = spawner.prepare_identity::<A>(Subname::Named(name), None).unwrap();
+    let staged = spawner.build::<A>(identity, (), (), Vec::new()).unwrap();
+    let causing_chain = MailId::new(parent.self_mailbox(), correlation);
+    let deferred = parent.dispatch_stage::<SpawnOutcome<A>>(
+        Some(spawner.mailer().acquire_settlement_hold(causing_chain)),
+        RequestId(parent.mint_correlation()),
+    );
+    let dispatch_id = deferred.dispatch_id();
+    let finalizer = NativeSpawnFinalizer::<A>::parented(
+        parent_reservation,
+        deferred,
+        staged.identity.id,
+        staged.identity.canonical_name.clone(),
+        Arc::downgrade(&staged.transport),
+    );
+
+    (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id)
 }
 
 pub(super) fn finalized_probe(
@@ -250,6 +318,15 @@ pub(super) fn await_spawn_done(
     wakes: &crossbeam_channel::Receiver<DispatchId>,
     dispatch_id: DispatchId,
 ) -> TaskDone<SpawnOutcome<ActivationProbe>, ()> {
+    await_spawn_outcome::<ActivationProbe>(parent, wakes, dispatch_id)
+}
+
+/// [`await_spawn_done`] for any born type `A`.
+pub(super) fn await_spawn_outcome<A: 'static>(
+    parent: &NativeBinding,
+    wakes: &crossbeam_channel::Receiver<DispatchId>,
+    dispatch_id: DispatchId,
+) -> TaskDone<SpawnOutcome<A>, ()> {
     loop {
         if let Some(done) = parent.dispatch_take(dispatch_id) {
             return done;

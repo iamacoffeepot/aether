@@ -5,6 +5,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::mail::registry::effect::ActivationToken;
+use crate::mail::registry::publication::PublicationTable;
 use crate::mail::{KindId, MailboxId};
 
 use super::birth::{PendingBirth, RouteContinuation};
@@ -28,11 +29,16 @@ pub(super) fn staged_kind<'a>(
     staged.get(&id).or_else(|| inner.kinds.get(&id))
 }
 
+pub(super) fn staged_publications<'a>(staged: Option<&'a PublicationTable>, inner: &'a Inner) -> &'a PublicationTable {
+    staged.unwrap_or(&inner.publications)
+}
+
 pub(super) fn commit_staged(
     inner: &mut Inner,
     routes: FxHashMap<MailboxId, Option<RouteRecord>>,
     kinds: FxHashMap<KindId, KindSlot>,
     pending: FxHashMap<MailboxId, Option<ActivationToken>>,
+    publications: Option<PublicationTable>,
 ) -> Vec<RouteContinuation> {
     let mut continuations = Vec::new();
     for (id, route) in routes {
@@ -45,6 +51,9 @@ pub(super) fn commit_staged(
     for (id, slot) in kinds {
         inner.name_index.insert(slot.descriptor.name.clone(), id);
         inner.kinds.insert(id, slot);
+    }
+    if let Some(publications) = publications {
+        inner.publications = publications;
     }
     for (id, token) in pending {
         let unchanged =
