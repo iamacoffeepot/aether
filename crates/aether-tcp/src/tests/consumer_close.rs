@@ -121,14 +121,14 @@ fn spawn_closable_consumer(
     chassis: &PassiveChassis<TestChassis>,
     key: &str,
 ) -> (ActorRef<SessionConsumer>, ProtocolPath<TcpConsumer>, mpsc::Receiver<CapturedSessionMail>) {
-    let (captures, captured) = mpsc::channel();
+    let (captures, received) = mpsc::channel();
     let consumer = chassis
         .spawn_actor::<SessionConsumer>(Subname::Named(key), captures, ())
         .finish()
         .expect("the session consumer spawns");
     let path = ActorPath::<SessionConsumer>::instance(&LoadName::new(key).expect("a valid key")).narrow();
 
-    (consumer, path, captured)
+    (consumer, path, received)
 }
 
 /// Bind a listener named `name` on an OS-picked loopback port and answer the
@@ -177,7 +177,7 @@ fn listed((rx, chassis): &Booted) -> Vec<String> {
 #[test]
 fn a_listener_closes_when_its_consumer_closes() {
     let booted = boot_with_watcher();
-    let (consumer, consumer_path, _captured) = spawn_closable_consumer(&booted.1, "closing-consumer");
+    let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "closing-consumer");
     let local_port = bind(&booted, "closing", Some(consumer_path));
     watch_listener(&booted, "closing");
 
@@ -196,7 +196,7 @@ fn a_listener_closes_when_its_consumer_closes() {
 #[test]
 fn a_session_closes_when_its_consumer_closes() {
     let booted = boot_with_watcher();
-    let (consumer, consumer_path, captured) = spawn_closable_consumer(&booted.1, "session-consumer");
+    let (consumer, consumer_path, received) = spawn_closable_consumer(&booted.1, "session-consumer");
     let local_port = bind(&booted, "sessions", Some(consumer_path));
     let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
     client.write_all(&framed_body(b"live")).expect("write one complete frame");
@@ -204,7 +204,7 @@ fn a_session_closes_when_its_consumer_closes() {
     // Session mail is driven by the socket, not by a root this test holds, so
     // the capture channel is the only signal and its wait is time-bounded.
     // The delivery shows the session is live and bound to the consumer.
-    let delivered = captured.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches the consumer");
+    let delivered = received.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches the consumer");
     assert!(matches!(delivered, CapturedSessionMail::Data(_)), "expected SessionData, got {delivered:?}");
 
     send_and_settle(&booted.1, consumer, &ShutDown, None);
@@ -226,7 +226,7 @@ fn a_session_closes_when_its_consumer_closes() {
 #[test]
 fn a_listener_with_no_consumer_stays_bound_when_another_actor_closes() {
     let booted = boot_with_watcher();
-    let (consumer, consumer_path, _captured) = spawn_closable_consumer(&booted.1, "other-consumer");
+    let (consumer, consumer_path, _received) = spawn_closable_consumer(&booted.1, "other-consumer");
     let unowned_port = bind(&booted, "unowned", None);
     bind(&booted, "owned", Some(consumer_path));
     watch_listener(&booted, "owned");
