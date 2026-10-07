@@ -15,7 +15,8 @@ use std::process;
 
 use aether_actor::{ActorInitError, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor};
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, PeerConfig, PeerState, SubstrateHarnessObserver, TickObserved, WireObserved,
+    Bump, CountQuery, CountReport, PeerConfig, PeerState, SubstrateHarnessObserver, TickObserved, UnwireObserved,
+    WireObserved,
 };
 use aether_test_fixtures_republish::ProbeGate;
 
@@ -37,6 +38,11 @@ impl WasmActor for Peer {
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         ctx.send::<SubstrateHarnessObserver>(&WireObserved);
         Ok(())
+    }
+
+    /// Report each run of the hook, so a commit/abort test can count it.
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.send::<SubstrateHarnessObserver>(&UnwireObserved);
     }
 
     /// Hand-written, where v1 generates it from `type State`, because the

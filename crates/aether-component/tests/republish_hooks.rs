@@ -12,10 +12,9 @@
 //! The fixtures are the hooks pair: `test.republish.hooks.parent`, whose
 //! replace hooks do what its `HookFaultConfig` says, and its inline
 //! `test.republish.hooks.counter`. v2's counter returns an error from
-//! `on_rehydrate`. After a refusal the reinstated parent's `wire` runs a
-//! second time and spawns the counter's name again; that spawn answers the
-//! counter that stands (issue 7536, ADR-0249 §5), and one test reads its
-//! count to say so.
+//! `on_rehydrate`. After a refusal the reinstated parent keeps the counter
+//! that stands (issue 7536, ADR-0249 §5), and one test reads its count to say
+//! so, with no second `wire`.
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -215,10 +214,10 @@ fn a_child_that_cannot_be_rebuilt_refuses_the_republish() {
 }
 
 #[test]
-fn a_reinstated_guests_second_wire_answers_the_counter_that_stands() {
-    // Catches: the reinstated guest's `wire`, run a second time, spawning the
-    // counter's name over the resident counter, whose fresh `init` reads back
-    // as a count of 0 where the rebuilt one held 2.
+fn an_abort_leaves_the_standing_counter_untouched() {
+    // Catches: an abort that rewires the old guest, spawning the counter's
+    // name over the resident counter, whose fresh `init` reads back as a
+    // count of 0 where the rebuilt one held 2.
     let Some(fixtures) = hooks() else {
         return;
     };
@@ -248,5 +247,5 @@ fn a_reinstated_guests_second_wire_answers_the_counter_that_stands() {
         .expect("query the counter")
         .reply::<CountReport>("count")
         .expect("decode CountReport");
-    assert_eq!(standing.count, 2, "the reinstated guest's second wire left the counter it already had");
+    assert_eq!(standing.count, 2, "the abort left the standing counter untouched");
 }

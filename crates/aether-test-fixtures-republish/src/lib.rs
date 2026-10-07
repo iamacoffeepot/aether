@@ -264,9 +264,9 @@ impl HandedWatches {
 ///
 /// It has no saved state and neither republish hook: what a republish
 /// carries of its watches is the host's and the SDK's doing alone. So its
-/// successor keeps no id under any tag and has been handed none. Nor does a
-/// republish run `wire` on the instance it installs (ADR-0114, amendment of
-/// 2026-07-08), so a successor's `wired` list stays empty.
+/// successor keeps no id under any tag and has been handed none. A republish
+/// wires the successor at prepare with its outbox held (ADR-0249 §3), so a
+/// successor's `wired` list holds the watch its `wire` made.
 pub struct WatchLedger {
     config: WatchLedgerConfig,
     /// The provider the last [`WatchHold`] came from.
@@ -305,8 +305,9 @@ impl WasmActor for WatchLedger {
     }
 
     /// Watch the config's target, then succeed, refuse, or trap as
-    /// configured. A guest reinstated after an aborted republish runs this
-    /// again, and its watch finds the one already standing.
+    /// configured. A successor wires at prepare with its outbox held, and an
+    /// abort never re-wires the old guest, so a watch its `wire` makes finds
+    /// the one standing and takes its id.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         if let Some(target) = &self.config.target {
             let provider = ctx.resolve(target).map_err(|error| ActorInitError::new(error.to_string()))?;
@@ -506,9 +507,10 @@ impl WasmActor for WatchClerk {
     }
 
     /// Watch the config's desk, failing the spawn when it cannot be resolved.
-    /// A republish rebuilds a clerk through `init` and `on_rehydrate` and
-    /// never runs its `wire` (ADR-0114, amendment of 2026-07-08), so only a
-    /// fresh spawn reaches this hook.
+    /// A republish rebuilds a clerk through `init` and `on_rehydrate`, then
+    /// wires it after its parent's `wire` (ADR-0249 §6), so a rebuilt clerk
+    /// watches again there; a spawn inside `wire` that names it wires it
+    /// before answering.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
         if let Some(target) = &self.config.target {
             let desk = ctx.resolve(target).map_err(|error| ActorInitError::new(error.to_string()))?;

@@ -20,7 +20,7 @@ use crate::component::Prepared;
 use crate::trampoline::WasmTrampoline;
 
 use super::contract;
-use super::state::{PreparedSlot, Slot, WasmTrampolineState};
+use super::state::{CandidateRefusal, CandidateUnwire, PreparedSlot, Slot, WasmTrampolineState};
 
 /// What a candidate is built as: its module, its actor-type tag, and the
 /// receive surface it registers on commit.
@@ -68,18 +68,19 @@ impl WasmTrampolineState {
     /// Build a candidate of `candidate` beside the running guest and hold it
     /// for a commit or an abort. `code` is the bytes the candidate's module
     /// was checked in from, which its load window reads assets from until
-    /// it closes; `config` is the candidate's init config, or `None` for the
+    /// `wire` returns; `config` is the candidate's init config, or `None` for the
     /// stored one; `target` names this actor in a refusal.
     ///
     /// The candidate instantiates first, with its outbox held, while the
     /// running guest is still wired: `init` cannot send mail, so a failed
     /// `init` drops the candidate before the running guest runs any hook
-    /// (#6134). The running guest then runs `unwire` and `on_dehydrate`, its
-    /// correlation cursor, reply table and watches move to the candidate, and
-    /// the candidate rehydrates. A refusal after the hooks, either guest's
-    /// replace hook returning an error among them (ADR-0249 §1), reinstates
-    /// the running guest with the state it saved. A slot that is not live has
-    /// nothing to prepare and refuses.
+    /// (#6134). The running guest then runs `on_dehydrate`, its correlation
+    /// cursor, reply table and watches move to the candidate, and the
+    /// candidate rehydrates and wires, still with its outbox held. A refusal
+    /// after the hooks, either guest's replace hook or the successor's `wire`
+    /// returning an error among them (ADR-0249 §1), reinstates the running
+    /// guest with the state it saved. A slot that is not live has nothing to
+    /// prepare and refuses.
     pub(super) fn prepare(
         &mut self,
         ctx: &mut NativeCtx<'_, WasmTrampoline>,
@@ -126,18 +127,22 @@ impl WasmTrampolineState {
                 }));
                 Prepared::Ready
             }
-            Err(error) => {
-                self.reinstate(ctx, old, new_component, saved, VecDeque::new());
+            Err(CandidateRefusal { error, unwire }) => {
+                self.reinstate(ctx, old, new_component, saved, VecDeque::new(), unwire);
                 Prepared::Refused { error }
             }
         }
     }
 
-    /// Install the prepared candidate. Its held mail is sent on this turn's
-    /// chain, so the chain settles only after that mail does, and its staged
-    /// aliases publish. The module, hosted type, receive surface and config
-    /// become the candidate's, the kept guest drops, and the mail the gate
-    /// queued is delivered to the candidate in order.
+    /// Install the prepared candidate. The old guest runs its `unwire` first,
+    /// children first, whose mail leaves at once, then drops; the
+    /// candidate's held mail is sent on this turn's chain, so the chain
+    /// settles only after that mail does, and its staged aliases publish.
+    /// The module, hosted type, receive surface and config become the
+    /// candidate's, and the mail the gate queued is delivered to the
+    /// candidate in order. The old guest's release mail precedes the
+    /// successor's held mail at every recipient, so a paired `unwire` and
+    /// `wire` ends holding what the successor asked for again (ADR-0249 §4).
     ///
     /// A commit with nothing prepared is a host bug and aborts the substrate
     /// (ADR-0063).
@@ -149,15 +154,15 @@ impl WasmTrampolineState {
                 ctx.fatal_abort(format!("component {} committed a republish it never prepared", ctx.path()));
             }
         };
-        let PreparedSlot { old, saved: _, mut candidate, module, type_tag, capabilities, config, gated } = prepared;
+        let PreparedSlot { mut old, saved: _, mut candidate, module, type_tag, capabilities, config, gated } = prepared;
 
-        candidate.flush_held_outbox(ctx);
-        Self::stage_inline_aliases(ctx, candidate.drain_pending_aliases());
-        Self::stage_inline_alias_retirements(ctx, candidate.drain_pending_alias_retirements());
-
+        old.unwire();
         // The retired guest drops here: the `Component`'s own `Drop` releases
         // its wasm store.
         drop(old);
+        candidate.flush_held_outbox(ctx);
+        Self::stage_inline_aliases(ctx, candidate.drain_pending_aliases());
+        Self::stage_inline_alias_retirements(ctx, candidate.drain_pending_alias_retirements());
         self.module = module;
         // ADR-0096: track the actor type this trampoline now hosts, so a
         // later republish with no explicit type override reuses the
@@ -188,8 +193,9 @@ impl WasmTrampolineState {
     pub(super) fn abort(&mut self, ctx: &mut NativeCtx<'_, WasmTrampoline>) {
         match mem::replace(&mut self.slot, Slot::Released) {
             Slot::Prepared(prepared) => {
+                // A prepared candidate wired: prepare refuses otherwise.
                 let PreparedSlot { old, candidate, saved, gated, .. } = *prepared;
-                self.reinstate(ctx, old, candidate, saved, gated);
+                self.reinstate(ctx, old, candidate, saved, gated, CandidateUnwire::Owed);
             }
             other => self.slot = other,
         }
@@ -211,8 +217,8 @@ impl WasmTrampolineState {
         substrate_ctx.hold_outbox();
         // ADR-0163 §3 (#3984): install the load window over the republish's
         // code before instantiate so the candidate's `init` can pull assets;
-        // closed, letting go of the code, once it rehydrated (a republish
-        // re-runs `init`, not `wire`).
+        // closed, letting go of the code, when its `wire` returns (a republish
+        // runs `init`, `on_rehydrate`, then `wire`).
         substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(module, Some(code)));
         // ADR-0231 §4: an inline child the candidate spawns publishes its
         // own namespace and rows, read from the candidate's module.
@@ -225,23 +231,24 @@ impl WasmTrampolineState {
             .map_err(|e| format!("wasm instantiation failed: {e}"))
     }
 
-    /// Retire `old` into `candidate`: run `unwire` then `on_dehydrate` on the
-    /// old guest, move its correlation cursor and reply table to the
-    /// candidate, and rehydrate the candidate from the old guest's saved
-    /// bundle. Issue 584 Phase 2b: `unwire` fires first so the old guest can
-    /// announce its retirement before the swap. An `on_dehydrate` that
-    /// returned an error, a save the host refused, a carried context the
-    /// replacement does not declare (#6429), or a failed rehydrate refuses;
-    /// the caller then reinstates the old guest.
+    /// Retire `old` into `candidate`: run `on_dehydrate` on the old guest,
+    /// move its correlation cursor and reply table to the candidate, rehydrate
+    /// the candidate from the old guest's saved bundle, then wire the
+    /// candidate with its outbox still held. An `on_dehydrate` that returned
+    /// an error, a save the host refused, a carried context the replacement
+    /// does not declare (#6429), a failed rehydrate, or a failed `wire`
+    /// refuses; the caller then reinstates the old guest.
     ///
     /// A trap in the old guest's `on_dehydrate` aborts the substrate
     /// (ADR-0063, ADR-0249 §2): it is the live guest, which would have to
     /// keep running on a store left wherever the trap found it.
     ///
     /// Returns the bundle the old guest saved beside the outcome, on a
-    /// refusal too, so a reinstated old guest gets it back (issue 7125). An
-    /// `on_dehydrate` that returned an error still saved what its hooks
-    /// captured; a `save_state` the host rejected deposited none.
+    /// refusal too, so a reinstated old guest gets it back (issue 7125). A
+    /// refusal says whether the successor owes `unwire`, so the
+    /// reinstatement unwires exactly what wired. An `on_dehydrate` that
+    /// returned an error still saved what its hooks captured; a `save_state`
+    /// the host rejected deposited none.
     fn start_candidate(
         &self,
         ctx: &NativeCtx<'_, WasmTrampoline>,
@@ -249,8 +256,7 @@ impl WasmTrampolineState {
         old: &mut Component,
         candidate: &mut Component,
         replacement: &HashSet<KindId>,
-    ) -> (Option<StateBundle>, Result<(), String>) {
-        old.unwire();
+    ) -> (Option<StateBundle>, Result<(), CandidateRefusal>) {
         let dehydrated = match old.on_dehydrate() {
             Ok(()) => Ok(()),
             Err(HookFault::Returned(error)) => Err(error),
@@ -263,34 +269,38 @@ impl WasmTrampolineState {
 
         // The host's own record of a save it refused comes first: it stands
         // whether or not the hook passed the save's error on.
-        let started = match (old.take_save_error(), dehydrated) {
+        let rehydrated = match (old.take_save_error(), dehydrated) {
             (Some(error), _) => Err(error),
             (None, Err(error)) => Err(format!("on_dehydrate failed: {error}")),
             (None, Ok(())) => self.rehydrate_candidate(ctx, target, candidate, saved.as_ref(), replacement),
         };
+        let started = match rehydrated {
+            Ok(()) => Self::wire_candidate(candidate),
+            // The successor's `wire` never ran.
+            Err(error) => Err(CandidateRefusal { error, unwire: CandidateUnwire::NotOwed }),
+        };
+
         (saved, started)
     }
 
     /// Move what belongs to the mailbox from the old guest to the candidate,
-    /// after the old guest's hooks and before the candidate's `on_rehydrate`
-    /// and every delivery. It moves on a refusal too: the reinstatement moves
-    /// it back.
+    /// after the old guest's `on_dehydrate` and before the candidate's
+    /// `on_rehydrate` and every delivery. It moves on a refusal too: the
+    /// reinstatement moves it back.
     fn hand_over(old: &mut Component, candidate: &mut Component) {
-        // ADR-0139 §3 (#6400, #6422, #6409): after `unwire`, which may still
-        // send or answer handles, and `on_dehydrate`, the candidate continues
-        // the mailbox's correlation and reply-lineage sequences and takes
-        // over the reply table, so it reuses neither a request id nor a reply
-        // `MailId` and answers each held handle to its own requester.
+        // ADR-0139 §3 (#6400, #6422, #6409): after `on_dehydrate`, the
+        // candidate continues the mailbox's correlation and reply-lineage
+        // sequences and takes over the reply table, so it reuses neither a
+        // request id nor a reply `MailId` and answers each held handle to its
+        // own requester.
         candidate.resume_correlations(old.correlation_cursor());
         candidate.resume_replies(old.take_pending_replies());
-        // ADR-0079 §8: the old guest's watches move with the mailbox, after
-        // its `unwire` had the chance to end any. Nothing is registered or
-        // released: a registration is keyed by the watcher's mailbox, which a
-        // republish does not change. Their contexts reach the candidate in
-        // the saved bundle's request-context table, restored before its
-        // `on_rehydrate` runs.
+        // ADR-0079 §8: the old guest's watches move with the mailbox. Nothing
+        // is registered or released: a registration is keyed by the watcher's
+        // mailbox, which a republish does not change. Their contexts reach the
+        // candidate in the saved bundle's request-context table, restored
+        // before its `on_rehydrate` runs.
         candidate.resume_watches(old.take_watches());
-        candidate.close_load_window();
     }
 
     /// The part of [`Self::start_candidate`] after the hand-over: check the
@@ -312,6 +322,32 @@ impl WasmTrampolineState {
         // ADR-0016 §4: a failed rehydrate refuses the prepare.
         saved.map_or(Ok(()), |bundle| {
             candidate.call_on_rehydrate(bundle).map_err(|fault| format!("on_rehydrate failed: {fault}"))
+        })
+    }
+
+    /// The tail of [`Self::start_candidate`] after a successful rehydrate:
+    /// wire the successor with its outbox still held, and close its load
+    /// window whether or not `wire` succeeded, the way `wire_guest` does at
+    /// birth (ADR-0249 §9). Aliases the successor's `wire` staged stay
+    /// pending, so commit's drain publishes them and abort's discard drops
+    /// them with the candidate. The call passes no in-flight root, as the
+    /// reinstate call does, since everything it sends is held and re-stamped
+    /// on the commit turn at flush.
+    ///
+    /// A `wire` that returned an error leaves an intact successor that owes
+    /// `unwire`, and one that trapped leaves a successor that runs no more
+    /// code; the refusal says which.
+    fn wire_candidate(candidate: &mut Component) -> Result<(), CandidateRefusal> {
+        let wired = candidate.wire(None);
+        candidate.close_load_window();
+
+        wired.map_err(|fault| {
+            let unwire = if fault.is_trap() {
+                CandidateUnwire::NotOwed
+            } else {
+                CandidateUnwire::Owed
+            };
+            CandidateRefusal { error: format!("wire failed: {fault}"), unwire }
         })
     }
 
