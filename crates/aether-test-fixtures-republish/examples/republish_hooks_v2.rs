@@ -15,7 +15,7 @@ use aether_test_fixtures_kinds::{
 
 pub struct Parent {
     count: u32,
-    held: Option<Held<HeldRequestResult>>,
+    held: Vec<Held<HeldRequestResult>>,
 }
 
 #[actor(root, spawns(Counter))]
@@ -24,7 +24,7 @@ impl WasmActor for Parent {
     const NAMESPACE: &'static str = "test.republish.hooks.parent";
 
     fn init(_config: HookFaultConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Parent { count: 0, held: None })
+        Ok(Parent { count: 0, held: Vec::new() })
     }
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
@@ -46,7 +46,7 @@ impl WasmActor for Parent {
     #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, _request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
-        self.held = Some(held);
+        self.held.push(held);
         pending
     }
 }

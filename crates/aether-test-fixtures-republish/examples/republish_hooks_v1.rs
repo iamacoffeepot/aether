@@ -12,6 +12,8 @@
 //!   `type State`, so every dehydrate packs a child entry the successor has to
 //!   rebuild.
 
+use core::mem;
+
 use aether_actor::{
     ActorInitError, Held, Pending, PriorState, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx, actor,
 };
@@ -20,18 +22,18 @@ use aether_test_fixtures_kinds::{
     REHYDRATE_REFUSAL,
 };
 
-/// What `Parent` carries across a republish: its count and the reply it
+/// What `Parent` carries across a republish: its count and the replies it
 /// holds.
 #[aether_data::kind(name = "aether.test_fixtures.republish_hooks_parent_state")]
 struct ParentState {
     count: u32,
-    held: Option<Held<HeldRequestResult>>,
+    held: Vec<Held<HeldRequestResult>>,
 }
 
 pub struct Parent {
     config: HookFaultConfig,
     count: u32,
-    held: Option<Held<HeldRequestResult>>,
+    held: Vec<Held<HeldRequestResult>>,
     /// Set once `on_dehydrate` has run on this instance.
     dehydrated: bool,
 }
@@ -42,7 +44,7 @@ impl WasmActor for Parent {
     const NAMESPACE: &'static str = "test.republish.hooks.parent";
 
     fn init(config: HookFaultConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Parent { config, count: 0, held: None, dehydrated: false })
+        Ok(Parent { config, count: 0, held: Vec::new(), dehydrated: false })
     }
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) -> Result<(), ActorInitError> {
@@ -66,13 +68,13 @@ impl WasmActor for Parent {
     #[handler::request]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, _request: HeldRequest) -> Pending<HeldRequestResult> {
         let (pending, held) = ctx.hold::<HeldRequestResult>();
-        self.held = Some(held);
+        self.held.push(held);
         pending
     }
 
-    /// Save the count and the held reply, or do what the config says in
-    /// their place. A save that fails gets the held reply back before the
-    /// error is returned, so the instance that keeps running still holds it.
+    /// Save the count and the held replies, or do what the config says in
+    /// their place. A save that fails gets the held replies back before the
+    /// error is returned, so the instance that keeps running still holds them.
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         self.dehydrated = true;
         match self.config.dehydrate {
@@ -81,7 +83,7 @@ impl WasmActor for Parent {
             HookOutcome::Traps => panic!("the fixture was told to trap in on_dehydrate"),
         }
 
-        let state = ParentState { count: self.count, held: self.held.take() };
+        let state = ParentState { count: self.count, held: mem::take(&mut self.held) };
         let saved = ctx.save_state_kind(0, &state);
         if saved.is_err() {
             self.held = state.held;

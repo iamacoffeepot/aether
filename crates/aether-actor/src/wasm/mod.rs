@@ -1453,11 +1453,11 @@ macro_rules! __export_internal {
             // that was then rolled back, is live again in this instance,
             // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
-            let (__aether_user_state, __aether_hooks) = $crate::wasm::inline::compose::dehydrate(
+            let __aether_dehydrated = $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
             );
-            $crate::__export_internal!(@finish_dehydrate __aether_user_state, __aether_hooks)
+            $crate::__export_internal!(@finish_dehydrate __aether_dehydrated)
         }
 
         /// # Safety
@@ -1748,23 +1748,15 @@ macro_rules! __export_internal {
         }
     }};
 
-    // The tail of both `on_dehydrate` exports (ADR-0249 §1). A held reply
-    // that is still live was neither saved nor answered, so the republish is
-    // refused (ADR-0243 §6). The state the dehydrate composed is saved
-    // whatever the hooks returned: the host reinstates this instance and
-    // hands it back through `on_rehydrate`, which claims the tickets it saved
-    // back to live (issue 7125). The first error, of the hooks, the save and
-    // the held check in that order, is the one the export returns.
-    (@finish_dehydrate $state:ident, $hooks:ident) => {{
-        let __aether_held = $crate::wasm::inline::compose::held_unsaved(&__AETHER_INLINE);
-        let __aether_saved = match __AETHER_INLINE.compose_request_context_state($state) {
-            ::core::option::Option::Some((version, bytes)) => {
-                $crate::WasmDropCtx::__new(&__AETHER_INLINE).save_state(version, &bytes)
-            }
-            ::core::option::Option::None => ::core::result::Result::Ok(()),
-        };
-        let __aether_dehydrated = $hooks.and(__aether_saved).and(__aether_held);
-        $crate::__export_internal!(@hook_status __aether_dehydrated)
+    // The tail of both `on_dehydrate` exports (ADR-0249 §1): the shared
+    // finish, handed this module's host `save_state`.
+    (@finish_dehydrate $dehydrated:ident) => {{
+        let __aether_finished = $crate::wasm::inline::compose::finish_dehydrate(
+            &__AETHER_INLINE,
+            $dehydrated,
+            |version, bytes| $crate::WasmDropCtx::__new(&__AETHER_INLINE).save_state(version, bytes),
+        );
+        $crate::__export_internal!(@hook_status __aether_finished)
     }};
 
     // The return code of a hook export, as the `wire` export gives it: `0`,
@@ -2181,11 +2173,11 @@ macro_rules! __export_multi_internal {
             // that was then rolled back, is live again in this instance,
             // whether or not its `on_rehydrate` claimed it back.
             __AETHER_INLINE.__revert_dehydrate();
-            let (__aether_user_state, __aether_hooks) = $crate::wasm::inline::compose::dehydrate(
+            let __aether_dehydrated = $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
             );
-            $crate::__export_internal!(@finish_dehydrate __aether_user_state, __aether_hooks)
+            $crate::__export_internal!(@finish_dehydrate __aether_dehydrated)
         }
 
         /// # Safety

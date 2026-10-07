@@ -34,11 +34,40 @@ use crate::mail::PriorState;
 use crate::wasm::ctx::{CapturedState, NO_INBOUND_SOURCE, SpawnError, WasmDropCtx, WasmInitCtx, install_inline_child};
 use crate::wasm::decode::decode_config;
 use crate::wasm::inline::bundle::{self, ChildEntry};
-use crate::wasm::inline::{ChildRecord, Registry};
+use crate::wasm::inline::{ChildRecord, InlineChildMeta, Registry};
 use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
 
 /// A migration bundle as the host `save_state` takes it: `(version, bytes)`.
 pub type SavedBundle = (u32, Vec<u8>);
+
+/// What a composite dehydrate left behind (ADR-0249 §1): whether a hook
+/// refused, and whether there is a bundle for the one host `save_state`. Each
+/// case is one that occurs, so a caller handles all four and none is read off
+/// a pair of fields.
+pub enum Dehydrated {
+    /// Every hook returned `Ok`, the parent saved nothing and no child was
+    /// packed: there is no bundle. The shim skips the host `save_state`
+    /// exactly as a no-saving component does, and the substrate then skips
+    /// `on_rehydrate` (ADR-0016 §3).
+    Stateless,
+    /// Every hook returned `Ok` and this is the bundle for the single host
+    /// `save_state`. With no inline children it is byte-identical to the
+    /// parent's own blob.
+    Saved(SavedBundle),
+    /// A hook returned `error` and no hook that ran saved anything: the
+    /// parent refused before saving, or the first child did and the parent
+    /// had saved nothing.
+    Refused(ActorInitError),
+    /// A hook returned `error` after the hooks that ran saved `saved`. The
+    /// bundle is still handed to the host, which gives it back to the
+    /// reinstated guest through `on_rehydrate` (issue 7125).
+    SavedThenRefused {
+        /// What the hooks that ran saved.
+        saved: SavedBundle,
+        /// The refusing hook's error.
+        error: ActorInitError,
+    },
+}
 
 /// Run the parent's `on_dehydrate` and every inline child's, packing one
 /// composite migration bundle (ADR-0114 §5).
@@ -49,24 +78,17 @@ pub type SavedBundle = (u32, Vec<u8>);
 /// component's inline-child registry (the `export!`-emitted
 /// `static __AETHER_INLINE`); its resident children are walked here.
 ///
-/// Returns the bundle beside the hooks' outcome. The walk stops at the first
-/// hook that returns an error, the parent's or a child's (ADR-0249 §1): a hook
-/// that said no ends the step, and running the remaining children would move
-/// more state out of a guest that is about to keep running. The bundle then
-/// holds what the hooks that ran saved. A child the walk did not reach is
-/// absent from it, and so is the refusing child when it saved nothing, so the
-/// reinstated guest's rebuild leaves both resident and untouched.
-///
-/// The bundle is `None` when the parent's `on_dehydrate` saved nothing **and**
-/// no child entry was packed — the no-bundle case, so the shim skips the host
-/// `save_state` exactly as a no-saving component does (the substrate then
-/// skips `on_rehydrate`, ADR-0016 §3). Otherwise it is `Some((version,
-/// bytes))` for the single host `save_state`; with no inline children that is
-/// byte-identical to the parent's own blob.
+/// The walk stops at the first hook that returns an error, the parent's or a
+/// child's (ADR-0249 §1): a hook that said no ends the step, and running the
+/// remaining children would move more state out of a guest that is about to
+/// keep running. The bundle of a refused dehydrate holds what the hooks that
+/// ran saved. A child the walk did not reach is absent from it, and so is the
+/// refusing child when it saved nothing, so the reinstated guest's rebuild
+/// leaves both resident and untouched.
 pub fn dehydrate(
     registry: &Registry,
     run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>) -> Result<(), ActorInitError>,
-) -> (Option<SavedBundle>, Result<(), ActorInitError>) {
+) -> Dehydrated {
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
     let mut parent_capture = CapturedState::default();
     let mut outcome = run_parent_dehydrate(&mut WasmDropCtx::__new_capturing(&mut parent_capture, registry));
@@ -94,41 +116,88 @@ pub fn dehydrate(
         // A child that ran to the end is packed whether or not it saved, so
         // the successor rebuilds it. The refusing child is packed only when it
         // saved: an entry with no state would rebuild it fresh over the
-        // resident one.
-        let refused = hook.is_err();
-        let packed = if refused {
-            saved
-        } else {
-            Some(saved.unwrap_or((0, Vec::new())))
-        };
-        if let Err(error) = hook {
-            outcome = Err(ActorInitError::from(format!("inline child `{}`: {error}", meta.full_subname)));
-        }
-        if let Some((version, state_bytes)) = packed {
-            children.push(ChildEntry {
-                alias_id: meta.id.0,
-                type_tag: meta.type_tag,
-                is_counter: meta.is_counter,
-                full_subname: meta.full_subname,
-                version,
-                state_bytes,
-                config_bytes: meta.config_bytes,
-                parent_id: Some(meta.parent.0),
-            });
-        }
-        if refused {
-            break;
+        // resident one. The walk ends at it either way.
+        match hook {
+            Ok(()) => children.push(packed_child(meta, saved.unwrap_or((0, Vec::new())))),
+            Err(error) => {
+                outcome = Err(ActorInitError::from(format!("inline child `{}`: {error}", meta.full_subname)));
+                if let Some(state) = saved {
+                    children.push(packed_child(meta, state));
+                }
+                break;
+            }
         }
     }
 
     // No parent save and no children: there is no bundle to migrate, so
-    // skip the host save entirely (the unchanged no-state path).
-    if parent_saved.is_none() && children.is_empty() {
-        return (None, outcome);
+    // the host save is skipped entirely (the unchanged no-state path).
+    let parent_silent = parent_saved.is_none();
+    let stateless = parent_silent && children.is_empty();
+    if stateless {
+        return match outcome {
+            Ok(()) => Dehydrated::Stateless,
+            Err(error) => Dehydrated::Refused(error),
+        };
     }
 
     let (parent_version, parent_bytes) = parent_saved.unwrap_or((0, Vec::new()));
-    (Some(bundle::compose(parent_version, &parent_bytes, &children)), outcome)
+    let saved = bundle::compose(parent_version, &parent_bytes, &children);
+    match outcome {
+        Ok(()) => Dehydrated::Saved(saved),
+        Err(error) => Dehydrated::SavedThenRefused { saved, error },
+    }
+}
+
+/// The bundle entry of one dehydrated child: its registry metadata beside the
+/// `(version, bytes)` its `on_dehydrate` saved.
+fn packed_child(meta: InlineChildMeta, (version, state_bytes): SavedBundle) -> ChildEntry {
+    ChildEntry {
+        alias_id: meta.id.0,
+        type_tag: meta.type_tag,
+        is_counter: meta.is_counter,
+        full_subname: meta.full_subname,
+        version,
+        state_bytes,
+        config_bytes: meta.config_bytes,
+        parent_id: Some(meta.parent.0),
+    }
+}
+
+/// The tail of both `on_dehydrate` exports (ADR-0249 §1), which hands the
+/// composed state to the host through `save`, the shim's host `save_state`.
+///
+/// A held reply that is still live was neither saved nor answered, so the
+/// republish is refused (ADR-0243 §6). The state the dehydrate composed is
+/// saved whatever the hooks returned: the host reinstates this instance and
+/// hands it back through `on_rehydrate`, which claims the tickets it saved
+/// back to live (issue 7125).
+///
+/// # Errors
+/// The first error, of the hooks, the save and the held check in that order.
+#[doc(hidden)]
+pub fn finish_dehydrate(
+    registry: &Registry,
+    dehydrated: Dehydrated,
+    save: impl FnOnce(u32, &[u8]) -> Result<(), ActorInitError>,
+) -> Result<(), ActorInitError> {
+    let held = held_unsaved(registry);
+    let save_enveloped = |user_state| match registry.compose_request_context_state(user_state) {
+        Some((version, bytes)) => save(version, &bytes),
+        None => Ok(()),
+    };
+
+    match dehydrated {
+        Dehydrated::Stateless => save_enveloped(None).and(held),
+        Dehydrated::Saved(saved) => save_enveloped(Some(saved)).and(held),
+        Dehydrated::Refused(error) => {
+            let _saved = save_enveloped(None);
+            Err(error)
+        }
+        Dehydrated::SavedThenRefused { saved, error } => {
+            let _saved = save_enveloped(Some(saved));
+            Err(error)
+        }
+    }
 }
 
 /// One inline child to reconstruct, handed to the codegen-supplied
@@ -225,8 +294,7 @@ pub fn reconstruct_inline_children(
         }
 
         let stalled = deferred.len() == pending_count;
-        let orphan = deferred.first().filter(|_| stalled);
-        if let Some(orphan) = orphan {
+        if stalled && let Some(orphan) = deferred.first() {
             return Err(ActorInitError::from(format!(
                 "inline child `{}` was not rebuilt: its recorded parent is absent",
                 orphan.full_subname
@@ -262,14 +330,13 @@ pub fn placement_refused(child: &InlineChildToReconstruct<'_>, refusal: &SpawnEr
     ))
 }
 
-/// The held-reply guard both `on_dehydrate` exports run after the hooks
+/// The held-reply guard [`finish_dehydrate`] runs after the hooks
 /// (ADR-0243 §6).
 ///
 /// # Errors
 /// When a held reply is still live: the dehydrate neither saved nor answered
 /// it, so the republish is refused.
-#[doc(hidden)]
-pub fn held_unsaved(registry: &Registry) -> Result<(), ActorInitError> {
+fn held_unsaved(registry: &Registry) -> Result<(), ActorInitError> {
     if registry.__held_unsaved() {
         return Err(ActorInitError::from("a held reply is live and was not saved"));
     }
@@ -428,7 +495,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children, reconstruct_one_child};
+    use super::{
+        Dehydrated, InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children, reconstruct_one_child,
+    };
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ctx::{NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
     use crate::wasm::inline::{ChildRecord, bundle};
@@ -442,18 +511,24 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::Cell;
 
-    /// A child whose `on_dehydrate` counts its run and then either saves a
-    /// fixed 4-byte tag, so the compose can be asserted to carry the child's
-    /// bytes, or returns `refusal` having saved nothing. The reconstruct
-    /// tests don't drive this type's dispatch.
+    /// A child whose `on_dehydrate` counts its run and then does what
+    /// `hook` says. The reconstruct tests don't drive this type's dispatch.
     struct SavingChild {
-        tag: u32,
-        refusal: Option<&'static str>,
+        hook: DehydrateHook,
         runs: Rc<Cell<u32>>,
     }
 
+    /// What a [`SavingChild`]'s `on_dehydrate` does.
+    enum DehydrateHook {
+        /// Saves this fixed 4-byte tag, so the compose can be asserted to
+        /// carry the child's bytes.
+        Saves(u32),
+        /// Returns this error, having saved nothing.
+        Refuses(&'static str),
+    }
+
     fn saving(tag: u32) -> SavingChild {
-        SavingChild { tag, refusal: None, runs: Rc::default() }
+        SavingChild { hook: DehydrateHook::Saves(tag), runs: Rc::default() }
     }
 
     impl ErasedWasmActor for SavingChild {
@@ -469,9 +544,9 @@ mod tests {
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>) {}
         fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
             self.runs.set(self.runs.get() + 1);
-            match self.refusal {
-                Some(refusal) => Err(ActorInitError::from(refusal)),
-                None => ctx.save_state(9, &self.tag.to_le_bytes()),
+            match self.hook {
+                DehydrateHook::Saves(tag) => ctx.save_state(9, &tag.to_le_bytes()),
+                DehydrateHook::Refuses(refusal) => Err(ActorInitError::from(refusal)),
             }
         }
         fn erased_on_rehydrate(
@@ -546,9 +621,9 @@ mod tests {
         );
 
         // Parent saves a marker blob of its own.
-        let (bundle, hooks) = dehydrate(&registry, |ctx| ctx.save_state(3, &[0xDE, 0xAD]));
-        hooks.expect("no hook refused");
-        let (version, bytes) = bundle.expect("a parent that saves plus two children yields a bundle");
+        let Dehydrated::Saved((version, bytes)) = dehydrate(&registry, |ctx| ctx.save_state(3, &[0xDE, 0xAD])) else {
+            panic!("a parent that saves plus two children yields a bundle and no hook refused");
+        };
 
         // Decompose and assert both children + the parent survived. The
         // local registry holds exactly the two inserted children.
@@ -870,20 +945,21 @@ mod tests {
         registry.insert_child(
             ids[1],
             record("second"),
-            Box::new(SavingChild { tag: 0, refusal: Some("not now"), runs: Rc::default() }),
+            Box::new(SavingChild { hook: DehydrateHook::Refuses("not now"), runs: Rc::default() }),
         );
         registry.insert_child(
             ids[2],
             record("third"),
-            Box::new(SavingChild { tag: 0, refusal: None, runs: Rc::clone(&third_runs) }),
+            Box::new(SavingChild { hook: DehydrateHook::Saves(0), runs: Rc::clone(&third_runs) }),
         );
 
-        let (bundle, hooks) = dehydrate(&registry, |_ctx| Ok(()));
+        let Dehydrated::SavedThenRefused { saved: (version, bytes), error } = dehydrate(&registry, |_ctx| Ok(()))
+        else {
+            panic!("the second child refused and the first child's state is still handed back");
+        };
 
-        let error = hooks.expect_err("the second child refused");
         assert_eq!(error.message(), "inline child `second`: not now");
         assert_eq!(third_runs.get(), 0, "the walk stops at the refusal");
-        let (version, bytes) = bundle.expect("the first child's state is still handed back");
         let packed = bundle::decompose(version, &bytes).children;
         assert_eq!(packed.len(), 1, "only the child that ran to the end is packed");
         assert_eq!(packed[0].alias_id, ids[0].0);
