@@ -3,18 +3,18 @@ use std::collections::hash_map::Entry;
 use std::iter;
 use std::time::Duration;
 
-use aether_data::{EngineId, ErasedActorPath, Kind, MailId, tagged_id};
+use aether_data::{EngineId, ErasedActorPath, Kind, MailId, MailboxId, tagged_id};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
-    MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
-    TraceShape,
+    MailSpec, MailStatus, ReplyEventJson, ReplyProjection, RingTruncationJson, SendMailArgs, SendMailTracedArgs,
+    SendMailTracedResponse, TraceShape,
 };
 
 use super::envelope::{engine_envelope, engine_envelope_to};
-use super::ids::{mail_id_to_json, render_compact_tree};
+use super::ids::{mail_id_to_json, mailbox_id_to_tagged, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
 use super::reply_format::{ReplyFormat, resolve_reply_format};
@@ -181,6 +181,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
                 tree: None,
                 node_count: None,
                 in_flight: None,
+                truncated: Vec::new(),
                 replies: None,
             });
         }
@@ -198,6 +199,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             tree: None,
             node_count: None,
             in_flight: None,
+            truncated: Vec::new(),
             replies: None,
         });
     }
@@ -220,6 +222,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             tree: None,
             node_count: None,
             in_flight: None,
+            truncated: Vec::new(),
             replies: None,
         });
     }
@@ -252,32 +255,34 @@ pub(super) async fn finish_traced_dispatch(
     // walk with the layers already absorbed.
     let mut walk = TreeWalk::new(root);
     loop {
-        let tagged: Vec<String> =
-            iter::from_fn(|| walk.next_mailbox()).filter_map(|mailbox| tagged_id::encode(mailbox.0)).collect();
+        let layer: Vec<(MailboxId, String)> = iter::from_fn(|| walk.next_mailbox())
+            .filter_map(|mailbox| tagged_id::encode(mailbox.0).map(|tagged| (mailbox, tagged)))
+            .collect();
+        let (mailboxes, tagged): (Vec<MailboxId>, Vec<String>) = layer.into_iter().unzip();
         if tagged.is_empty() {
             break;
         }
         let Ok(paths) = mcp.engine_paths(engine, tagged).await else {
             break;
         };
-        for path in paths.into_iter().flatten() {
+        for (mailbox, path) in mailboxes.into_iter().zip(paths).filter_map(|(mailbox, path)| Some((mailbox, path?))) {
             let request = TraceTail { max: 0, since: None, root: Some(root) };
-            let entries = match mcp
+            let (entries, truncated_before) = match mcp
                 .session
                 .call_one(engine_envelope_to(engine, path, &request))
                 .await
                 .ok()
                 .and_then(|reply| TraceTailResult::decode_from_bytes(&reply.payload))
             {
-                Some(TraceTailResult::Ok { entries, .. }) => entries,
-                Some(TraceTailResult::Err { .. }) | None => Vec::new(),
+                Some(TraceTailResult::Ok { entries, truncated_before, .. }) => (entries, truncated_before),
+                Some(TraceTailResult::Err { .. }) | None => (Vec::new(), None),
             };
-            walk.absorb(entries);
+            walk.absorb(mailbox, entries, truncated_before);
         }
     }
 
     match walk.finish() {
-        DescribeTreeResult::Ok { root, in_flight, mails } => {
+        DescribeTreeResult::Ok { root, in_flight, mails, truncated } => {
             // Reverse mailbox / kind ids to real names through the
             // engine's inventory map (ADR-0088 §8). `render_mail_nodes`
             // builds + resolves the map; the root id then renders
@@ -293,6 +298,16 @@ pub(super) async fn finish_traced_dispatch(
                 let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
                 mail_id_to_json(root, cache.get(&engine))
             };
+            let truncated: Vec<RingTruncationJson> = {
+                let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
+                truncated
+                    .into_iter()
+                    .map(|ring| RingTruncationJson {
+                        actor: mailbox_id_to_tagged(ring.mailbox, cache.get(&engine)),
+                        truncated_before: ring.truncated_before,
+                    })
+                    .collect()
+            };
             json(&SendMailTracedResponse {
                 engine_id,
                 status: "settled".into(),
@@ -301,6 +316,7 @@ pub(super) async fn finish_traced_dispatch(
                 tree,
                 node_count: Some(node_count),
                 in_flight: Some(in_flight),
+                truncated,
                 replies: Some(replies),
             })
         }

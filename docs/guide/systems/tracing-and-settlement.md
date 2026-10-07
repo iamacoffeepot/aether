@@ -241,9 +241,10 @@ the oldest entries whose chains have already *settled* — those trees are compl
 so dropping them costs nothing — and it grows its capacity, doubling toward a
 configured ceiling, only to make room for chains still in flight. Past the ceiling,
 or once every old entry belongs to a still-in-flight chain, the oldest entries are
-overwritten. Because overwriting any one node leaves a hole its tree can't be
-faithfully rebuilt from, the whole chain is dropped rather than served partial —
-and a chain still in flight when its entries lap is dropped with a warning. So what
+overwritten one at a time. A tree whose entries were partly overwritten still comes
+back, with the nodes that survive: a node whose `Finished` was dropped reads as in
+flight, and `truncated` names each actor whose ring cut the tree and the sequence
+it was cut before. A root whose own `Sent` was dropped is an error, not a tree. So what
 you tend to lose first is an old, already-settled trace you didn't read promptly,
 not the in-flight work the ring is actively protecting. A tree self-reports where
 it was truncated, but old or high-volume chains can come back incomplete or not at
@@ -270,6 +271,9 @@ returns the combined trace tree, the correlated replies, and a `status`:
 - `"settled"` — the chain closed. By default `mails` is `null`, `tree` holds one
   indented line per node (`sender → recipient`, kind, and handler duration),
   `node_count` states how many nodes were rendered, and `in_flight` reads `0`.
+  When a trace ring dropped entries this tree needed, `truncated` lists each such
+  actor and the sequence its ring was cut before; a whole tree carries no
+  `truncated`.
   Pass `trace: "nodes"` to restore the complete `mails` nodes with `parent` edges
   and all timestamps; that mode omits `tree` and carries the same `node_count`.
 - `"timeout"` — the chain didn't settle within `settlement_timeout_millis`

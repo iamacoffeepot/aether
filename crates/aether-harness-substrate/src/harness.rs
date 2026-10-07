@@ -1178,8 +1178,8 @@ impl SubstrateHarness {
                         .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
                 })
             };
-            if let Some(TraceTailResult::Ok { entries, .. }) = result {
-                walk.absorb(entries);
+            if let Some(TraceTailResult::Ok { entries, truncated_before, .. }) = result {
+                walk.absorb(mailbox, entries, truncated_before);
             }
         }
         walk.finish_with(|tid| thread_name::resolve(tid.0))

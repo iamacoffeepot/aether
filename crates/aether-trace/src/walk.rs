@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use aether_data::{KindId, MailId, MailboxId, ThreadId};
-use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, TraceEvent, TraceRingEntry};
+use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, Nanos, RingTruncation, TraceEvent, TraceRingEntry};
 
 /// A guided breadth-first walk of one root's mail tree across per-actor
 /// trace rings. Construct with [`TreeWalk::new`], then drive the loop:
@@ -50,6 +50,7 @@ pub struct TreeWalk {
     visited: BTreeSet<MailboxId>,
     frontier: VecDeque<MailboxId>,
     collected: Vec<TraceRingEntry>,
+    cursors: BTreeMap<MailboxId, u64>,
 }
 
 impl TreeWalk {
@@ -59,7 +60,7 @@ impl TreeWalk {
     pub fn new(root: MailId) -> Self {
         let mut frontier = VecDeque::new();
         frontier.push_back(root.sender);
-        Self { root, visited: BTreeSet::new(), frontier, collected: Vec::new() }
+        Self { root, visited: BTreeSet::new(), frontier, collected: Vec::new(), cursors: BTreeMap::new() }
     }
 
     /// The next mailbox whose trace ring should be queried, or `None`
@@ -74,12 +75,24 @@ impl TreeWalk {
         None
     }
 
-    /// Feed the entries returned for the mailbox handed out by the most
-    /// recent [`Self::next_mailbox`]. Entries for other roots are
-    /// ignored (a `root`-filtered tail keeps the fetch cheap, but the
+    /// Feed the entries returned for `mailbox`'s ring, with that ring's
+    /// `truncated_before` cursor from the same tail reply. `mailbox` is
+    /// passed, not remembered, because a caller may drain a whole
+    /// frontier layer before it tails any ring. Entries for other roots
+    /// are ignored (a `root`-filtered tail keeps the fetch cheap, but the
     /// guard is belt-and-braces). Each in-tree `Sent` enqueues its
-    /// recipient onto the frontier.
-    pub fn absorb(&mut self, entries: impl IntoIterator<Item = TraceRingEntry>) {
+    /// recipient onto the frontier. The cursor is kept to name the ring
+    /// in [`DescribeTreeResult::Ok::truncated`] when the tree shows a
+    /// hole at `mailbox`.
+    pub fn absorb(
+        &mut self,
+        mailbox: MailboxId,
+        entries: impl IntoIterator<Item = TraceRingEntry>,
+        truncated_before: Option<u64>,
+    ) {
+        if let Some(cursor) = truncated_before {
+            self.cursors.insert(mailbox, cursor);
+        }
         for entry in entries {
             if entry.root != self.root {
                 continue;
@@ -111,7 +124,19 @@ impl TreeWalk {
     where
         F: Fn(ThreadId) -> Option<String>,
     {
-        stitch_with(self.root, self.collected, resolve)
+        let result = stitch_with(self.root, self.collected, resolve);
+        match result {
+            DescribeTreeResult::Ok { root, in_flight, mails, .. } => {
+                let truncated = self
+                    .cursors
+                    .into_iter()
+                    .filter(|(mailbox, _)| mails.iter().any(|node| has_hole_at(node, *mailbox)))
+                    .map(|(mailbox, truncated_before)| RingTruncation { mailbox, truncated_before })
+                    .collect();
+                DescribeTreeResult::Ok { root, in_flight, mails, truncated }
+            }
+            err @ DescribeTreeResult::Err { .. } => err,
+        }
     }
 }
 
@@ -139,7 +164,8 @@ pub fn stitch(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>) -
 /// tree never existed or its seed ring evicted it — matching the
 /// central observer's contract. `in_flight` counts nodes with a `Sent`
 /// but no `Finished`; the only caller today walks post-settlement, so
-/// it sees `0`.
+/// it sees `0`. It carries no ring replies, so `truncated` is empty;
+/// [`TreeWalk::finish_with`] fills it.
 #[must_use]
 pub fn stitch_with<F>(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>, resolve: F) -> DescribeTreeResult
 where
@@ -150,7 +176,7 @@ where
         return DescribeTreeResult::Err { not_found: root };
     }
     let in_flight = u32::try_from(mails.iter().filter(|n| n.t_finished.is_none()).count()).unwrap_or(u32::MAX);
-    DescribeTreeResult::Ok { root, in_flight, mails }
+    DescribeTreeResult::Ok { root, in_flight, mails, truncated: Vec::new() }
 }
 
 /// Collapse a flat event stream into one [`MailNodeWire`] per `mail_id`,
@@ -223,6 +249,14 @@ where
             })
         })
         .collect()
+}
+
+/// Whether `node` was delivered to `mailbox` yet lacks the `Received` or
+/// `Finished` that ring should hold.
+fn has_hole_at(node: &MailNodeWire, mailbox: MailboxId) -> bool {
+    let delivered_here = node.recipient == mailbox;
+    let incomplete = node.t_received.is_none() || node.t_finished.is_none();
+    delivered_here && incomplete
 }
 
 #[derive(Default)]
@@ -315,7 +349,7 @@ mod tests {
 
     fn ok(result: DescribeTreeResult) -> (MailId, u32, Vec<MailNodeWire>) {
         match result {
-            DescribeTreeResult::Ok { root, in_flight, mails } => (root, in_flight, mails),
+            DescribeTreeResult::Ok { root, in_flight, mails, .. } => (root, in_flight, mails),
             DescribeTreeResult::Err { not_found } => panic!("expected Ok, got Err {not_found:?}"),
         }
     }
@@ -432,7 +466,7 @@ mod tests {
         while let Some(mbx) = walk.next_mailbox() {
             visited_order.push(mbx);
             let entries = rings.get(&mbx).cloned().unwrap_or_default();
-            walk.absorb(entries);
+            walk.absorb(mbx, entries, None);
         }
         let (got_root, in_flight, mails) = ok(walk.finish());
 
@@ -486,10 +520,45 @@ mod tests {
         let mut visits = 0;
         while let Some(mbx) = walk.next_mailbox() {
             visits += 1;
-            walk.absorb(rings.get(&mbx).cloned().unwrap_or_default());
+            walk.absorb(mbx, rings.get(&mbx).cloned().unwrap_or_default(), None);
         }
         let (_, _, mails) = ok(walk.finish());
         assert_eq!(visits, 3, "chassis, observer, shared — shared once");
         assert_eq!(mails.len(), 3, "root + two children");
+    }
+
+    /// Walks root -> mailbox 2 with `ring_entries` as 2's ring and cursor
+    /// `Some(7)`, returning the walk's `truncated` list.
+    fn truncated_of(ring_entries: &[TraceRingEntry]) -> Vec<RingTruncation> {
+        let root = mid(0, 1);
+        let mut walk = TreeWalk::new(root);
+        while let Some(mbx) = walk.next_mailbox() {
+            if mbx == MailboxId(2) {
+                walk.absorb(mbx, ring_entries.to_vec(), Some(7));
+            } else {
+                walk.absorb(mbx, vec![sent(root, root, 2)], None);
+            }
+        }
+        match walk.finish() {
+            DescribeTreeResult::Ok { truncated, .. } => truncated,
+            DescribeTreeResult::Err { not_found } => panic!("expected Ok, got Err {not_found:?}"),
+        }
+    }
+
+    // Catches: a ring's cursor discarded, so a tree with a hole is unmarked.
+    #[test]
+    fn a_ring_with_a_cursor_and_a_node_missing_received_is_listed() {
+        let root = mid(0, 1);
+        let truncated = truncated_of(&[finished(root, root)]);
+        assert_eq!(truncated, vec![RingTruncation { mailbox: MailboxId(2), truncated_before: 7 }]);
+    }
+
+    // Catches: every ring that reports a cursor marked, though a warm ring
+    // has dropped older entries under nearly every tree.
+    #[test]
+    fn a_ring_with_a_cursor_under_a_whole_tree_is_not_listed() {
+        let root = mid(0, 1);
+        let truncated = truncated_of(&[received(root, root), finished(root, root)]);
+        assert!(truncated.is_empty());
     }
 }

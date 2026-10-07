@@ -178,7 +178,8 @@ batch lands under one chassis-level trace root. The settled default returns a
 compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
 each line names `sender → recipient`, kind, and handler duration, with indentation
 for causal depth. Pass `trace: "nodes"` to restore the complete `mails` node values;
-that form omits `tree` and carries the same `node_count`. Both forms also carry
+that form omits `tree` and carries the same `node_count`. A tree a trace ring cut
+also carries `truncated`, naming each such actor; a whole tree has none. Both forms also carry
 the complete flat reply list and rely on the generic response spill rather than
 truncating. Its `format` is the same reply mask as `send_mail`'s, applied to
 that reply list and validated before the batch is encoded; a string `format`,

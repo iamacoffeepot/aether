@@ -367,6 +367,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
         tree: Some(vec!["aether.chassis → aether.fs  aether.fs.list  +0µs".to_owned()]),
         node_count: Some(1),
         in_flight: Some(0),
+        truncated: Vec::new(),
         replies: Some(Vec::new()),
     })
     .expect("compact response serializes");
@@ -382,6 +383,7 @@ fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
         tree: None,
         node_count: Some(1),
         in_flight: Some(0),
+        truncated: Vec::new(),
         replies: Some(Vec::new()),
     })
     .expect("full response serializes");
@@ -400,6 +402,7 @@ fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
         tree: None,
         node_count: None,
         in_flight: None,
+        truncated: Vec::new(),
         replies: None,
     })
     .expect("timeout response serializes");
@@ -416,6 +419,7 @@ fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
         tree: None,
         node_count: None,
         in_flight: None,
+        truncated: Vec::new(),
         replies: None,
     })
     .expect("dispatched response serializes");
