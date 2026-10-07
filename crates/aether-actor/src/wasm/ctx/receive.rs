@@ -5,12 +5,15 @@
 //! parent door in `super::parent`, and its child-spawning
 //! verbs in `super::spawn`.
 
+use core::cell::OnceCell;
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ptr;
 
-use aether_data::{Kind, MailboxId, RequestId, Source};
+use aether_data::{Blob, Kind, MailboxId, RequestId, Source};
 
+use crate::asset::{AssetInfo, Assets};
+use crate::blob::guest;
 use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{ReplyMode, Single, Unchecked};
@@ -22,6 +25,7 @@ use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
 /// capability handle for FFI guests. Exposes send, reply, and
@@ -62,6 +66,10 @@ pub struct WasmCtx<'a, A = Erased, S = Anyone, M: ReplyMode = Single> {
     /// A plain `bool`, the same in every reply mode, so the mode and actor
     /// reborrows stay layout-identical.
     pub(super) held_armed: bool,
+    /// Asset catalog, fetched lazily on the first [`Assets::assets`] call and
+    /// cached for the ctx's life — served from the instance's own module in
+    /// every hook (ADR-0250).
+    pub(super) catalog: OnceCell<Vec<AssetInfo>>,
     _borrow: PhantomData<&'a ()>,
     /// ADR-0112: phantom reply-mode marker (a ZST, layout-neutral) that
     /// selects which reply surface this ctx exposes. Defaults to
@@ -120,6 +128,7 @@ impl<'a> WasmCtx<'a, Erased, Anyone, Unchecked> {
             host_dispatch: true,
             inline,
             held_armed: false,
+            catalog: OnceCell::new(),
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -140,6 +149,7 @@ impl<'a> WasmCtx<'a, Erased, Anyone, Unchecked> {
             host_dispatch: false,
             inline,
             held_armed: false,
+            catalog: OnceCell::new(),
             _borrow: PhantomData,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -337,5 +347,21 @@ impl<A, S: SenderRequirement, M: ReplyMode> WasmCtx<'_, A, S, M> {
     #[must_use]
     pub fn sender(&self) -> S::Reference {
         S::__reference(self.source.map(ErasedActorRef::id), |_| true)
+    }
+}
+
+impl<A, S, M: ReplyMode> Assets for WasmCtx<'_, A, S, M> {
+    fn assets(&self) -> &[AssetInfo] {
+        use crate::wasm::bridge::asset;
+        self.catalog.get_or_init(asset::fetch_catalog).as_slice()
+    }
+
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
+        use crate::wasm::bridge::asset;
+        asset::fetch_asset(name)
+    }
+
+    fn asset_blob(&mut self, name: &str) -> Option<Blob> {
+        guest::asset_blob(name)
     }
 }

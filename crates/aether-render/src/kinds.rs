@@ -875,7 +875,7 @@ pub struct DrawTexturedQuads {
 /// `aether.render.create_font` — register a font from the bytes of a
 /// TrueType or OpenType file. `bytes` arrives as a `Blob` and is parsed as
 /// received, without a copy: the caller reads the file however it likes
-/// (an `aether.fs.read` reply, an asset from its load window, bytes it
+/// (an `aether.fs.read` reply, one of its module's assets, bytes it
 /// embeds) and hands the blob on. The parse runs off the renderer's turn,
 /// so the reply comes after the handler returns. A second create of the
 /// same bytes is a second font. Needs no render device. Reply:

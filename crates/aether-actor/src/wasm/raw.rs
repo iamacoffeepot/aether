@@ -124,33 +124,32 @@ unsafe extern "C" {
     /// host-side, nothing staged).
     #[link_name = "despawn_inline_child_p32"]
     pub fn despawn_inline_child(alias: u64) -> u32;
-    /// ADR-0163 §3 (#3984): pull one asset's bytes through the load window.
+    /// ADR-0250: pull one asset's bytes from the instance's own module.
     /// `(name_ptr, name_len)` is the asset name (a UTF-8 slice in guest
     /// memory), copied out before the call returns. The return is the
     /// packed `(ptr << 32) | len`: `u64::MAX` means "no such asset in the
-    /// open window" (the SDK maps it to `None`); any other value is a live
+    /// module" (the SDK maps it to `None`); any other value is a live
     /// guest buffer of `len` bytes at `ptr` the SDK copies out and frees
-    /// through the guest allocator. A call after the load window closed
-    /// (post-`wire`) traps host-side — payload access is init+wire only.
+    /// through the guest allocator. Served in every hook from the
+    /// instance's own module.
     #[link_name = "asset_fetch_p32"]
     pub fn asset_fetch(name_ptr: u32, name_len: u32) -> u64;
-    /// ADR-0163 §3 (#3984): the component's asset catalog as a wire-encoded
+    /// ADR-0250: the component's asset catalog as a wire-encoded
     /// `Vec<AssetInfo>`, delivered the same way as [`asset_fetch`] — the
     /// return is the packed `(ptr << 32) | len` of a live guest buffer the
     /// SDK decodes and frees. An empty catalog is a valid empty sequence.
-    /// Backs `AssetCatalog::assets()`; readable for the instance's life
-    /// (the catalog metadata is retained past the window close).
+    /// Backs `Assets::assets()`; readable for the instance's life.
     #[link_name = "asset_catalog_p32"]
     pub fn asset_catalog() -> u64;
-    /// ADR-0163 §3: take one asset through the load window as a blob this
-    /// instance holds by hash, with no payload byte entering guest memory.
-    /// `(name_ptr, name_len)` is the asset name, copied out before the call
-    /// returns. On success the host places the asset in this instance's blob
-    /// table with one hold, writes its 32-byte hash at `hash_out_ptr`, and
-    /// returns its length; `blob_drop` gives the hold back. A negative return,
-    /// with nothing held or written, means "no such asset in the open
-    /// window" (the SDK maps it to `None`). The host traps where
-    /// [`asset_fetch`] does, and on a `hash_out_ptr` outside guest memory.
+    /// ADR-0250: take one asset from the instance's own module as a blob
+    /// this instance holds by hash, with no payload byte entering guest
+    /// memory. `(name_ptr, name_len)` is the asset name, copied out before
+    /// the call returns. On success the host places the asset in this
+    /// instance's blob table with one hold, writes its 32-byte hash at
+    /// `hash_out_ptr`, and returns its length; `blob_drop` gives the hold
+    /// back. A negative return, with nothing held or written, means "no such
+    /// asset in the module" (the SDK maps it to `None`). The host traps on
+    /// a `hash_out_ptr` outside guest memory.
     #[link_name = "asset_blob_p32"]
     pub fn asset_blob(name_ptr: u32, name_len: u32, hash_out_ptr: u32) -> i64;
     /// ADR-0230 §3 (#6786): prove the actor path at `(path_ptr, path_len)`, a
@@ -364,7 +363,7 @@ pub unsafe fn spawn_inline_child(
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
 }
 
-/// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).
+/// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0250).
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
 /// # Safety
@@ -379,7 +378,7 @@ pub unsafe fn asset_fetch(_name_ptr: u32, _name_len: u32) -> u64 {
     panic!("aether-actor: asset_fetch called outside the FFI guest");
 }
 
-/// Host-side stub for the FFI `aether::asset_catalog` import (ADR-0163).
+/// Host-side stub for the FFI `aether::asset_catalog` import (ADR-0250).
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
 /// # Safety

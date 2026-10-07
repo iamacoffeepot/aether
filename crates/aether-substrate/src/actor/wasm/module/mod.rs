@@ -9,16 +9,15 @@
 //!   only in their assets share one compile and one parse of the kinds,
 //!   exported and private actor groups, lineage, boot, namespace, and the
 //!   no-default and content-addressed markers;
-//! - the [`ModuleManifest`]'s per-file asset index, each asset's catalog entry
-//!   with its byte range, parsed once per file hash.
+//! - the [`ModuleManifest`]'s per-file asset index, each asset checked in as
+//!   its own blob through the check-in handle, parsed once per file hash.
 //!
-//! The wasm bytes are used to compile and to parse, and are then let go:
-//! nothing here holds the code blob or any asset's payload, so the bytes
-//! leave the store once the caller drops its value. Every later load, boot
-//! and replace of the same bytes reads the entry instead of the bytes. An
-//! asset's payload passes only through a load window, which reads its range
-//! from the code the window's opener brought and lets go of it when the
-//! window closes (ADR-0163 §3).
+//! The wasm bytes are used to compile and to parse, and the file bytes are
+//! then let go: each asset is kept once as its own blob, deduplicated by the
+//! store, for as long as a `Module` holds it, so the bytes leave the store
+//! once the caller drops its value. Every later load, boot and replace of the
+//! same bytes reads the entry instead of the bytes. An instance reads its
+//! assets from its own module in every hook (ADR-0250).
 //!
 //! A module publishes the namespaces [`Module::published_groups`] names
 //! (ADR-0241 §3): its exported groups' declared namespaces, each qualified by

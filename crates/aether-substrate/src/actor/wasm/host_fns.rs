@@ -7,13 +7,12 @@
 use core::str::from_utf8;
 use std::borrow::Cow;
 
-use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
+use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath};
 use aether_codec::frame::max_frame_size;
-use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
+use aether_data::{Blob, BlobHash, BlobReader, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
-use crate::actor::native::{BlobCheckIn, ResolvePathError};
-use crate::actor::wasm::asset_manifest::LoadWindow;
+use crate::actor::native::ResolvePathError;
 use crate::actor::wasm::component::GuestAnswer;
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::actor::wasm::reply_table::{ReplyEntry, ReplyMail};
@@ -592,67 +591,67 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0163 §3 asset load window (#3984). This cannot be a
+    // HOST_FN_OK: ADR-0250 module-held assets. This cannot be a
     // native capability addressed by mail: `asset` is a synchronous read
-    // inside the guest's own `init` / `wire`, and the bytes live host-side
-    // in the module file — the guest must pull them across the FFI at that
+    // inside the guest's own hook, and the bytes live host-side in the
+    // instance's own module — the guest must pull them across the FFI at that
     // instant and get them back into its own linear memory. That is the
     // same host-mediated byte-transport shape as config delivery into
     // `init` (ADR-0090) and mail delivery into `receive`, none of which a
-    // mail-round-trip capability can express. The surface is window-scoped
-    // (traps after `wire`), so it grows no persistent capability.
+    // mail-round-trip capability can express. Served from the instance's own
+    // module in every hook, so it grows no persistent capability.
     //
-    // Pull one asset's bytes through the load window: the guest passes the
+    // Pull one asset's bytes from the instance's module: the guest passes the
     // asset name (a slice in guest memory), the host looks it up in the
-    // `LoadWindow` installed on the ctx, allocates a buffer in guest memory
-    // through the guest's own `realloc_p32`, writes the bytes, and returns
-    // the ADR-0163 packed `(ptr << 32) | len`. Encoding:
-    //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the window is open but carries
-    //     no asset by that name; the guest maps it to `None`.
+    // module installed on the ctx, streams its blob through `BlobReader`,
+    // allocates a buffer in guest memory through the guest's own
+    // `realloc_p32`, writes the bytes, and returns the packed
+    // `(ptr << 32) | len`. Encoding:
+    //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the module carries no asset by
+    //     that name; the guest maps it to `None`.
     //   - any other value — `(ptr << 32) | len`, a live guest buffer the
     //     SDK copies out and frees. An empty asset answers `0` (no buffer,
     //     length 0), distinct from the not-found sentinel.
-    // A call after the window closed (post-`wire`) or with no window at all
-    // traps, so the type-fence (`asset` lives only on the init/wire ctx) is
-    // backed by a loud runtime failure for a hand-rolled guest, never a
-    // silent empty. Not-found vs closed is thus a returned sentinel vs a
-    // trap — two unambiguous outcomes. A catalogued asset fetched by an
-    // instance spawned without its module's bytes, whose window holds no
-    // code to read it from, also traps, naming the two doors that bring
-    // them: a spawn with its code, and a load (ADR-0163 §4).
+    // A ctx holding no module traps (reachable only on bare test ctxs, never
+    // on a trampoline-born instance, which always installs its module).
     linker.func_wrap(
         "aether",
         "asset_fetch_p32",
         |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let bytes = open_load_window(caller.data_mut(), "asset_fetch")?
-                .fetch(&name)
-                .map_err(|error| wasmtime::Error::msg(format!("asset_fetch: {error}")))?;
-            bytes.map_or_else(|| Ok(ASSET_NOT_FOUND), |bytes| deliver_bytes_to_guest(&mut caller, &bytes))
+            let blob = {
+                let ctx = caller.data();
+                let Some(module) = ctx.module.as_ref() else {
+                    return Err(wasmtime::Error::msg("asset_fetch: this component holds no module"));
+                };
+                module.manifest().assets().section(&name).map(|section| section.blob.clone())
+            };
+            let Some(blob) = blob else {
+                return Ok(ASSET_NOT_FOUND);
+            };
+            deliver_bytes_to_guest(&mut caller, &read_blob(&blob))
         },
     )?;
 
-    // HOST_FN_OK: ADR-0163 §3 asset load window — the blob sibling of
-    // `asset_fetch_p32` above, backing the guest's `AssetWindow::asset_blob`.
+    // HOST_FN_OK: ADR-0250 module-held assets — the blob sibling of
+    // `asset_fetch_p32` above, backing the guest's `Assets::asset_blob`.
     // It cannot be a native capability addressed by mail for the same
-    // reason: the read is synchronous inside the guest's own `init` / `wire`,
-    // and a mail round trip cannot answer inside `wire`. Unlike the fetch it
-    // moves no payload byte into guest memory: the guest gets a handle, and
-    // the bytes stay where the module's code already sits in the store.
+    // reason: the read is synchronous inside the guest's own hook, and a
+    // mail round trip cannot answer inside it. Unlike the fetch it moves no
+    // payload byte into guest memory: the guest gets a handle, and the bytes
+    // stay where the module's asset blob already sits in the store.
     //
-    // Take the asset named by `(name_ptr, name_len)` as a view of its range
-    // of the module's code (ADR-0238 decision 8), place the view in this
-    // instance's blob table with one hold, write its 32-byte hash at
-    // `hash_out_ptr`, and return its length. The SDK builds a `Blob` over
-    // that hash whose `GuestHold` owns the hold, exactly the value a tag-1
-    // decode produces, so `blob_read_p32` reads it, a send resolves it and
-    // `blob_drop_p32` gives it back. `ASSET_BLOB_NOT_FOUND` (`-1`), with
-    // nothing held or written, means the window is open but carries no asset
-    // by that name.
+    // Take the asset named by `(name_ptr, name_len)` as the module's own
+    // blob, place it in this instance's blob table with one hold, write its
+    // 32-byte hash at `hash_out_ptr`, and return its length. The SDK builds
+    // a `Blob` over that hash whose `GuestHold` owns the hold, exactly the
+    // value a tag-1 decode produces, so `blob_read_p32` reads it, a send
+    // resolves it and `blob_drop_p32` gives it back.
+    // `ASSET_BLOB_NOT_FOUND` (`-1`), with nothing held or written, means the
+    // module carries no asset by that name.
     //
-    // The window rules are the fetch's: a call with no window, after the
-    // window closed, or for a catalogued asset on a window spawned without
-    // its module's bytes traps, as does a `hash_out_ptr` outside guest memory.
+    // A ctx holding no module traps, as for the fetch, as does a
+    // `hash_out_ptr` outside guest memory.
     linker.func_wrap(
         "aether",
         "asset_blob_p32",
@@ -662,16 +661,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          hash_out_ptr: u32|
          -> wasmtime::Result<i64> {
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let ctx = caller.data_mut();
-            let blobs = BlobCheckIn::new(ctx.binding.mailer().blob_store().clone());
-            let asset = open_load_window(ctx, "asset_blob")?
-                .fetch_blob(&blobs, &name)
-                .map_err(|error| wasmtime::Error::msg(format!("asset_blob: {error}")))?;
+            let asset = {
+                let ctx = caller.data();
+                let Some(module) = ctx.module.as_ref() else {
+                    return Err(wasmtime::Error::msg("asset_blob: this component holds no module"));
+                };
+                module.manifest().assets().section(&name).map(|section| section.blob.clone())
+            };
             let Some(asset) = asset else {
                 return Ok(ASSET_BLOB_NOT_FOUND);
             };
             let entry = store_entry(&asset)
-                .ok_or_else(|| wasmtime::Error::msg("asset_blob: the load window served a blob outside the store"))?;
+                .ok_or_else(|| wasmtime::Error::msg("asset_blob: the module served a blob outside the store"))?;
 
             let memory = caller
                 .get_export("memory")
@@ -683,26 +684,23 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0163 §3 (#3984) — the catalog companion of the
-    // asset_fetch pull above, backing the guest's `AssetCatalog::assets()`
-    // (the `AssetWindow: AssetCatalog` supertrait). Same host-mediated
-    // byte-transport rationale; a mail capability cannot serve a
-    // synchronous in-`wire` read into guest memory. Returns the window's
-    // catalog as a wire-encoded `Vec<AssetInfo>` delivered like
-    // `asset_fetch_p32`; an empty catalog encodes to a valid empty
-    // sequence (no sentinel). Unlike `asset_fetch`, this reads the catalog
-    // metadata retained past `close()`, so it answers for the instance's
-    // life; it traps only when no window was ever installed.
+    // HOST_FN_OK: ADR-0250 — the catalog companion of the asset_fetch pull
+    // above, backing the guest's `Assets::assets()`. Same host-mediated
+    // byte-transport rationale; a mail capability cannot serve a synchronous
+    // read into guest memory. Returns the module's catalog as a wire-encoded
+    // `Vec<AssetInfo>` delivered like `asset_fetch_p32`; an empty catalog
+    // encodes to a valid empty sequence (no sentinel). It answers for the
+    // instance's life; it traps only when the ctx holds no module.
     linker.func_wrap(
         "aether",
         "asset_catalog_p32",
         |mut caller: Caller<'_, ComponentCtx>| -> wasmtime::Result<u64> {
             let bytes = {
                 let ctx = caller.data();
-                let Some(window) = ctx.load_window.as_ref() else {
-                    return Err(wasmtime::Error::msg("asset_catalog: this component has no asset load window"));
+                let Some(module) = ctx.module.as_ref() else {
+                    return Err(wasmtime::Error::msg("asset_catalog: this component holds no module"));
                 };
-                wire::to_vec(window.assets())
+                wire::to_vec(module.manifest().asset_catalog())
                     .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?
             };
             deliver_bytes_to_guest(&mut caller, &bytes)
@@ -1082,32 +1080,32 @@ fn read_guest_hash(caller: &mut Caller<'_, ComponentCtx>, hash_ptr: u32) -> Resu
     Ok(BlobHash::from_bytes(bytes))
 }
 
-/// The open load window `host_fn` reads an asset's payload through, or the
-/// trap it answers with when this component has no window or the window has
-/// closed. `asset_fetch_p32` and `asset_blob_p32` share it, so the two verbs
-/// cannot disagree about when the window serves.
-fn open_load_window<'a>(ctx: &'a mut ComponentCtx, host_fn: &str) -> wasmtime::Result<&'a mut LoadWindow> {
-    let Some(window) = ctx.load_window.as_mut() else {
-        return Err(wasmtime::Error::msg(format!("{host_fn}: this component has no asset load window")));
-    };
-    if !window.is_open() {
-        return Err(wasmtime::Error::msg(format!(
-            "{host_fn}: called outside the load window — asset payload access ends when `wire` returns \
-             (ADR-0163 §3)"
-        )));
+/// The bytes of the asset blob `blob`, streamed through `BlobReader`.
+fn read_blob(blob: &Blob) -> Vec<u8> {
+    let reader = BlobReader::open(blob);
+    let len = usize::try_from(reader.len()).unwrap_or(0);
+    let mut bytes = vec![0; len];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
+        if copied == 0 {
+            break;
+        }
+        filled += copied;
     }
-    Ok(window)
+    bytes.truncate(filled);
+    bytes
 }
 
-/// `asset_blob_p32`'s return for "the load window is open but carries no
-/// asset by the requested name": negative, so it is no length. The guest
-/// maps it to `None`.
+/// `asset_blob_p32`'s return for "the module carries no asset by the
+/// requested name": negative, so it is no length. The guest maps it to
+/// `None`.
 pub const ASSET_BLOB_NOT_FOUND: i64 = -1;
 
-/// ADR-0163 packed-return marker for "the load window is open but carries
-/// no asset by the requested name" — distinct from a real `(ptr << 32) |
-/// len` (a 4 GiB asset at pointer `0xFFFF_FFFF` is impossible under the
-/// frame and address bounds). The guest maps it to `None`.
+/// ADR-0250 packed-return marker for "the module carries no asset by the
+/// requested name" — distinct from a real `(ptr << 32) | len` (a 4 GiB asset
+/// at pointer `0xFFFF_FFFF` is impossible under the frame and address
+/// bounds). The guest maps it to `None`.
 const ASSET_NOT_FOUND: u64 = u64::MAX;
 
 /// Alignment the asset delivery buffer is allocated with. Byte payloads

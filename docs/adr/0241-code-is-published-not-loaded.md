@@ -71,7 +71,8 @@ pub struct Module {
     compiled: Arc<wasmtime::Module>,  // compiled once per code per engine, shared by every
                                       // module whose bytes differ only in asset sections
     manifest: Arc<ModuleManifest>,    // parsed once: exports, rows, depends, lineage, boot, kinds,
-                                      // and each asset's catalog entry and byte range
+                                      // and each asset's catalog entry and own blob
+    assets: Arc<AssetIndex>,          // each asset's name to its own `Blob` (held by the `Module`)
 }
 ```
 
@@ -85,19 +86,20 @@ section is its own code. Every other custom section stays in the code: the
 name section feeds trap symbolication, and the manifest sections differ only
 between modules that are different modules.
 
-The wasm bytes are used once, to compile and to parse, and are not retained,
-and neither is any asset's payload. Nothing re-parses a section per load or
-per replace: every reader today that re-reads the bytes (a replace's
-predecessor kinds and boot namespace, the inline contracts) reads the manifest
-instead. An asset's payload passes only through a load window (ADR-0163 §3),
-which reads the asset's recorded range from the code its opener brought (a
-load's, a spawn's, or a republish's bytes) and lets go of that code when the
-window closes. A spawn may bring the bytes of the module that publishes its
-namespace, and its window then reads that module's assets from them. A spawn
-that brings none answers the catalog and refuses a catalogued asset, naming
-the two doors that bring the bytes: a spawn with its code, and a load. An
-entry lives while anything holds it: a publication, a running
-instance, or a held `Module`. Compiled code lives while any entry over it does.
+The wasm bytes are used once, to compile and to parse, and the file bytes
+are then let go: a publish checks each asset in as its own deduplicated blob
+held by the `Module` (ADR-0250 §1), so each asset lives exactly as long as a
+`Module` holds it — while a publication, a running instance, or a held
+`Module` holds it. Nothing re-parses a section per load or per replace: every
+reader today that re-reads the bytes (a replace's predecessor kinds and boot
+namespace, the inline contracts) reads the manifest instead. A component reads
+its assets from its own module in every hook — `init`, `wire`, all handlers,
+`on_rehydrate`, and `unwire` — served from the instance's own module with no
+window and no trap for a call made at the wrong time. A spawn brings no bytes:
+a spawn of a published type always builds an instance that can read its
+assets, whoever asks for it. An entry lives while anything holds it: a
+publication, a running instance, or a held `Module`. Compiled code lives while
+any entry over it does.
 
 A `Module` never leaves its engine. Compiled code is tied to the engine's
 wasmtime version, configuration, and target, so the portable form of code is
@@ -327,17 +329,16 @@ registry owner (§3), and the host reads it there.
   with `configs` as each listed instance's new config. Its reply names each
   namespace it bound, so a caller of a content-addressed module never
   recomputes the hash.
-- `Spawn { namespace, key, parent, config, code: Option<Blob> }` asks for an
-  instance to exist, and the name decides the answer. `code` brings the
-  module's bytes for the new instance's load window (§2); the host checks
-  them in and refuses the spawn when they are not the module the namespace
-  is bound to, because the asset ranges the window reads are that module's. A live name: the reply names it and
-  nothing is re-initialised. An absent name: the engine stands the instance
-  up. A tombstoned name: the spawn is refused, because the name is spent
-  (§8). The door spawns published guest types. A native namespace is
-  composed by its chassis or parent, and spawning one by mail is not
-  supported yet, so a `Spawn` naming one, a composed singleton's included,
-  is refused with an error saying so (see Alternatives considered).
+- `Spawn { namespace, key, parent, config }` asks for an instance to exist,
+  and the name decides the answer. A spawn brings no bytes: a spawn of a
+  published type always builds an instance that can read its assets, in every
+  hook, from its own module. A live name: the reply names it and nothing is
+  re-initialised. An absent name: the engine stands the instance up. A
+  tombstoned name: the spawn is refused, because the name is spent (§8). The
+  door spawns published guest types. A native namespace is composed by its
+  chassis or parent, and spawning one by mail is not supported yet, so a
+  `Spawn` naming one, a composed singleton's included, is refused with an
+  error saying so (see Alternatives considered).
 
 `LoadComponent` becomes a convenience that publishes and spawns in one call.
 `ReplaceComponent { wasm, configs: Vec<(ErasedActorPath, Vec<u8>)> }` becomes

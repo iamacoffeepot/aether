@@ -108,8 +108,7 @@ fn a_first_publish_binds_every_export_for_a_spawn() {
     let namespaces = publish(&mut harness, &fixtures.v1);
 
     assert_eq!(namespaces, [GATE, PEER], "the reply names every namespace the module exports");
-    let spawn =
-        Spawn { namespace: GATE.to_owned(), key: Some("a".to_owned()), parent: None, config: Vec::new(), code: None };
+    let spawn = Spawn { namespace: GATE.to_owned(), key: Some("a".to_owned()), parent: None, config: Vec::new() };
     match host_call::<_, SpawnResult>(&mut harness, &spawn) {
         SpawnResult::Spawned { path, .. } => assert_eq!(path.as_str(), format!("{GATE}:a")),
         other => panic!("the published gate spawns: {other:?}"),

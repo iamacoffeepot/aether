@@ -112,14 +112,6 @@ impl Component {
         Err(HookFault::Returned(message))
     }
 
-    /// ADR-0163 §3: close the asset load window on this component's store
-    /// ctx. The trampoline calls this once the guest's `wire` has returned,
-    /// so post-window `asset_fetch_p32` traps while the catalog metadata
-    /// stays queryable through `asset_catalog_p32` for the instance's life.
-    pub fn close_load_window(&mut self) {
-        self.store.data_mut().close_load_window();
-    }
-
     /// Resolve the inbound mail's source `MailboxId` for the trailing
     /// `receive_p32` frame slot (issue 2001). A peer-component origin
     /// (`SourceAddr::Component`) yields that mailbox's raw id. A reply (no

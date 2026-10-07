@@ -1,5 +1,5 @@
 //! A module's custom sections, split into a code-shared part and a per-file asset
-//! index (ADR-0241 §2, ADR-0163 §3).
+//! index (ADR-0241 §2, ADR-0250).
 //!
 //! [`CodeManifest::parse`] runs each code-section reader in [`kind_manifest`]
 //! once per code and keeps what it returns, while the per-file side runs the
@@ -9,16 +9,16 @@
 //! for every section, and not one kind parse per bundle.
 
 use std::collections::HashSet;
-use std::ops::Range;
 use std::sync::Arc;
 
 use aether_actor::NAMESPACE_SEGMENT_MAX_LEN;
 use aether_data::canonical::kind_id_from_parts;
-use aether_data::{ActorLineageRecord, CONTENT_ADDRESSED_SECTION, KindDescriptor, KindId};
+use aether_data::{ActorLineageRecord, Blob, CONTENT_ADDRESSED_SECTION, KindDescriptor, KindId};
 use aether_kinds::AssetInfo;
 use rustc_hash::FxHashMap;
 
 use super::{AssetName, HASH_HEX_BYTES};
+use crate::actor::native::BlobCheckIn;
 use crate::actor::wasm::asset_manifest;
 use crate::actor::wasm::kind_manifest::{self, ActorInputs};
 
@@ -51,36 +51,45 @@ pub struct ModuleManifest {
     assets: Arc<AssetIndex>,
 }
 
-/// A module's assets, indexed once when the module is parsed and shared by
-/// every load window over it (ADR-0163 §3).
+/// A module's assets, indexed once when the module is published: each asset's
+/// own blob, checked in from the module file (ADR-0250 §1).
 pub struct AssetIndex {
     /// Section order: what `describe_component` reports.
     catalog: Vec<AssetInfo>,
-    /// Section order: each asset's name and payload range.
+    /// Section order: each asset's name and own blob.
     sections: Vec<AssetSection>,
     /// An asset's position in both lists, by name.
     by_name: FxHashMap<AssetName, usize>,
 }
 
 impl AssetIndex {
-    /// Index `records`, each name minted into an [`AssetName`]. The lists
-    /// keep the records' order; the map answers a name in constant time.
-    fn new(records: Vec<asset_manifest::AssetRecord>) -> Result<Self, String> {
+    /// Index `records`, each name minted into an [`AssetName`], checking each
+    /// record's `offset..offset + len` slice of `file` in through `blobs` as
+    /// the asset's own blob. The lists keep the records' order; the map
+    /// answers a name in constant time.
+    fn new(records: Vec<asset_manifest::AssetRecord>, file: &[u8], blobs: &BlobCheckIn) -> Result<Self, String> {
         let mut sections = Vec::with_capacity(records.len());
         let mut by_name = FxHashMap::default();
         by_name.reserve(records.len());
         for (position, record) in records.iter().enumerate() {
             let name = AssetName::new(&record.info.name)?;
+            let end = record.offset.checked_add(record.len).ok_or_else(|| {
+                format!("`{}`: the asset's recorded range runs past the module's bytes", record.info.name)
+            })?;
+            let bytes = file.get(record.offset..end).ok_or_else(|| {
+                format!("`{}`: the module's bytes end before the asset's recorded range", record.info.name)
+            })?;
+            let blob = blobs.check_in(bytes.to_vec().into_boxed_slice());
             by_name.insert(name.clone(), position);
-            sections.push(AssetSection { name, range: record.offset..record.offset + record.len });
+            sections.push(AssetSection { name, blob });
         }
         let catalog = records.into_iter().map(|record| record.info).collect();
 
         Ok(Self { catalog, sections, by_name })
     }
 
-    /// The asset named `name`: its name and payload range, or `None` when
-    /// the module carries none.
+    /// The asset named `name`: its name and own blob, or `None` when the
+    /// module carries none.
     #[must_use]
     pub fn section(&self, name: &str) -> Option<&AssetSection> {
         self.by_name.get(name).map(|&position| &self.sections[position])
@@ -91,20 +100,14 @@ impl AssetIndex {
     pub fn catalog(&self) -> &[AssetInfo] {
         &self.catalog
     }
-
-    /// Each asset's name and payload range, in section order.
-    #[must_use]
-    pub fn sections(&self) -> &[AssetSection] {
-        &self.sections
-    }
 }
 
-/// Where one asset's payload sits in the wasm bytes, for a load window to
-/// read it from the code its opener brought (ADR-0163 §3).
+/// One asset's own blob, checked in from the module file at publish (ADR-0250
+/// §1): the payload the instance's host calls serve.
 #[derive(Clone)]
 pub struct AssetSection {
     pub name: AssetName,
-    pub range: Range<usize>,
+    pub blob: Blob,
 }
 
 impl CodeManifest {
@@ -178,12 +181,13 @@ impl ModuleManifest {
         Self { code, assets }
     }
 
-    /// Index the asset sections of `file`: each asset's catalog entry and its
-    /// byte range into that file, never its bytes. A duplicate section or an
-    /// empty asset path fails this file, even when its code is already shared.
-    pub(super) fn asset_index(file: &[u8]) -> Result<Arc<AssetIndex>, String> {
+    /// Index the asset sections of `file`: each asset's catalog entry plus its
+    /// own blob checked in from its `offset..offset + len` slice of `file`
+    /// through `blobs`. A duplicate section or an empty asset path fails this
+    /// file, even when its code is already shared.
+    pub(super) fn asset_index(file: &[u8], blobs: &BlobCheckIn) -> Result<Arc<AssetIndex>, String> {
         let records = asset_manifest::read_assets_from_bytes(file)?;
-        Ok(Arc::new(AssetIndex::new(records)?))
+        Ok(Arc::new(AssetIndex::new(records, file, blobs)?))
     }
 
     /// Every kind the `aether.kinds` section declares, labels merged.
@@ -272,15 +276,7 @@ impl ModuleManifest {
         self.assets.catalog()
     }
 
-    /// Each asset's name and the byte range of its payload in the module's
-    /// wasm bytes, in section order: what a load window reads from the code
-    /// its opener brought.
-    #[must_use]
-    pub fn asset_sections(&self) -> &[AssetSection] {
-        self.assets.sections()
-    }
-
-    /// The module's asset index, for a load window to share rather than copy.
+    /// The module's asset index, held for as long as the module lives.
     #[must_use]
     pub fn assets(&self) -> &Arc<AssetIndex> {
         &self.assets

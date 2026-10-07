@@ -180,7 +180,7 @@ impl ComponentHostCapabilityState {
         let QueuedPublish { publisher, code, module, configs } = queued;
         match self.plan_republish(ctx, &module, configs) {
             Ok(Plan::Unchanged) => self.conclude_publish(ctx, publisher, &module),
-            Ok(Plan::Publish) => self.first_publish(ctx, publisher, code, module),
+            Ok(Plan::Publish) => self.first_publish(ctx, publisher, module),
             Ok(Plan::Group(members)) => self.start_republish(ctx, publisher, code, module, members),
             Err(error) => publisher.refuse(ctx, &error),
         }

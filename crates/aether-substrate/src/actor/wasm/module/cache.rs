@@ -93,11 +93,12 @@ impl ModuleCache {
     /// it takes the code's shared value, compiling and parsing it only when
     /// no live module shares it, so a section the shared part cannot read
     /// refuses before any compile time is spent, and then indexes this file's
-    /// own assets, so a file the asset reader cannot read fails even when its
-    /// code is already shared. `code` is read where it already sits in the
-    /// store, or checked in once when it is `Owned`, and is never kept, nor
-    /// is any asset section's payload: the bytes leave the store when the
-    /// caller drops `code` (ADR-0163 §3).
+    /// own assets, checking each asset in as its own blob through `blobs`, so
+    /// a file the asset reader cannot read fails even when its code is
+    /// already shared. `code` is read where it already sits in the store, or
+    /// checked in once when it is `Owned`; the file bytes are let go when the
+    /// caller drops `code`, while each asset stays as its own blob for as
+    /// long as the module lives (ADR-0250 §1, §2).
     ///
     /// # Errors
     ///
@@ -121,7 +122,7 @@ impl ModuleCache {
         };
 
         let compiled = self.compiled_code(code_hash, &bytes)?;
-        let assets = ModuleManifest::asset_index(file)?;
+        let assets = ModuleManifest::asset_index(file, blobs)?;
         let manifest = ModuleManifest::from_parts(Arc::clone(compiled.manifest()), assets);
         let fresh = Arc::new(ModuleEntry { hash, code: compiled, manifest });
 

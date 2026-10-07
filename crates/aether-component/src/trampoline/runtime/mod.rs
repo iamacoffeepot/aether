@@ -43,7 +43,6 @@ pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
     Dispatch, NativeActor, NativeCtx, NativeInitCtx, Pending, RegistryBatchResult, TaskDone,
 };
-pub use aether_substrate::actor::wasm::asset_manifest;
 pub use aether_substrate::actor::wasm::component::Component;
 pub use aether_substrate::chassis::error::BootError;
 #[allow(unused_imports, reason = "runtime facade retains its established KindId re-export")]
@@ -80,13 +79,10 @@ impl NativeActor for WasmTrampoline {
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
-        // ADR-0163 §3 (#3984): open an asset load window over the code this
-        // instance's load brought and install it before instantiate, so the
-        // guest's `init` (run inside `instantiate`) and its later `wire` can
-        // pull assets through the `asset_fetch_p32` host fn. The window owns
-        // the code, which the state never keeps, and lets go of it once
-        // `wire` returns (below).
-        substrate_ctx.install_load_window(asset_manifest::LoadWindow::open(&config.module, config.code));
+        // ADR-0250: install the instance's module before instantiate, so the
+        // guest's `init`, `wire`, handlers, `on_rehydrate`, and `unwire` read
+        // assets from it.
+        substrate_ctx.install_module(config.module.clone());
         // ADR-0231 §4: an inline child the guest spawns publishes its own
         // namespace and rows, read from this module's exported and private
         // groups.
@@ -282,7 +278,7 @@ impl NativeActor for WasmTrampoline {
         };
 
         let target = ctx.path();
-        state.prepare(ctx, &target, candidate, code, config)
+        state.prepare(ctx, &target, candidate, config)
     }
 
     /// Install the prepared candidate (ADR-0241 §7): the old guest unwires

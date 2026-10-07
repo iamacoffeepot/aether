@@ -661,13 +661,13 @@ mod control_plane {
         /// retention static for the config kind on load, exactly as for
         /// handler kinds.
         pub config: Option<ConfigCapability>,
-        /// ADR-0163 §3: the component's asset catalog — one [`AssetInfo`]
-        /// per `aether.asset.<path>` custom section, indexed at load
+        /// ADR-0250: the component's asset catalog — one [`AssetInfo`]
+        /// per `aether.asset.<path>` custom section, indexed at publish
         /// without instantiating the bytes. Empty for a component that
         /// carries no assets. Surfaces through `describe_component` so
         /// tooling reads what a bundle carries without executing it;
-        /// payload bytes are reachable only through the load-window
-        /// `AssetWindow` ctx surface (`init` + `wire`), never this list.
+        /// payload bytes are reachable only through the `Assets` ctx trait,
+        /// never this list.
         #[serde(default)]
         pub assets: Vec<AssetInfo>,
     }
@@ -705,20 +705,18 @@ mod control_plane {
     }
 
     /// One asset a component carries in an `aether.asset.<path>` wasm
-    /// custom section (ADR-0163 §2/§3). The load-time indexer records
-    /// each asset's catalog entry — the path it was declared under
-    /// and its byte length — by walking the custom
-    /// sections host-side, without instantiating the component. The
-    /// catalog rides [`ComponentCapabilities::assets`] so
-    /// `describe_component` answers "what does this bundle carry" without
-    /// executing it; payload access is the separate load-window surface
-    /// (the `AssetWindow` ctx trait in `aether-actor`), never through this
+    /// custom section (ADR-0163 §2, ADR-0250). The publish-time indexer
+    /// records each asset's catalog entry — the path it was declared under
+    /// and its byte length — by walking the custom sections host-side,
+    /// without instantiating the component. The catalog rides
+    /// [`ComponentCapabilities::assets`] so `describe_component` answers
+    /// "what does this bundle carry" without executing it; payload access is
+    /// the separate `Assets` ctx trait in `aether-actor`, never through this
     /// metadata.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct AssetInfo {
         /// The asset path — the section name with the `aether.asset.`
-        /// prefix stripped, the key the load window's `asset(name)`
-        /// resolves against.
+        /// prefix stripped, the key the `Assets` verbs resolve against.
         pub name: String,
         /// The asset's byte length.
         pub len: u64,
@@ -805,21 +803,19 @@ mod control_plane {
     }
 
     /// `aether.component.spawn` — ask for an instance of a published type to
-    /// exist (ADR-0241 §9), addressed to the component host. `namespace` is
-    /// the published name a [`PublishResult`] reported. The name the instance
-    /// takes (`NS`, `NS:key`, or `parent/NS:key`, §5) decides the answer: a
-    /// live name answers with that instance, which is not re-initialised; an
-    /// absent name stands the instance up with `config`; a tombstoned name is
-    /// refused, because it is spent (§8). A singleton names no key; an
-    /// instanced type takes `key`, or a counter when it is `None`. A spawn of
-    /// a namespace whose module is republishing waits until the republish
-    /// answers (§7). A namespace native code implements is refused, since
-    /// native types are composed by their chassis or parent and are not
-    /// spawned by mail yet. A spawn that brings its module's bytes in `code`
-    /// opens the new instance's load window over them, so the instance reads
-    /// its assets in `init` and `wire` (ADR-0163 §4); one that brings other
-    /// bytes is refused; one that brings none opens a window that serves no
-    /// payload. Reply: [`SpawnResult`].
+    /// exist (ADR-0241 §9, ADR-0250), addressed to the component host.
+    /// `namespace` is the published name a [`PublishResult`] reported. The
+    /// name the instance takes (`NS`, `NS:key`, or `parent/NS:key`, §5)
+    /// decides the answer: a live name answers with that instance, which is
+    /// not re-initialised; an absent name stands the instance up with
+    /// `config`; a tombstoned name is refused, because it is spent (§8). A
+    /// singleton names no key; an instanced type takes `key`, or a counter
+    /// when it is `None`. A spawn of a namespace whose module is republishing
+    /// waits until the republish answers (§7). A namespace native code
+    /// implements is refused, since native types are composed by their
+    /// chassis or parent and are not spawned by mail yet. A spawn of a
+    /// published type always builds an instance that can read its assets, in
+    /// every hook, from its own module. Reply: [`SpawnResult`].
     #[aether_data::kind(name = "aether.component.spawn")]
     pub struct Spawn {
         pub namespace: String,
@@ -830,10 +826,6 @@ mod control_plane {
         /// The init config a new instance is built with (ADR-0090).
         #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
-        /// The bytes of the module that publishes `namespace`, for the new
-        /// instance's load window; `None` opens a window that serves no
-        /// payload.
-        pub code: Option<aether_data::Blob>,
     }
 
     /// Reply to [`Spawn`]. `Spawned` and `Live` are sent by the instance

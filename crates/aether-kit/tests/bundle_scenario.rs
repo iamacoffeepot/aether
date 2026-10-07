@@ -4,7 +4,7 @@
 //! `aether.kit.bundle` export (ADR-0096), and drives the residency
 //! lifecycle the reference actor bakes in:
 //!
-//! - `wire` pulls the embedded tile through the load window and uploads
+//! - `wire` reads the embedded tile from its module's assets and uploads
 //!   it as a texture, and the tick handler draws the resident every frame
 //!   — which it can only do after the `create_texture` reply landed and the
 //!   `texture_id` was stored. A committed overlay batch over a non-white

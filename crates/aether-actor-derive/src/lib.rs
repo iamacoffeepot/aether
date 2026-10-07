@@ -440,15 +440,15 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
 ///
 /// The path is resolved relative to the invoking source file, exactly
 /// like `include_bytes!`, and the path string as written is the
-/// asset's name — the key the ADR-0163 load window
-/// (`AssetWindow::asset`) and catalog report.
+/// asset's name — the key the module-held catalog (`Assets::assets`) and
+/// payload verbs report.
 ///
 /// ```ignore
 /// aether_actor::export_asset!("sprites/slime.png");
 /// ```
 ///
 /// The bytes ride a custom section keyed by the asset path — the
-/// section the host-side load window and catalog index — and are not
+/// section the host-side indexer and module-held catalog index — and are not
 /// addressable from guest code. The static that carries them stays out
 /// of linear memory: rustc leaves an unreferenced `#[link_section]`
 /// static as a dead internal global, and this expansion withholds the

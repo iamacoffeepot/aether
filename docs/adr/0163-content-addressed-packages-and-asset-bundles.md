@@ -4,6 +4,8 @@
 - **Date:** 2026-07-22
 - **Amended:** 2026-10-04 — Section 3: `AssetInfo` drops `sha256` (nothing read it, and the catalog outlives the bytes, so it could not be computed lazily); the module's assets are indexed once into a name map shared by every window, so indexing and fetching are linear (issue 7403).
 - **Amended:** 2026-10-04 — Section 3: `AssetWindow` gains `asset_blob`, which hands an asset over as a `Blob` the guest holds by handle, a range of the module's code where it already sits in the engine blob store; a blob the actor keeps or sends on holds that code resident until it drops, while the window itself still lets go when `wire` returns (issue 7393).
+- **Amended:** 2026-10-07 — Section 3: the load window is replaced by module-held asset blobs (ADR-0250): a publish checks each asset in as its own deduplicated blob held by the `Module`, and `asset` / `asset_blob` read from the instance's own module through the `Assets` ctx trait in every hook.
+- **Amended:** 2026-10-07 — Section 4: the load-window door is replaced by the module model (ADR-0250): a `Spawn` carries no bytes, and a spawn of a published type always builds an instance that can read its assets, in every hook, from its own module.
 
 ## Context
 
