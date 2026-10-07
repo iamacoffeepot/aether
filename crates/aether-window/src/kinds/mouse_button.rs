@@ -3,7 +3,7 @@
 //! space — decoupled from winit's `MouseButton` discriminants, the same
 //! way `keycode` decouples from winit's `KeyCode`.
 //!
-//! The substrate maps `winit::event::MouseButton → u32` via the constants
+//! The desktop window backend maps `winit::event::MouseButton → u32` via the constants
 //! below; components match on these constants. Unmapped buttons (winit's
 //! `Other(n)`) produce no mail, mirroring the unmapped-key contract in
 //! `keycode`.

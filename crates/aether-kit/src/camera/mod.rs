@@ -67,9 +67,10 @@ pub use kinds::*;
 use aether_actor::{ActorInitError, ActorPath, Departed, NoContext, PriorState, ReplyMode, Sends, Subscriber};
 use aether_actor::{WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_kinds::{Tick, WindowSize};
+use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
 use aether_render::{ViewProjection, ViewSubscribe, ViewUnsubscribe, ViewportExtent};
+use aether_window::WindowSize;
 use aether_window::{ListWindows, ListWindowsResult, WindowCapability, WindowOpened};
 
 use pose::Gliding;

@@ -1,7 +1,6 @@
 use aether_actor::{ActorPath, ActorRef, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness};
-use aether_kinds::{Key, MouseMove};
 use aether_substrate::{BootError, NativeActor, NativeCtx, NativeInitCtx};
 use aether_test_fixtures_kinds::SubstrateHarnessObserver;
 use aether_window::{
@@ -10,6 +9,7 @@ use aether_window::{
     SetWindowTitle, SetWindowTitleResult, SubscribeWindow, UnsubscribeWindow, WindowCapability, WindowInstance,
     WindowMode, WindowPresentation, WindowSelector, WindowSizeRequest, WindowSpec, WindowSubscription, window_path,
 };
+use aether_window::{Key, MouseMove};
 
 /// The scenario's subscriber: silent `Key` and `MouseMove` handlers, so its
 /// path narrows to a subscriber of each, that forward every event to the

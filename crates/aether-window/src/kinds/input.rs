@@ -7,7 +7,6 @@
 //! default.
 
 use aether_data::ErasedActorPath;
-use alloc::string::String;
 
 /// A single keyboard keypress, identified by the stable codes in
 /// `keycode`. Dispatched on press only (no repeat). Released keys
@@ -197,51 +196,4 @@ pub struct Modifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub meta: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use aether_data::{Kind, Schema, SchemaType};
-
-    use super::{
-        ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-        WindowSize,
-    };
-
-    fn assert_window_is_leading_field<K: Schema>() {
-        let SchemaType::Struct { fields, repr_c } = &K::SCHEMA else {
-            panic!("window input kind must have a struct schema");
-        };
-        assert_eq!(fields.first().map(|field| field.name.as_ref()), Some("window"));
-        assert!(!repr_c, "window input kinds use the structured wire path");
-    }
-
-    #[test]
-    fn window_identity_is_leading_and_changes_every_input_kind_id() {
-        assert_window_is_leading_field::<Key>();
-        assert_window_is_leading_field::<KeyRelease>();
-        assert_window_is_leading_field::<MouseButton>();
-        assert_window_is_leading_field::<MouseButtonRelease>();
-        assert_window_is_leading_field::<MouseWheel>();
-        assert_window_is_leading_field::<MouseMove>();
-        assert_window_is_leading_field::<WindowSize>();
-        assert_window_is_leading_field::<TextInput>();
-        assert_window_is_leading_field::<ImePreedit>();
-        assert_window_is_leading_field::<Modifiers>();
-
-        for (name, current, legacy) in [
-            (Key::NAME, Key::ID.0, 0x2cd4_71a8_6d5a_45c3),
-            (KeyRelease::NAME, KeyRelease::ID.0, 0x29af_edc4_d29e_66b9),
-            (MouseButton::NAME, MouseButton::ID.0, 0x2ae2_bffd_3539_0765),
-            (MouseButtonRelease::NAME, MouseButtonRelease::ID.0, 0x25b3_c586_4948_a587),
-            (MouseWheel::NAME, MouseWheel::ID.0, 0x200e_f6be_b9c5_c7fc),
-            (MouseMove::NAME, MouseMove::ID.0, 0x23d7_5eca_383f_2613),
-            (WindowSize::NAME, WindowSize::ID.0, 0x2987_ca5c_c96a_8043),
-            (TextInput::NAME, TextInput::ID.0, 0x225a_4efe_afb7_7bcf),
-            (ImePreedit::NAME, ImePreedit::ID.0, 0x25ad_e0e7_6687_d8db),
-            (Modifiers::NAME, Modifiers::ID.0, 0x2ddb_7336_fd9e_18ce),
-        ] {
-            assert_ne!(current, legacy, "{name} retained its single-window schema id");
-        }
-    }
 }

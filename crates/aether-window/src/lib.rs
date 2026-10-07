@@ -65,10 +65,6 @@ pub use kinds::*;
 
 use aether_actor::{ActorPath, Publisher, Publishes, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
-};
 /// The one declaration of the `aether.window` mailbox name, which
 /// [`WindowCapability`]'s runtime reads as its `NAMESPACE`
 /// (iamacoffeepot/aether#5720).

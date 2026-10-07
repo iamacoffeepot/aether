@@ -66,10 +66,11 @@ pub use kinds::*;
 use aether_actor::{ActorInitError, ActorRef, PriorState, ReplyMode, ResolveError, WasmActor, WasmCtx, WasmDropCtx};
 use aether_actor::{WasmInitCtx, actor};
 use aether_data::{ErasedActorPath, Kind};
-use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Tick};
+use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_math::Vec2;
 use aether_render::{ViewProjection, ViewSubscribe, ViewUnsubscribe};
+use aether_window::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_window::{WindowCapability, WindowFocus};
 
 use crate::camera::{CameraComponent, Pose, Where};

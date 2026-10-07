@@ -2,15 +2,19 @@
 
 use aether_actor::{HeldReply, PathRefused, ProtocolPath, Subscriber};
 use aether_data::{ErasedActorPath, KindId};
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowMode, WindowSize,
-};
+use aether_kinds::WindowMode;
 use serde::{Deserialize, Serialize};
 
+mod input;
 mod key_focus;
+pub mod keycode;
+pub mod mouse_button;
 mod presentation;
 
+pub use input::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
+};
 pub use key_focus::{KeyFocusGained, KeyFocusHolder, KeyFocusLost, KeyFocusScope, ReleaseKeyFocus, TakeKeyFocus};
 pub use presentation::{FrameRate, FrameRateError, WindowPresentation};
 
@@ -223,7 +227,7 @@ impl HeldReply for SetWindowMenuResult {
 /// Published when a native menu item is chosen, carrying the window whose
 /// menu owns the item and the caller's own [`WindowMenuItem::id`].
 ///
-/// Routed by the same selector-aware subscription family as [`aether_kinds::Key`].
+/// Routed by the same selector-aware subscription family as [`Key`].
 #[aether_data::kind(name = "aether.window.menu_activated", eq)]
 pub struct WindowMenuActivated {
     pub window: ErasedActorPath,

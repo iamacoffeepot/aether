@@ -37,13 +37,14 @@ use aether_data::{ErasedActorPath, Kind};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
-use aether_kinds::keycode::KEY_D;
-use aether_kinds::{Key, KeyRelease, LoadComponent, MouseButton, MouseMove, MouseWheel, NamedMail, mouse_button};
+use aether_kinds::{LoadComponent, NamedMail};
 use aether_kit::camera::controller::{CameraController, ControllerConfig};
 use aether_kit::camera::{CameraComponent, CameraConfig, Distance, Lens, Pitch, Pixels, Pose, Viewport, Where, Yaw};
 use aether_math::{Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewFrom, ViewSource};
 use aether_window::WindowFocus;
+use aether_window::keycode::KEY_D;
+use aether_window::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, mouse_button};
 
 /// Capture surface — a 4:3 frame, which the camera's fixed viewport matches.
 const WINDOW_WIDTH: u32 = 128;

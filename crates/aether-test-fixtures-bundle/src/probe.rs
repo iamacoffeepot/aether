@@ -49,12 +49,13 @@
 //! `export: Some("test.probe_with_config")` (ADR-0096).
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{Key, TextInput, Tick};
+use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
 use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyFocusObserved, KeyObserved, ProbeConfig, SubstrateHarnessObserver, TakeKeyFocusAt,
     TextInputObserved, TickObserved, UnsubscribeKeys,
 };
+use aether_window::{Key, TextInput};
 use aether_window::{KeyFocusGained, KeyFocusLost, KeyFocusScope, TakeKeyFocus, WindowCapability, WindowInstance};
 
 pub struct Probe {

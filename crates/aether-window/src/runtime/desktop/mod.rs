@@ -17,12 +17,13 @@ mod slot;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
+use crate::{
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
+};
 use aether_actor::{ActorRef, Anyone, ErasedActorRef, ProtocolRef, ReplyMode, Single};
 use aether_data::ErasedActorPath;
-use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowMode, WindowSize,
-};
+use aether_kinds::WindowMode;
 use aether_substrate::actor::native::{Held, NativeCtx, SpawnOutcome};
 use aether_substrate::runtime::effect_chain::OrderingDevice;
 use aether_substrate::{MonitorHandle as ActorMonitorHandle, Subname};
@@ -1095,8 +1096,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fmt::Debug;
 
+    use crate::mouse_button;
     use aether_data::{ErasedActorPath, Kind, SessionToken, Uuid};
-    use aether_kinds::mouse_button;
     use aether_substrate::ReplyTarget;
     use aether_substrate::actor::native::SpawnError;
     use aether_substrate::testing::{boot_bare_test_chassis, decode_session_reply, fresh_substrate_and_rx};

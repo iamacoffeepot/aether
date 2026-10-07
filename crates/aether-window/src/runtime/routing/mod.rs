@@ -7,7 +7,7 @@
 //! kinds are narrowed by the window's key focus slot ([`key_focus`], ADR-0248
 //! §9), and two lifecycle kinds also clear routing state after they are sent.
 
-use aether_kinds::{
+use crate::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
 };
@@ -108,9 +108,9 @@ impl Routed for WindowMenuActivated {}
 mod tests {
     use std::collections::BTreeSet;
 
+    use crate::{Key, KeyRelease, TextInput};
     use aether_actor::{ActorPath, ActorRef};
     use aether_data::{Kind, LoadName};
-    use aether_kinds::{Key, KeyRelease, TextInput};
 
     use crate::KeyFocusScope::{Actor, Subtree};
     use crate::WindowSelector::All;

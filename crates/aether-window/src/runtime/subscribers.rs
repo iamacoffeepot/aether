@@ -4,12 +4,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aether_actor::{ActorPath, Anyone, ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
-use aether_data::{ActorMail, ErasedActorPath, Kind, KindId};
-use aether_kinds::{
+use crate::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
 };
+use aether_actor::{ActorPath, Anyone, ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
+use aether_data::{ActorMail, ErasedActorPath, Kind, KindId};
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
@@ -424,9 +424,9 @@ pub mod fixture {
     use std::collections::BTreeSet;
     use std::sync::mpsc::{self, Receiver, Sender};
 
+    use crate::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, TextInput, WindowSize};
     use aether_actor::{ActorPath, ActorRef, ErasedActorRef, HandlesKind, ProtocolRef, ReplyMode, Root};
     use aether_data::{ErasedActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
-    use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, MouseWheel, TextInput, WindowSize};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
     use aether_substrate::chassis::builder::PassiveChassis;
     use aether_substrate::chassis::error::BootError;
@@ -883,7 +883,7 @@ pub mod fixture {
 mod tests {
     use std::collections::BTreeSet;
 
-    use aether_kinds::{Key, MouseMove};
+    use crate::{Key, MouseMove};
 
     use super::fixture::{Leave, Rig, receivers, recipients, watcher};
     use super::*;

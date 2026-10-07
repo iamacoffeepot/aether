@@ -24,11 +24,12 @@ use aether_component::ComponentHostCapability;
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, MonitorNotice, TextInput};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, MonitorNotice};
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::{BootError, MonitorHandle};
 use aether_test_fixtures_bundle::{KeyProbe, Probe};
 use aether_test_fixtures_kinds::{KeyFocusObserved, KeyObserved, TakeKeyFocusAt, TextInputObserved, UnsubscribeKeys};
+use aether_window::{Key, TextInput};
 use aether_window::{WindowCapability, window_path};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.

@@ -320,8 +320,8 @@ impl SyntheticWindows {
 
 #[cfg(test)]
 mod tests {
+    use crate::Key;
     use aether_data::Kind;
-    use aether_kinds::Key;
     use std::collections::BTreeSet;
 
     use super::*;

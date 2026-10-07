@@ -1,8 +1,9 @@
 //! The substrate's own mail vocabulary: the kinds an actor sends to the
-//! substrate, receives from it (input events, lifecycle stages), or exchanges
+//! substrate, receives from it (lifecycle stages), or exchanges
 //! with a peer through it. Kinds owned by one capability live with that
 //! capability's crate instead; `aether.draw_triangle`, for instance, belongs
-//! to `aether-render`.
+//! to `aether-render`, and the input family (`aether.key`, `aether.mouse_move`)
+//! to `aether-window`.
 //!
 //! A kind id is `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))`, a
 //! compile-time constant on the `Kind` trait (ADR-0030). Substrate boot and
@@ -17,11 +18,8 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod diagnostics;
-pub mod input;
-pub mod keycode;
 pub mod lifecycle;
 pub mod math;
-pub mod mouse_button;
 pub mod text_metrics;
 pub mod trace;
 pub mod utility;
@@ -34,10 +32,6 @@ pub mod transforms;
 pub use text_metrics::{CachedFontMetrics, scale_units};
 
 pub use diagnostics::{DecodeRefused, MonitorNotice, NoContext};
-pub use input::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
-    WindowSize,
-};
 pub use lifecycle::{
     InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, Present, Quit, Render, Shutdown, StepLength,
     Steps, Tick,

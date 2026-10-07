@@ -13,8 +13,8 @@
 //! stream, so it is not part of this demo.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::{Key, MouseButton, MouseMove};
 use aether_window::WindowCapability;
+use aether_window::{Key, MouseButton, MouseMove};
 
 pub struct InputLogger;
 

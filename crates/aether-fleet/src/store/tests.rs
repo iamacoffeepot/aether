@@ -3,7 +3,7 @@ use super::{
     StoredManifest,
 };
 use aether_data::Kind;
-use aether_kinds::{ComponentActor, ComponentManifest, Key, Tick};
+use aether_kinds::{ComponentActor, ComponentManifest, Ping, Tick};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
@@ -24,17 +24,17 @@ fn manifest(chassis: &str) -> StoredManifest {
     })
 }
 
-/// A component manifest exporting `namespace`, handling `Tick` + `Key`,
+/// A component manifest exporting `namespace`, handling `Tick` + `Ping`,
 /// for the ADR-0116 component-store resolve/list unit tests.
 fn component_manifest(namespace: &str) -> StoredManifest {
     StoredManifest::Component(ComponentManifest {
         namespaces: vec![namespace.to_owned()],
         actors: vec![ComponentActor {
             namespace: namespace.to_owned(),
-            handled_kinds: vec![Tick::ID, Key::ID],
+            handled_kinds: vec![Tick::ID, Ping::ID],
             fallback: false,
         }],
-        handled_kinds: vec![Tick::ID, Key::ID],
+        handled_kinds: vec![Tick::ID, Ping::ID],
         fallback: false,
         provenance: String::new(),
     })
