@@ -106,14 +106,15 @@ impl WasmActor for ReplyHolder {
 
     /// Saves copies, so a guest reinstated by an aborted republish still
     /// holds its parked handles (ADR-0241 §7).
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let (handles, tags) = self.parked.iter().copied().unzip();
-        ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags });
+        ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags })
     }
 
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Some(saved) = prior.decode_kind::<ParkedReplies>() {
             self.parked = saved.handles.into_iter().zip(saved.tags).collect();
         }
+        Ok(())
     }
 }

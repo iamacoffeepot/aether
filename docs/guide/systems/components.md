@@ -444,24 +444,54 @@ to carry state forward: `on_dehydrate` serializes the old instance's state, and
 `on_rehydrate` recovers it on the replacement. There's no `replaceable` flag on
 `export!` and no subtrait — participation is the override itself. `on_rehydrate`'s
 ctx is typed by the actor like a handler's (`WasmCtx<'_>` reads as
-`WasmCtx<'_, Self>`):
+`WasmCtx<'_, Self>`). Both hooks return `Result<(), ActorInitError>`, as `init`
+and `wire` do, and the save verbs return the save's error for the hook to pass
+on with `?`
+([ADR-0249](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0249-a-republish-wires-the-successor-and-unwires-the-old-guest-at-commit.md) §1):
 
 ```rust
 #[actor(root)]
 impl WasmActor for MyComponent {
     // init / wire / #[handler::<class>]s as usual …
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind::<Snapshot>(0, &snapshot);   // hand state to the successor
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind::<Snapshot>(0, &snapshot)?;   // hand state to the successor
+        Ok(())
     }
 
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
-        if let Some(snap) = prior.decode_kind::<Snapshot>() { … }
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
+        let snap = prior.decode_kind::<Snapshot>().ok_or("the saved snapshot does not decode")?;
+        …
+        Ok(())
     }
 }
 
 aether_actor::export!(public = [MyComponent]);
 ```
+
+A returned error is how a replace hook says no, and a trap is a bug:
+
+- **`on_dehydrate` returns an error:** the republish is refused naming the
+  hook, and the old instance keeps running. It is handed back whatever it
+  saved before the error, through its own `on_rehydrate`. `on_dehydrate`
+  saves and does not send: `WasmDropCtx` has no send verb, and `unwire` is
+  the hook that announces a departure.
+- **`on_dehydrate` traps:** the engine aborts. The old instance is the live
+  guest, and a guest that trapped runs no more code.
+- **A successor's `on_rehydrate` returns an error or traps:** the republish is
+  refused naming the hook, and the successor is dropped.
+- **The old instance's `on_rehydrate` returns an error** when it is handed
+  its state back after a refused republish: the instance closes. Each reply
+  it holds is answered `unanswered` and its name is spent. A trap there
+  aborts the engine.
+
+The hooks `#[actor]` generates for a declared `type State` return the save's
+result and the decode's, so a successor whose `type State` kind changed shape
+refuses the republish. An author who wants a fresh start on a mismatch writes
+both hooks by hand and returns `Ok(())` when `decode_kind` answers `None`. A
+resident inline child the successor cannot rebuild refuses the republish the
+same way: an unknown type, a placement the successor rejects, a config that
+no longer decodes, a failed `init`, or the child's own `on_rehydrate` error.
 
 A `Publish { code, configs }` of a module that succeeds one already bound
 republishes every live instance of the module's namespaces as one group
@@ -503,8 +533,9 @@ exported types and its `export!` `private` list, each under its old alias; the
 `spawns(..)` check guarantees that list names every child a listed actor can
 spawn inline.
 
-A refusal in any member's prepare (a failed `init`, a rejected state save, a
-carried context, a request's or a watch's, that the candidate does not declare
+A refusal in any member's prepare (a failed `init`, an `on_dehydrate` that
+returned an error, a rejected state save, a carried context, a request's or a
+watch's, that the candidate does not declare
 ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md)
 §4), or a failed rehydrate), or a refused publish, aborts every member: each
 reinstates its old guest with its reply table, counters and watches, hands it back the

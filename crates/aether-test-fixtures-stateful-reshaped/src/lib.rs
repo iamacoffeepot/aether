@@ -1,10 +1,10 @@
 //! ADR-0113 decode-miss companion to `stateful_replace_typed.rs`: same
 //! `NAMESPACE` and the same `CounterState` kind name, but the state shape
 //! gains a `generation` field. Reshaping the schema changes `Kind::ID`,
-//! so when this wasm replaces the typed fixture the generated
+//! so when this wasm republishes the typed fixture the generated
 //! `on_rehydrate` sees `PriorState::decode_kind::<CounterState>() == None`
-//! (the saved bundle carries the old id), warns, and boots fresh — the
-//! counter resets to its `init` zero instead of restoring.
+//! (the saved bundle carries the old id) and returns an error — the
+//! republish is refused and the typed guest keeps its count (ADR-0249 §1).
 
 #![forbid(unsafe_code)]
 // See `stateful_replace_typed.rs`: `rehydrate` takes its `State` by value

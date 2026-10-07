@@ -70,8 +70,11 @@ fails fast:
   state, or its mail had no reply target;
 - a reply whose stored context holds a `Held` must take that context, or the
   guest panics after the handler returns, naming the context kind;
-- `on_dehydrate` refuses the republish while a `Held` is still live and
-  unsaved, and the host keeps the old instance running.
+- `on_dehydrate` returns an error while a `Held` is still live and unsaved,
+  which refuses the republish, and the host keeps the old instance running;
+- an `on_dehydrate` that fails after moving values into its saved state
+  returns them to its fields before it returns the error, so the instance
+  that keeps running still holds them.
 
 `R` must implement `aether_actor::HeldReply`, whose `unanswered()` names the
 failure reply the caller receives if the guest never answers. `hold` encodes it,

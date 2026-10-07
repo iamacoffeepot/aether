@@ -144,7 +144,7 @@ impl NativeActor for Host {
         guest_ctx.hold_outbox();
         let mut candidate = self.instantiate(&self.guests.candidate, guest_ctx);
 
-        self.old.on_dehydrate();
+        self.old.on_dehydrate().expect("the old guest dehydrates");
         let bundle = self.old.take_saved_state().expect("the old guest saves its held handle");
         candidate.resume_correlations(self.old.correlation_cursor());
         candidate.resume_replies(self.old.take_pending_replies());

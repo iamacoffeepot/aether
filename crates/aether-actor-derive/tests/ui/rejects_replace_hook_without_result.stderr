@@ -1,0 +1,11 @@
+error: `on_dehydrate` returns the republish's result: write `fn on_dehydrate(..) -> Result<(), ActorInitError>` and end it with `Ok(())`; an `Err` refuses the republish and whoever asked for it is told
+  --> tests/ui/rejects_replace_hook_without_result.rs:32:8
+   |
+32 |     fn on_dehydrate(&mut self, _ctx: &mut aether_actor::WasmDropCtx<'_>) {}
+   |        ^^^^^^^^^^^^
+
+error: `on_rehydrate` returns the republish's result: write `fn on_rehydrate(..) -> Result<(), ActorInitError>` and end it with `Ok(())`; an `Err` refuses the republish and whoever asked for it is told
+  --> tests/ui/rejects_replace_hook_without_result.rs:48:8
+   |
+48 |     fn on_rehydrate(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _prior: aether_actor::PriorState<'_>) {}
+   |        ^^^^^^^^^^^^

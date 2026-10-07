@@ -19,7 +19,7 @@ pub mod wire_corpus;
 
 use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, LoadName, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -419,6 +419,27 @@ pub struct FsContextDemuxReport {
 #[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
 pub struct UnsubscribeKeys;
 
+/// Ask a key probe to take key focus in the window named `window` for itself
+/// alone, so a scenario drives a guest's own take: the probe writes the
+/// window's typed path from the name and mails the window the take, and the
+/// window reads the holder off the sender. The field is the name because
+/// this crate does not depend on the window's, so it cannot spell the typed
+/// path the take carries.
+#[aether_data::kind(name = "aether.test_fixtures.take_key_focus")]
+pub struct TakeKeyFocusAt {
+    pub window: LoadName,
+}
+
+/// Report a key probe emits for each key focus notice the window sends it:
+/// `gained` is `true` for `aether.window.key_focus_gained` and `false` for
+/// `aether.window.key_focus_lost`, and `window` is the window the notice
+/// named.
+#[aether_data::kind(name = "aether.test_fixture.key_focus_observed")]
+pub struct KeyFocusObserved {
+    pub window: ErasedActorPath,
+    pub gained: bool,
+}
+
 /// Configure the listener lineage used by the TCP load probe when it echoes
 /// frames received from accepted sessions. The probe binds that listener on
 /// `127.0.0.1:0` with itself as the consumer (`aether.tcp.bind_listener_self`)
@@ -787,17 +808,40 @@ pub struct CourierState {
     pub hops: u32,
 }
 
-/// Issue 7463: what a `WireFault` fixture's `wire` does once it has sent its
-/// [`WireMarker`].
+/// What a fixture's hook does when its config names an outcome for it: the
+/// `wire` of a `WireFault` fixture once it has sent its [`WireMarker`] (issue
+/// 7463), and the replace hooks of a `HookFault` fixture (issue 7535).
 #[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WireOutcome {
-    /// `wire` returns `Ok(())` and the instance goes live.
+pub enum HookOutcome {
+    /// The hook returns `Ok(())`.
     #[default]
     Succeeds,
-    /// `wire` returns an error whose message is [`WIRE_REFUSAL`].
+    /// The hook returns an error: [`WIRE_REFUSAL`] from `wire`,
+    /// [`DEHYDRATE_REFUSAL`] from `on_dehydrate`, [`REHYDRATE_REFUSAL`] from
+    /// `on_rehydrate`.
     Refuses,
-    /// `wire` panics, which the host sees as a trap.
+    /// The hook panics, which the host sees as a trap.
     Traps,
+}
+
+/// Issue 7535: the message a `HookFault` fixture's `on_dehydrate` returns as
+/// its error, which the refused republish's answer must carry.
+pub const DEHYDRATE_REFUSAL: &str = "dehydrate refused: the fixture was told to fail";
+
+/// Issue 7535: the message a `HookFault` fixture's `on_rehydrate` returns as
+/// its error.
+pub const REHYDRATE_REFUSAL: &str = "rehydrate refused: the fixture was told to fail";
+
+/// Issue 7535: the config of the `HookFault` fixture, one outcome per replace
+/// hook. `successor_rehydrate` is what `on_rehydrate` does on an instance that
+/// has not dehydrated, a republish's successor; `reinstated_rehydrate` is what
+/// it does on the instance that dehydrated, handed its own state back after
+/// its republish was refused.
+#[aether_data::kind(name = "aether.test_fixtures.hook_fault.config", copy, default, eq)]
+pub struct HookFaultConfig {
+    pub dehydrate: HookOutcome,
+    pub successor_rehydrate: HookOutcome,
+    pub reinstated_rehydrate: HookOutcome,
 }
 
 /// Issue 7463: the message a `WireFault` or `WireRefuser` fixture's `wire`
@@ -807,7 +851,7 @@ pub const WIRE_REFUSAL: &str = "wire refused: the fixture was told to fail";
 /// Issue 7463: the config of the `WireFault` fixture.
 #[aether_data::kind(name = "aether.test_fixtures.wire_fault.config", copy, default, eq)]
 pub struct WireFaultConfig {
-    pub outcome: WireOutcome,
+    pub outcome: HookOutcome,
 }
 
 /// Issue 7463: what a `WireFault` fixture mails the harness observer from
@@ -916,7 +960,7 @@ pub enum WatchThrough {
 pub struct WatchLedgerConfig {
     pub target: Option<ProtocolPath<WatchProvider>>,
     pub tag: u32,
-    pub outcome: WireOutcome,
+    pub outcome: HookOutcome,
 }
 
 /// Issue 7496: a provider admits itself to the watch ledger. The ledger casts

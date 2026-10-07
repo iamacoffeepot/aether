@@ -33,6 +33,8 @@ use aether_substrate::testing::{
 };
 use aether_substrate::{ChassisTarget, ReplyTarget};
 
+mod consumer_close;
+
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
@@ -138,7 +140,17 @@ impl NativeActor for SessionConsumer {
     fn on_session_closed(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionClosed) {
         let _ = self.captures.send(CapturedSessionMail::Closed(mail));
     }
+
+    #[handler::tell]
+    fn on_shut_down(&mut self, ctx: &mut NativeCtx<'_>, _mail: ShutDown) {
+        ctx.shutdown();
+    }
 }
+
+/// Tells a [`SessionConsumer`] to shut itself down, the way a consumer that
+/// is done, or is torn down, closes without unbinding anything.
+#[aether_data::kind(name = "test.tcp.shut_down", copy)]
+struct ShutDown;
 
 /// The key [`ConsumerHost`] spawns its nested [`SessionConsumer`] under.
 const NESTED_CONSUMER_KEY: &str = "probe";
@@ -309,10 +321,11 @@ fn drive_and_decode<K: Kind, R: Kind, I>(
 fn bind_then_list_then_unbind_roundtrip() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "roundtrip-consumer");
 
     // Bind to port 0 — let the OS pick a free port.
     let bind_reply: BindListenerResult =
-        drive_and_decode(&chassis, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None });
+        drive_and_decode(&chassis, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer });
     let (listener_name, local_port) = match bind_reply {
         BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
         BindListenerResult::Err(error) => panic!("bind failed: {error:?}"),
@@ -347,12 +360,13 @@ fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     const LISTENER_NAME: &str = "held-bind";
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "held-bind-consumer");
     let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
     let correlation_id = 0x4066;
     send_and_settle(
         &chassis,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer },
         Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
@@ -380,13 +394,14 @@ fn staged_bind_rejection_replies_once_and_releases_the_name() {
     let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "rejected-bind-consumer");
     let collision = register_route_collision(&registry, &canonical_name);
 
     let rejected: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: consumer.clone() },
     );
     assert!(
         matches!(rejected, BindListenerResult::Err(BindListenerError::Failed { ref addr, ref error })
@@ -401,7 +416,7 @@ fn staged_bind_rejection_replies_once_and_releases_the_name() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer },
     );
     assert!(
         matches!(retried, BindListenerResult::Ok { ref listener_name, .. } if listener_name == LISTENER_NAME),
@@ -418,17 +433,18 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     const LISTENER_NAME: &str = "duplicate-staged-listener";
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "duplicate-name-consumer");
     let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
     let session_beta = SessionToken(Uuid::from_u128(0x4066_DB7A));
 
     let (_, settled_alpha) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: consumer.clone() },
         Some(ReplyTarget::Session { session: session_alpha, correlation: 1 }),
     );
     let (_, settled_beta) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer },
         Some(ReplyTarget::Session { session: session_beta, correlation: 2 }),
     );
     await_settled(&settled_alpha, "the alpha duplicate-name bind");
@@ -488,12 +504,13 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
     let canonical_name = format!("{}/{}:{SESSION_NAME}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "rejected-connect-consumer");
     let _collision = register_route_collision(&registry, &canonical_name);
     let rejected: ConnectResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &Connect { addr: socket_addr.to_string(), name: Some(SESSION_NAME.into()), consumer: None },
+        &Connect { addr: socket_addr.to_string(), name: Some(SESSION_NAME.into()), consumer },
     );
 
     assert!(
@@ -513,11 +530,12 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
 fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "held-unbind-consumer");
     let bind_reply: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer },
     );
     let listener_name = match bind_reply {
         BindListenerResult::Ok { listener_name, .. } => listener_name,
@@ -565,9 +583,10 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     let (registry, mailer, rx) = fresh_substrate();
     let mut cap = PumpedDriver::<TcpCapability>::boot(boot_bare_test_chassis(&registry, &mailer), (), ());
     let tcp = cap.chassis().actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(cap.chassis(), "duplicate-unbind-consumer");
     cap.send_and_settle(
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer },
         Some(session_reply()),
     );
     let listener_name = match next_reply::<BindListenerResult>(&rx, "the bind reply").2 {
@@ -635,7 +654,7 @@ fn connect_roundtrip_spawns_writable_session() {
     let tcp = chassis.actor_ref::<TcpCapability>();
     let (consumer, consumer_rx) = spawn_consumer(&chassis, "connect-consumer");
     let connect_reply: ConnectResult =
-        drive_and_decode(&chassis, &rx, tcp, &Connect { addr: addr.to_string(), name: None, consumer: Some(consumer) });
+        drive_and_decode(&chassis, &rx, tcp, &Connect { addr: addr.to_string(), name: None, consumer });
     let (session_name, peer) = match connect_reply {
         ConnectResult::Ok { session_name, peer } => (session_name, peer),
         ConnectResult::Err(error) => panic!("connect failed: {error:?}"),
@@ -686,18 +705,19 @@ fn concurrent_connects_reply_to_their_own_origins() {
 
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "concurrent-connect-consumer");
     let session_alpha = SessionToken(Uuid::from_u128(0xA11A));
     let session_beta = SessionToken(Uuid::from_u128(0xB37A));
     let correlation_alpha = 0xA11A;
     let correlation_beta = 0xB37A;
     let (_, settled_alpha) = chassis.send_tracked(
         tcp,
-        &Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None },
+        &Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: consumer.clone() },
         Some(ReplyTarget::Session { session: session_alpha, correlation: correlation_alpha }),
     );
     let (_, settled_beta) = chassis.send_tracked(
         tcp,
-        &Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None },
+        &Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer },
         Some(ReplyTarget::Session { session: session_beta, correlation: correlation_beta }),
     );
 
@@ -739,12 +759,13 @@ fn concurrent_connects_reply_to_their_own_origins() {
 fn bind_port_in_use_returns_err() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "port-in-use-consumer");
 
     let first: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()), consumer: consumer.clone() },
     );
     let local_port = match first {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -756,7 +777,7 @@ fn bind_port_in_use_returns_err() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()), consumer: None },
+        &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()), consumer },
     );
     match second {
         BindListenerResult::Err(BindListenerError::Failed { error, addr }) => {
@@ -801,7 +822,7 @@ fn bind_refuses_a_consumer_path_with_no_live_covering_actor() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("orphan".into()), consumer: Some(consumer.clone()) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("orphan".into()), consumer: consumer.clone() },
     );
     assert!(
         matches!(&refused, BindListenerResult::Err(BindListenerError::Consumer(PathRefused { path, reason }))
@@ -857,7 +878,7 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(consumer) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -936,7 +957,7 @@ fn nested_lineage_consumer_receives_session_mail() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: Some(consumer.narrow()) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("nested".into()), consumer: consumer.narrow() },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -968,7 +989,7 @@ fn session_reports_frame_rejection_to_bound_consumer() {
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(consumer) },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -1000,18 +1021,19 @@ fn session_reports_frame_rejection_to_bound_consumer() {
 fn list_enumerates_two_concurrent_listeners() {
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
+    let (consumer, _deliveries) = spawn_consumer(&chassis, "list-consumer");
 
     let _: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: consumer.clone() },
     );
     let _: BindListenerResult = drive_and_decode(
         &chassis,
         &rx,
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer: None },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer },
     );
 
     let list: ListListenersResult = drive_and_decode(&chassis, &rx, tcp, &ListListeners::default());

@@ -73,8 +73,9 @@ impl WasmActor for Typed {
         ctx.send::<Peer>(&Ping { seq: 2 });
     }
 
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         ctx.send::<Peer>(&Ping { seq: 3 });
+        Ok(())
     }
 
     #[handler::tell]

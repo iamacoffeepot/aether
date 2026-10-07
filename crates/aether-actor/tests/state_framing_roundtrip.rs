@@ -3,17 +3,15 @@
 //!
 //! The generated `on_dehydrate` deposits the actor's `type State` via
 //! `Persistence::save_state_kind`; the generated `on_rehydrate` recovers
-//! it via `PriorState::decode_kind` and boots fresh (warning) when the decode
-//! misses. Those hooks only run on the wasm load/replace path, which the
-//! substrate harness drives end-to-end — but the substrate harness cannot observe the
-//! decode-miss warn (it does not route `aether.log` mail through its
-//! observed sinks). This test stands in for that seam on the host: it
-//! exercises the deposit (`save_state_kind`) and recovery (`decode_kind`)
-//! halves through a capture ctx, and asserts the exact decode-miss
-//! predicate the generated warn branches on (`decode_kind() == None` while
-//! `bytes()` is non-empty).
+//! it via `PriorState::decode_kind` and returns an error, which refuses the
+//! republish, when the decode misses (ADR-0249 §1). Those hooks only run on
+//! the wasm load/replace path, which the substrate harness drives end-to-end.
+//! This test stands in for that seam on the host: it exercises the deposit
+//! (`save_state_kind`) and recovery (`decode_kind`) halves through a capture
+//! ctx, and asserts the exact decode-miss predicate the generated hook
+//! branches on (`decode_kind() == None` while `bytes()` is non-empty).
 
-use aether_actor::{Persistence, PriorState};
+use aether_actor::{ActorInitError, Persistence, PriorState};
 use aether_data::Kind;
 
 /// Captures whatever the dehydrate side deposits, standing in for the
@@ -24,8 +22,9 @@ struct CaptureCtx {
 }
 
 impl Persistence for CaptureCtx {
-    fn save_state(&mut self, version: u32, bytes: &[u8]) {
+    fn save_state(&mut self, version: u32, bytes: &[u8]) -> Result<(), ActorInitError> {
         self.saved = Some((version, bytes.to_vec()));
+        Ok(())
     }
 }
 
@@ -61,7 +60,7 @@ fn save_state_kind_round_trips_through_decode_kind() {
     let value = CounterState { count: 7 };
 
     let mut ctx = CaptureCtx::default();
-    ctx.save_state_kind::<CounterState>(0, &value);
+    ctx.save_state_kind::<CounterState>(0, &value).expect("a plain state encodes");
 
     let (version, buf) = ctx.saved.expect("dehydrate deposits a bundle");
     assert_eq!(version, 0, "the generated on_dehydrate frames version 0");
@@ -73,14 +72,13 @@ fn save_state_kind_round_trips_through_decode_kind() {
 
 /// A bundle framed under one state shape and recovered against a reshaped
 /// one decodes to `None` while leaving the raw bytes present — the exact
-/// condition the generated `on_rehydrate` reads to fire its warn before
-/// booting fresh.
+/// condition the generated `on_rehydrate` reads to return its error.
 #[test]
 fn reshaped_state_kind_misses_decode_with_bytes_present() {
     let value = CounterState { count: 7 };
 
     let mut ctx = CaptureCtx::default();
-    ctx.save_state_kind::<CounterState>(0, &value);
+    ctx.save_state_kind::<CounterState>(0, &value).expect("a plain state encodes");
     let (_, buf) = ctx.saved.expect("dehydrate deposits a bundle");
 
     // The reshaped kind has a different `Kind::ID`, so the leading-id
@@ -96,5 +94,5 @@ fn reshaped_state_kind_misses_decode_with_bytes_present() {
         prior.decode_kind::<CounterStateReshaped>().is_none(),
         "a reshaped state kind must not decode the old bundle",
     );
-    assert!(!prior.bytes().is_empty(), "the raw bytes stay present on a decode-miss — this is the warn trigger");
+    assert!(!prior.bytes().is_empty(), "the raw bytes stay present on a decode-miss — this is what makes it an error");
 }

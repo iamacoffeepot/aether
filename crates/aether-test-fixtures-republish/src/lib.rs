@@ -29,10 +29,10 @@ use aether_actor::{
 use aether_data::LoadName;
 use aether_test_fixtures_kinds::{
     CarriedRequest, CarriedRequestResult, CountQuery, CountReport, GateConfig, GateProbe, GateQuery, GateQueryResult,
-    HeldRequest, HeldRequestResult, ReleaseCarried, SubstrateHarnessObserver, WIRE_REFUSAL, WatchAdmit,
+    HeldRequest, HeldRequestResult, HookOutcome, ReleaseCarried, SubstrateHarnessObserver, WIRE_REFUSAL, WatchAdmit,
     WatchAdmitResult, WatchAuditor, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig,
     WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease,
-    WatchThrough, WireCountQuery, WireOutcome,
+    WatchThrough, WireCountQuery,
 };
 
 /// The reply handles `ReplyHolder` has parked, with their tags, carried
@@ -75,15 +75,16 @@ impl WasmActor for ReplyHolder {
 
     /// Saves copies, so a guest reinstated by an aborted republish still
     /// holds its parked handles (ADR-0241 §7).
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let (handles, tags) = self.parked.iter().copied().unzip();
-        ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags });
+        ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags })
     }
 
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Some(saved) = prior.decode_kind::<ParkedReplies>() {
             self.parked = saved.handles.into_iter().zip(saved.tags).collect();
         }
+        Ok(())
     }
 }
 
@@ -149,18 +150,19 @@ impl WasmActor for Keeper {
 
     /// Moves the saved fields out rather than copying them, and leaves every
     /// stray behind.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
         let state =
             KeptState { held: self.held.take(), tag: mem::take(&mut self.tag), kept: mem::take(&mut self.kept) };
-        ctx.save_state_kind(0, &state);
+        ctx.save_state_kind(0, &state)
     }
 
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) -> Result<(), ActorInitError> {
         if let Some(KeptState { held, tag, kept }) = prior.decode_kind::<KeptState>() {
             self.held = held;
             self.tag = tag;
             self.kept = kept;
         }
+        Ok(())
     }
 }
 
@@ -307,9 +309,9 @@ impl WasmActor for WatchLedger {
         }
 
         match self.config.outcome {
-            WireOutcome::Succeeds => Ok(()),
-            WireOutcome::Refuses => Err(ActorInitError::new(WIRE_REFUSAL)),
-            WireOutcome::Traps => panic!("the fixture was told to trap in wire"),
+            HookOutcome::Succeeds => Ok(()),
+            HookOutcome::Refuses => Err(ActorInitError::new(WIRE_REFUSAL)),
+            HookOutcome::Traps => panic!("the fixture was told to trap in wire"),
         }
     }
 

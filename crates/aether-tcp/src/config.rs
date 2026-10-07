@@ -12,27 +12,27 @@ use crate::kinds::TcpConsumer;
 /// Init config for [`TcpListenerActor`](super::TcpListenerActor).
 /// `TcpCapability::on_bind` binds the socket on the dispatcher thread
 /// (so addr-parse / port-in-use failures surface synchronously) and
-/// hands the bound listener through `spawn_child`. The `listener`
-/// field is `Option` so init can move it out into the accept thread.
+/// hands the bound listener through `spawn_child`; `init` moves it into
+/// the accept thread.
 /// `consumer` is the proof the cap took when it received `BindListener` or
 /// `BindListenerSelf` (ADR-0230, ADR-0231 §3/§4).
 pub struct TcpListenerConfig {
-    pub listener: Option<TcpListener>,
+    pub listener: TcpListener,
     pub addr: String,
     pub port: u16,
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    pub consumer: ProtocolRef<TcpConsumer>,
 }
 
 /// Init config for [`TcpSessionActor`](super::TcpSessionActor). A listener's
 /// `on_connection_ready` builds it for an accepted stream; the cap's
-/// `on_connect_ready` builds the same config for a dialed stream. `stream` is
-/// `Option` so init can `.take()` and split it; `peer`, `session_name`, and the
-/// optional late-bound `consumer` are shared by both session lineages. The
-/// consumer is the proof the cap took when it received a `Connect` or
-/// `BindListener` request or its `_self` form (ADR-0230, ADR-0231 §3/§4).
+/// `on_connect_ready` builds the same config for a dialed stream. `init`
+/// splits `stream`; `peer`, `session_name`, and `consumer` are shared by both
+/// session lineages. The consumer is the proof
+/// the cap took when it received a `Connect` or `BindListener` request or its
+/// `_self` form (ADR-0230, ADR-0231 §3/§4).
 pub struct TcpSessionConfig {
-    pub stream: Option<TcpStream>,
+    pub stream: TcpStream,
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    pub consumer: ProtocolRef<TcpConsumer>,
 }

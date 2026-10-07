@@ -29,13 +29,13 @@ impl WasmActor for Refuser {
         CountReport { count: self.count }
     }
 
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        ctx.save_state_kind(0, &CountReport { count: self.count });
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
+        ctx.save_state_kind(0, &CountReport { count: self.count })
     }
 
     /// `abort` lowers to `unreachable`, which the host reports as an
     /// `on_rehydrate` failure.
-    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
         process::abort();
     }
 }

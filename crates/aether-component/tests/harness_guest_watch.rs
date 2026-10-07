@@ -64,9 +64,9 @@ use aether_kinds::{
 use aether_substrate::actor::native::{Held, NativeActor, NativeCtx, NativeInitCtx, Pending};
 use aether_substrate::{BootError, MonitorHandle};
 use aether_test_fixtures_kinds::{
-    WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold, WatchLedgerConfig,
-    WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider, WatchRelease,
-    WatchThrough, WireOutcome,
+    HookOutcome, WatchAdmit, WatchAdmitResult, WatchAudit, WatchClerkSpawn, WatchDeparture, WatchHeld, WatchHold,
+    WatchLedgerConfig, WatchLedgerQuery, WatchLedgerReport, WatchNudge, WatchPeerAdmit, WatchPeerConfig, WatchProvider,
+    WatchRelease, WatchThrough,
 };
 use aether_test_fixtures_republish::{WatchClerk, WatchDesk, WatchLedger, WatchPeer};
 
@@ -317,7 +317,7 @@ fn plain_ledger(harness: &mut SubstrateHarness, wasm: &[u8]) -> ActorRef<WatchLe
 
 /// A config whose `wire` watches the provider with `tag`, then does
 /// `outcome`.
-fn wire_watch(tag: u32, outcome: WireOutcome) -> WatchLedgerConfig {
+fn wire_watch(tag: u32, outcome: HookOutcome) -> WatchLedgerConfig {
     WatchLedgerConfig { target: Some(provider_path()), tag, outcome }
 }
 
@@ -677,7 +677,7 @@ fn a_wire_watch_stands_through_aborted_republishes(aborts: usize) {
         return;
     };
     let mut harness = pooled();
-    let ledger = load_ledger(&mut harness, &family.v1, &wire_watch(15, WireOutcome::Succeeds))
+    let ledger = load_ledger(&mut harness, &family.v1, &wire_watch(15, HookOutcome::Succeeds))
         .unwrap_or_else(|error| panic!("the ledger loads: {error}"));
     let _peer = load_peer(&mut harness, &family.v1, WatchPeerConfig { trap_on_rehydrate: true, trap_on_unwire: false });
     let [watch] = report(&mut harness, &ledger).wired[..] else {

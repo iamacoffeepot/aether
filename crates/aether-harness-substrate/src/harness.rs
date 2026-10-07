@@ -68,7 +68,7 @@ use super::chassis::{
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, after, select};
 
 /// A reply source's wake: sends [`PumpWake::Mail`] on the harness's one wake
 /// channel. The source fires it after it enqueues, so the pump loop woken by
@@ -148,6 +148,12 @@ pub enum SubstrateHarnessError {
         protocol: &'static str,
         path: Option<ErasedActorPath>,
     },
+    /// The engine fatally aborted while the harness waited on a reply
+    /// (ADR-0063): a guest trapped where the engine cannot go on without it,
+    /// or a native handler panicked. Carries the abort's reason. The thread
+    /// that owed the reply is gone, so no later wait on this harness can be
+    /// answered, and its teardown reports the abort.
+    FatalAbort(String),
     SettlementTimeout {
         /// The sent mail's kind, as the registry labels it.
         kind: String,
@@ -179,6 +185,7 @@ impl fmt::Display for SubstrateHarnessError {
             Self::CastRefused { protocol, path: None } => {
                 write!(f, "a reference with no retained path does not answer the protocol {protocol}")
             }
+            Self::FatalAbort(reason) => write!(f, "the engine fatally aborted: {reason}"),
             Self::SettlementTimeout { kind, pending } => write!(
                 f,
                 "send of {kind} did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
@@ -1503,6 +1510,7 @@ impl SubstrateHarness {
         // on a dispatcher hop + compile when N test binaries run in
         // parallel); `Duration::MAX` (the no-cap sentinel) waits forever.
         let stall_deadline = self.settlement_cap;
+        let aborted = self.passive.fatal_abort_tripwire();
 
         let mut last_progress = Instant::now();
         let mut iterations = 0u32;
@@ -1587,20 +1595,33 @@ impl SubstrateHarness {
                 continue;
             }
 
+            // An abort unwound the thread that owed the reply, so nothing is
+            // left to send it: report the abort's reason where the stall
+            // budget would otherwise run out on a bare timeout.
+            if let Some(reason) = self.passive.fatal_abort_reason() {
+                return Err(SubstrateHarnessError::FatalAbort(reason));
+            }
+
             let remaining = stall_deadline.saturating_sub(last_progress.elapsed());
             if remaining.is_zero() {
                 return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
             }
-            let woke = if stall_deadline == Duration::MAX {
-                self.wake_rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            let budget = if stall_deadline == Duration::MAX {
+                crossbeam_channel::never()
             } else {
-                self.wake_rx.recv_timeout(remaining)
+                after(remaining)
             };
-            // A wake loops back to empty the rest of the queue and drain; a
-            // timeout loops back to the budget check above, which reports it.
-            // A disconnect means every source's wake is gone, so no reply can
+            // A wake loops back to empty the rest of the queue and drain; an
+            // abort loops back to the check above, which reports it; a
+            // timeout loops back to the budget check, which reports it. A
+            // disconnect means every source's wake is gone, so no reply can
             // arrive.
-            if woke == Err(RecvTimeoutError::Disconnected) {
+            let woke = select! {
+                recv(self.wake_rx) -> woke => woke.is_ok(),
+                recv(aborted) -> _ => true,
+                recv(budget) -> _ => true,
+            };
+            if !woke {
                 return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
             }
         }

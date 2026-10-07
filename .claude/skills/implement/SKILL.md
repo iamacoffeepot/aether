@@ -89,7 +89,8 @@ After the worker returns:
 2. compare the exact changed paths with the worker result and reject duplicates;
 3. compute the priced overflow with the resolver's changed mode at the approved base;
 4. inspect every changed file and Plan step directly;
-5. rerun the Plan's focused tests, format check, and full clippy in the parent.
+5. list every `Option` and `.take()` the diff adds in non-test code and check each against design rule R-0048 (`docs/guide/contributing/design-rules.md`): a lookup that can miss, or a value fixed at construction that never existed and never will, stays, and the pull request body names it with that meaning; anything else goes back to the worker before the push;
+6. rerun the Plan's focused tests, format check, and full clippy in the parent.
 
 Resume the same worker once for a focused correction. When the resume is refused because the worker's cache has expired, dispatch a fresh `implementer` with a short brief built from the worktree's observable state. Preserve partial state and report evidence when the Plan must change.
 

@@ -8,7 +8,7 @@
 //! `stateful_replace_reshaped.rs` is the decode-miss companion: same
 //! `NAMESPACE`, a reshaped `CounterState` (an added field changes
 //! `Kind::ID`), so a replacement compiled against it sees `decode_kind` =
-//! `None` and boots fresh.
+//! `None` and refuses the republish.
 
 #![forbid(unsafe_code)]
 // `rehydrate` takes its `State` by value — the macro hands the decoded
