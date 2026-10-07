@@ -110,7 +110,7 @@ impl NativeActor for Host {
             &guests.engine,
             &guests.linker,
             guests.old.compiled(),
-            ctx.guest_ctx(Arc::clone(&guests.outbound)),
+            ctx.guest_ctx(Arc::clone(&guests.outbound), guests.old.clone()),
             &[],
             None,
         )
@@ -140,7 +140,7 @@ impl NativeActor for Host {
             return;
         }
 
-        let mut guest_ctx = ctx.guest_ctx(Arc::clone(&self.guests.outbound));
+        let mut guest_ctx = ctx.guest_ctx(Arc::clone(&self.guests.outbound), self.guests.candidate.clone());
         guest_ctx.hold_outbox();
         let mut candidate = self.instantiate(&self.guests.candidate, guest_ctx);
 

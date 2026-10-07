@@ -1214,7 +1214,7 @@ macro_rules! __export_internal {
             // real params bytes over the FFI.
             let params =
                 <<$component as $crate::Lifecycle<$component>>::Params as ::core::default::Default>::default();
-            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
+            let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(&__AETHER_INLINE);
             match <$component as $crate::Lifecycle<$component>>::init(config, params, &mut ctx) {
                 Ok(instance) => {
                     __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$component>());
@@ -2298,7 +2298,7 @@ macro_rules! __export_multi_internal {
         // ADR-0156 §2: empty params for now — resolve `Params` to its
         // compiled default, mirroring the empty-config path above.
         let params = <<$ty as $crate::Lifecycle<$ty>>::Params as ::core::default::Default>::default();
-        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new();
+        let mut ctx: $crate::WasmInitCtx<'_> = $crate::WasmInitCtx::__new(&__AETHER_INLINE);
         match <$ty as $crate::Lifecycle<$ty>>::init(config, params, &mut ctx) {
             ::core::result::Result::Ok(instance) => {
                 __AETHER_INLINE.set_entry_actor_tag($crate::ActorTypeTag::of::<$ty>());

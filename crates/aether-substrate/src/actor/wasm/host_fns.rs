@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath};
 use aether_codec::frame::max_frame_size;
-use aether_data::{Blob, BlobHash, BlobReader, ErasedActorPath, MAX_READ_BYTES, wire};
+use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
 
 use crate::actor::native::ResolvePathError;
@@ -591,67 +591,23 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0250 module-held assets. This cannot be a
-    // native capability addressed by mail: `asset` is a synchronous read
-    // inside the guest's own hook, and the bytes live host-side in the
-    // instance's own module — the guest must pull them across the FFI at that
-    // instant and get them back into its own linear memory. That is the
-    // same host-mediated byte-transport shape as config delivery into
-    // `init` (ADR-0090) and mail delivery into `receive`, none of which a
-    // mail-round-trip capability can express. Served from the instance's own
-    // module in every hook, so it grows no persistent capability.
-    //
-    // Pull one asset's bytes from the instance's module: the guest passes the
-    // asset name (a slice in guest memory), the host looks it up in the
-    // module installed on the ctx, streams its blob through `BlobReader`,
-    // allocates a buffer in guest memory through the guest's own
-    // `realloc_p32`, writes the bytes, and returns the packed
-    // `(ptr << 32) | len`. Encoding:
-    //   - `ASSET_NOT_FOUND` (`u64::MAX`) — the module carries no asset by
-    //     that name; the guest maps it to `None`.
-    //   - any other value — `(ptr << 32) | len`, a live guest buffer the
-    //     SDK copies out and frees. An empty asset answers `0` (no buffer,
-    //     length 0), distinct from the not-found sentinel.
-    // A ctx holding no module traps (reachable only on bare test ctxs, never
-    // on a trampoline-born instance, which always installs its module).
-    linker.func_wrap(
-        "aether",
-        "asset_fetch_p32",
-        |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
-            let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let blob = {
-                let ctx = caller.data();
-                let Some(module) = ctx.module.as_ref() else {
-                    return Err(wasmtime::Error::msg("asset_fetch: this component holds no module"));
-                };
-                module.manifest().assets().section(&name).map(|section| section.blob.clone())
-            };
-            let Some(blob) = blob else {
-                return Ok(ASSET_NOT_FOUND);
-            };
-            deliver_bytes_to_guest(&mut caller, &read_blob(&blob))
-        },
-    )?;
-
-    // HOST_FN_OK: ADR-0250 module-held assets — the blob sibling of
-    // `asset_fetch_p32` above, backing the guest's `Assets::asset_blob`.
-    // It cannot be a native capability addressed by mail for the same
-    // reason: the read is synchronous inside the guest's own hook, and a
-    // mail round trip cannot answer inside it. Unlike the fetch it moves no
-    // payload byte into guest memory: the guest gets a handle, and the bytes
-    // stay where the module's asset blob already sits in the store.
+    // HOST_FN_OK: ADR-0250 module-held assets. This cannot be a native
+    // capability addressed by mail: the read is synchronous inside the
+    // guest's own hook, and a mail round trip cannot answer inside it. It is
+    // the one name-to-blob lookup behind the guest's `Assets::asset` and
+    // `Assets::asset_blob`, and it moves no payload byte into guest memory:
+    // the guest gets a handle, and the bytes stay where the module's asset
+    // blob already sits in the store.
     //
     // Take the asset named by `(name_ptr, name_len)` as the module's own
-    // blob, place it in this instance's blob table with one hold, write its
-    // 32-byte hash at `hash_out_ptr`, and return its length. The SDK builds
-    // a `Blob` over that hash whose `GuestHold` owns the hold, exactly the
-    // value a tag-1 decode produces, so `blob_read_p32` reads it, a send
-    // resolves it and `blob_drop_p32` gives it back.
-    // `ASSET_BLOB_NOT_FOUND` (`-1`), with nothing held or written, means the
-    // module carries no asset by that name.
-    //
-    // A ctx holding no module traps, as for the fetch, as does a
-    // `hash_out_ptr` outside guest memory.
+    // blob, place it in this instance's blob table with one hold (`hold_entry`
+    // rather than a pin, because only `receive` drops pins), write its 32-byte
+    // hash at `hash_out_ptr`, and return its length. The SDK builds a `Blob`
+    // over that hash whose `GuestHold` owns the hold, exactly the value a
+    // tag-1 decode produces, so `blob_read_p32` reads it, a send resolves it
+    // and `blob_drop_p32` gives it back. `ASSET_BLOB_NOT_FOUND` (`-1`), with
+    // nothing held or written, means the module carries no asset by that
+    // name. A `hash_out_ptr` outside guest memory traps.
     linker.func_wrap(
         "aether",
         "asset_blob_p32",
@@ -661,13 +617,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          hash_out_ptr: u32|
          -> wasmtime::Result<i64> {
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
-            let asset = {
-                let ctx = caller.data();
-                let Some(module) = ctx.module.as_ref() else {
-                    return Err(wasmtime::Error::msg("asset_blob: this component holds no module"));
-                };
-                module.manifest().assets().section(&name).map(|section| section.blob.clone())
-            };
+            let asset = caller.data().module.manifest().assets().section(&name).map(|section| section.blob.clone());
             let Some(asset) = asset else {
                 return Ok(ASSET_BLOB_NOT_FOUND);
             };
@@ -684,25 +634,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // HOST_FN_OK: ADR-0250 — the catalog companion of the asset_fetch pull
-    // above, backing the guest's `Assets::assets()`. Same host-mediated
-    // byte-transport rationale; a mail capability cannot serve a synchronous
-    // read into guest memory. Returns the module's catalog as a wire-encoded
-    // `Vec<AssetInfo>` delivered like `asset_fetch_p32`; an empty catalog
-    // encodes to a valid empty sequence (no sentinel). It answers for the
-    // instance's life; it traps only when the ctx holds no module.
+    // HOST_FN_OK: ADR-0250 — the one listing of the module's assets, backing
+    // the guest's `Assets::assets()`. Same host-mediated byte-transport
+    // rationale; a mail capability cannot serve a synchronous read into guest
+    // memory. Returns the module's catalog as a wire-encoded `Vec<AssetInfo>`
+    // delivered into a guest buffer; an empty catalog encodes to a valid empty
+    // sequence (no sentinel). The guest asks once per instance.
     linker.func_wrap(
         "aether",
         "asset_catalog_p32",
         |mut caller: Caller<'_, ComponentCtx>| -> wasmtime::Result<u64> {
-            let bytes = {
-                let ctx = caller.data();
-                let Some(module) = ctx.module.as_ref() else {
-                    return Err(wasmtime::Error::msg("asset_catalog: this component holds no module"));
-                };
-                wire::to_vec(module.manifest().asset_catalog())
-                    .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?
-            };
+            let bytes = wire::to_vec(caller.data().module.manifest().asset_catalog())
+                .map_err(|e| wasmtime::Error::msg(format!("asset_catalog: encode failed: {e}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;
@@ -1080,33 +1023,10 @@ fn read_guest_hash(caller: &mut Caller<'_, ComponentCtx>, hash_ptr: u32) -> Resu
     Ok(BlobHash::from_bytes(bytes))
 }
 
-/// The bytes of the asset blob `blob`, streamed through `BlobReader`.
-fn read_blob(blob: &Blob) -> Vec<u8> {
-    let reader = BlobReader::open(blob);
-    let len = usize::try_from(reader.len()).unwrap_or(0);
-    let mut bytes = vec![0; len];
-    let mut filled = 0;
-    while filled < bytes.len() {
-        let copied = reader.read_range(filled as u64, &mut bytes[filled..]);
-        if copied == 0 {
-            break;
-        }
-        filled += copied;
-    }
-    bytes.truncate(filled);
-    bytes
-}
-
 /// `asset_blob_p32`'s return for "the module carries no asset by the
 /// requested name": negative, so it is no length. The guest maps it to
 /// `None`.
 pub const ASSET_BLOB_NOT_FOUND: i64 = -1;
-
-/// ADR-0250 packed-return marker for "the module carries no asset by the
-/// requested name" — distinct from a real `(ptr << 32) | len` (a 4 GiB asset
-/// at pointer `0xFFFF_FFFF` is impossible under the frame and address
-/// bounds). The guest maps it to `None`.
-const ASSET_NOT_FOUND: u64 = u64::MAX;
 
 /// Alignment the asset delivery buffer is allocated with. Byte payloads
 /// need no alignment, so `1` keeps the guest's free (`realloc_bytes(ptr,

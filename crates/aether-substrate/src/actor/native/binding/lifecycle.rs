@@ -13,6 +13,8 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::{ActorProbe, NativeActor};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{InboxReceiver, ReplyLineage, SettlingInbox};
 #[cfg(feature = "wasm")]
@@ -407,9 +409,10 @@ impl NativeBinding {
     /// Build a guest ctx over this binding. The path behind
     /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) and
     /// [`NativeCtx::guest_ctx`](crate::actor::native::ctx::NativeCtx::guest_ctx).
+    /// `module` is the module the guest runs.
     #[cfg(feature = "wasm")]
-    pub(crate) fn guest_ctx(self: &Arc<Self>, outbound: Arc<HubOutbound>) -> ComponentCtx {
-        self.mailer.guest_ctx(Arc::clone(self), outbound)
+    pub(crate) fn guest_ctx(self: &Arc<Self>, outbound: Arc<HubOutbound>, module: Module) -> ComponentCtx {
+        self.mailer.guest_ctx(Arc::clone(self), outbound, module)
     }
 
     /// Make this actor's accept set exactly `guest`, and seed a cost cell for

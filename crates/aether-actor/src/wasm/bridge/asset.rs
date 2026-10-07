@@ -1,19 +1,18 @@
-//! ADR-0250 asset FFI bridge — the guest half of the `asset_fetch_p32` /
-//! `asset_blob_p32` / `asset_catalog_p32` host fns.
+//! ADR-0250 asset FFI bridge — the guest half of the `asset_blob_p32` /
+//! `asset_catalog_p32` host fns.
 //!
 //! Asset bytes live host-side in the instance's own module, whose publish
-//! checked each asset in as its own blob. The bridge is the guest-initiated
-//! pull: it hands the host an asset name (a slice in guest memory), the host
-//! looks it up in the instance's module, allocates a buffer through the
-//! guest's own allocator, writes the bytes, and returns the packed
-//! `(ptr << 32) | len`. The bridge copies that buffer into an owned `Vec` and
-//! frees it symmetrically through the same allocator — the host allocated it
-//! via `realloc_p32` (which routes to [`realloc_bytes`]), so the guest frees
-//! it the same way.
+//! checked each asset in as its own blob. `fetch_asset_blob` is the lookup:
+//! the host holds the asset's own store entry for this instance and hands
+//! back only its hash and length, which the guest's blob backing wraps
+//! (`crate::blob::guest`); the bytes are read through the ordinary blob read.
 //!
-//! `fetch_asset_blob` is the other pull: the host holds the asset's own store
-//! entry for this instance and hands back only its hash and length, which the
-//! guest's blob backing wraps (`crate::blob::guest`).
+//! `fetch_catalog` is the listing: it hands the host nothing, the host
+//! allocates a buffer through the guest's own allocator, writes the wire
+//! bytes, and returns the packed `(ptr << 32) | len`. The bridge copies that
+//! buffer into an owned `Vec` and frees it symmetrically through the same
+//! allocator — the host allocated it via `realloc_p32` (which routes to
+//! [`realloc_bytes`]), so the guest frees it the same way.
 //!
 //! This is the transport backing [`crate::Assets`] on the guest ctxs, served
 //! from the instance's module in every hook.
@@ -32,10 +31,6 @@ use alloc::vec::Vec;
 
 use crate::wasm::guest_alloc::realloc_bytes;
 use crate::wasm::raw;
-
-/// The host's "no asset by that name in the open window" sentinel — must
-/// match `host_fns::ASSET_NOT_FOUND`. Distinct from any real `(ptr, len)`.
-const ASSET_NOT_FOUND: u64 = u64::MAX;
 
 /// Alignment the host allocated the delivery buffer with — must match
 /// `host_fns::ASSET_ALLOC_ALIGN`. Byte data needs none, so `1` keeps the
@@ -72,22 +67,6 @@ pub(super) unsafe fn take_delivered(ptr: u32, len: u32) -> Vec<u8> {
         realloc_bytes(ptr as *mut u8, len as usize, ASSET_ALLOC_ALIGN, 0);
     }
     bytes
-}
-
-/// Pull an asset's bytes from the instance's own module (ADR-0250). `None`
-/// when the component carries no asset by that name (the host returns the
-/// not-found sentinel).
-#[must_use]
-pub fn fetch_asset(name: &str) -> Option<Vec<u8>> {
-    // SAFETY: FFI import; the host copies the name out before returning and
-    // hands back either the not-found sentinel or a live `(ptr, len)`.
-    let packed = unsafe { raw::asset_fetch(name.as_ptr().addr() as u32, name.len() as u32) };
-    if packed == ASSET_NOT_FOUND {
-        return None;
-    }
-    let (ptr, len) = unpack(packed);
-    // SAFETY: a non-sentinel return is a live host-delivered buffer.
-    Some(unsafe { take_delivered(ptr, len) })
 }
 
 /// Take an asset from the instance's own module as a blob the host holds for

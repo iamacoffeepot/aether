@@ -78,11 +78,10 @@ impl NativeActor for WasmTrampoline {
     const NAMESPACE: &'static str = super::identity::TRAMPOLINE_LABEL;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
-        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound));
-        // ADR-0250: install the instance's module before instantiate, so the
+        // ADR-0250: the ctx is built with the instance's module, so the
         // guest's `init`, `wire`, handlers, `on_rehydrate`, and `unwire` read
         // assets from it.
-        substrate_ctx.install_module(config.module.clone());
+        let mut substrate_ctx = ctx.guest_ctx(Arc::clone(&config.outbound), config.module.clone());
         // ADR-0231 §4: an inline child the guest spawns publishes its own
         // namespace and rows, read from this module's exported and private
         // groups.

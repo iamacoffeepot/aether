@@ -11,6 +11,8 @@ use crate::mail::registry::{InboxHandler, OwnedDispatch};
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::component::ComponentCtx;
 #[cfg(feature = "wasm")]
+use crate::actor::wasm::module::Module;
+#[cfg(feature = "wasm")]
 use crate::mail::mailer::Mailer;
 #[cfg(feature = "wasm")]
 use crate::mail::{HubOutbound, Registry};
@@ -44,7 +46,8 @@ pub(super) fn component_ctx_with_binding(
     mailer: Arc<Mailer>,
     sender: MailboxId,
 ) -> (ComponentCtx, Arc<NativeBinding>) {
+    let module = Module::bare_for_test(mailer.blob_store());
     let binding = Arc::new(NativeBinding::new_for_test(mailer, sender));
-    let ctx = ComponentCtx::new(Arc::clone(&binding), registry, HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(Arc::clone(&binding), registry, HubOutbound::disconnected(), module);
     (ctx, binding)
 }

@@ -201,15 +201,12 @@ pub struct ComponentCtx {
     /// `Component::instantiate`; empty on the test paths that build a bare
     /// ctx, where a tag lookup always misses and no alias is staged.
     inline_children: FxHashMap<u64, InlineChildType>,
-    /// ADR-0250 instance module. `Some` for a component loaded through the
-    /// trampoline (installed before `Component::instantiate`, so the guest's
-    /// `init`, `wire`, handlers, `on_rehydrate`, and `unwire` read assets);
-    /// the `asset_fetch_p32` / `asset_blob_p32` / `asset_catalog_p32` host
-    /// fns serve the guest's `Assets` surface from it. Held for the
-    /// instance's life, so asset reads work in every hook. An asset blob the
-    /// guest took sits in `blob_table`, not here.
-    /// `None` on the test paths that build a bare ctx.
-    pub module: Option<Module>,
+    /// ADR-0250 instance module: the module this instance was instantiated
+    /// from, fixed when the ctx is built. The `asset_blob_p32` /
+    /// `asset_catalog_p32` host fns serve the guest's `Assets` surface from
+    /// it, so asset reads work in every hook. An asset blob the guest took
+    /// sits in `blob_table`, not here.
+    pub module: Module,
     /// A candidate guest's held outbox (#7067): `Some` from
     /// [`Self::hold_outbox`] until the candidate is flushed or discarded,
     /// while every send and reply it makes is held rather than sent.
@@ -297,8 +294,14 @@ impl ComponentCtx {
     /// Crate-private: a guest ctx is built through
     /// [`NativeInitCtx::guest_ctx`](crate::actor::native::NativeInitCtx::guest_ctx) /
     /// [`NativeCtx::guest_ctx`](crate::actor::native::NativeCtx::guest_ctx),
-    /// which read `registry` from the binding's own mailer.
-    pub(crate) fn new(binding: Arc<NativeBinding>, registry: Arc<Registry>, outbound: Arc<HubOutbound>) -> Self {
+    /// which read `registry` from the binding's own mailer. `module` is the
+    /// module the guest instantiated against this ctx runs.
+    pub(crate) fn new(
+        binding: Arc<NativeBinding>,
+        registry: Arc<Registry>,
+        outbound: Arc<HubOutbound>,
+        module: Module,
+    ) -> Self {
         Self {
             sender: binding.self_mailbox(),
             registry,
@@ -319,7 +322,7 @@ impl ComponentCtx {
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
             inline_children: FxHashMap::default(),
-            module: None,
+            module,
             held: None,
             pending_unanswered: None,
         }
@@ -489,14 +492,6 @@ impl ComponentCtx {
 
     pub(crate) fn take_pending_alias_retirements(&mut self) -> Vec<PreparedAliasRetirement> {
         mem::take(&mut self.pending_alias_retirements)
-    }
-
-    /// Install the ADR-0250 instance module before `Component::instantiate`,
-    /// so the guest's `init`, `wire`, handlers, `on_rehydrate`, and `unwire`
-    /// read assets through the `asset_fetch_p32` host fns. Called by
-    /// `WasmTrampoline::init` right after it builds the ctx.
-    pub fn install_module(&mut self, module: Module) {
-        self.module = Some(module);
     }
 
     /// Install the type of every inline-child actor the resident module can

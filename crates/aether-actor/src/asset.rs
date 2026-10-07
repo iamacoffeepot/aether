@@ -16,11 +16,12 @@
 //!   asset's own store entry. Take it when the actor **routes** the asset,
 //!   mailing it on as a `Blob` field to the actor that consumes it (a texture
 //!   upload, a mesh load): the recipient reads the same bytes in place.
-//! - [`Assets::asset`] copies the asset into guest memory as a `Vec<u8>`.
-//!   Take it when the actor **reads** the payload itself: parses it, slices
-//!   it, or transforms it before anything leaves. A blob can be read too,
-//!   through [`aether_data::BlobReader`], a range at a time; `asset` is the
-//!   plain form when the whole payload is wanted in hand.
+//! - [`Assets::asset`] copies the asset into guest memory as a `Vec<u8>`:
+//!   the asset's blob read whole, then dropped. Take it when the actor
+//!   **reads** the payload itself: parses it, slices it, or transforms it
+//!   before anything leaves. A blob can be read a range at a time through
+//!   [`aether_data::BlobReader`]; `asset` is the plain form when the whole
+//!   payload is wanted in hand.
 //!
 //! The catalog is indexed host-side from the custom sections without
 //! instantiating the component (`aether-substrate`'s asset section indexer).
@@ -44,7 +45,7 @@ pub trait Assets {
 
     /// The bytes of the asset named `name`, copied into guest memory, or
     /// `None` when the component carries no such asset. The bytes are the
-    /// actor's to keep or drop.
+    /// asset's blob read whole; they are the actor's to keep or drop.
     fn asset(&mut self, name: &str) -> Option<Vec<u8>>;
 
     /// The asset named `name` as a blob the guest holds by handle, or `None`

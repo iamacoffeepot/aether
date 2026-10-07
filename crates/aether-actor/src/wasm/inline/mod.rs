@@ -44,16 +44,17 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell, UnsafeCell};
+use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use core::mem;
 
 use aether_data::wire::{Encoder, LedgerEncoder};
 use aether_data::{__watch_id_number, Blob, Kind, KindId, MailboxId, RequestId, Source, WatchId};
 
+use crate::asset::AssetInfo;
 use crate::blob::guest::EncodedGuestMail;
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::request_context::{RequestContextTable, compose_state_envelope};
-use crate::wasm::bridge::mail;
+use crate::wasm::bridge::{asset, mail};
 use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 use crate::wasm::decode::guest_ctx;
 use crate::wasm::{ActorInitError, ErasedWasmActor};
@@ -348,6 +349,13 @@ pub struct Registry {
     /// `self_id`'s set-once-from-the-shim shape; a `fn` pointer is `Copy`, so
     /// a `Cell` suffices.
     spawn_resolver: Cell<Option<SpawnByTagFn>>,
+    /// ADR-0250: the names and lengths of the assets this instance's module
+    /// carries, in indexed order. Set by the first [`Assets::assets`] call on
+    /// any ctx of the instance, from one `asset_catalog_p32` call, and never
+    /// changed afterwards, because an instance's module never changes. Unset
+    /// means only that no ctx has asked yet. A once-set cell because
+    /// [`Self::new`] is `const` and backs a `static`.
+    assets: OnceCell<Vec<AssetInfo>>,
 }
 
 // SAFETY: identical argument to [`crate::Slot`] — the WASM guest is
@@ -362,7 +370,9 @@ pub struct Registry {
 // `request_contexts` `RefCell` needs `Sync` only for that single-thread
 // reason; its borrow flag still catches reentrancy. The `spawn_resolver`
 // cell is written once from an init shim and read from guest handler code —
-// again, only ever from the single run-token thread.
+// again, only ever from the single run-token thread. The `assets` cell is
+// written once by the first ctx that lists assets and read from the same
+// thread; a host test owns its registry.
 unsafe impl Sync for Registry {}
 
 impl Registry {
@@ -378,7 +388,14 @@ impl Registry {
             held: RefCell::new(HeldTickets::new()),
             unanswered: RefCell::new(None),
             spawn_resolver: Cell::new(None),
+            assets: OnceCell::new(),
         }
+    }
+
+    /// The assets this instance's module carries, fetched from the host on
+    /// the first call and held for the instance's life.
+    pub(crate) fn assets(&self) -> &[AssetInfo] {
+        self.assets.get_or_init(asset::fetch_catalog)
     }
 
     /// Store a typed request context under `request` (ADR-0139), warning

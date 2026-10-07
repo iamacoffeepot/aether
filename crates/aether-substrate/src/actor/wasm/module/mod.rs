@@ -34,6 +34,8 @@ use std::sync::Arc;
 use aether_data::BlobHash;
 
 use crate::actor::wasm::kind_manifest::ActorInputs;
+#[cfg(test)]
+use {crate::actor::native::BlobCheckIn, crate::store::BlobStore, wasmtime::Engine};
 
 mod cache;
 mod code;
@@ -69,6 +71,17 @@ struct ModuleEntry {
     /// The file's manifest: the shared code part cloned from `code`, plus the
     /// file's own asset index.
     manifest: ModuleManifest,
+}
+
+#[cfg(test)]
+impl Module {
+    /// A module with no exports, no kinds and no assets, checked into
+    /// `store`: the module a test ctx holds when the test reads no assets.
+    pub(crate) fn bare_for_test(store: &BlobStore) -> Self {
+        let blobs = BlobCheckIn::new(store.clone());
+        let code = blobs.check_in(wat::parse_str("(module)").expect("compile WAT").into_boxed_slice());
+        ModuleCache::new(Arc::new(Engine::default())).check_in(&blobs, &code).expect("check the module in")
+    }
 }
 
 impl Module {
