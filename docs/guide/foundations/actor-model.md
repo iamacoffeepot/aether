@@ -840,8 +840,8 @@ the MCP, RPC, and harness boundary, is the one place an `ErasedActorPath` become
 position
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 The reply carries no position. A successful load reply is sent by the loaded
-actor itself, so a native requester keeps `ctx.sender()` as its reference and
-an embedder types the reply event's stamped sender.
+actor itself, so a requester, native or guest, keeps `ctx.sender()` from the
+reply as its reference and an embedder types the reply event's stamped sender.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one

@@ -50,8 +50,10 @@ impl NativeActor for Echo {
 }
 
 /// The pumped actor under the driver: it counts its bumps and its relays,
-/// and keeps the number of the last answer its relays got back.
+/// keeps the number of the last answer its relays got back, and whether the
+/// last bump's sender was this actor.
 struct Counter {
+    bump_from_self: bool,
     bumps: u32,
     relayed: u32,
     bounced: u32,
@@ -63,11 +65,13 @@ impl NativeActor for Counter {
     type Config = ();
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { bumps: 0, relayed: 0, bounced: 0 })
+        Ok(Self { bump_from_self: false, bumps: 0, relayed: 0, bounced: 0 })
     }
 
     #[aether_actor::handler::tell]
-    fn on_bump(&mut self, _ctx: &mut NativeCtx<'_>, bump: Bump) {
+    fn on_bump(&mut self, ctx: &mut NativeCtx<'_>, bump: Bump) {
+        let sender_path = ctx.sender().map(|sender| ctx.actor_path(sender).to_string());
+        self.bump_from_self = sender_path.as_deref() == Some("test.pumped_driver.counter");
         self.bumps += bump.n;
     }
 
@@ -109,7 +113,9 @@ fn settle_returns_only_once_every_root_has_settled() {
 
 /// `pump_until` wakes on mail no chain the test holds carries: a detached
 /// self-wake lands on the pumped inbox and is dispatched by the drain its
-/// mail wake triggers.
+/// mail wake triggers. The wake carries its own actor as the sender: a wake
+/// pushed without that stamp would reach the handler with no sender, which an
+/// ordinary mail's handler is about to be refused.
 #[test]
 fn pump_until_drains_a_detached_mail_on_its_wake() {
     let mut driver = driver();
@@ -118,4 +124,6 @@ fn pump_until_drains_a_detached_mail_on_its_wake() {
     wake.wake(&Bump { n: 5 });
 
     driver.pump_until("the detached bump", |counter| counter.bumps == 5);
+
+    assert_eq!(driver.read_state(|counter| counter.bump_from_self), Some(true));
 }

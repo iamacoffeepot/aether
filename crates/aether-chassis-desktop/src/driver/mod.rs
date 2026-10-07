@@ -140,13 +140,15 @@ pub struct DesktopRenderIntegration {
 impl DesktopRenderIntegration {
     /// Begin graceful shutdown exactly once. The window application drives a
     /// frame immediately after this request and exits only after the lifecycle
-    /// reports its terminal.
+    /// reports its terminal. The quit is sent from the driver's claimed
+    /// [`Self::lifecycle_reply_inbox`], so the lifecycle capability reads that
+    /// mailbox as its sender.
     fn request_quit(&mut self) {
         if self.quit_requested {
             return;
         }
         self.quit_requested = true;
-        self.lifecycle.push_root(&Quit, None);
+        self.lifecycle.push_root(&Quit, Some(&self.lifecycle_reply_inbox));
     }
 
     /// Push a chassis-root `LifecycleAdvance` to the `aether.lifecycle` cap
@@ -497,7 +499,8 @@ impl DriverCapability for DesktopDriverCapability {
         }));
 
         // The chassis-root doors for the per-frame `Frame` request and the
-        // `Occluded` forward, and for each `LifecycleAdvance` and the `Quit`.
+        // `Occluded` forward, and for each `LifecycleAdvance` and the `Quit`. Both
+        // are sent from the driver's claimed lifecycle reply inbox.
         let render = ctx.root_pusher::<RenderCapability>();
         let lifecycle = ctx.root_pusher::<LifecycleCapability>();
 

@@ -317,6 +317,9 @@ impl<A, S: SenderRequirement, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// The envelope sender, as what this ctx's sender requirement `S` hands
     /// out (ADR-0231 §11).
     ///
+    /// A reply's sender is the actor that replied, as it is for a native
+    /// handler.
+    ///
     /// On a ctx that states nothing, which is [`Anyone`], it is a proven
     /// [`ErasedActorRef`]: the dispatch source the host stamped, minted with
     /// no lookup, and `None` for a sourceless dispatch (session /

@@ -7,10 +7,11 @@
 //! no mailer or binding, so the only send it grants is one self-wake of `K`
 //! (ADR-0230): the helper cannot address any other actor through it.
 //!
-//! The wake is the same unchained loopback push the ADR-0093 completion tail
-//! makes for [`TaskCompletionWake`](super::blocking::TaskCompletionWake). The
-//! handle holds its binding weakly, so a wake after the actor has dropped does
-//! nothing.
+//! The wake is an unchained loopback push like the one the ADR-0093 completion
+//! tail makes for [`TaskCompletionWake`](super::blocking::TaskCompletionWake),
+//! except that it carries its own actor as the sender: the helper acts for its
+//! actor, so the handler reads that actor from `ctx.sender()`. The handle holds
+//! its binding weakly, so a wake after the actor has dropped does nothing.
 //!
 //! The thread itself is spawned from the wake, with
 //! [`SelfWake::spawn_sidecar`]. That is the sanctioned spawn for a cap's
@@ -78,10 +79,11 @@ impl<K> SelfWake<K> {
 
 impl<K: ActorMail> SelfWake<K> {
     /// Push `payload` to the minting actor's own mailbox as an unchained
-    /// loopback wake. Does nothing once that actor has dropped.
+    /// loopback wake that carries that actor as its sender. Does nothing once
+    /// that actor has dropped.
     pub fn wake(&self, payload: &K) {
         if let Some(binding) = self.binding.upgrade() {
-            binding.wake_self(K::ID, payload.encode_into_bytes());
+            binding.wake_as_self(K::ID, payload.encode_into_bytes());
         }
     }
 }
