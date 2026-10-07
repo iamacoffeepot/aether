@@ -12,9 +12,10 @@ the code as it is; the change that implements this ADR edits ADR-0241 §2 and
 §9 in place and marks ADR-0163 §3 and §4 amended.
 
 Three terms are used throughout. A **module file** is the wasm bytes a publish
-brings, code and asset sections together. An **asset** is the payload of one
-`aether.asset.<path>` custom section in that file (ADR-0163 §2). A
-**publication** is the binding of a namespace to a module (ADR-0241 §3).
+brings, code and asset sections together. An **asset** is a named blob a module carries: the name is
+the `<path>` of one `aether.asset.<path>` custom section in that file
+(ADR-0163 §2) and the blob is that section's payload. A **publication** is the
+binding of a namespace to a module (ADR-0241 §3).
 
 ## Context
 
@@ -83,12 +84,25 @@ that long, and the blob store frees each one when its last holder goes. Two
 modules that carry the same asset hold one entry between them, and it is freed
 when the second lets go.
 
-### 3. The asset calls work in every hook
+### 3. An instance reads its module's table in every hook
 
-A component reads its assets from `init`, `wire`, every handler,
-`on_rehydrate`, and `unwire`. The host serves the read from the instance's own
-module. There is no window, no closed state, and no trap for a call made at
-the wrong time. A name the catalog does not carry answers `None`, as today.
+The module's asset table is sidecar data, as its kind manifest is: the host
+reads it from the module file's custom sections at publish, it stays with the
+`Module`, and it is never copied into an instance. Every instance holds its
+`Module` from the moment its context is built, so there is no instance without
+one, no window, no closed state, and no trap for a call made at the wrong
+time. A component reads its assets from `init`, `wire`, every handler,
+`on_rehydrate`, and `unwire`.
+
+Nothing reads an asset's bytes but the blob system. The host offers two calls
+over the table and no third:
+
+- a lookup that turns a name into that row's blob. The blob enters the
+  instance's blob table held once, for the value the guest builds over it,
+  and from there it is read, sent and dropped as any blob is. A name the
+  table does not carry answers that there is none.
+- the list of names and lengths, for a component that must find out what its
+  module carries, such as a bundle packed after it was compiled.
 
 The guest surface is one trait in place of `AssetCatalog` and `AssetWindow`,
 implemented by every wasm ctx:
@@ -96,13 +110,15 @@ implemented by every wasm ctx:
 ```rust
 pub trait Assets {
     fn assets(&self) -> &[AssetInfo];                      // names and lengths
-    fn asset(&mut self, name: &str) -> Option<Vec<u8>>;    // copied into guest memory
+    fn asset(&mut self, name: &str) -> Option<Vec<u8>>;    // the blob, read into guest memory
     fn asset_blob(&mut self, name: &str) -> Option<Blob>;  // the asset's own blob, no copy
 }
 ```
 
-This puts two verbs on the handler ctx that it does not have today. They are
-the existing host calls with their restriction removed, not new operations.
+`asset_blob` is the lookup. `asset` is the lookup followed by the ordinary
+blob read, so there is one way bytes reach a guest. The list is fetched once
+for an instance and kept beside the actor, not on a ctx, because a ctx is
+built again for every hook.
 
 A blob from `asset_blob` is the asset's own entry. A component that keeps it,
 or an actor it was sent to, holds that one asset and nothing else.
@@ -137,6 +153,8 @@ Unloading a bundle is ending its instances and unpublishing it.
   its spawns.
 - The trap text that names "a spawn with its code, and a load" as the two
   doors.
+- The host call that copies an asset's bytes to the guest (`asset_fetch_p32`)
+  and the instance context's optional module.
 - From ADR-0163: the load window (§3), "one door between cold and resident"
   (§4), and the absence "no runtime payload fetch".
 - From ADR-0241: the deferral of unpublish.
@@ -181,6 +199,15 @@ Unloading a bundle is ending its instances and unpublishing it.
 - **Embed assets in the code as data segments.** Always readable with no host
   call, but every asset sits in the instance's linear memory for its life and
   is copied again on each republish (ADR-0163, Alternatives considered).
+- **Hand each instance a copy of the table when it is born.** Removes every
+  asset host call, but each instance then holds every asset of its module for
+  its whole life and carries the names in its own memory, and a kind manifest
+  is not handed over this way.
+- **Check the module file in as one blob and make each asset a range of it.**
+  A publish hashes and copies nothing per asset, but a kept or mailed asset
+  holds the whole file, and two modules with the same asset hold it twice. It
+  can return as a publish optimization beneath the same table if per-asset
+  check-in is measured to dominate a large bundle's publish.
 - **Free a publication automatically when its last instance ends.** A
   publication has no instances between its publish and its first spawn, so
   this would withdraw it before it could be used.
