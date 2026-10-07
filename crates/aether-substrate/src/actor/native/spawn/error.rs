@@ -66,7 +66,12 @@ pub enum SpawnError {
     /// The registry owner closed before it could authoritatively apply the
     /// staged birth.
     OwnerClosed,
-    /// Storage or cost reservation rejected the prepared activation.
+    /// Storage or cost reservation rejected this birth's prepared
+    /// activation, or another birth staged in the same handler turn was
+    /// refused, since a turn's births are one owner batch that all
+    /// commit or fail together (ADR-0165). In the second case the refused
+    /// birth carries its own reason, this one was never born, and its name is
+    /// free to stage again.
     ActivationRejected,
     /// A post-seal external birth was accepted by the registry owner and then
     /// nothing decided it within the spawn path's patience budget (30 s).
