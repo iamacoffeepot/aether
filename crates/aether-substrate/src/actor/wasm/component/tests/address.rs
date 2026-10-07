@@ -22,12 +22,11 @@ use crate::actor::wasm::host_fns;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{
-    InboxHandler, OwnedDispatch, Registry, RegistryOwnerLease, RouteContract, lineage_mailbox_id,
-};
+use crate::mail::registry::{InboxHandler, OwnedDispatch, Registry, RegistryOwnerLease, RouteContract};
 use crate::mail::{KindId, MailboxId};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig};
+use crate::testing::canonical_id;
 use crate::testing::{bare_substrate, boot_authority, registered_ref};
 
 /// Where the guest's `ask` export reads the path text from.
@@ -212,7 +211,7 @@ fn route_rows_answers_a_live_or_dropped_route_under_its_canonical_name() {
     let impostor = registry
         .try_register_inbox_with_id(
             &boot_authority(),
-            lineage_mailbox_id(folded),
+            canonical_id(folded),
             "test.wasm.route_rows_impostor",
             discharging(),
         )

@@ -13,13 +13,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
+use core::iter;
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::segment::{SegmentFault, check_segment};
-use crate::hash::{MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError};
+use crate::hash::{MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError, fold_lineage};
+use crate::ids::{ActorId, MailboxId};
 use crate::schema::{LabelNode, SchemaType};
+use crate::tagged_id::{Tag, with_tag};
 use crate::wire::{Error as WireError, WireDecode, WireEncode};
 use crate::{CastEligible, CrossesActors, CrossesWire, Schema};
 
@@ -41,10 +44,86 @@ pub struct ErasedActorPath(Box<str>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActorPathForm<'a> {
     /// A canonical `/`-rendered lineage path: no step is a hole.
-    Canonical(&'a str),
+    Canonical(CanonicalPath<'a>),
     /// An ADR-0166 short path: at least one step is a hole, and the root is a
     /// bare namespace. `steps` are the steps written after the root.
     Short { root: &'a str, steps: Vec<PathSegment<'a>> },
+}
+
+/// A borrowed view of proven-canonical path text, handed out by
+/// [`ErasedActorPath::form`]. Reaching the walk requires matching the
+/// canonical arm, so a short path can never be folded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalPath<'a>(&'a str);
+
+impl<'a> CanonicalPath<'a> {
+    /// The proven-canonical text.
+    #[must_use]
+    pub fn text(&self) -> &'a str {
+        self.0
+    }
+
+    /// The position the path names: the ADR-0099 §4 parse → fold, the
+    /// inverse of the render. Each segment is one node, a bare namespace a
+    /// singleton and `namespace:discriminator` an instance, folded root to
+    /// leaf and tagged once at the end. A one-segment path is the depth-1
+    /// fixed point.
+    #[must_use]
+    pub fn lineage_id(&self) -> MailboxId {
+        let (root, beneath) = self.root_and_beneath();
+        let folded = beneath.fold(node(root).0, |parent, segment| fold_lineage(parent, node(segment)));
+
+        MailboxId(with_tag(Tag::Mailbox, folded))
+    }
+
+    /// The immediate parent: the text before the last `/` with the position
+    /// that prefix names, or `None` for a root, which has no parent.
+    #[must_use]
+    pub fn parent(&self) -> Option<(&'a str, MailboxId)> {
+        let (parent, _) = self.0.rsplit_once('/')?;
+
+        Some((parent, Self(parent).lineage_id()))
+    }
+
+    /// Every prefix of the path that ends on a segment boundary, root first,
+    /// each with the position it names: the path's ancestors in order, then
+    /// the path itself. The fold carries the untagged hash from one segment
+    /// to the next and tags a copy for each prefix, so the id of a prefix is
+    /// the id that prefix has as a path of its own.
+    pub fn ancestors(&self) -> impl Iterator<Item = (&'a str, MailboxId)> + 'a {
+        let text = self.0;
+        let (root, beneath) = self.root_and_beneath();
+        let root_fold = node(root).0;
+        // A separator precedes every segment beneath the root.
+        let beneath = beneath.scan((root.len(), root_fold), move |(end, parent), segment| {
+            *end += 1 + segment.len();
+            *parent = fold_lineage(*parent, node(segment));
+
+            Some((&text[..*end], *parent))
+        });
+
+        iter::once((root, root_fold))
+            .chain(beneath)
+            .map(|(prefix, folded)| (prefix, MailboxId(with_tag(Tag::Mailbox, folded))))
+    }
+
+    /// The root segment and the segments beneath it, in order. A canonical
+    /// path always has a root, so the walk starts from a hash and never from
+    /// "nothing folded yet".
+    fn root_and_beneath(&self) -> (&'a str, impl Iterator<Item = &'a str> + 'a) {
+        let (root, beneath) = self.0.split_once('/').unwrap_or((self.0, ""));
+
+        (root, beneath.split_terminator('/'))
+    }
+}
+
+/// The lineage node one canonical segment names: `namespace:discriminator` an
+/// instance, a bare namespace a singleton.
+fn node(segment: &str) -> ActorId {
+    match segment.split_once(':') {
+        Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
+        None => ActorId::singleton(segment),
+    }
 }
 
 /// One step of a short [`ErasedActorPath`] after its root, as written.
@@ -96,7 +175,7 @@ impl ErasedActorPath {
         if steps.iter().any(|step| matches!(step, PathSegment::Hole { .. })) {
             ActorPathForm::Short { root, steps }
         } else {
-            ActorPathForm::Canonical(&self.0)
+            ActorPathForm::Canonical(CanonicalPath(&self.0))
         }
     }
 }
@@ -241,6 +320,7 @@ impl<'de> Deserialize<'de> for ErasedActorPath {
 mod tests {
     use alloc::format;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use super::*;
 
@@ -286,7 +366,57 @@ mod tests {
         );
 
         let canonical = ErasedActorPath::new("root/manager/worker:camera").expect("a canonical path");
-        assert_eq!(canonical.form(), ActorPathForm::Canonical("root/manager/worker:camera"));
+        assert_eq!(canonical.form(), ActorPathForm::Canonical(CanonicalPath("root/manager/worker:camera")));
+    }
+
+    #[test]
+    fn canonical_view_parent_is_none_for_a_root_and_the_immediate_prefix_beneath() {
+        let root = ErasedActorPath::new("root").expect("a canonical root");
+        let ActorPathForm::Canonical(view) = root.form() else {
+            panic!("a hole-free path is canonical");
+        };
+        assert_eq!(view.text(), "root");
+        assert_eq!(view.parent(), None);
+
+        let nested = ErasedActorPath::new("root/manager/worker:camera").expect("a canonical path");
+        let ActorPathForm::Canonical(nested_view) = nested.form() else {
+            panic!("a hole-free path is canonical");
+        };
+        let parent_text = "root/manager";
+        let parent_path = ErasedActorPath::new(parent_text).expect("a canonical prefix");
+        let ActorPathForm::Canonical(parent_view) = parent_path.form() else {
+            panic!("a hole-free prefix is canonical");
+        };
+        assert_eq!(nested_view.parent(), Some((parent_text, parent_view.lineage_id())));
+
+        let instanced = ErasedActorPath::new("root/scope:7").expect("an instanced-leaf path");
+        let ActorPathForm::Canonical(instanced_view) = instanced.form() else {
+            panic!("a hole-free path is canonical");
+        };
+        let root_prefix = ErasedActorPath::new("root").expect("a canonical prefix");
+        let ActorPathForm::Canonical(root_view) = root_prefix.form() else {
+            panic!("a hole-free prefix is canonical");
+        };
+        assert_eq!(instanced_view.parent(), Some(("root", root_view.lineage_id())));
+    }
+
+    #[test]
+    fn canonical_view_ancestors_walk_root_first_with_each_prefix_fold() {
+        let path = ErasedActorPath::new("root/manager/worker:camera").expect("a canonical path");
+        let ActorPathForm::Canonical(view) = path.form() else {
+            panic!("a hole-free path is canonical");
+        };
+        let prefixes = ["root", "root/manager", "root/manager/worker:camera"];
+        let ancestors = view.ancestors().collect::<Vec<_>>();
+        assert_eq!(ancestors.len(), prefixes.len(), "one step per written prefix");
+        for (index, prefix) in prefixes.into_iter().enumerate() {
+            let prefix_path = ErasedActorPath::new(prefix).expect("a canonical prefix");
+            let ActorPathForm::Canonical(prefix_view) = prefix_path.form() else {
+                panic!("a hole-free prefix is canonical");
+            };
+            assert_eq!(ancestors[index].0, prefix, "the walk stays root-first without skipping a level");
+            assert_eq!(ancestors[index].1, prefix_view.lineage_id(), "each step folds its own prefix");
+        }
     }
 
     #[test]

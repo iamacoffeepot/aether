@@ -14,12 +14,11 @@ use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
 use crate::mail::registry::owner::RegistryOwnerLease;
-use crate::mail::registry::{
-    AddressResolutionError, Registry, RouteContract, canonical_mailbox_id, lineage_mailbox_id, noop_handler,
-};
+use crate::mail::registry::{AddressResolutionError, Registry, RouteContract, canonical_mailbox_id, noop_handler};
 use crate::mail::{KindId, MailboxId};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 use super::support::starting_token;
 
@@ -50,7 +49,7 @@ fn lookup_over_bytes_scope_path_is_resolution_miss() {
 fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
     let r = Registry::new();
     let canonical = "root/worker:camera";
-    let id = lineage_mailbox_id(canonical);
+    let id = canonical_id(canonical);
     r.register_inbox(&auth(), "root", noop_handler());
     r.try_register_inbox_with_id(&auth(), id, canonical, noop_handler()).unwrap();
 
@@ -70,7 +69,7 @@ fn lineage_fold_is_the_node_chain_and_meets_the_canonical_id_at_depth_one() {
     // depth-1 fold equals the id a by-name registration takes, and a nested
     // path must fold node by node rather than hash the joined string.
     for name in ["aether.component", "aether.kit.camera:main"] {
-        assert_eq!(lineage_mailbox_id(name).0, canonical_mailbox_id(name).0, "{name}");
+        assert_eq!(canonical_id(name).0, canonical_mailbox_id(name).0, "{name}");
     }
 
     let path = "root/scope:7/leaf";
@@ -78,8 +77,8 @@ fn lineage_fold_is_the_node_chain_and_meets_the_canonical_id_at_depth_one() {
         fold_lineage(ActorId::singleton("root").0, ActorId::instanced("scope", "7")),
         ActorId::singleton("leaf"),
     );
-    assert_eq!(lineage_mailbox_id(path).0, with_tag(Tag::Mailbox, chain));
-    assert_ne!(lineage_mailbox_id(path).0, with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, path.as_bytes())));
+    assert_eq!(canonical_id(path).0, with_tag(Tag::Mailbox, chain));
+    assert_ne!(canonical_id(path).0, with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, path.as_bytes())));
 }
 
 #[test]
@@ -189,12 +188,7 @@ fn resolve_protocol_proves_live_routes_and_refuses_the_rest() {
 
     let folded = "test.resolve_protocol.folded";
     registry
-        .try_register_inbox_with_id(
-            &auth(),
-            lineage_mailbox_id(folded),
-            "test.resolve_protocol.impostor",
-            noop_handler(),
-        )
+        .try_register_inbox_with_id(&auth(), canonical_id(folded), "test.resolve_protocol.impostor", noop_handler())
         .expect("the fold is free");
     assert_eq!(
         registry.resolve_protocol(&received(folded)).expect_err("another name stands at the fold"),
@@ -285,7 +279,7 @@ fn route_rows_answer_live_and_dropped_routes_under_the_path() {
 
     let folded = "test.route_rows.folded";
     let impostor = registry
-        .try_register_inbox_with_id(&auth(), lineage_mailbox_id(folded), "test.route_rows.impostor", noop_handler())
+        .try_register_inbox_with_id(&auth(), canonical_id(folded), "test.route_rows.impostor", noop_handler())
         .expect("the fold is free");
     registry.publish_contract(&auth(), impostor, contract(&rows)).expect("an empty contract takes any rows");
 
@@ -364,7 +358,7 @@ fn cast_mints_only_for_a_live_route_whose_rows_the_protocol_admits() {
         registry.submit(EffectBatch::new(vec![RegistryEffect::reserve_named(starting.to_owned())])).expect("submits");
     owner.run_once();
     starting_token(&reserved.try_take().expect("reservation completes").expect("reserves"));
-    let starting = registry.stamped_sender(lineage_mailbox_id(starting)).expect("a Starting record stands there");
+    let starting = registry.stamped_sender(canonical_id(starting)).expect("a Starting record stands there");
     let dropped = stand("test.cast.dropped", &[(Load::ID, ReplyContract::None)]);
     registry.drop_mailbox(&auth(), dropped.id()).expect("the live route retires");
     assert!(!cast(starting), "a Starting route is not live");
