@@ -14,19 +14,20 @@ pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 pub use std::time::Duration;
 
-pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::{Anyone, ProtocolRef, Single, runtime};
+use aether_actor::{Anyone, Single, runtime};
 // `MonitorNotice` is named by `on_monitor_notice`'s signature.
 use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::kinds::{Close, ConnectionReady, TcpConsumer};
+use crate::kinds::{Close, ConnectionReady};
+// The consumer and this listener's monitor on it, in the shape a session holds.
+use crate::session::BoundConsumer;
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpListenerActor;
 
@@ -41,13 +42,11 @@ pub struct TcpListenerState {
     pub local_port: u16,
     /// The consumer the cap proved at `BindListener` or `BindListenerSelf`
     /// receipt (ADR-0230, ADR-0231 §3/§4), handed to every session this
-    /// listener accepts.
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
-    /// The listener's monitor on `consumer`, taken in `wire`: the consumer's
-    /// close arrives as a `MonitorNotice` and closes this listener. `None`
-    /// before `wire`, and for a listener bound with no consumer. It
-    /// deregisters when this state drops.
-    pub consumer_watch: Option<MonitorHandle>,
+    /// listener accepts, together with this listener's monitor on it: the
+    /// consumer's close arrives as a `MonitorNotice` and closes this
+    /// listener. `None` is a listener bound with no consumer, and nothing
+    /// else.
+    pub consumer: Option<BoundConsumer>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_start: Option<mpsc::Sender<()>>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -172,8 +171,7 @@ impl NativeActor for TcpListenerActor {
 
         Ok(TcpListenerState {
             local_port: port,
-            consumer: config.consumer,
-            consumer_watch: None,
+            consumer: config.consumer.map(BoundConsumer::Unwatched),
             shutdown,
             accept_start: Some(accept_start_tx),
             accept_thread: Some(thread),
@@ -186,7 +184,7 @@ impl NativeActor for TcpListenerActor {
         // `init` cannot take the monitor: `NativeInitCtx` has no `monitor`.
         // A consumer that closed before this ran is noticed the same way,
         // once this listener's birth promotes.
-        state.consumer_watch = state.consumer.map(|consumer| ctx.monitor(consumer));
+        state.consumer = state.consumer.take().map(|consumer| consumer.watched(ctx));
 
         if let Some(start) = state.accept_start.take() {
             let _ = start.send(());
@@ -231,11 +229,11 @@ impl NativeActor for TcpListenerActor {
         let Some(departed) = ctx.sender() else {
             return;
         };
-        let Some(consumer) = state.consumer else {
+        let Some(consumer) = &state.consumer else {
             return;
         };
 
-        let consumer_closed = departed == consumer.erase();
+        let consumer_closed = departed == consumer.reference().erase();
         if consumer_closed {
             ctx.shutdown();
         }
@@ -266,7 +264,7 @@ impl NativeActor for TcpListenerActor {
                 stream: Some(stream),
                 peer: peer_str.clone(),
                 session_name: subname.clone(),
-                consumer: state.consumer,
+                consumer: state.consumer.as_ref().map(BoundConsumer::reference),
             };
             match ctx
                 .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config, ())

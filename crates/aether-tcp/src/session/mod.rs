@@ -56,3 +56,7 @@ use aether_actor::actor;
 
 #[cfg(feature = "runtime")]
 mod runtime;
+
+// The listener holds its consumer in the same shape a session does.
+#[cfg(feature = "runtime")]
+pub use runtime::BoundConsumer;

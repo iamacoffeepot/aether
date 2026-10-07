@@ -24,7 +24,7 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
-use aether_actor::{ProtocolRef, runtime};
+use aether_actor::{ProtocolRef, ReplyMode, runtime};
 use aether_codec::frame::pop_frame;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature.
 use aether_kinds::MonitorNotice;
@@ -56,18 +56,58 @@ pub struct TcpSessionState {
     /// inherits the handler's causal chain; a proof rather than a runtime
     /// name, because a name cannot reach a nested actor such as a component
     /// loaded beneath a parent at `parent/NS:key`.
-    pub consumer: Option<ProtocolRef<TcpConsumer>>,
-    /// The session's monitor on `consumer`, taken in `wire`: the consumer's
-    /// close arrives as a `MonitorNotice` and closes this session. `None`
-    /// before `wire`, and for a session with no consumer. It deregisters
-    /// when this state drops.
-    pub consumer_watch: Option<MonitorHandle>,
+    ///
+    /// It is held with this session's monitor on it: the consumer's close
+    /// arrives as a `MonitorNotice` and closes this session. `None` is a
+    /// session with no consumer, and nothing else.
+    pub consumer: Option<BoundConsumer>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
     pub read_start: Option<mpsc::Sender<()>>,
     pub read_thread: Option<JoinHandle<()>>,
     pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
+}
+
+/// The consumer a listener or session was bound with, and its holder's
+/// monitor on it. A listener and each session it accepts hold one each, so
+/// each hears the consumer's close itself.
+///
+/// `init` receives the reference in its config and cannot monitor, because
+/// `NativeInitCtx` has no `monitor`; `wire` is the first ctx that can. The
+/// two cases are that fact: the reference alone until `wire`, the reference
+/// with its monitor from then on.
+pub enum BoundConsumer {
+    /// Between `init` and `wire`: the reference the config carried.
+    Unwatched(ProtocolRef<TcpConsumer>),
+    /// From `wire` on. Dropping `_monitor` deregisters, so the watch ends
+    /// with the state that holds it.
+    Watched { reference: ProtocolRef<TcpConsumer>, _monitor: MonitorHandle },
+}
+
+impl BoundConsumer {
+    /// The consumer, in either case.
+    pub fn reference(&self) -> ProtocolRef<TcpConsumer> {
+        match self {
+            Self::Unwatched(reference) | Self::Watched { reference, .. } => *reference,
+        }
+    }
+
+    /// Monitor the consumer for the actor `ctx` runs. A consumer already
+    /// watched keeps the monitor it has.
+    pub fn watched<A, S, M: ReplyMode>(self, ctx: &NativeCtx<'_, A, S, M>) -> Self {
+        match self {
+            Self::Unwatched(reference) => Self::Watched { reference, _monitor: ctx.monitor(reference) },
+            watched @ Self::Watched { .. } => watched,
+        }
+    }
+}
+
+impl TcpSessionState {
+    /// The consumer deliveries go to, or `None` for a session without one.
+    fn consumer(&self) -> Option<ProtocolRef<TcpConsumer>> {
+        self.consumer.as_ref().map(BoundConsumer::reference)
+    }
 }
 
 #[runtime]
@@ -155,8 +195,7 @@ impl NativeActor for TcpSessionActor {
         Ok(TcpSessionState {
             peer: config.peer,
             session_name: config.session_name,
-            consumer: config.consumer,
-            consumer_watch: None,
+            consumer: config.consumer.map(BoundConsumer::Unwatched),
             read_buffer: Vec::new(),
             write_half,
             shutdown,
@@ -171,7 +210,7 @@ impl NativeActor for TcpSessionActor {
         // A consumer that closed before this ran, such as one that closed
         // while the connection was being accepted or dialed, is noticed the
         // same way, once this session's birth promotes.
-        state.consumer_watch = state.consumer.map(|consumer| ctx.monitor(consumer));
+        state.consumer = state.consumer.take().map(|consumer| consumer.watched(ctx));
 
         if let Some(start) = state.read_start.take() {
             let _ = start.send(());
@@ -212,7 +251,7 @@ impl NativeActor for TcpSessionActor {
         let Some(departed) = ctx.sender() else {
             return;
         };
-        let Some(consumer) = state.consumer else {
+        let Some(consumer) = state.consumer() else {
             return;
         };
 
@@ -238,7 +277,7 @@ impl NativeActor for TcpSessionActor {
                         match pop_frame(&mut state.read_buffer) {
                             Ok(Some(bytes)) => {
                                 ctx.fanout(
-                                    state.consumer,
+                                    state.consumer(),
                                     &SessionData {
                                         session_name: state.session_name.clone(),
                                         peer: state.peer.clone(),
@@ -256,7 +295,7 @@ impl NativeActor for TcpSessionActor {
                                     "tcp session frame rejected",
                                 );
                                 ctx.fanout(
-                                    state.consumer,
+                                    state.consumer(),
                                     &SessionClosed {
                                         session_name: state.session_name.clone(),
                                         peer: state.peer.clone(),
@@ -276,7 +315,7 @@ impl NativeActor for TcpSessionActor {
                         format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
                     };
                     ctx.fanout(
-                        state.consumer,
+                        state.consumer(),
                         &SessionClosed { session_name: state.session_name.clone(), peer: state.peer.clone(), reason },
                     );
                     ctx.shutdown();
