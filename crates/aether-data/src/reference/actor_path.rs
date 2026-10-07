@@ -165,6 +165,16 @@ impl ErasedActorPath {
         &self.0
     }
 
+    /// The namespace of the type the path names (ADR-0241 §5): its last `/`
+    /// step, up to that step's first `:`, or the whole step when it has no
+    /// key.
+    #[must_use]
+    pub fn leaf_namespace(&self) -> &str {
+        let leaf = self.0.rsplit_once('/').map_or(&*self.0, |(_, leaf)| leaf);
+
+        leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
+    }
+
     /// The parsed view of the written text. Infallible, because the text was
     /// validated on the way in.
     #[must_use]

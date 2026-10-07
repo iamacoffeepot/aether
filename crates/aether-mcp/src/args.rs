@@ -774,6 +774,20 @@ pub struct SpawnArgs {
     pub full: bool,
 }
 
+/// `unpublish` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnpublishArgs {
+    /// Engine UUID to unpublish from (from `list_engines`). Omit to target
+    /// the sole supervised engine; with zero or several engines an omitted
+    /// id is an error naming the situation, never a guess. The reply echoes
+    /// the engine that answered.
+    #[serde(default)]
+    pub engine_id: Option<String>,
+    /// The published type to withdraw, by the name a publish reported: `NS`,
+    /// or `NS.<hash>` for a content-addressed module.
+    pub namespace: String,
+}
+
 /// `describe_component` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeComponentArgs {

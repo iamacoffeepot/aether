@@ -107,19 +107,10 @@ impl<C: Instanced> ActorPath<C> {
     }
 }
 
-/// The leaf namespace of a canonical path: its last `/` step, up to that
-/// step's first `:`, or the whole step when it has no key.
-fn leaf_namespace(path: &ErasedActorPath) -> &str {
-    let text = path.as_str();
-    let leaf = text.rsplit_once('/').map_or(text, |(_, leaf)| leaf);
-
-    leaf.split_once(':').map_or(leaf, |(namespace, _)| namespace)
-}
-
 /// Whether `path`'s leaf names an `R`: exact equality with `R::NAMESPACE`,
 /// never a prefix.
 fn names<R: Addressable>(path: &ErasedActorPath) -> bool {
-    leaf_namespace(path) == R::NAMESPACE
+    path.leaf_namespace() == R::NAMESPACE
 }
 
 /// A canonical path whose leaf names an `R`, or `WireError::InvalidActorPath`,
@@ -160,7 +151,7 @@ impl Display for ForeignLeaf<'_> {
             f,
             "invalid typed actor path `{}`: its leaf `{}` is not `{}`",
             self.path,
-            leaf_namespace(self.path),
+            self.path.leaf_namespace(),
             self.expected
         )
     }
