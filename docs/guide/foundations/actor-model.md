@@ -939,6 +939,11 @@ at the spawner through the ordinary task-completion path as
 ([ADR-0243](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0243-typed-held-replies.md)
 §9) — so an apply-time conflict (a name another actor won
 first, say) surfaces as one typed failure rather than a silent half-spawn. A
+handler that stages several births in one turn gets one outcome per birth, and
+those births commit or fail together: if the owner refuses one, that one's
+outcome carries the reason, every other outcome of the turn is
+`SpawnError::ActivationRejected`, none of them is born, and each name can be
+staged again on a later turn. A
 `SpawnOutcome` names itself on both arms:
 
 ```rust
