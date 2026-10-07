@@ -351,13 +351,15 @@ impl NativeActor for Viewer {
 
     #[handler::tell]
     fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, subscribe: Subscribe) {
-        let camera = ctx.resolve(&subscribe.camera).expect("the camera is live");
+        let Subscribe { camera } = subscribe;
+        let camera = ctx.resolve(&camera).expect("the camera is live");
         ctx.send_to(camera, &ViewSubscribe);
     }
 
     #[handler::tell]
     fn on_unsubscribe(&mut self, ctx: &mut NativeCtx<'_>, unsubscribe: Unsubscribe) {
-        let camera = ctx.resolve(&unsubscribe.camera).expect("the camera is live");
+        let Unsubscribe { camera } = unsubscribe;
+        let camera = ctx.resolve(&camera).expect("the camera is live");
         ctx.send_to(camera, &ViewUnsubscribe);
     }
 
@@ -384,7 +386,8 @@ impl NativeActor for Bystander {
 
     #[handler::tell]
     fn on_subscribe(&mut self, ctx: &mut NativeCtx<'_>, subscribe: Subscribe) {
-        let camera = ctx.resolve(&subscribe.camera).expect("the camera is live");
+        let Subscribe { camera } = subscribe;
+        let camera = ctx.resolve(&camera).expect("the camera is live");
         ctx.send_to(camera, &ViewSubscribe);
     }
 }
@@ -511,11 +514,11 @@ fn sends_a_view(event: &TraceEvent) -> bool {
 /// camera's own trace ring. The pose is pushed as a tracked root and the
 /// tail asks for that root's events; the camera handles the pose before the
 /// tail, so the count is settled when the reply arrives.
-fn views_sent_for(harness: &mut SubstrateHarness, camera: &ActorRef<CameraComponent>, pose: Pose) -> usize {
-    let root = harness.send_tracked(camera, &pose).expect("the pose is pushed");
+fn views_sent_for(harness: &mut SubstrateHarness, camera: ActorRef<CameraComponent>, pose: Pose) -> usize {
+    let root = harness.send_tracked(&camera, &pose).expect("the pose is pushed");
     let tail = TraceTail { max: 0, since: None, root: Some(root) };
     let reply = harness
-        .execute(vec![("tail", HarnessOp::send_and_await_reply(camera, &tail))])
+        .execute(vec![("tail", HarnessOp::send_and_await_reply(&camera, &tail))])
         .expect("the camera's trace ring answers")
         .reply::<TraceTailResult>("tail")
         .expect("decode TraceTailResult");
@@ -541,11 +544,11 @@ fn a_viewer_that_closed_without_unsubscribing_is_sent_no_further_view() {
     let mut harness = with_viewers();
     let camera = load_camera(&mut harness, &wasm, "main", &fixed(64, 48, facing(Vec3::ZERO, 2.0)));
     subscribe_viewer(&mut harness, "main");
-    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)), 1, "a live viewer is sent the view");
+    assert_eq!(views_sent_for(&mut harness, camera, facing(Vec3::ZERO, 3.0)), 1, "a live viewer is sent the view");
 
     close_viewer(&mut harness);
 
-    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
+    assert_eq!(views_sent_for(&mut harness, camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
 }
 
 /// A viewer that unsubscribed and later closes changes nothing for the
@@ -570,11 +573,7 @@ fn an_unsubscribed_viewer_that_later_closes_changes_nothing() {
 
     close_viewer(&mut harness);
 
-    assert_eq!(
-        views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)),
-        1,
-        "only the bystander is sent the view"
-    );
+    assert_eq!(views_sent_for(&mut harness, camera, facing(Vec3::ZERO, 3.0)), 1, "only the bystander is sent the view");
 }
 
 /// A viewer that subscribes twice is held once and removed by its one
@@ -591,9 +590,9 @@ fn a_viewer_that_subscribes_twice_is_removed_by_one_departure() {
     let camera = load_camera(&mut harness, &wasm, "main", &fixed(64, 48, facing(Vec3::ZERO, 2.0)));
     subscribe_viewer(&mut harness, "main");
     subscribe_viewer(&mut harness, "main");
-    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 3.0)), 1, "a viewer is held once");
+    assert_eq!(views_sent_for(&mut harness, camera, facing(Vec3::ZERO, 3.0)), 1, "a viewer is held once");
 
     close_viewer(&mut harness);
 
-    assert_eq!(views_sent_for(&mut harness, &camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
+    assert_eq!(views_sent_for(&mut harness, camera, facing(Vec3::ZERO, 4.0)), 0, "a closed viewer is sent nothing");
 }
