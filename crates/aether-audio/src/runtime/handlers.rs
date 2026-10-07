@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use aether_actor::DependsOn;
@@ -17,8 +18,25 @@ use crate::kinds::{
 use aether_fs::NamespaceAddr;
 
 impl AudioCapabilityState {
+    /// Monitor `sender` on its first state-creating mail so the cap
+    /// forgets its sound itself when the sender closes (ADR-0079 §8).
+    /// The monitor never fails: a sender that closed before its mail was
+    /// handled is noticed at once, and the notice, which arrives after
+    /// the handling turn returns, forgets the state that turn wrote.
+    /// Only `Some` senders are watched — the `None` key is shared by
+    /// session, MCP-forwarded, and substrate-internal mail and has no
+    /// actor to depart.
+    pub fn watch_sender<A>(&mut self, ctx: &mut NativeCtx<'_, A>) {
+        let Some(sender) = ctx.sender() else {
+            return;
+        };
+        if let Entry::Vacant(slot) = self.monitors.entry(sender) {
+            slot.insert(ctx.monitor(sender));
+        }
+    }
+
     pub fn handle_note_on<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: NoteOn) {
-        let Some(s) = self.sender.as_ref() else {
+        let Some(queue) = self.sender.as_ref() else {
             return;
         };
         let ev = AudioEvent::NoteOn {
@@ -28,12 +46,13 @@ impl AudioCapabilityState {
             instrument_id: mail.instrument_id,
             pan: mail.pan,
         };
-        if s.push(ev).is_err() {
+        if queue.push(ev).is_err() {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 "event queue full — dropping note_on",
             );
         }
+        self.watch_sender(ctx);
     }
 
     pub fn handle_note_off<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: NoteOff) {
@@ -97,12 +116,13 @@ impl AudioCapabilityState {
         mail: SetSenderGain,
     ) -> SetSenderGainResult {
         let applied = mail.gain.clamp(0.0, 4.0);
-        let Some(s) = self.sender.as_ref() else {
+        let Some(queue) = self.sender.as_ref() else {
             return SetSenderGainResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
         };
-        let _ = s.push(AudioEvent::SetSenderGain { sender: ctx.sender(), gain: applied });
+        let _ = queue.push(AudioEvent::SetSenderGain { sender: ctx.sender(), gain: applied });
+        self.watch_sender(ctx);
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.gain,
@@ -113,7 +133,7 @@ impl AudioCapabilityState {
     }
 
     pub fn handle_schedule<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: Schedule) -> ScheduleResult {
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(queue) = self.sender.as_ref() else {
             return ScheduleResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
@@ -142,9 +162,10 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation)]
         let accepted = mail.events.len() as u32;
         let ev = AudioEvent::Schedule { sender: ctx.sender(), events: mail.events };
-        if sender.push(ev).is_err() {
+        if queue.push(ev).is_err() {
             return ScheduleResult::Err { error: "audio event queue full — schedule dropped".to_owned() };
         }
+        self.watch_sender(ctx);
         ScheduleResult::Ok { accepted }
     }
 
@@ -182,6 +203,7 @@ impl AudioCapabilityState {
             );
             return pending;
         };
+        self.watch_sender(ctx);
         self.track_loads.insert(
             load_id,
             TrackLoad {
@@ -296,6 +318,44 @@ impl AudioCapabilityState {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 "event queue full — dropping track_stop",
+            );
+        }
+    }
+
+    /// Forget a departed sender (ADR-0079 §8). The host stamps the
+    /// departed sender as the notice's sender, so `ctx.sender()` is the
+    /// same proven reference the monitor map and the sender-keyed state
+    /// are keyed by (ADR-0230). Releases the handle, purges the
+    /// cap-side `track_loads` entries of the departed sender — each
+    /// answered `Err`, the `fail_assembly` answer-then-discard shape, so
+    /// an in-flight track never starts after its sender closed — and
+    /// pushes one forget event for the callback. The queue crossing
+    /// stays best-effort: a full queue warn-drops the forget exactly
+    /// like every other control event. A notice with no sender names
+    /// nothing and changes nothing.
+    pub fn handle_monitor_notice<A>(&mut self, ctx: &mut NativeCtx<'_, A>) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        self.monitors.remove(&departed);
+        for (_, load) in self.track_loads.extract_if(|_, load| load.sender == Some(departed)) {
+            load.held.answer(
+                ctx,
+                &PlayTrackResult::Err {
+                    namespace: load.namespace,
+                    path: load.path,
+                    lane: load.lane,
+                    error: "sender closed before its track started".to_owned(),
+                },
+            );
+        }
+        let Some(queue) = self.sender.as_ref() else {
+            return;
+        };
+        if queue.push(AudioEvent::SenderDeparted { sender: departed }).is_err() {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                "event queue full — dropping sender_departed",
             );
         }
     }

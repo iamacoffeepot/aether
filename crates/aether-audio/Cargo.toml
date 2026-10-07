@@ -40,6 +40,9 @@ runtime = [
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
+# The engine-only departure notice the cap forgets a closed sender on
+# (`aether.actor.monitor_notice`) is the substrate's own mail vocabulary.
+aether-kinds = { path = "../aether-kinds" }
 # The audio cap loads track / instrument assets through `aether.fs`: it
 # addresses `FsCapability` + its `Read` / `ReadResult` / `FsError` kinds.
 # `default-features = false` keeps the marker-only wasm build from dragging the

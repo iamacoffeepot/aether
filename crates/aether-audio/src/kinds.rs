@@ -259,7 +259,9 @@ impl HeldReply for PlayTrackResult {
 /// lets callers that share a source mailbox stop only their own lane.
 /// Releases through a short (~5 millisecond) linear fade to avoid a
 /// click. Stopping a track that isn't playing is a no-op, matching
-/// `note_off`. Fire-and-forget; no reply.
+/// `note_off`. Fire-and-forget; no reply. A closed sender's tracks stop
+/// without needing its cooperation — the engine forgets the sender and
+/// fades every track it owned, looping or not.
 #[aether_data::kind(name = "aether.audio.stop_track")]
 pub struct StopTrack {
     pub namespace: String,

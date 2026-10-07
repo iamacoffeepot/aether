@@ -29,6 +29,8 @@ fn ramp(len: usize) -> Vec<f32> {
     (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
 }
 
+mod cap_close;
+mod departure;
 mod instrument;
 mod synth_voice;
 mod track;
