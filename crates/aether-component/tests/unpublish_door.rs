@@ -59,8 +59,7 @@ fn publish(harness: &mut SubstrateHarness, wasm: &[u8]) -> Vec<String> {
 }
 
 fn spawn_gate(harness: &mut SubstrateHarness, key: &str) -> SpawnResult {
-    let spawn =
-        Spawn { namespace: GATE.to_owned(), key: Some(key.to_owned()), parent: None, config: Vec::new(), code: None };
+    let spawn = Spawn { namespace: GATE.to_owned(), key: Some(key.to_owned()), parent: None, config: Vec::new() };
     host_call(harness, &spawn)
 }
 
@@ -143,7 +142,7 @@ fn unpublish_is_refused_while_an_instance_is_live_and_withdraws_after_its_drop()
         "the withdrawn namespace describes nothing: {described:?}"
     );
 
-    let sibling = Spawn { namespace: PEER.to_owned(), key: None, parent: None, config: Vec::new(), code: None };
+    let sibling = Spawn { namespace: PEER.to_owned(), key: None, parent: None, config: Vec::new() };
     match host_call::<_, SpawnResult>(&mut harness, &sibling) {
         SpawnResult::Spawned { path, .. } => assert_eq!(path.as_str(), PEER),
         other => panic!("the module's sibling namespace still spawns: {other:?}"),
