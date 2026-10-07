@@ -7,6 +7,14 @@
 //! actor's own mailbox. The wake handler drains the mpsc and does
 //! the spawn on the dispatcher thread.
 //!
+//! Lifetime: a listener lives until `aether.tcp.unbind_listener` names
+//! it, until the consumer it was bound with closes, or until the engine
+//! tears down. The cap monitors the consumer and mails the listener the
+//! same `Close` either way. The engine does not close an actor's children
+//! with it, so the listener keeps an entry for each session it accepted,
+//! with its monitor on that session, and its `unwire` mails each one
+//! `SessionClose`.
+//!
 //! Shutdown: `unwire` flips the accept thread's shutdown flag, then
 //! self-connects to the bound port to wake the blocked accept call.
 //! The accept returns, sees the flag, breaks; the dispatcher thread
