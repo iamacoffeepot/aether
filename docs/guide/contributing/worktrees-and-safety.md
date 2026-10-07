@@ -214,9 +214,9 @@ input, and each refusal names the valid move:
 
 | Script | Event | Behavior |
 |---|---|---|
-| `check-agent-wait.sh` | before a Bash call | refuses a gate wait (`wave-status.sh --wait`, `gh run watch`, `gh pr checks --watch`), a loop that sleeps, and a single sleep of four minutes or more; refuses a foreground timeout above 270000 milliseconds unless the agent type is `implementer` |
+| `check-agent-wait.sh` | before a Bash call | refuses a gate wait (`wave-status.sh --wait`, `gh run watch`, `gh pr checks --watch`, `agent-job.sh wait --until-done`), a loop that sleeps, a single sleep of four minutes or more, and a foreground timeout above 240000 milliseconds, for every agent type |
 | `check-agent-stop.sh` | when a subagent stops | refuses the stop while a background shell task that the agent itself started is still running |
-| `check-agent-resume.sh` | before a message to a subagent | refuses the message when the target has been idle past its cache lifetime: 300 seconds, or 3300 for an `implementer` |
+| `check-agent-resume.sh` | before a message to a subagent | refuses the message when the target has been idle past its cache lifetime of 300 seconds |
 | `record-agent-wait.sh` | after a Bash call | appends one line for a subagent call that ran five minutes or longer |
 
 Every refusal also appends a line to the same ledger,

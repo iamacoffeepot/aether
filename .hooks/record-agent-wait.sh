@@ -4,7 +4,8 @@
 #
 # As a PostToolUse Bash hook (no arguments) it records a subagent call that ran
 # five minutes or longer: a subagent's prompt cache lasts five minutes, so such
-# a call rewrote the agent's whole context.
+# a call rewrote the agent's whole context. `check-agent-wait.sh` holds a
+# foreground call under four minutes, so a line here is a wait that got past it.
 #
 # The check-agent-*.sh hooks call it as `record-agent-wait.sh --refused <rule>`
 # with their own hook input on stdin to record a refusal.

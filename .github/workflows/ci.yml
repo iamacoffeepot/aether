@@ -155,6 +155,9 @@ jobs:
       # same reason: a pull request that edits a hook is judged against it.
       - name: Hook regression tests
         run: bash .hooks/tests/run.sh
+      # The job script the wait hook points a subagent at.
+      - name: Agent job regression tests
+        run: bash scripts/test-agent-job.sh
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's

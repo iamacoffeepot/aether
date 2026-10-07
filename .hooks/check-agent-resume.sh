@@ -5,9 +5,8 @@
 #
 # The target's transcript is
 #   <transcript_path without .jsonl>/subagents/agent-<to>.jsonl
-# and its idle time is that file's modification age. The limit is 300 seconds,
-# or 3300 for an `implementer` (one-hour cache), read from the sibling
-# agent-<to>.meta.json.
+# and its idle time is that file's modification age. The limit is 300 seconds
+# for every agent type.
 
 set -u
 
@@ -39,11 +38,7 @@ case "$modified" in
 esac
 idle_secs=$(( $(date +%s) - modified ))
 
-agent_type=$(jq -r '.agentType // empty' "$agents_dir/agent-$target.meta.json" 2>/dev/null || true)
 limit_secs=300
-if [[ "$agent_type" == "implementer" ]]; then
-    limit_secs=3300
-fi
 
 (( idle_secs > limit_secs )) || exit 0
 

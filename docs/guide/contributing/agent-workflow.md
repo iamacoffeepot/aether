@@ -202,11 +202,11 @@ of being silently waived.
 
 ## An agent ends at a wait
 
-In Claude Code a subagent's prompt cache lasts five minutes, while the main
-session's lasts an hour. A subagent that waits longer than five minutes, blocked
-on CI, parked on its own background task, or resumed later by a message,
-re-reads its whole context on its next call. The wait buys nothing, because the
-workflow already resumes from observable facts.
+In Claude Code every subagent's prompt cache lasts five minutes, while the main
+session's lasts an hour. A subagent that goes longer than five minutes between
+calls, blocked on CI, parked on its own background task, or resumed later by a
+message, re-reads its whole context on its next call. The wait buys nothing,
+because the workflow already resumes from observable facts.
 
 So the Claude Code `implement` and `resolve` skills end when the head is
 pushed: they hand back the pull request number and head SHA. The session that
@@ -217,8 +217,27 @@ That dispatching session owns the retry count.
 
 Hooks refuse the waits in a subagent rather than rely on the instruction; they
 are listed under [Hooks are defense in depth](worktrees-and-safety.md#hooks-are-defense-in-depth).
-The `implementer` agent type (`.claude/agents/implementer.md`) has a one-hour
-cache, so a build whose result the worker needs mid-work does not expire it.
+No agent type is exempt, the `implementer` (`.claude/agents/implementer.md`)
+included.
+
+A build or check a worker needs before it can continue is the one wait that
+stays with the worker, in slices that keep its cache warm.
+`scripts/agent-job.sh start <name> -- <command>` detaches the command, and
+`scripts/agent-job.sh wait <name>` blocks at most 225 seconds and prints one
+line whose first word is the answer:
+
+| Answer | Meaning | The worker's move |
+|---|---|---|
+| `done` | the job ended; the line carries its exit status and log path | continue |
+| `running` | the slice ran out | wait again |
+| `handoff` | the tenth `running` answer, about 40 minutes | end the turn with the job name |
+| `lost` | the job's process is gone and it recorded no status | read the log |
+
+Each `running` answer re-reads the worker's context from cache, about a tenth
+of the price of rebuilding it cold, so ten of them cost what a fresh worker
+would. Past that the dispatching session takes the wait with
+`scripts/agent-job.sh wait <name> --until-done`, which the hooks refuse in a
+subagent, and dispatches a fresh worker from the job's exit status and log.
 The Codex skills keep their own check loop: the cache behavior and the hooks
 are Claude Code's.
 
