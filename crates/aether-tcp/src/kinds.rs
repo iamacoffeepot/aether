@@ -50,6 +50,10 @@ pub trait TcpConsumer {
 /// closes. The capability monitors the consumer and closes every listener
 /// bound to it when it closes, and a listener that closes, by either exit,
 /// closes the sessions it accepted.
+///
+/// A second bind of the same `addr` string by the same consumer answers `Ok`
+/// with the standing listener's name and port and binds nothing new; the
+/// requested `name` is ignored on such a hit.
 #[aether_data::kind(name = "aether.tcp.bind_listener", no_serde)]
 pub struct BindListener {
     pub addr: String,
@@ -69,6 +73,10 @@ pub struct BindListener {
 /// `addr` and `name` mean what they mean on [`BindListener`].
 /// The listener and the sessions it accepts close when the sender closes,
 /// so the sender need not unbind before it does. Reply: `BindListenerResult`.
+///
+/// A second bind of the same `addr` string by the same consumer answers `Ok`
+/// with the standing listener's name and port and binds nothing new; the
+/// requested `name` is ignored on such a hit.
 #[aether_data::kind(name = "aether.tcp.bind_listener_self")]
 pub struct BindListenerSelf {
     pub addr: String,
