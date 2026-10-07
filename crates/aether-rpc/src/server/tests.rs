@@ -1153,7 +1153,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     stream.set_write_timeout(Some(Duration::from_secs(10))).expect("set_write_timeout");
 
     // Announce a body just over the cap, then push that many zero
-    // bytes. The cap defaults to 64 MiB (MAX_FRAME_SIZE), and the
+    // bytes. The cap defaults to 128 MiB (MAX_FRAME_SIZE), and the
     // process-wide accessor caches on first read — so the drain
     // ceiling is exactly `2 * max_frame_size()`. Pick the smallest
     // legal oversize: max + 1.
@@ -1164,7 +1164,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     #[allow(clippy::cast_possible_truncation)]
     let prefix = (oversize as u32).to_le_bytes();
     stream.write_all(&prefix).expect("write oversize length prefix");
-    // Write the body in chunks so a 64 MiB+ payload doesn't single-
+    // Write the body in chunks so a 128 MiB+ payload doesn't single-
     // syscall through.
     let chunk = vec![0u8; 1024 * 1024];
     let mut remaining = oversize;

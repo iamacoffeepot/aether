@@ -87,7 +87,7 @@ impl Component {
             return Ok(Placement::Oversize);
         }
         // Wasm32 carries u32 byte lengths; `len <= MAX_DELIVERABLE_MAIL_BYTES`
-        // (64 MiB) keeps the cast lossless.
+        // (128 MiB) keeps the cast lossless.
         #[allow(clippy::cast_possible_truncation)]
         let new_cap = len as u32;
         if *large_cap < new_cap {
