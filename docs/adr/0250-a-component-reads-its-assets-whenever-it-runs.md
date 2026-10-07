@@ -97,9 +97,10 @@ time. A component reads its assets from `init`, `wire`, every handler,
 Nothing reads an asset's bytes but the blob system. The host offers two calls
 over the table and no third:
 
-- a lookup that turns a name into that row's blob, admitted to the instance's
-  blob table as a blob arriving on mail is. A name the table does not carry
-  answers that there is none.
+- a lookup that turns a name into that row's blob. The blob enters the
+  instance's blob table held once, for the value the guest builds over it,
+  and from there it is read, sent and dropped as any blob is. A name the
+  table does not carry answers that there is none.
 - the list of names and lengths, for a component that must find out what its
   module carries, such as a bundle packed after it was compiled.
 
@@ -152,9 +153,8 @@ Unloading a bundle is ending its instances and unpublishing it.
   its spawns.
 - The trap text that names "a spawn with its code, and a load" as the two
   doors.
-- The host call that copies an asset's bytes to the guest (`asset_fetch_p32`),
-  the separate way an asset blob enters an instance's blob table, and the
-  instance context's optional module.
+- The host call that copies an asset's bytes to the guest (`asset_fetch_p32`)
+  and the instance context's optional module.
 - From ADR-0163: the load window (§3), "one door between cold and resident"
   (§4), and the absence "no runtime payload fetch".
 - From ADR-0241: the deferral of unpublish.
