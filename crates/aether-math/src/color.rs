@@ -85,6 +85,7 @@ impl Rgb {
         Self { r, g, b }
     }
 
+    /// Builds a linear colour from 8-bit sRGB bytes by the IEC 61966-2-1 decode.
     #[inline]
     #[must_use]
     pub const fn from_srgb8(r: u8, g: u8, b: u8) -> Self {
@@ -127,6 +128,7 @@ impl Rgba {
         Self { r, g, b, a }
     }
 
+    /// Builds a linear colour from 8-bit sRGB bytes by the IEC 61966-2-1 decode; alpha is `a / 255` with no curve.
     #[inline]
     #[must_use]
     pub const fn from_srgb8(r: u8, g: u8, b: u8, a: u8) -> Self {
@@ -181,6 +183,7 @@ impl Hsl {
         Self { h, s, l }
     }
 
+    /// Hue, saturation and lightness describe an sRGB-encoded colour; the result is linear by the IEC 61966-2-1 decode.
     #[inline]
     #[must_use]
     pub fn to_rgb(self) -> Rgb {
@@ -203,8 +206,11 @@ impl Hsl {
             (chroma, 0.0, secondary)
         };
         let match_value = lightness - chroma / 2.0;
-        let srgb = Rgb::new(red + match_value, green + match_value, blue + match_value);
-        Rgb::new(srgb.r * srgb.r, srgb.g * srgb.g, srgb.b * srgb.b)
+        Rgb::new(
+            srgb_channel_to_linear(red + match_value),
+            srgb_channel_to_linear(green + match_value),
+            srgb_channel_to_linear(blue + match_value),
+        )
     }
 
     #[inline]
@@ -217,8 +223,50 @@ impl Hsl {
 #[inline]
 #[must_use]
 const fn srgb8_channel_to_linear(channel: u8) -> f32 {
-    let c = channel as f32 / 255.0;
-    c * c
+    SRGB8_TO_LINEAR[channel as usize]
+}
+
+/// IEC 61966-2-1 decode of one encoded channel in `0.0..=1.0`.
+///
+/// The power `base^2.4` is written as `base^2 * (base^2)^(1/5)` because no `const` power function exists on the
+/// pinned toolchain and `from_srgb8` must stay `const`.
+const fn srgb_channel_to_linear(encoded: f32) -> f32 {
+    if encoded <= 0.04045 {
+        return encoded / 12.92;
+    }
+
+    let base = (encoded + 0.055) / 1.055;
+    let squared = base * base;
+
+    squared * fifth_root(squared)
+}
+
+/// Newton's iteration for the fifth root, a fixed number of steps so it terminates by construction.
+const fn fifth_root(value: f32) -> f32 {
+    let mut root = 1.0;
+    let mut step = 0;
+    while step < 16 {
+        root = (4.0 * root + value / (root * root * root * root)) / 5.0;
+        step += 1;
+    }
+
+    root
+}
+
+const SRGB8_TO_LINEAR: [f32; 256] = srgb8_table();
+
+const fn srgb8_table() -> [f32; 256] {
+    let mut table = [0.0; 256];
+    let mut channel = 0u8;
+    loop {
+        table[channel as usize] = srgb_channel_to_linear(channel as f32 / 255.0);
+        if channel == u8::MAX {
+            break;
+        }
+        channel += 1;
+    }
+
+    table
 }
 
 #[inline]
@@ -244,17 +292,43 @@ mod tests {
     }
 
     #[test]
-    fn srgb8_to_linear_preserves_approximate_transfer() {
-        // Tripwire: RGB keeps the current approximate `(channel / 255)^2` transfer.
-        assert_eq!(Rgba::from_srgb8(255, 128, 0, 255), Rgba::new(1.0, 0.251_964_66, 0.0, 1.0));
+    fn from_srgb8_decodes_every_byte_by_the_srgb_curve() {
+        for byte in 0..=u8::MAX {
+            let encoded = f64::from(byte) / 255.0;
+            let reference = if encoded <= 0.04045 {
+                encoded / 12.92
+            } else {
+                libm::pow((encoded + 0.055) / 1.055, 2.4)
+            };
+            let error = (f64::from(Rgb::from_srgb8(byte, byte, byte).r) - reference).abs();
+            assert!(error <= 1e-6, "byte {byte}: error {error}");
+        }
     }
 
     #[test]
-    fn hsl_primaries_map_to_squared_linear_rgb() {
-        // Tripwire: HSL primaries preserve the existing piecewise-chroma math.
+    fn from_srgb8_keeps_the_ends_exact_and_alpha_linear() {
+        // Tripwire: black and white through the iteration are exactly 0.0 and 1.0, so a colour built from bytes still
+        // equals `Rgba::BLACK` / `Rgba::WHITE`; alpha never takes the curve.
+        assert_eq!(Rgba::from_srgb8(0, 0, 0, 255), Rgba::BLACK);
+        assert_eq!(Rgba::from_srgb8(255, 255, 255, 255), Rgba::WHITE);
+        assert_eq!(Rgba::from_srgb8(0, 0, 0, 128).a, 128.0 / 255.0);
+    }
+
+    #[test]
+    fn hsl_primaries_map_to_linear_rgb() {
+        // Tripwire: HSL primaries preserve the piecewise-chroma math; 0.0 and 1.0 are fixed points of the curve.
         assert_eq!(Hsl::new(0.0, 1.0, 0.5).to_rgb(), Rgb::new(1.0, 0.0, 0.0));
         assert_eq!(Hsl::new(120.0, 1.0, 0.5).to_rgb(), Rgb::new(0.0, 1.0, 0.0));
         assert_eq!(Hsl::new(240.0, 1.0, 0.5).to_rgb(), Rgb::new(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn hsl_grey_matches_the_same_bytes() {
+        let grey = Hsl::new(0.0, 0.0, 128.0 / 255.0).to_rgb();
+        let bytes = Rgb::from_srgb8(128, 128, 128);
+        assert!((grey.r - bytes.r).abs() <= 1e-6);
+        assert!((grey.g - bytes.g).abs() <= 1e-6);
+        assert!((grey.b - bytes.b).abs() <= 1e-6);
     }
 
     #[test]
