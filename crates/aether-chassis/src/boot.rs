@@ -50,7 +50,7 @@ use aether_trace::TraceDispatchCapability;
 use crate::autoload::{AutoloadComponent, boot_manifest_autoload, load_boot_components};
 use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
-use crate::package::{package_assets_root, package_autoload};
+use crate::package::{package_assets_root, package_autoload, package_objects_root};
 
 /// Env fallback for the chassis config-file path. The path is
 /// meta-config: it selects the file source and does not change the file
@@ -916,14 +916,15 @@ impl CommonEnv {
         // builder seam at install time, so lowering no longer happens here.
         let chassis_boot = sources.resolve::<ChassisBootConfig>()?;
         // Read before resolving, because resolution consumes the staged argv
-        // layer and programmatic override: a depot's own `pack/assets` fills
-        // the `assets` root only when no source above the compiled defaults
-        // supplied one, so an operator's `AETHER_ASSETS_DIR` / `--assets-dir`
-        // still wins over a shipped package (the issue 4001 precedence the
+        // layer and programmatic override: a depot's own `pack/assets` and
+        // `pack/objects` fill the `assets` and `objects` roots only when no
+        // source above the compiled defaults supplied one, so an operator's
+        // `AETHER_ASSETS_DIR` / `--assets-dir` or `AETHER_OBJECTS_DIR` /
+        // `--objects-dir` still wins over a shipped package (the issue 4001 precedence the
         // manifest's tick cadence and window mode already take).
         //
         // Provenance is per member rather than per field, so any pinned fs
-        // root — save or config as much as assets — keeps the whole resolved
+        // root — save or config as much as assets or objects — keeps the whole resolved
         // `NamespaceRoots`. That errs toward the operator, which is the side
         // this precedence exists to protect.
         let roots_supplied = sources.provenance_of::<NamespaceRoots>() != ConfigProvenance::Default;
@@ -960,9 +961,16 @@ impl CommonEnv {
                 // namespace roots inside the package rather than beside the
                 // binary. Without this a shipped product boots with an empty
                 // asset namespace and every `aether.fs.read` a component makes
-                // answers `NotFound`.
-                if !roots_supplied && let Some(assets) = package_assets_root(Path::new(&root)) {
-                    namespace_roots.assets = assets;
+                // answers `NotFound`. The `objects` namespace roots at the
+                // package's own object store under the same gate, so an actor
+                // reads by hash the objects the depot ships, the ones boot did
+                // not load included.
+                if !roots_supplied {
+                    let package_root = Path::new(&root);
+                    namespace_roots.objects = package_objects_root(package_root);
+                    if let Some(assets) = package_assets_root(package_root) {
+                        namespace_roots.assets = assets;
+                    }
                 }
                 package_autoload(Path::new(&root))?
             }

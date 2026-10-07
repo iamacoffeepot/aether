@@ -2,7 +2,9 @@
 //!
 //! Owns the whole stack: the mail kinds ([`kinds`]), the [`FileAdapter`] trait
 //! and its `LocalFileAdapter`, the [`AdapterRegistry`] over the `save`,
-//! `assets`, and `config` namespaces, and the [`FsCapability`] itself. A
+//! `assets`, `config`, and `objects` namespaces, and the [`FsCapability`]
+//! itself. `objects` is the read-only store of content-addressed package
+//! objects, read by hash through its own adapter (`object_adapter`). A
 //! chassis main resolves a [`NamespaceRoots`] (usually through
 //! `NamespaceRoots::from_env`) and passes it to
 //! `with_actor::<FsCapability>(roots)`; `init` builds the adapter registry and
@@ -21,6 +23,7 @@ pub mod kinds;
 
 mod adapter;
 mod config;
+mod object_adapter;
 mod registry;
 
 pub use kinds::*;

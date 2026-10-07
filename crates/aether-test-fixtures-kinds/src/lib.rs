@@ -801,6 +801,19 @@ pub struct GuestLoad {
     pub export: Option<String>,
 }
 
+/// Issue 7629: asks the object loader to read the package object named
+/// `hash` (its lowercase hex sha256) from the `objects` file namespace,
+/// publish it, and spawn the type published as `namespace`. It replies the
+/// spawn's `SpawnResult`, or a `SpawnResult::Err` naming the stage that
+/// failed.
+#[aether_data::kind(name = "aether.test_fixtures.object_spawn")]
+pub struct ObjectSpawn {
+    /// The lowercase hex sha256 the guest reads in `objects`.
+    pub hash: String,
+    /// The published name the guest spawns once its publish answers.
+    pub namespace: String,
+}
+
 /// Issue 7086: asks the republish gate how many times its `wire` hook has
 /// run on this instance. It replies a [`CountReport`].
 #[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]

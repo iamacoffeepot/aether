@@ -11,10 +11,11 @@ use std::error::Error;
 #[cfg(feature = "runtime")]
 use std::fmt;
 
-/// Resolved filesystem roots for the three ADR-0041 namespaces. The
-/// chassis reads this at boot, hands each path to a `LocalFileAdapter`,
-/// and registers the result in an `AdapterRegistry` keyed on the
-/// namespace short name (`"save"`, `"assets"`, `"config"`).
+/// Resolved filesystem roots for the three ADR-0041 namespaces and the
+/// `objects` namespace (ADR-0163 §1). The chassis reads this at boot,
+/// hands each path to its adapter, and registers the result in an
+/// `AdapterRegistry` keyed on the namespace short name (`"save"`,
+/// `"assets"`, `"config"`, `"objects"`).
 ///
 /// ADR-0090 unit g (iamacoffeepot/aether#1264) escape hatch: the
 /// `#[derive(aether_substrate::Config)]` emits the Layer +
@@ -47,6 +48,13 @@ pub struct NamespaceRoots {
         config(env = "AETHER_CONFIG_DIR", cli_long = "config-dir", parse = parse_dir)
     )]
     pub config: PathBuf,
+    /// Read-only directory of hash-named package objects; unset uses the directory beside the binary.
+    /// Always set and never created: a directory that does not exist holds no objects.
+    #[cfg_attr(
+        feature = "runtime",
+        config(env = "AETHER_OBJECTS_DIR", cli_long = "objects-dir", parse = parse_dir)
+    )]
+    pub objects: PathBuf,
 }
 
 impl NamespaceRoots {
@@ -57,6 +65,10 @@ impl NamespaceRoots {
     /// builders that want to surface root-validity as a "skip the
     /// `aether.fs` cap and continue" decision rather than letting
     /// init failure abort the whole boot.
+    ///
+    /// `objects` is left alone: its adapter never creates or
+    /// canonicalizes its root, and an absent root is a valid store
+    /// holding no objects.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         fs::create_dir_all(&self.save)?;
         fs::create_dir_all(&self.assets)?;
@@ -90,20 +102,28 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
 
     fn from_layer(layer: NamespaceRootsLayer) -> Self {
         use std::env;
-        use std::path::Path;
         Self {
             save: layer
                 .save
                 .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(env::temp_dir).join("aether").join("save")),
-            assets: layer.assets.unwrap_or_else(|| {
-                env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .map_or_else(|| env::temp_dir().join("aether").join("assets"), |p| p.join("assets"))
-            }),
+            assets: layer.assets.unwrap_or_else(|| beside_binary("assets")),
             config: layer.config.unwrap_or_else(|| dirs::config_dir().unwrap_or_else(env::temp_dir).join("aether")),
+            objects: layer.objects.unwrap_or_else(|| beside_binary("objects")),
         }
     }
+}
+
+/// The default root of a read-only namespace: `<binary dir>/<name>`, or
+/// `temp_dir()/aether/<name>` when the running binary's directory cannot
+/// be resolved.
+#[cfg(feature = "runtime")]
+fn beside_binary(name: &str) -> PathBuf {
+    use std::env;
+    use std::path::Path;
+    env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .map_or_else(|| env::temp_dir().join("aether").join(name), |dir| dir.join(name))
 }
 
 /// Parse a directory override. An empty string errors so confique

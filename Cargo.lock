@@ -426,6 +426,7 @@ dependencies = [
  "crossbeam-channel",
  "inventory",
  "serde_json",
+ "sha2",
  "tracing",
  "wasmtime",
 ]
@@ -1077,6 +1078,7 @@ dependencies = [
  "aether-clipboard",
  "aether-component",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-test-fixtures-kinds",
 ]
