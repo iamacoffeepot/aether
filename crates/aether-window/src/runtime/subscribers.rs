@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aether_actor::{Anyone, ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
+use aether_actor::{ActorPath, Anyone, ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
 use aether_data::{ActorMail, ErasedActorPath, Kind, KindId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -13,11 +13,11 @@ use aether_kinds::{
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::routing::key_focus::{KeyFocus, Reach, Take};
+use super::routing::key_focus::{Hold, KeyFocus, Reach, Take};
 use super::routing::{Route, Routed};
 use crate::{
-    KeyFocusHolder, KeyFocusLost, KeyFocusScope, WindowClosed, WindowFocus, WindowMenuActivated, WindowOpened,
-    WindowSelector, WindowSubscription,
+    KeyFocusHolder, KeyFocusLost, KeyFocusScope, WindowClosed, WindowFocus, WindowInstance, WindowMenuActivated,
+    WindowOpened, WindowSelector, WindowSubscription,
 };
 
 /// The subscribers of one published kind `K`, each held as the
@@ -288,7 +288,7 @@ impl WindowSubscribers {
     pub(super) fn take_key_focus<A, S, M: ReplyMode>(
         &mut self,
         ctx: &NativeCtx<'_, A, S, M>,
-        window: &ErasedActorPath,
+        window: &ActorPath<WindowInstance>,
         holder: ProtocolRef<KeyFocusHolder>,
         scope: KeyFocusScope,
     ) -> Take {
@@ -299,7 +299,7 @@ impl WindowSubscribers {
 
     /// Empty `window`'s key focus slot when `sender` holds it, answering
     /// whether it did.
-    pub(super) fn release_key_focus(&mut self, window: &ErasedActorPath, sender: ErasedActorRef) -> bool {
+    pub(super) fn release_key_focus(&mut self, window: &ActorPath<WindowInstance>, sender: ErasedActorRef) -> bool {
         self.key_focus.release(window, sender)
     }
 
@@ -330,8 +330,8 @@ impl WindowSubscribers {
             }
             Route::Closed => {
                 self.fan_out(ctx, window, event, &Reach::Everyone);
-                if let Some(holder) = self.key_focus.close(window) {
-                    ctx.send_to(holder, &KeyFocusLost { window: window.clone() });
+                if let Some(Hold { window, holder }) = self.key_focus.close(window) {
+                    ctx.send_to(holder, &KeyFocusLost { window });
                 }
             }
         }
@@ -444,7 +444,7 @@ pub mod fixture {
     use crate::runtime::desktop::DesktopWindows;
     use crate::{
         KeyFocusGained, KeyFocusLost, KeyFocusScope, ReleaseKeyFocus, SubscribeWindow, SubscribeWindowResult,
-        TakeKeyFocus, WindowCapability, WindowFocus, WindowSelector, WindowSubscription,
+        TakeKeyFocus, WindowCapability, WindowFocus, WindowInstance, WindowSelector, WindowSubscription,
     };
 
     /// One published event a [`Watcher`] received: the watcher's key, the
@@ -477,14 +477,14 @@ pub mod fixture {
     /// mails the window the take itself, as any holder does.
     #[aether_data::kind(name = "test.window.watcher.take_key_focus", eq)]
     pub struct TakeKeyFocusIn {
-        pub window: ErasedActorPath,
+        pub window: ActorPath<WindowInstance>,
         pub scope: KeyFocusScope,
     }
 
     /// Tells a [`Watcher`] to release its key focus in `window`.
     #[aether_data::kind(name = "test.window.watcher.release_key_focus", eq)]
     pub struct ReleaseKeyFocusIn {
-        pub window: ErasedActorPath,
+        pub window: ActorPath<WindowInstance>,
     }
 
     /// Tells a [`Watcher`] to spawn one [`WatcherChild`] beneath itself,
@@ -788,7 +788,7 @@ pub mod fixture {
         pub fn take(
             &mut self,
             watcher: ActorRef<Watcher>,
-            window: &ErasedActorPath,
+            window: &ActorPath<WindowInstance>,
             scope: KeyFocusScope,
         ) -> Vec<Receipt> {
             self.send_to(watcher, &TakeKeyFocusIn { window: window.clone(), scope }).1
@@ -796,7 +796,7 @@ pub mod fixture {
 
         /// Tell `watcher` to release its key focus in `window`, and answer
         /// the receipts the release delivered once its chain settles.
-        pub fn release(&mut self, watcher: ActorRef<Watcher>, window: &ErasedActorPath) -> Vec<Receipt> {
+        pub fn release(&mut self, watcher: ActorRef<Watcher>, window: &ActorPath<WindowInstance>) -> Vec<Receipt> {
             self.send_to(watcher, &ReleaseKeyFocusIn { window: window.clone() }).1
         }
 

@@ -223,13 +223,13 @@ Key focus is separate from the sequence. It is state the window manager holds: o
 | The console opens and takes key focus, itself alone | console | the console |
 | The console closes or releases | empty | every key subscriber |
 
-The kinds. A take is plain mail to `aether.window`, and its sender is the holder: there is no ctx verb for it and no constructor. The commands and the notices all name the window, by the canonical path every window event carries, and they carry "key" in the name to stay clear of `aether.window.focus`:
+The kinds. A take is plain mail to `aether.window`, and its sender is the holder: there is no ctx verb for it and no constructor. The commands and the notices all name the window by an `ActorPath<WindowInstance>`, the canonical path every window event carries, typed so that a path whose leaf is not a window's does not decode, and they carry "key" in the name to stay clear of `aether.window.focus`:
 
 ```rust
 // crates/aether-window/src/kinds/key_focus.rs
 #[aether_data::kind(name = "aether.window.take_key_focus", eq)]
 pub struct TakeKeyFocus {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
     pub scope: KeyFocusScope,
 }
 
@@ -240,17 +240,17 @@ pub enum KeyFocusScope {
 
 #[aether_data::kind(name = "aether.window.release_key_focus", eq)]
 pub struct ReleaseKeyFocus {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
 }
 
 #[aether_data::kind(name = "aether.window.key_focus_gained", eq)]
 pub struct KeyFocusGained {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
 }
 
 #[aether_data::kind(name = "aether.window.key_focus_lost", eq)]
 pub struct KeyFocusLost {
-    pub window: ErasedActorPath,
+    pub window: ActorPath<WindowInstance>,
 }
 
 #[aether_actor::protocol]
@@ -260,7 +260,8 @@ pub trait KeyFocusHolder {
 }
 
 // a holder, which declares depends(WindowCapability) and handles both notices
-ctx.send::<WindowCapability>(&TakeKeyFocus { window: key.window.clone(), scope: KeyFocusScope::Actor });
+// `self.window` is the typed path its config named, or `WindowInstance::path(&name)`
+ctx.send::<WindowCapability>(&TakeKeyFocus { window: self.window.clone(), scope: KeyFocusScope::Actor });
 ```
 
 The take's handler and the release's handler state `KeyFocusHolder` as their sender, on the ctx type (ADR-0231 §11):
@@ -276,7 +277,7 @@ fn on_take_key_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, KeyF
 
 So the send builds only for an actor that handles both notices, and the engine casts the sender to the protocol before the handler runs: mail with no actor sender, or from a sender that does not cover it, never reaches the handler. Mail sent through MCP arrives with `aether.rpc.server` as its sender, so a session cannot take key focus; it mails the actor that should hold the keys, and that actor takes.
 
-A take cannot fail, so it has no reply; `KeyFocusGained` confirms a first take. Any window path is accepted, as `WindowSelector::One` accepts any path for a subscription, so an actor may take for a window that has not opened yet. A slot for a path no window stands at narrows nothing and goes when its holder releases or closes.
+A take cannot fail, so it has no reply; `KeyFocusGained` confirms a first take. The typed path proves what the path names and nothing about liveness: any window path is accepted, as `WindowSelector::One` accepts any path for a subscription, so an actor may take for a window that has not opened yet, and a path that is not a window's is refused at decode, before the handler. A slot for a window path no window stands at narrows nothing and goes when its holder releases or closes. The input kinds name their window as an erased path, because `aether-kinds` sits beneath `aether-window` and cannot name `WindowInstance`, and no erased path can be made typed outside decode (ADR-0230 §4); a holder therefore gets the typed path from its config or writes it from the window's name, and compares it with an event's through `as_erased()`.
 
 What each mail does to the slot of the window it names. No mail touches another window's slot.
 

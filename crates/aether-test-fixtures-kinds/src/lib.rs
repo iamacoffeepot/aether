@@ -19,7 +19,7 @@ pub mod wire_corpus;
 
 use aether_actor::{PathRefused, ProtocolPath};
 use aether_bloomery_kinds::{Head, ProgramName};
-use aether_data::{Blob, ErasedActorPath, OpaqueBytes, Ref, Utf8Text};
+use aether_data::{Blob, ErasedActorPath, LoadName, OpaqueBytes, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -419,12 +419,15 @@ pub struct FsContextDemuxReport {
 #[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
 pub struct UnsubscribeKeys;
 
-/// Ask a key probe to take key focus in `window` for itself alone, so a
-/// scenario drives a guest's own take: the probe mails the window the take,
-/// and the window reads the holder off the sender.
+/// Ask a key probe to take key focus in the window named `window` for itself
+/// alone, so a scenario drives a guest's own take: the probe writes the
+/// window's typed path from the name and mails the window the take, and the
+/// window reads the holder off the sender. The field is the name because
+/// this crate does not depend on the window's, so it cannot spell the typed
+/// path the take carries.
 #[aether_data::kind(name = "aether.test_fixtures.take_key_focus")]
 pub struct TakeKeyFocusAt {
-    pub window: ErasedActorPath,
+    pub window: LoadName,
 }
 
 /// Report a key probe emits for each key focus notice the window sends it:

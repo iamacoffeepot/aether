@@ -21,7 +21,7 @@ use std::path::Path;
 
 use aether_actor::{ActorRef, HeldReply, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{ErasedActorPath, Kind};
+use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, MonitorNotice, TextInput};
@@ -38,7 +38,12 @@ const KEY_CODE: u32 = 65;
 /// fans an injection out by selector without checking the window is live, so
 /// no window is created for it.
 fn test_window() -> ErasedActorPath {
-    window_path(&aether_data::LoadName::new("main").expect("a valid window name"))
+    window_path(&test_window_name())
+}
+
+/// The name of [`test_window`], which a guest writes the typed path from.
+fn test_window_name() -> LoadName {
+    LoadName::new("main").expect("a valid window name")
 }
 
 fn boot_bench() -> SubstrateHarness {
@@ -354,7 +359,7 @@ fn a_guest_takes_key_focus_and_its_drop_empties_the_slot() {
     harness
         .execute(vec![
             ("watch", HarnessOp::send_and_settle(&watcher, &Watch { target: taker_path.clone() })),
-            ("take", HarnessOp::send_and_settle(&taker, &TakeKeyFocusAt { window: test_window() })),
+            ("take", HarnessOp::send_and_settle(&taker, &TakeKeyFocusAt { window: test_window_name() })),
         ])
         .expect("take sequence");
     assert_eq!(

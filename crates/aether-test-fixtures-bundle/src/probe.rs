@@ -55,7 +55,7 @@ use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyFocusObserved, KeyObserved, ProbeConfig, SubstrateHarnessObserver, TakeKeyFocusAt,
     TextInputObserved, TickObserved, UnsubscribeKeys,
 };
-use aether_window::{KeyFocusGained, KeyFocusLost, KeyFocusScope, TakeKeyFocus, WindowCapability};
+use aether_window::{KeyFocusGained, KeyFocusLost, KeyFocusScope, TakeKeyFocus, WindowCapability, WindowInstance};
 
 pub struct Probe {
     tick_count: u64,
@@ -162,7 +162,8 @@ impl WasmActor for KeyProbe {
     }
 
     /// Take key focus in the named window for this probe alone. The send
-    /// builds because this actor handles both key focus notices.
+    /// builds because this actor handles both key focus notices, and the
+    /// window's typed path is written here, guest-side, from its name.
     ///
     /// # Agent
     /// Send `aether.test_fixtures.take_key_focus` to the probe; the window
@@ -170,20 +171,23 @@ impl WasmActor for KeyProbe {
     /// reports as `aether.test_fixture.key_focus_observed`.
     #[handler::tell]
     fn on_take_key_focus(&mut self, ctx: &mut WasmCtx<'_>, TakeKeyFocusAt { window }: TakeKeyFocusAt) {
-        ctx.send::<WindowCapability>(&TakeKeyFocus { window, scope: KeyFocusScope::Actor });
+        ctx.send::<WindowCapability>(&TakeKeyFocus {
+            window: WindowInstance::path(&window),
+            scope: KeyFocusScope::Actor,
+        });
     }
 
     /// Reports the window's notice that this probe holds key focus.
     #[handler::tell]
     fn on_key_focus_gained(&mut self, ctx: &mut WasmCtx<'_>, KeyFocusGained { window }: KeyFocusGained) {
-        ctx.send::<SubstrateHarnessObserver>(&KeyFocusObserved { window, gained: true });
+        ctx.send::<SubstrateHarnessObserver>(&KeyFocusObserved { window: window.as_erased().clone(), gained: true });
     }
 
     /// Reports the window's notice that this probe no longer holds key
     /// focus.
     #[handler::tell]
     fn on_key_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, KeyFocusLost { window }: KeyFocusLost) {
-        ctx.send::<SubstrateHarnessObserver>(&KeyFocusObserved { window, gained: false });
+        ctx.send::<SubstrateHarnessObserver>(&KeyFocusObserved { window: window.as_erased().clone(), gained: false });
     }
 }
 

@@ -200,11 +200,15 @@ holder:
 
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block that also handles
-// `KeyFocusGained` and `KeyFocusLost`.
+// `KeyFocusGained` and `KeyFocusLost`. `self.window` is the
+// `ActorPath<WindowInstance>` the actor's config named.
 #[handler::event]
 fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-    if key.code == keycode::KEY_BACKQUOTE {
-        ctx.send::<WindowCapability>(&TakeKeyFocus { window: key.window, scope: KeyFocusScope::Actor });
+    let in_window = key.window == *self.window.as_erased();
+    let opens = key.code == keycode::KEY_BACKQUOTE;
+
+    if in_window && opens {
+        ctx.send::<WindowCapability>(&TakeKeyFocus { window: self.window.clone(), scope: KeyFocusScope::Actor });
     }
 }
 ```
@@ -216,10 +220,15 @@ fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
 | `KeyFocusGained` | `aether.window.key_focus_gained` | `window` |
 | `KeyFocusLost` | `aether.window.key_focus_lost` | `window` |
 
-`window` is the window's canonical path, the one every window event carries in
-its own `window` field, `aether.window.list` reports, and `WindowSelector::One`
-takes. An actor usually has it in hand from the event that made it want the
-keys. `scope` is `KeyFocusScope::Actor`, the holder alone, or
+`window` is an `ActorPath<WindowInstance>`: the window's canonical path, the
+text every window event carries in its own `window` field, `aether.window.list`
+reports, and `WindowSelector::One` takes, typed as a window's. A path whose
+leaf is not `aether.window.instance` does not decode, so a take that names
+something that cannot be a window never reaches the window manager. An actor
+holds the typed path from its config, as the camera controller does, or writes
+it from the window's name with `WindowInstance::path(&name)`; the erased path
+an input event carries cannot be turned into it, so a holder compares the two
+with `as_erased()`. `scope` is `KeyFocusScope::Actor`, the holder alone, or
 `KeyFocusScope::Subtree`, the holder and every actor beneath it in lineage.
 
 The rules of one window's slot:
@@ -234,7 +243,8 @@ The rules of one window's slot:
 - **The holder's close empties every slot it holds**, and it is sent nothing.
 - **The window's close removes its slot**, and the holder is sent
   `KeyFocusLost` after `WindowClosed` is published.
-- **A take cannot fail and has no reply.** Any window path is accepted, so a
+- **A take cannot fail and has no reply.** The typed path says what the path
+  names, never that a window stands there: any window path is accepted, so a
   boot component may take for `main` before the window opens.
 - **A window that loses operating-system focus keeps its slot**, so returning
   to it finds its holder unchanged.
@@ -291,8 +301,10 @@ Limits:
   mid-composition the old holder is sent `KeyFocusLost` and drops its own
   composition; the platform's composition state is untouched.
 - A subscriber that joins a scope mid-press is sent a release without a press.
-- A window is named by its canonical path. A short path, or a path no window
-  stands at, takes a slot no key event is routed by.
+- A window is named by its typed canonical path. A path that is not a
+  window's is refused when the mail is decoded. A window path no window stands
+  at takes a slot no key event is routed by, held until its holder releases it
+  or closes.
 - Key focus does not move the operating system's focus. An actor that takes
   key focus in a window that is not the focused one holds that slot and is sent
   nothing until the window is focused.

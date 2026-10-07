@@ -1642,7 +1642,9 @@ mod tests {
         }
         let (window, winit_id) =
             rig.desktop_turn(|state, _ctx| insert_scaled_window(state, 1.0)).expect("the desktop manager is live");
-        rig.take(holder, &window, crate::KeyFocusScope::Actor);
+        let held = WindowInstance::path(&aether_data::LoadName::new("main").expect("fixture window name"));
+        assert_eq!(held.as_erased(), &window, "the take names the window winit raises for");
+        rig.take(holder, &held, crate::KeyFocusScope::Actor);
 
         rig.desktop_turn(|state, ctx| {
             state.window_event(winit_id, WindowEvent::Ime(Ime::Commit("a".to_owned())), ctx);

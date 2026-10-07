@@ -143,10 +143,24 @@ impl Publisher for WindowCapability {
 /// caps.
 #[must_use]
 pub fn window_path(name: &LoadName) -> ErasedActorPath {
-    ActorPath::<WindowInstance>::child(&ActorPath::<WindowCapability>::root(), name)
-        .expect("a window path is two valid steps, under both caps")
-        .as_erased()
-        .clone()
+    WindowInstance::path(name).as_erased().clone()
+}
+
+impl WindowInstance {
+    /// The typed path of the window named `name`, the same text
+    /// [`window_path`] writes, for a kind field that names a window and
+    /// nothing else, such as [`TakeKeyFocus::window`]. It compiles without
+    /// the runtime, so a wasm guest builds it.
+    ///
+    /// # Panics
+    ///
+    /// Never: the path is two steps of valid segments, under the depth and
+    /// byte caps.
+    #[must_use]
+    pub fn path(name: &LoadName) -> ActorPath<Self> {
+        ActorPath::<Self>::child(&ActorPath::<WindowCapability>::root(), name)
+            .expect("a window path is two valid steps, under both caps")
+    }
 }
 
 /// The validated load name of a window spec's `name`.

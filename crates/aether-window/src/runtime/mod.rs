@@ -346,8 +346,12 @@ impl NativeActor for WindowCapability {
     /// (ADR-0248 §9). The latest take wins: the actor it replaces is sent
     /// `KeyFocusLost` and the sender `KeyFocusGained`, both naming the
     /// window. A take by the window's holder changes its scope and sends
-    /// nothing. Any window path is accepted, open or not, so the take cannot
-    /// fail.
+    /// nothing. The mail's `window` is an `ActorPath<WindowInstance>`, so a
+    /// path that cannot name a window fails the mail's decode and never
+    /// reaches this handler. The type says nothing about liveness: any window
+    /// path is accepted, open or not, so the take cannot fail, and a take for
+    /// a name no window ever opens under holds a slot until its holder
+    /// releases it or departs.
     ///
     /// The ctx's sender is the requirement (ADR-0231 §11): an actor sends
     /// this kind only when it covers [`KeyFocusHolder`], and the engine casts
