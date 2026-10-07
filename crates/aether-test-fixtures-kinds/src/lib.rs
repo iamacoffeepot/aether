@@ -69,10 +69,15 @@ pub struct BootObserved {
 
 /// Report the stateful-replace `Counter` fixture mails the harness observer
 /// from its `wire` hook, once per run of the hook. A scenario counts it to
-/// prove a guest reinstated after a failed replace runs `wire` again
-/// (ADR-0241 §7).
+/// prove the successor wired at prepare (ADR-0249 §3).
 #[aether_data::kind(name = "aether.test_fixture.wire_observed", default)]
 pub struct WireObserved;
+
+/// Report the group `Peer` fixture mails the harness observer from its
+/// `unwire` hook, once per run of the hook. A scenario counts it to prove
+/// commit unwires the old guest and abort leaves it wired (ADR-0249 §4).
+#[aether_data::kind(name = "aether.test_fixture.unwire_observed", default)]
+pub struct UnwireObserved;
 
 /// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
 /// its `unwire` hook, once when the boot singleton closes on a drop
@@ -1064,9 +1069,8 @@ pub struct WatchLedgerQuery;
 
 /// Issue 7496: the answer to a [`WatchLedgerQuery`]. Both lists are the
 /// answering instance's own memory, which a republish does not carry: a
-/// successor lists only what it handled itself. A successor's `wired` list is
-/// empty because a republish runs no `wire` on the instance it installs, not
-/// only because the list is not carried.
+/// successor lists only what it handled itself, including the watch its own
+/// `wire` made at prepare.
 #[aether_data::kind(name = "aether.test_fixtures.watch.ledger_query_result", default, eq)]
 pub struct WatchLedgerReport {
     /// The ordinal ([`WatchAdmitResult`]) of the id each run of `wire` on

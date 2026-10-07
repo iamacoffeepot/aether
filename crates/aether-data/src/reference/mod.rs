@@ -8,7 +8,7 @@ mod load_name;
 mod namespace;
 pub(crate) mod segment;
 
-pub use actor_path::{ActorPathError, ActorPathForm, ErasedActorPath, PathSegment};
+pub use actor_path::{ActorPathError, ActorPathForm, CanonicalPath, ErasedActorPath, PathSegment};
 pub use load_name::{LoadName, LoadNameError};
 pub use namespace::Namespace;
 pub use segment::SegmentFault;

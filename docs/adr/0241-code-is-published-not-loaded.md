@@ -247,22 +247,24 @@ every member ends up on the new module, or none does.
   republished namespace. The first failing check refuses the whole replace
   before any instance prepares.
 - **Prepare.** Each member closes its own inbox gate, so new mail for it
-  waits instead of reaching either guest. It runs `unwire` and
-  `on_dehydrate` on the old guest, which is kept, not dropped. It
-  instantiates the candidate with its config (§4), moves the correlation
-  cursor, reply table, and request contexts to it, and runs `on_rehydrate`.
-  The candidate's outbox is held: nothing it sends leaves before commit.
+  waits instead of reaching either guest. It runs `on_dehydrate` on the old
+  guest, which is kept, not dropped. It instantiates the candidate with its
+  config (§4), moves the correlation cursor, reply table, and request
+  contexts to it, runs `on_rehydrate`, and then `wire` with its outbox still
+  held. The candidate's outbox is held: nothing it sends leaves before
+  commit.
 - **Commit.** Once every member is ready, the module is published (§3) and
-  every member commits together: its held outbox is flushed, and its inbox
-  gate releases the mail it queued, in order, to the candidate, which is now
-  the instance.
-- **Abort.** A pre-check refusal, an `init` or `on_rehydrate` failure in any
-  member, or a publish failure aborts every member. Each reinstates its old
-  guest with its cursor, reply table, contexts, and the state its
-  `on_dehydrate` saved, which the old guest gets back through its own
-  `on_rehydrate`, and runs `wire` again, so a member whose own prepare
-  succeeded is left neither unwired nor without what its dehydrate moved out
-  by another member's failure. The candidate's mail is discarded.
+  every member commits together: the old guest runs `unwire`, then drops,
+  its held outbox is flushed, and its inbox gate releases the mail it queued,
+  in order, to the candidate, which is now the instance. The old guest's
+  release mail precedes the successor's held mail at every recipient.
+- **Abort.** A pre-check refusal, an `init`, `on_rehydrate`, or `wire`
+  failure in any member, or a publish failure aborts every member. Each
+  unwires its candidate exactly when that candidate wired, discards it,
+  reinstates its old guest, still wired, with its cursor, reply table,
+  contexts, and the state its `on_dehydrate` saved, which the old guest gets
+  back through its own `on_rehydrate`, with no second `wire`. The
+  candidate's mail is discarded.
 - **The reply.** The replace answers `Ok` only after every member has
   committed and every chain its flush released has settled.
 - **Concurrent traffic.** A spawn or load of a republishing namespace waits
@@ -374,7 +376,7 @@ links its code; the kind crates of ADR-0066 are where these markers live.
 | 0096 multi-actor modules | Accepted | §1, §3: a module publishes its export set; a replace takes no export selector |
 | 0097 sibling spawn | Accepted | §3, §4: a sibling is an ordinary spawn of a published or module-private type |
 | 0099 identity and addressing | Accepted | §5 the `Embedded` fold and §6 `aether.embedded` superseded; the 2026-08-05 runtime-parent amendment superseded |
-| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`/rehydrate failure in any member aborts the whole group, and every member reinstates its old guest with its cursor, reply table, contexts, and the state its `on_dehydrate` saved, through `on_rehydrate`, and runs `wire` again |
+| 0101 / 0016 / 0113 hooks | Accepted | hooks run per member of a group republish; a dehydrate refusal or an `init`, rehydrate, or `wire` failure in any member aborts the whole group, and every member unwires its candidate exactly when it wired and reinstates its old guest, still wired, with its cursor, reply table, contexts, and the state its `on_dehydrate` saved, through `on_rehydrate`, with no second `wire` |
 | 0114 inline children | Accepted | D2 the child is `parent/<child NS>:key`; D5 rebuilt from the republished module; the 2026-07-08 `despawn_inline_child` becomes a close, and the name tombstones |
 | 0119 resolver strategies | Accepted | `Embedded` and `EmbeddedMany` retire |
 | 0138 opt-in default entry | Accepted | moot: every spawn names its namespace; `aether.no_default` retires |

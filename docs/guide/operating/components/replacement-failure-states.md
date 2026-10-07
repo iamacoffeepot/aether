@@ -4,10 +4,10 @@ A `publish` of a successor republishes a module over every live instance of its
 namespaces as one group (ADR-0241 §7): on success every instance runs the
 successor behind its unchanged mailbox, and on failure every instance runs its
 old guest. An error is still not a clean rollback signal. Depending on which
-phase failed, an old guest may already have run its `unwire` and `on_dehydrate`
-hooks. It gets back the state its `on_dehydrate` saved, through its
-`on_rehydrate`, and runs `wire` again; only teardown outside that saved state
-and outside what `wire` rebuilds stays gone. Nothing a successor sent leaves: its mail is held
+phase failed, an old guest may already have run its `on_dehydrate` hook. It
+gets back the state its `on_dehydrate` saved, through its `on_rehydrate`, with
+no second `wire`; only teardown outside that saved state and outside what
+`wire` built stays gone. Nothing a successor sent leaves: its mail is held
 until the group commits, and a failed successor's mail is discarded.
 Introspection can also describe a retained capability snapshot rather than the
 state an installed guest is actually in.
@@ -20,18 +20,18 @@ spawn, load, and drop behavior.
 | Failure phase | Guests left behind | Capability/introspection risk |
 |---|---|---|
 | a pre-check: bad wasm, no predecessor, content-addressed, a republish in flight, a boot, a dropped namespace or narrowed contract (ADR-0231 §5), an unmet added dependency, or a missing or undecodable config | every instance is untouched; no hook ran | existing descriptions still reflect the prior registry snapshot |
-| a successor's `init` fails in one instance | every instance reinstates its old guest; an instance whose own prepare succeeded ran its unwire/dehydrate hooks, gets its saved state back through `on_rehydrate`, and runs its `wire` again | old descriptions remain the best snapshot, but those guests may have changed lifecycle state their saved state does not carry |
-| an `on_dehydrate` that returned an error, a `save_state` host-call rejection, a live held reply left unsaved (ADR-0243 §6), a carried context the successor does not declare, a pending request's or a watch's (ADR-0139 §4, ADR-0079 §8), a successor's `on_rehydrate` that returned an error or trapped, or an inline child the successor cannot rebuild, in one instance (ADR-0249 §1, §6) | every instance reinstates its old guest with its pending replies, counters, and the state its `on_dehydrate` saved (none after a rejected `save_state`), and runs its `wire` again; nothing a successor sent from `init` or `on_rehydrate` leaves | as above |
-| the module publish is refused (admission against the table as the owner stages it) | every instance reinstates its old guest with the state it saved and runs its `wire` again | as above |
+| a successor's `init` fails in one instance | every instance reinstates its old guest, still wired; an instance whose own prepare succeeded gets its saved state back through `on_rehydrate`, with no second `wire` | old descriptions remain the best snapshot, but those guests may have changed lifecycle state their saved state does not carry |
+| an `on_dehydrate` that returned an error, a `save_state` host-call rejection, a live held reply left unsaved (ADR-0243 §6), a carried context the successor does not declare, a pending request's or a watch's (ADR-0139 §4, ADR-0079 §8), a successor's `on_rehydrate` that returned an error or trapped, a successor's `wire` that returned an error or trapped, or an inline child the successor cannot rebuild, in one instance (ADR-0249 §1, §6) | every instance reinstates its old guest, still wired, with its pending replies, counters, and the state its `on_dehydrate` saved (none after a rejected `save_state`); a wired successor is unwired and nothing a successor sent from `init`, `on_rehydrate`, or `wire` leaves | as above |
+| the module publish is refused (admission against the table as the owner stages it) | every instance reinstates its old guest, still wired, with the state it saved | as above |
 | success | every instance runs its successor and the new capabilities are registered | MCP refreshes its cached instances of each republished type from the result |
 
 The exact phase matters more than the generic `Err` shape. Do not say
 “replacement rolled back” unless a current behavioral observation proves the
 old guests still serve their mailboxes.
 
-An `unwire` guest trap is different: it is logged and contained rather than
-returned as `PublishResult::Err`, and the prepare continues. If the group later
-commits, do not mistake an earlier `unwire` trap log for a rolled-back swap.
+An `unwire` guest trap at commit is different: it is logged and contained
+rather than returned as `PublishResult::Err`, and the commit goes on. Do not
+mistake an `unwire` trap log for a rolled-back swap.
 
 An `on_dehydrate` guest trap aborts the engine (ADR-0063, ADR-0249 §2). The
 guest that trapped is the live one and runs no more code, so there is nothing

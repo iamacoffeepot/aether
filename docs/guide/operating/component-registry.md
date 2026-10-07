@@ -209,13 +209,14 @@ its stored config. An inline child cannot be given a config, so a config-kind
 change on a live inline child's type is refused.
 
 Then every instance prepares its successor while mail for it waits at its inbox
-gate, the module publishes, and every instance commits, receiving the waiting
-mail in order. The reply, `{engine_id, types: [{namespace, capabilities}]}`,
+gate, the module publishes, and every instance commits, unwiring the old guest
+first and receiving the waiting mail in order. The reply, `{engine_id, types: [{namespace, capabilities}]}`,
 comes once every commit's chain has settled. A refusal while preparing, or a
-publish failure, aborts every instance: each reinstates its old guest, which
-gets back the state its `on_dehydrate` saved through its `on_rehydrate`, and runs
-its `wire` again. Only teardown outside that saved state and outside what `wire`
-rebuilds stays gone. Nothing a failed successor sent leaves. Loads and
+publish failure, aborts every instance: each unwires its candidate exactly when
+that candidate wired, reinstates its old guest, still wired, which gets back
+the state its `on_dehydrate` saved through its `on_rehydrate`, with no second
+`wire`. Only teardown outside that saved state and outside what `wire` built
+stays gone. Nothing a failed successor sent leaves. Loads and
 drops of the module's namespaces that arrive meanwhile wait for the answer.
 
 Require an explicit successful result, then re-run `describe_component` and a

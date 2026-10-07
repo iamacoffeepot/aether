@@ -41,14 +41,13 @@
 //! (`aether.render.view_subscribe`), and it keeps the eye of the last
 //! [`ViewProjection`] the camera sent. Until one arrives the filled mesh
 //! draws and the outlines are omitted. A path that does not prove fails the
-//! viewer's birth, so the camera must be live first. `unwire` unsubscribes. A
-//! republish does not run `wire`, so `on_rehydrate` subscribes again.
+//! viewer's birth, so the camera must be live first. `unwire` unsubscribes.
 
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, ActorPath, ActorRef, Erased, Held, Pending, PriorState, ResolveError, WasmActor};
-use aether_actor::{WasmCtx, WasmDropCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorPath, ActorRef, Erased, Held, Pending, ResolveError, WasmActor};
+use aether_actor::{WasmCtx, WasmInitCtx, actor};
 use aether_data::{Blob, BlobReader};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
@@ -106,11 +105,6 @@ pub struct MeshViewer {
     /// The last view the camera sent; `None` until the first.
     view: Option<ViewProjection>,
 }
-
-/// What a viewer carries across a republish: nothing of its own. Saving it
-/// is what makes the replacement's `on_rehydrate` run.
-#[aether_data::kind(name = "aether.kit.mesh.state", copy, eq, no_serde)]
-struct MeshViewerState;
 
 /// The state one load carries from `on_load` to `on_read_result`: the held
 /// `MeshLoadResult` reply it owes its requester, and the file it read.
@@ -173,22 +167,6 @@ impl WasmActor for MeshViewer {
         if let Some(camera) = self.followed.take() {
             ctx.send_to(camera, &ViewUnsubscribe);
         }
-    }
-
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) -> Result<(), ActorInitError> {
-        ctx.save_state_kind(0, &MeshViewerState)
-    }
-
-    /// Subscribe to the camera again: a republish does not run `wire`, and
-    /// the instance it replaced unsubscribed in `unwire`.
-    /// A camera that no longer proves is logged and the viewer draws without
-    /// outlines: returning the error would close an instance reinstated
-    /// after an aborted republish.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) -> Result<(), ActorInitError> {
-        if let Err(error) = self.follow_camera(ctx) {
-            tracing::error!(target: "aether_kit", %error, "the mesh viewer's camera does not prove; outlines are off");
-        }
-        Ok(())
     }
 
     /// Emit the cached faces, and the DSL outline loops solved for the eye

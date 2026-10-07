@@ -8,6 +8,7 @@
 use crate::store::{
     ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor,
 };
+use aether_codec::frame::max_frame_size;
 use aether_kinds::{
     BinaryManifest, BinarySelector, ComponentSelector, ListComponentBinaries, ListEngineBinaries,
     ResolveComponentResult,
@@ -201,6 +202,15 @@ pub fn ingest_component(
     pin: bool,
 ) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
+    let max = max_frame_size();
+    let len = bytes.len();
+    if len > max {
+        return Err(format!(
+            "component {path:?} is {len} bytes, over the {max}-byte RPC frame cap \
+             (frame too large: {len} > {max}); it could never load through the resolve reply, \
+             so build the release wasm or raise the cap"
+        ));
+    }
     let manifest = component_manifest(&bytes).map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
     store.upload_with_pin(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name, pin).map_err(
         |e| {
@@ -466,7 +476,7 @@ fn sanitize_exec_file_name(app_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_ingest, exec_file_name, validate_manifest};
+    use super::{bootstrap_ingest, exec_file_name, ingest_component, validate_manifest};
     use crate::store::{ArtifactStore, DEFAULT_DISK_BUDGET_BYTES};
     use aether_kinds::BinaryManifest;
 
@@ -608,5 +618,39 @@ mod tests {
         assert_eq!(named(&["--app-name", "Lun\u{0}aris"]), "substrate");
         assert_eq!(named(&["--app-name"]), "substrate");
         assert_eq!(named(&["--app-name", &"L".repeat(65)]), "substrate");
+    }
+
+    /// A staged module already over the framing cap is refused at ingest,
+    /// before manifest parsing or store insertion, because its raw bytes
+    /// already exceed the resolve reply that would have to carry them
+    /// inline. Catches a dropped guard, a guard that compares the wrong
+    /// way, or an insert-before-check. The bytes are arbitrary rather
+    /// than valid wasm, which also proves the size check runs first.
+    #[test]
+    fn an_over_cap_module_is_refused_at_ingest() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::{env, fs, process};
+
+        use aether_codec::frame::max_frame_size;
+
+        let max = max_frame_size();
+        let len = max + 1;
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-ingest-cap-{}-{nanos}", process::id()));
+        fs::create_dir_all(&dir).expect("test setup: temp dir");
+
+        let staged = dir.join("over-cap.wasm");
+        fs::write(&staged, vec![0xAA; len]).expect("test setup: write over-cap bytes");
+
+        let mut store =
+            ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES).expect("test setup: open store");
+        let staged_path = staged.to_string_lossy().into_owned();
+        let error = ingest_component(&mut store, &staged_path, None, false)
+            .expect_err("an over-cap module is refused at ingest");
+        assert!(error.contains(&len.to_string()), "the refusal names the byte size: {error}");
+        assert!(error.contains(&max.to_string()), "the refusal names the cap: {error}");
+        assert_eq!(store.entry_count(), 0, "a refused module leaves nothing in the store");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -10,8 +10,8 @@ use crate::chassis::builder::{Builder, PassiveChassis};
 use crate::mail::KindId;
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
-use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::registry::{MailboxEntry, Registry, RouteContract};
+use crate::testing::canonical_id;
 use crate::testing::{TestChassis, await_settled, await_signal, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{ActorRef, Addressable, ErasedActorRef, HandlesKind};
@@ -136,7 +136,7 @@ impl WatcherProbe {
 fn publish_alias(registry: &Registry, host: MailboxId) -> (MailboxId, String) {
     let host_name = registry.mailbox_name(host).expect("host registers a canonical name");
     let alias_name = format!("{host_name}/test.inline.child:widget");
-    let alias_id = lineage_mailbox_id(&alias_name);
+    let alias_id = canonical_id(&alias_name);
     let published = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,

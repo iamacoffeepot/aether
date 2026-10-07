@@ -63,10 +63,13 @@ pub mod compose;
 mod slot;
 mod tickets;
 mod unwire;
+mod wire;
 
 pub(crate) use slot::{Child, Reinserted};
 pub(crate) use unwire::unwire_child;
 pub use unwire::unwire_children;
+pub use wire::wire_rebuilt_children;
+pub(crate) use wire::wire_seated;
 
 use slot::Seat;
 use tickets::{ClaimLedger, ContextLedger, DehydrateLedger, HeldTickets};

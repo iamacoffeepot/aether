@@ -32,12 +32,12 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{EffectBatch, RegistryApplied, RegistryBatch, RegistryEffect, RegistryEffectError};
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{
-    AddressResolutionError, AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id,
-    lineage_mailbox_id, noop_handler,
+    AddressResolutionError, AdoptRefused, ContractBreak, Registry, RouteContract, canonical_mailbox_id, noop_handler,
 };
 use crate::scheduler::WakeSink;
 use crate::store::BlobStore;
 use crate::testing::boot_authority as auth;
+use crate::testing::canonical_id;
 
 const NATIVE_SINGLETON: &str = "test.publication.native_singleton";
 const NATIVE_INSTANCED: &str = "test.publication.native_instanced";
@@ -506,7 +506,7 @@ impl Fixture {
     /// needs its parent registered first (ADR-0248 §5).
     fn register(&self, name: &str) {
         self.registry
-            .try_register_inbox_with_id(&auth(), lineage_mailbox_id(name), name, noop_handler())
+            .try_register_inbox_with_id(&auth(), canonical_id(name), name, noop_handler())
             .expect("register the route");
     }
 
@@ -547,7 +547,7 @@ fn loaded_adopts_only_a_published_guest() {
     fixture.register(Guest::NAMESPACE);
     fixture.register("test.publication.not_a_guest");
 
-    let resolve = |name: &str| fixture.registry.resolve_live(lineage_mailbox_id(name)).expect("the route is live");
+    let resolve = |name: &str| fixture.registry.resolve_live(canonical_id(name)).expect("the route is live");
 
     assert!(fixture.registry.loaded::<Guest>(resolve(Guest::NAMESPACE)).is_ok());
     assert_eq!(

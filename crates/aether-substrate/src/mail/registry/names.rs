@@ -1,5 +1,4 @@
-use aether_data::tagged_id::{Tag, with_tag};
-use aether_data::{ActorId, MailboxCategory, fold_lineage};
+use aether_data::{CanonicalPath, MailboxCategory};
 
 use crate::mail::MailboxId;
 
@@ -18,57 +17,14 @@ pub fn canonical_mailbox_id(name: &str) -> MailboxId {
 }
 
 /// The position a `/`-rendered canonical lineage path names: the ADR-0099 §4
-/// parse → fold, the inverse of the render. Each segment is one node, a bare
-/// namespace a singleton and `namespace:discriminator` an instance, folded
-/// root to leaf. A one-segment path is the depth-1 fixed point, equal to
-/// [`canonical_mailbox_id`] for the same name.
+/// parse → fold, the inverse of the render. A one-segment path is the
+/// depth-1 fixed point, equal to [`canonical_mailbox_id`] for the same name.
 ///
 /// Crate-private: the registry's name lookup is the one place a written
 /// address becomes a position (ADR-0230 §3), and this is the fold it keys
-/// with. It is the last step of [`lineage_prefixes`], so a path and its
-/// ancestors are folded by one piece of code.
-pub fn lineage_mailbox_id(path: &str) -> MailboxId {
-    // `split` yields at least one segment, even for an empty path, so the
-    // fallback is never taken.
-    lineage_prefixes(path).last().map_or(MailboxId(with_tag(Tag::Mailbox, 0)), |(_, id)| id)
-}
-
-/// Every prefix of a `/`-rendered canonical lineage path that ends on a
-/// segment boundary, root first, each with the position it names: the path's
-/// ancestors in order, then the path itself (ADR-0099 §4).
-///
-/// The fold carries the untagged hash from one segment to the next and tags
-/// a copy for each prefix, so the id of a prefix is the id that prefix has as
-/// a path of its own, at any depth.
-///
-/// Consumers: [`lineage_mailbox_id`], the registry's birth check that a
-/// nested name's parent holds a record, and `Registry::lineage_order`, which
-/// reads one birth serial per prefix (ADR-0248 §5).
-pub(super) fn lineage_prefixes(path: &str) -> impl Iterator<Item = (&str, MailboxId)> {
-    path.split('/').scan((0, LineageFold::Root), move |(end, fold), segment| {
-        let node = match segment.split_once(':') {
-            Some((namespace, discriminator)) => ActorId::instanced(namespace, discriminator),
-            None => ActorId::singleton(segment),
-        };
-        // A separator precedes every segment but the first.
-        let (folded, separator) = match *fold {
-            LineageFold::Root => (node.0, 0),
-            LineageFold::Beneath { parent } => (fold_lineage(parent, node), 1),
-        };
-        *end += segment.len() + separator;
-        *fold = LineageFold::Beneath { parent: folded };
-
-        Some((&path[..*end], MailboxId(with_tag(Tag::Mailbox, folded))))
-    })
-}
-
-/// Where [`lineage_prefixes`] stands in a path: at its first segment, which
-/// is hashed alone, or beneath a parent whose untagged hash the next segment
-/// folds into.
-#[derive(Clone, Copy)]
-enum LineageFold {
-    Root,
-    Beneath { parent: u64 },
+/// with.
+pub fn lineage_mailbox_id(path: &CanonicalPath) -> MailboxId {
+    path.lineage_id()
 }
 
 /// Categorise a native mailbox name for the inventory snapshot (issue 730).

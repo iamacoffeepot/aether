@@ -12,7 +12,7 @@ use crate::model::{Addressable, Instanced, NamespaceError, Subname, validate_nam
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::decode::decode_config;
-use crate::wasm::inline::{Child, ChildRecord, Registry, Reinserted, unwire_child};
+use crate::wasm::inline::{Child, ChildRecord, Registry, Reinserted, unwire_child, wire_seated};
 use crate::wasm::{__validate_inline_child_alias, ActorInitError, ErasedWasmActor, Spawns, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -123,10 +123,12 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// a synchronous `init` `Err` returns [`SpawnError::InitFailed`].
     ///
     /// A [`Subname::Named`] at which a `C` already stands beneath this actor
-    /// answers that child (ADR-0249 §5): nothing is initialised or wired
-    /// again, `config` is ignored, and no host call is made. A `wire` that
-    /// spawns a child is therefore safe to run again. A name whose child was
-    /// despawned is not standing: it is spent, and the spawn is refused.
+    /// answers that child (ADR-0249 §5): nothing is initialised again,
+    /// `config` is ignored, and no host call is made. A standing child that
+    /// never wired wires now, before the answer, and its failure comes back
+    /// as [`SpawnError::WireFailed`]. A `wire` that spawns a child is
+    /// therefore safe to run again. A name whose child was despawned is not
+    /// standing: it is spent, and the spawn is refused.
     ///
     /// The alias extends the executing actor's lineage, so the same subname
     /// can exist beneath distinct parents in one component cluster. The same
@@ -214,7 +216,7 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
         // alias's contract rows by (ADR-0231 §4).
         let type_tag = ActorTypeTag::of::<C>().0;
         if let Some(standing) = self.standing_child(ActorTypeTag(type_tag), is_counter, &full_subname) {
-            return Ok(InlineChild::new(standing));
+            return self.wire_standing(standing).map(InlineChild::new);
         }
         // A zero alias is the host's refusal, a spent name among them
         // (ADR-0241 §8), and an unmet dependency its own status (ADR-0230):
@@ -246,6 +248,20 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
             return None;
         }
         self.inline.resident(MailboxId(self.mailbox), type_tag, full_subname)
+    }
+
+    /// Wire the child standing at `standing` when it never wired, and answer
+    /// its alias (ADR-0249 §6). A standing child that already wired answers
+    /// at once; an unwired one, which a republish rebuilt through `init` and
+    /// `on_rehydrate` without `wire`, runs its `wire` now, through a ctx
+    /// addressed to its alias. Still no host call and `config` still ignored.
+    /// A `wire` that refuses runs its `unwire` and comes back as
+    /// [`SpawnError::WireFailed`].
+    fn wire_standing(&self, standing: MailboxId) -> Result<MailboxId, SpawnError> {
+        match wire_seated(self.inline, standing) {
+            Ok(()) => Ok(standing),
+            Err(error) => Err(SpawnError::WireFailed(error)),
+        }
     }
 
     /// The actor type this ctx is executing, per the registry — the logical
@@ -292,7 +308,9 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// [`SpawnError::SubnameInvalid`] before any type lookup. A valid one at
     /// which a child of this `tag` already stands beneath this actor answers
     /// that child before the resolver runs, as the typed verb does: nothing
-    /// is initialised again and `config_bytes` are ignored. The generated
+    /// is initialised again and `config_bytes` are ignored. A standing child
+    /// that never wired wires now, before the answer, and its failure comes
+    /// back as [`SpawnError::WireFailed`]. The generated
     /// resolver rejects an unknown tag, a non-instanced actor, an unavailable
     /// parent identity, or denied placement before allocating a host alias. A
     /// type that declares a dependency with no `Live` route returns
@@ -306,7 +324,7 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     ) -> Result<ErasedActorRef, SpawnError> {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         if let Some(standing) = self.standing_child(tag, is_counter, &full_subname) {
-            return Ok(ErasedActorRef::new(standing));
+            return self.wire_standing(standing).map(ErasedActorRef::new);
         }
         // The resolver is installed on the module's registry by every
         // `export!` init shim — it enumerates the exported type set the
@@ -443,8 +461,9 @@ fn resolve_subname(subname: Subname<'_>) -> Result<(bool, String), SpawnError> {
 /// and finds its spawner's slot. Once `wire` has returned `Ok` the child is
 /// seated wired. Only the two fresh-spawn paths funnel here; the
 /// `replace_component` reconstruct path (`reconstruct_one_child`) has its
-/// own insert and runs `init` + `on_rehydrate`, not `wire`, so a reload
-/// never fires `wire`.
+/// own insert and runs `init` + `on_rehydrate`, not `wire`: a rebuild
+/// itself never wires, and the `wire` export wires rebuilt children after
+/// the entry actor's `wire` (ADR-0249 §6).
 ///
 /// A child that despawned itself inside its own `wire` has no slot to be
 /// seated in. Its `wire` returned `Ok`, so it runs its `unwire` and drops,

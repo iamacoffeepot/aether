@@ -27,9 +27,9 @@ use crate::mail::registry::Registry;
 use crate::mail::registry::RegistryOwnerLease;
 use crate::mail::registry::RouteContract;
 use crate::mail::registry::effect::{EffectBatch, PreparedAliasRoute, RegistryEffect};
-use crate::mail::registry::lineage_mailbox_id;
 use crate::mail::{Mail, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::WakeSink;
+use crate::testing::canonical_id;
 use crate::testing::{boot_authority, token_root};
 use aether_data::tagged_id::Tag;
 use std::sync::mpsc::Receiver;
@@ -1684,7 +1684,7 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
         Tag::Mailbox,
         aether_data::fold_lineage(parent_carry, aether_data::ActorId::instanced("test.inline.child", "widget")),
     ));
-    let from_path = lineage_mailbox_id("test.inline.parent/test.inline.child:widget");
+    let from_path = canonical_id("test.inline.parent/test.inline.child:widget");
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
 }
 
@@ -1698,14 +1698,14 @@ fn inline_spawns_extend_the_executing_inline_actor() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.nested_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
 
     let parent_name = format!("{root_name}/test.inline.child:branch");
-    let parent = lineage_mailbox_id(&parent_name);
+    let parent = canonical_id(&parent_name);
     let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root, RouteContract::empty()));
     ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
@@ -1716,7 +1716,7 @@ fn inline_spawns_extend_the_executing_inline_actor() {
         .expect("deliver nested spawn turn");
 
     let expected_inline_name = format!("{parent_name}/test.inline.child:leaf");
-    let expected_inline = lineage_mailbox_id(&expected_inline_name);
+    let expected_inline = canonical_id(&expected_inline_name);
     let aliases = component.drain_pending_aliases();
     let inline = aliases.iter().find(|alias| alias.alias == expected_inline).expect("nested inline alias staged");
     assert_eq!(&*inline.rendered_name, expected_inline_name);
@@ -1734,12 +1734,12 @@ fn inline_spawns_reject_a_foreign_parent() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.scoped_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
-    let foreign = lineage_mailbox_id("test.inline.foreign");
+    let foreign = canonical_id("test.inline.foreign");
     let mut ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
     ctx.install_inline_children([(TEST_INLINE_TAG, test_inline_child_type())]);
     let mut component = instantiate_with_ctx(&wat_inline_spawn(foreign, TEST_INLINE_TAG), ctx);
@@ -1761,7 +1761,7 @@ fn inline_spawns_refuse_an_undeclared_tag() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let root_name = "test.inline.undeclared_root";
-    let root = lineage_mailbox_id(root_name);
+    let root = canonical_id(root_name);
     let (_captured, root_handler) = lineage_capture_handler();
     registry
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
@@ -1787,7 +1787,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let (captured, capture_handler) = lineage_capture_handler();
     let parent_name = "test.inline.parent".to_owned();
-    let parent_id = lineage_mailbox_id(&parent_name);
+    let parent_id = canonical_id(&parent_name);
     registry
         .try_register_inbox_with_id(&boot_authority(), parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
@@ -1802,7 +1802,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
     // Mirror the host/trampoline split: fold the alias id, then let the owner
     // publish only the logical alias-to-parent relation.
     let alias_name = format!("{parent_name}/test.inline.child:widget");
-    let alias_id = lineage_mailbox_id(&alias_name);
+    let alias_id = canonical_id(&alias_name);
     let completion = registry
         .submit(EffectBatch::new(vec![RegistryEffect::PublishAlias(PreparedAliasRoute::new(
             alias_id,

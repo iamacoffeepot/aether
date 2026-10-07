@@ -3,8 +3,8 @@
 //! successor's config kind refuses before any member prepares; a candidate
 //! whose `on_rehydrate` traps is dropped and the old guest is reinstalled,
 //! and the slot keeps its module and config, so a later replace rebuilds it.
-//! The reinstated guest runs `wire` again, and nothing the failed candidate
-//! sent leaves (ADR-0241 §7).
+//! The reinstated guest is untouched, with no second `wire`, and nothing the
+//! failed candidate sent leaves (ADR-0241 §7).
 //!
 //! Skipped when the fixture wasm hasn't been built (`require_wasm`); CI
 //! pre-builds it and sets `AETHER_REQUIRE_RUNTIME=1` so the skip becomes a
@@ -185,12 +185,12 @@ fn a_candidate_that_fails_rehydrate_sends_nothing() {
 }
 
 #[test]
-fn a_reinstated_guest_is_wired_again() {
-    // Catches: the old guest is reinstated after its `unwire` without running
-    // `wire` again, so whatever `wire` set up stays torn down.
+fn a_reinstated_guest_runs_no_second_wire() {
+    // Catches: an abort that rewires the old guest, so whatever `wire` set up
+    // is torn down and set up again on one instance.
     let Some((harness, wired)) = replace_with_rehydrate_trap() else {
         return;
     };
 
-    assert_eq!(harness.count_observed(WireObserved::NAME), wired + 1, "the reinstated peer runs `wire` again");
+    assert_eq!(harness.count_observed(WireObserved::NAME), wired, "the reinstated peer runs no second wire");
 }

@@ -70,14 +70,15 @@ impl Error for HookFault {}
 
 impl Component {
     /// Run the guest's `wire` hook, if it exports one. The trampoline runs it
-    /// at birth and again on a guest it reinstates after a republish aborts
-    /// (ADR-0241 §7), since that guest's `unwire` ran at prepare.
+    /// at birth and on a republish successor at prepare, with its outbox held
+    /// (ADR-0249 §3).
     ///
     /// `root` is the `wire` ctx's in-flight root: the birth's wire root
     /// (ADR-0244), which every send the guest makes from `wire` inherits, or
-    /// `None` for a reinstatement, whose guest sends mint their own roots.
-    /// It is published on the in-flight cells for the call and cleared
-    /// after, as [`Self::deliver`] does with an inbound's lineage.
+    /// `None` for a republish prepare, whose sends are held and re-stamped on
+    /// the commit turn at flush. It is published on the in-flight cells for
+    /// the call and cleared after, as [`Self::deliver`] does with an
+    /// inbound's lineage.
     ///
     /// # Errors
     /// [`HookFault::Returned`] when the hook returned a non-zero code, with

@@ -25,7 +25,7 @@ use super::kinds::KindSlot;
 use super::publish::Publication;
 use super::route::{BirthSerial, RouteEndpoint, RouteLifecycle, RouteRecord};
 use super::staged::{
-    commit_staged, parent_stands, staged_kind, staged_pending_token, staged_publications, staged_route,
+    BirthName, birth_name, commit_staged, staged_kind, staged_pending_token, staged_publications, staged_route,
 };
 use super::{CapturedDisposition, Inner, Registry, SeizeCell};
 
@@ -120,10 +120,20 @@ impl Registry {
                     // so every prefix of a stored name has a birth serial to
                     // read. Checked ahead of the namespace hold below, which
                     // a refused birth must not leave behind.
-                    if !parent_stands(&staged_routes, inner, commit.canonical_name.as_str()) {
-                        let name = commit.canonical_name.to_string();
-                        drop(commit.reject_at_home(PreparedSpawnFailure::ParentUnknown { full_name: name.clone() }));
-                        return Err(RegistryEffectError::ParentUnknown { name });
+                    match birth_name(&staged_routes, inner, &commit.canonical_name) {
+                        BirthName::ParentStands => {}
+                        BirthName::ParentUnknown => {
+                            let name = commit.canonical_name.to_string();
+                            drop(
+                                commit.reject_at_home(PreparedSpawnFailure::ParentUnknown { full_name: name.clone() }),
+                            );
+                            return Err(RegistryEffectError::ParentUnknown { name });
+                        }
+                        BirthName::Short => {
+                            let name = commit.canonical_name.to_string();
+                            drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
+                            return Err(RegistryEffectError::Name(NameConflict { name }));
+                        }
                     }
                     // ADR-0241 §3, §6: a guest birth takes a published
                     // namespace, so it is admitted only where the table, as
@@ -239,8 +249,14 @@ impl Registry {
                         }
                         None => {}
                     }
-                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
-                        return Err(RegistryEffectError::ParentUnknown { name: canonical_name.to_string() });
+                    match birth_name(&staged_routes, inner, &canonical_name) {
+                        BirthName::ParentStands => {}
+                        BirthName::ParentUnknown => {
+                            return Err(RegistryEffectError::ParentUnknown { name: canonical_name.to_string() });
+                        }
+                        BirthName::Short => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: canonical_name.to_string() }));
+                        }
                     }
                     let record = RouteRecord {
                         canonical_name,
@@ -292,8 +308,14 @@ impl Registry {
                     if staged_route(&staged_routes, inner, route.id).is_some() {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
-                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
-                        return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                    match birth_name(&staged_routes, inner, &canonical_name) {
+                        BirthName::ParentStands => {}
+                        BirthName::ParentUnknown => {
+                            return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                        }
+                        BirthName::Short => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                        }
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
                     let born = BirthSerial::next(&mut next_birth_serial);
@@ -366,8 +388,14 @@ impl Registry {
                     if staged_route(&staged_routes, inner, route.id).is_some() {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
-                    if !parent_stands(&staged_routes, inner, canonical_name.as_str()) {
-                        return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                    match birth_name(&staged_routes, inner, &canonical_name) {
+                        BirthName::ParentStands => {}
+                        BirthName::ParentUnknown => {
+                            return Err(RegistryEffectError::ParentUnknown { name: route.canonical_name });
+                        }
+                        BirthName::Short => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
+                        }
                     }
                     let record = RouteRecord {
                         canonical_name,

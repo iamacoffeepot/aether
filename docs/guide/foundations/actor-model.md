@@ -1092,8 +1092,9 @@ parent's own, deepest first. A child that despawns itself runs `unwire` when the
 handler that asked returns, and is dropped after it. Each child runs `unwire`
 once, and only if its `wire` returned `Ok`. Spawning a name whose child is
 standing is not a second birth: the spawn answers the child that stands,
-initialises and wires nothing, and ignores the config it was passed, so a
-`wire` that spawns a child is safe to run again (§5).
+wiring it first when it never wired, initialising nothing, and ignoring the
+config it was passed, so a `wire` that spawns a child is safe to run again
+(§5).
 
 A component can also run as several instances of one type: an `instanced` type
 loaded under different keys is an independent actor at each `NS:key`. The loader
