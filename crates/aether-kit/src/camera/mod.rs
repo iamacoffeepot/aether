@@ -399,7 +399,7 @@ impl CameraComponent {
     }
 
     /// End any glide in progress, take `pose`, and publish.
-    fn rest_at<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, M>, pose: Pose) {
+    fn rest_at<S, M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Self, S, M>, pose: Pose) {
         if self.glide.take().is_some() {
             ctx.unsubscribe::<LifecycleCapability, Tick>();
         }

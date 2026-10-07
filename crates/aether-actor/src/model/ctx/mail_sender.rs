@@ -68,8 +68,8 @@ pub trait MailSender {
     /// inherent `send_to`), so each concrete ctx supplies its own body.
     ///
     /// This trait names no sending actor, so the target's handler must ask
-    /// nothing of its sender ([`Anyone`], ADR-0231 §11). A kind whose handler
-    /// takes `sender: ProtocolRef<P>` is sent through a ctx's inherent verbs,
-    /// which check the ctx's own actor against `P`.
+    /// nothing of its sender ([`Anyone`], ADR-0231 §11). A kind whose
+    /// handler's ctx names a protocol `P` as its sender is sent through a
+    /// ctx's inherent verbs, which check the ctx's own actor against `P`.
     fn send_detached_to<K: ActorMail, I>(&mut self, target: impl Target<K, I, Sender = Anyone>, payload: &K);
 }

@@ -11,10 +11,11 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use aether_actor::__macro_internals::SenderRefused;
-use aether_actor::{CastTarget, ErasedActorRef, OutboundReply, PathRefused, ProtocolRef, ReplyMode, Unchecked};
+use aether_actor::{Anyone, CastTarget, OutboundReply, PathRefused, ReplyMode, SenderRequirement, Unchecked};
 use aether_data::wire::{self, DecodeCtx};
-use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
+use aether_data::{ActorMail, Kind, KindId, MailId, MailboxId, RequestId};
 use aether_kinds::DecodeRefused;
+use core::ptr;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
@@ -24,7 +25,7 @@ use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// #1757 / ADR-0106: retain this handler's inbound mail as an
     /// [`InboundMail`] guard to defer its reply past the handler's return
     /// — the by-construction replacement for a hand-rolled
@@ -146,53 +147,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         );
     }
 
-    /// The mail's sender as the protocol `P` its handler requires
-    /// (ADR-0231 §11), by the guard cast [`Self::cast`] runs.
-    fn prove_sender<P: CastTarget>(&self) -> Option<ProtocolRef<P>> {
-        self.sender().and_then(|sender| self.cast::<P>(sender))
-    }
-
-    /// Why the sender of a `K` did not cast to `P`, logged once as an error
-    /// in this actor's log. Reads the sender's path and the rows it
-    /// published; both are paid only here, after the cast refused.
-    #[cold]
-    fn refused_sender<P: CastTarget, K: Kind>(&self) -> SenderRefused {
-        let sender = self.sender();
-        let rows = sender.and_then(|sender| self.binding.mailer().registry().published_rows_at(sender.id()));
-        let refused = SenderRefused::of::<P>(sender.map(|sender| self.binding.actor_path(sender)), rows.as_deref());
-
-        tracing::error!(
-            target: "aether_substrate::mail",
-            kind = K::NAME,
-            refusal = %refused,
-            "handler did not run: its sender is refused",
-        );
-        refused
-    }
-
-    /// Prove a tell's sender as `P` before its handler runs (ADR-0231 §11),
-    /// or refuse the mail: the `#[actor]` arm of a `#[handler::tell]` that
-    /// takes `sender: ProtocolRef<P>` calls it and passes the proven
-    /// reference as the handler's fourth argument. Hidden macro plumbing,
-    /// like [`Self::__decode_inbound`]; no handler calls it.
-    ///
-    /// # Errors
-    ///
-    /// The [`SenderRefused`] when the sender does not cast to `P`, or the
-    /// mail has none. The refusal is logged, the reply target hears it only
-    /// when it opts in (see `NativeBinding::refusal_listener`), and the handler
-    /// does not run.
-    #[doc(hidden)]
-    pub fn __sender_or_refuse<P: CastTarget, K: Kind>(&self) -> Result<ProtocolRef<P>, SenderRefused> {
-        if let Some(proven) = self.prove_sender::<P>() {
-            return Ok(proven);
-        }
-
-        let refused = self.refused_sender::<P, K>();
-        self.answer_decode_refusal(K::ID, &refused);
-        Err(refused)
-    }
-
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
     /// dispatched. Read by outbound `send` paths to stamp
     /// `parent_mail` on child mail. `None` when the ctx was
@@ -224,38 +178,22 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.source
     }
 
-    /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
-    /// source the host stamped, once one published-route read finds a route
-    /// record standing there, so the reference always names a path. This is the
-    /// *immediate* sender (one hop, the addressing layer's `Source`), not
-    /// the chain origin — the origin lives in the tracing layer (`root` /
-    /// `parent_mail`, ADR-0080). `None` for mail with no local sender
-    /// (broadcast, substrate-generated, hub-bubbled). One piece of
-    /// host-generated mail does carry a sender: an
-    /// [`aether_kinds::MonitorNotice`] is stamped with the departed actor, so
-    /// a watcher reads which actor it lost from here. Needs no actor type,
-    /// so it exists on the erased ctx too.
+    /// The position stamped as this dispatch's sender, fixed when the ctx
+    /// is built: the dispatch source, or for a reply the actor that replied.
+    /// It is what [`Self::sender`] mints from under every sender requirement,
+    /// so the typed reference names the position the dispatch arm's cast
+    /// proved.
     ///
     /// A reply carries no reply target of its own (its source is
     /// `SourceAddr::None` with the answered correlation), so its sender is the
     /// actor that replied: the replier minted the reply's mail id in its own
-    /// id space, and that id's sender half is the stamp. This is how a load
-    /// requester keeps the loaded actor, whose trampoline sends the
-    /// successful `LoadResult` itself (ADR-0230 §3). A reply sent with no
+    /// id space, and that id's sender half is the stamp. A reply sent with no
     /// handler chain (`Mailer::send_reply_unchained`) carries no mail id and
-    /// so no sender.
-    ///
-    /// Also `None` for a stamped position that holds no route record, such as
-    /// the chassis sentinel or a position forged through the public mail
-    /// entry points. The read is one lock-free load of the published route
-    /// view and one hash probe, paid only when a handler asks.
-    #[must_use]
-    pub fn sender(&self) -> Option<ErasedActorRef> {
+    /// so no stamp.
+    fn sender_stamp(&self) -> Option<MailboxId> {
         match self.source.addr {
-            SourceAddr::Component(id) => self.binding.stamped_sender(id),
-            SourceAddr::None if self.in_reply_to().is_some() => {
-                self.in_flight_mail_id.and_then(|id| self.binding.stamped_sender(id.sender))
-            }
+            SourceAddr::Component(id) => Some(id),
+            SourceAddr::None if self.in_reply_to().is_some() => self.in_flight_mail_id.map(|id| id.sender),
             _ => None,
         }
     }
@@ -325,7 +263,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 }
 
-impl<A> NativeCtx<'_, A, Unchecked> {
+impl<A, S> NativeCtx<'_, A, S, Unchecked> {
     /// Settle a refused decode of a `K` request whose row replies `O`
     /// (ADR-0231 §3). When `error` is a typed-path refusal and `answer`
     /// yields a reply, which it does exactly when `K` carries a
@@ -349,11 +287,117 @@ impl<A> NativeCtx<'_, A, Unchecked> {
         }
         self.__refuse_inbound_unanswered::<K>(error)
     }
+}
 
+impl<A, S: SenderRequirement, M: ReplyMode> NativeCtx<'_, A, S, M> {
+    /// The envelope sender, as what this ctx's sender requirement `S` hands
+    /// out (ADR-0231 §11).
+    ///
+    /// On a ctx that states nothing, which is [`Anyone`], it is a proven
+    /// [`ErasedActorRef`](aether_actor::ErasedActorRef): the dispatch source
+    /// the host stamped, once one published-route read finds a route record
+    /// standing there, so the reference always names a path. This is the
+    /// *immediate* sender (one hop, the addressing layer's `Source`), not
+    /// the chain origin — the origin lives in the tracing layer (`root` /
+    /// `parent_mail`, ADR-0080). `None` for mail with no local sender
+    /// (broadcast, substrate-generated, hub-bubbled). One piece of
+    /// host-generated mail does carry a sender: an
+    /// [`aether_kinds::MonitorNotice`] is stamped with the departed actor, so
+    /// a watcher reads which actor it lost from here. Needs no actor type,
+    /// so it exists on the erased ctx too.
+    ///
+    /// A reply's sender is the actor that replied. This is how a load
+    /// requester keeps the loaded actor, whose trampoline sends the
+    /// successful `LoadResult` itself (ADR-0230 §3). A reply sent with no
+    /// handler chain carries no sender.
+    ///
+    /// Also `None` for a stamped position that holds no route record, such as
+    /// the chassis sentinel or a position forged through the public mail
+    /// entry points. The read is one lock-free load of the published route
+    /// view and one hash probe, paid only when a handler asks.
+    ///
+    /// On a ctx whose handler names a protocol `P` as its sender it is the
+    /// [`ProtocolRef<P>`](aether_actor::ProtocolRef) the dispatch arm proved
+    /// before the handler ran, with no `Option`, no cast, and no registry
+    /// read: it is minted from the same stamp the arm's cast read.
+    #[must_use]
+    pub fn sender(&self) -> S::Reference {
+        S::__reference(self.sender_stamp(), |position| self.binding.stamped_sender(position).is_some())
+    }
+}
+
+impl<'a, A, M: ReplyMode> NativeCtx<'a, A, Anyone, M> {
+    /// This ctx typed by the protocol `P` its handler requires of its sender
+    /// (ADR-0231 §11), once the guard cast [`Self::cast`] runs proves the
+    /// dispatch's sender as `P`; the ctx itself, unchanged, when the cast
+    /// refuses or the dispatch has no sender.
+    ///
+    /// It is the only code that produces a ctx typed by a protocol, which is
+    /// what lets [`Self::sender`] on that ctx mint from the stamp with no
+    /// second cast: the stamp is fixed at construction, so the reference
+    /// minted there names the position this cast proved.
+    fn prove_sender<P: CastTarget>(&mut self) -> Result<&mut NativeCtx<'a, A, P, M>, &mut Self> {
+        let proven = self.sender().and_then(|sender| self.cast::<P>(sender));
+        if proven.is_none() {
+            return Err(self);
+        }
+
+        // SAFETY: `S` appears only in `PhantomData`, so
+        // `NativeCtx<'a, A, Anyone, M>` and `NativeCtx<'a, A, P, M>` are
+        // layout-identical for every `P` (see
+        // `native_ctx_layout_identical_across_modes`). The reborrow swaps the
+        // marker without touching any real field.
+        Ok(unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, P, M>>() })
+    }
+
+    /// Why the sender of a `K` did not cast to `P`, logged once as an error
+    /// in this actor's log. Reads the sender's path and the rows it
+    /// published; both are paid only here, after the cast refused.
+    #[cold]
+    fn refused_sender<P: CastTarget, K: Kind>(&self) -> SenderRefused {
+        let sender = self.sender();
+        let rows = sender.and_then(|sender| self.binding.mailer().registry().published_rows_at(sender.id()));
+        let refused = SenderRefused::of::<P>(sender.map(|sender| self.binding.actor_path(sender)), rows.as_deref());
+
+        tracing::error!(
+            target: "aether_substrate::mail",
+            kind = K::NAME,
+            refusal = %refused,
+            "handler did not run: its sender is refused",
+        );
+        refused
+    }
+
+    /// Prove a tell's sender as `P` before its handler runs (ADR-0231 §11)
+    /// and type the ctx by it, or refuse the mail: the `#[actor]` arm of a
+    /// `#[handler::tell]` whose ctx names `P` as its sender calls it and
+    /// calls the handler with the ctx it returns. Hidden macro plumbing,
+    /// like [`Self::__decode_inbound`]; no handler calls it.
+    ///
+    /// # Errors
+    ///
+    /// The [`SenderRefused`] when the sender does not cast to `P`, or the
+    /// mail has none. The refusal is logged, the reply target hears it only
+    /// when it opts in (see `NativeBinding::refusal_listener`), and the handler
+    /// does not run.
+    #[doc(hidden)]
+    pub fn __sender_or_refuse<P: CastTarget, K: Kind>(&mut self) -> Result<&mut NativeCtx<'a, A, P, M>, SenderRefused> {
+        let unproven = match self.prove_sender::<P>() {
+            Ok(proven) => return Ok(proven),
+            Err(unproven) => unproven,
+        };
+
+        let refused = unproven.refused_sender::<P, K>();
+        unproven.answer_decode_refusal(K::ID, &refused);
+        Err(refused)
+    }
+}
+
+impl<'a, A> NativeCtx<'a, A, Anyone, Unchecked> {
     /// Prove a request's sender as `P` before its handler runs
-    /// (ADR-0231 §11), or answer the request: the `#[actor]` arm of a
-    /// `#[handler::request]` that takes `sender: ProtocolRef<P>` calls it and
-    /// passes the proven reference as the handler's fourth argument.
+    /// (ADR-0231 §11) and type the ctx by it, or answer the request: the
+    /// `#[actor]` arm of a `#[handler::request]` whose ctx names `P` as its
+    /// sender calls it and calls the handler with the ctx it returns.
     ///
     /// A refused sender is answered at once with the row's reply `O`, built
     /// from a [`PathRefused`] naming the sender's path, through
@@ -371,15 +415,16 @@ impl<A> NativeCtx<'_, A, Unchecked> {
     #[doc(hidden)]
     pub fn __sender_or_answer<P: CastTarget, K: Kind, O: ActorMail + From<PathRefused>>(
         &mut self,
-    ) -> Result<ProtocolRef<P>, SenderRefused> {
-        if let Some(proven) = self.prove_sender::<P>() {
-            return Ok(proven);
-        }
+    ) -> Result<&mut NativeCtx<'a, A, P, Unchecked>, SenderRefused> {
+        let unproven = match self.prove_sender::<P>() {
+            Ok(proven) => return Ok(proven),
+            Err(unproven) => unproven,
+        };
 
-        let refused = self.refused_sender::<P, K>();
+        let refused = unproven.refused_sender::<P, K>();
         match refused.path_refused() {
-            Some(path) => OutboundReply::reply(self, &O::from(path)),
-            None => self.answer_decode_refusal(K::ID, &refused),
+            Some(path) => OutboundReply::reply(unproven, &O::from(path)),
+            None => unproven.answer_decode_refusal(K::ID, &refused),
         }
         Err(refused)
     }

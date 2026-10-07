@@ -804,11 +804,13 @@ fn fill_actor(ty: &mut Type) {
     }
 }
 
-/// Refuse a route's transport ctx that names the `Unchecked`
-/// reply mode, as `NativeCtx<'_, Self, Unchecked>` does: its second type
-/// argument's last segment is `Unchecked`. The generated handler covers the
-/// `HttpRouter` row with a single handler, so it passes a single ctx, and a
-/// route answers by returning. The match is syntactic, like [`fill_actor`]'s.
+/// Refuse a route's transport ctx that names the `Unchecked` reply mode, as
+/// `NativeCtx<'_, Self, Anyone, Unchecked>` does: a type argument after its
+/// actor whose last segment is `Unchecked`, which covers the mode's own third
+/// position and a two-argument spelling that leaves the sender out. The
+/// generated handler covers the `HttpRouter` row with a single handler, so it
+/// passes a single ctx, and a route answers by returning. The match is
+/// syntactic, like [`fill_actor`]'s.
 fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
     let Type::Path(TypePath { path, .. }) = ty else {
         return Ok(());
@@ -816,12 +818,8 @@ fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
     let Some(PathArguments::AngleBracketed(args)) = path.segments.last().map(|seg| &seg.arguments) else {
         return Ok(());
     };
-    let Some(GenericArgument::Type(Type::Path(TypePath { path: mode, .. }))) =
-        args.args.iter().filter(|arg| matches!(arg, GenericArgument::Type(_))).nth(1)
-    else {
-        return Ok(());
-    };
-    if mode.segments.last().is_some_and(|seg| seg.ident == "Unchecked") {
+    let names_unchecked = args.args.iter().filter_map(type_argument_path).skip(1).any(ends_in_unchecked);
+    if names_unchecked {
         return Err(syn::Error::new(
             ty.span(),
             "a route takes the single ctx the #[http::router] handler passes, not an `Unchecked` one: it answers by \
@@ -829,6 +827,20 @@ fn reject_unchecked_ctx(ty: &Type) -> syn::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A generic argument's path when it is a path type, and `None` for a
+/// lifetime or any other argument.
+fn type_argument_path(arg: &GenericArgument) -> Option<&syn::Path> {
+    match arg {
+        GenericArgument::Type(Type::Path(TypePath { path, .. })) => Some(path),
+        _ => None,
+    }
+}
+
+/// Whether a path's last segment is `Unchecked`.
+fn ends_in_unchecked(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|seg| seg.ident == "Unchecked")
 }
 
 /// Whether a transport ctx type is the wasm guest's `WasmCtx`, matched on its

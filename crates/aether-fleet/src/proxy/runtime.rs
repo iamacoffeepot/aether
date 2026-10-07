@@ -14,7 +14,7 @@ use super::config::ProxyTarget;
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-use aether_actor::{OutboundReply, Single, Unchecked, runtime};
+use aether_actor::{Anyone, OutboundReply, Single, Unchecked, runtime};
 pub use aether_data::EngineId;
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
@@ -110,7 +110,7 @@ impl FleetProxyState {
     /// 1339). Sent to the declared dependency as a fresh root: the `Pong`
     /// that triggered it is an external event causally unrelated to
     /// whatever inbound mail woke the handler.
-    pub fn report_alive(&self, ctx: &mut NativeCtx<'_, FleetProxy, Single>) {
+    pub fn report_alive(&self, ctx: &mut NativeCtx<'_, FleetProxy, Anyone, Single>) {
         ctx.send_detached::<FleetServer>(&EngineAlive { engine_id: self.engine_id.0.to_string() });
     }
 
@@ -122,7 +122,7 @@ impl FleetProxyState {
     /// Idempotent on the cap side — a `died` for an already-evicted
     /// engine is a no-op. Sent to the declared dependency as a fresh root,
     /// for the same reason as [`Self::report_alive`].
-    pub fn report_died(&self, ctx: &mut NativeCtx<'_, FleetProxy, Single>, reason: DeathReason) {
+    pub fn report_died(&self, ctx: &mut NativeCtx<'_, FleetProxy, Anyone, Single>, reason: DeathReason) {
         ctx.send_detached::<FleetServer>(&EngineDied { engine_id: self.engine_id.0.to_string(), reason });
     }
 
@@ -132,7 +132,12 @@ impl FleetProxyState {
     /// open, with the caller's correlation echoed, and the debt stays owed
     /// until the call's `ReplyEnd`. An event for a `cid` with no open
     /// forward (one that arrives after its terminal) is dropped.
-    pub fn route_reply(&mut self, ctx: &mut NativeCtx<'_, FleetProxy, Single>, cid: u64, envelope: &ReplyEnvelope) {
+    pub fn route_reply(
+        &mut self,
+        ctx: &mut NativeCtx<'_, FleetProxy, Anyone, Single>,
+        cid: u64,
+        envelope: &ReplyEnvelope,
+    ) {
         let Some(owed) = self.in_flight.get(&cid) else {
             tracing::debug!(
                 target: "aether_substrate::fleet_proxy",
@@ -155,7 +160,7 @@ impl FleetProxyState {
     /// caller unchanged.
     pub fn route_settled(
         &mut self,
-        ctx: &mut NativeCtx<'_, FleetProxy, Single>,
+        ctx: &mut NativeCtx<'_, FleetProxy, Anyone, Single>,
         cid: u64,
         result: Result<(), RpcError>,
     ) {
@@ -318,7 +323,7 @@ impl NativeActor for FleetProxy {
     /// `CallSettled` ends the exchange, a `CallSettled::Err` naming the
     /// failure when the call cannot be written to the engine.
     #[handler::unchecked(reason = "relays a remote call: many replies, kinds chosen at run time")]
-    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, mail: ForwardEnvelope) {
+    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, mail: ForwardEnvelope) {
         let envelope = MailEnvelope { to: Recipient::local(mail.recipient), kind: mail.kind, payload: mail.payload };
         match state.conn.client.call(envelope) {
             Ok(cid) => {
@@ -347,7 +352,11 @@ impl NativeActor for FleetProxy {
     /// surface. The reader thread fires this after pushing a frame;
     /// the handler drains `conn.inbound` and routes each frame.
     #[handler::tell]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: RpcInboundReady) {
+    fn on_inbound_ready(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
+        _mail: RpcInboundReady,
+    ) {
         while let Ok(frame) = state.conn.inbound.try_recv() {
             match frame {
                 WireFrame::ReplyEvent { cid, envelope } => state.route_reply(ctx, cid, &envelope),
@@ -432,7 +441,11 @@ impl NativeActor for FleetProxy {
     /// to the engines cap and self-shuts-down (its `Drop` terminates
     /// the wedged child's group). Otherwise it sends a fresh `Ping`.
     #[handler::tell]
-    fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: EngineHeartbeatTick) {
+    fn on_heartbeat_tick(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Single>,
+        _mail: EngineHeartbeatTick,
+    ) {
         state.heartbeat_seq += 1;
         // A write failure means the socket is already broken — the
         // reader sidecar will surface a `Bye` and `on_inbound_ready`

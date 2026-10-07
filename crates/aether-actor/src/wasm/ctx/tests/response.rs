@@ -13,6 +13,7 @@ use aether_data::Kind;
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
 use crate::mail::Mail;
+use crate::model::Anyone;
 use crate::model::ctx::{Erased, Unchecked};
 use crate::wasm::{ActorInitError, WasmInitCtx};
 
@@ -67,7 +68,8 @@ fn dispatch_uncorrelated<K: Kind>(responder: &mut Responder, mail: &K) -> u32 {
     let payload = mail.encode_into_bytes();
     // SAFETY: `payload` outlives the `Mail` built over it.
     let mail = unsafe { Mail::__from_ptr(K::ID.0, payload.as_ptr().addr(), payload.len() as u32, 1, 0, ACTOR) };
-    let mut ctx: WasmCtx<'_, Erased, Unchecked> = WasmCtx::__new_local_dispatch(ACTOR, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Anyone, Unchecked> =
+        WasmCtx::__new_local_dispatch(ACTOR, &registry, NO_INBOUND_SOURCE);
 
     <Responder as crate::WasmDispatch<Responder>>::dispatch(responder, &mut ctx, mail)
 }

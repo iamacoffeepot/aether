@@ -40,7 +40,7 @@ use aether_kinds::{LifecycleAdvance, MonitorNotice, Quit, Tick};
 use aether_substrate::actor::monitor::MonitorHandle;
 
 pub use aether_actor::OutboundReply;
-pub use aether_actor::Unchecked;
+pub use aether_actor::{Anyone, Unchecked};
 pub use aether_data::KindId;
 pub use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::Erased;
@@ -121,7 +121,11 @@ impl LifecycleCapabilityState {
     /// subscription was handled is noticed at once, and the notice, which
     /// arrives after the subscribing handler returns, purges the rows that
     /// handler wrote.
-    pub fn watch<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
+    pub fn watch<A, S, M: aether_actor::ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        subscriber: ErasedActorRef,
+    ) {
         if let Entry::Vacant(slot) = self.monitors.entry(subscriber) {
             slot.insert(ctx.monitor(subscriber));
         }
@@ -442,7 +446,11 @@ impl NativeActor for LifecycleCapability {
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Unchecked>, payload: LifecycleAdvance) {
+    fn on_advance(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>,
+        payload: LifecycleAdvance,
+    ) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -561,7 +569,7 @@ impl NativeActor for LifecycleCapability {
     /// when the in-flight count for `root` reaches zero; not a public
     /// API for user code.
     #[handler::unchecked(reason = "a held reply would pin the root the advance waits to settle (#6967)")]
-    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Unchecked>, payload: Settled) {
+    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Anyone, Unchecked>, payload: Settled) {
         let Some(pending) = state.pending.as_ref() else {
             return;
         };

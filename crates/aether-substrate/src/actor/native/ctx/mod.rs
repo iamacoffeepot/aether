@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{ReplyMode, Single, Unchecked};
+use aether_actor::{Anyone, ReplyMode, Single, Unchecked};
 use aether_data::{ActorMail, MailId};
 use core::marker::PhantomData;
 use core::ptr;
@@ -82,7 +82,7 @@ pub use init::NativeInitCtx;
 /// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
-pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
+pub struct NativeCtx<'a, A = Erased, S = Anyone, M: ReplyMode = Single> {
     binding: &'a Arc<NativeBinding>,
     source: Source,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
@@ -151,6 +151,13 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// that spells `Erased`. The type default is [`Erased`], so a signature
     /// that names no actor reads as that view.
     _actor: PhantomData<fn() -> A>,
+    /// Phantom marker naming what this ctx's handler requires of its sender
+    /// (ADR-0231 §11), and so what [`Self::sender`] hands out. The `#[actor]`
+    /// arm of a handler that names a protocol here retypes the ctx to it once
+    /// the sender cast passes; every other ctx carries [`Anyone`], the type
+    /// default. A marker only: nothing is stored for a proven sender, since
+    /// the stamp it is read from is fixed at construction.
+    _sender: PhantomData<fn() -> S>,
 }
 /// The actor marker of a ctx that names no actor, and so cannot parent a
 /// child (issue 4158).
@@ -167,7 +174,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 /// A type-position marker like [`Single`] / [`Unchecked`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub use aether_actor::Erased;
-impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
+impl<'a, M: ReplyMode, A> NativeCtx<'a, A, Anyone, M> {
     /// The inbound-less ctx the runtime builds for a turn that dispatches no
     /// mail, typed by the actor it runs for so the hook it drives reaches
     /// [`Self::spawn_child`] (issue 4158). The reply mode comes from the use
@@ -199,6 +206,7 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
+            _sender: PhantomData,
         }
     }
 
@@ -240,43 +248,47 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
             task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
+            _sender: PhantomData,
         }
     }
+}
 
+impl<'a, M: ReplyMode, A, S> NativeCtx<'a, A, S, M> {
     /// Issue 4158 downgrade-only coercion: view this ctx as one that names
     /// no actor, dropping [`Self::spawn_child`]. The `#[actor]` macro hands
     /// this view to a handler whose signature spells `Erased`; every other
     /// handler is typed by its actor (ADR-0231 §7) and can parent a child.
     /// Like [`Self::as_single`] the coercion only
     /// removes capability — there is deliberately no way back up, because
-    /// re-naming an actor is exactly the misstatement this replaced.
+    /// re-naming an actor is exactly the misstatement this replaced. Preserves
+    /// the sender marker `S`.
     #[doc(hidden)]
     #[must_use]
-    pub fn erase(&mut self) -> &mut NativeCtx<'a, Erased, M> {
-        // SAFETY: `A` appears only in `PhantomData`, so `NativeCtx<'a, A, M>`
-        // and `NativeCtx<'a, Erased, M>` are layout-identical for every `A`
+    pub fn erase(&mut self) -> &mut NativeCtx<'a, Erased, S, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `NativeCtx<'a, A, S, M>`
+        // and `NativeCtx<'a, Erased, S, M>` are layout-identical for every `A`
         // (see `native_ctx_layout_identical_across_modes`). The reborrow swaps
         // the marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Erased, M>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Erased, S, M>>() }
     }
 }
 
-impl<'a, A> NativeCtx<'a, A, Unchecked> {
+impl<'a, A, S> NativeCtx<'a, A, S, Unchecked> {
     /// ADR-0112 downgrade-only coercion: view this [`Unchecked`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
     /// handler whose marker disagrees with its class fails to unify.
     /// There is deliberately no `as_unchecked` — the runtime only ever
-    /// downgrades.
+    /// downgrades. Preserves the actor marker `A` and the sender marker `S`.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut NativeCtx<'a, A, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, A, Unchecked>` and
-        // `NativeCtx<'a, A, Single>` are layout-identical (the marker field is
+    pub fn as_single(&mut self) -> &mut NativeCtx<'a, A, S, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, A, S, Unchecked>` and
+        // `NativeCtx<'a, A, S, Single>` are layout-identical (the marker field is
         // a ZST for every `M` — see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Single>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, S, Single>>() }
     }
 
     /// Accept a returned [`Pending<R>`] receipt. The `#[actor]` and
@@ -288,7 +300,9 @@ impl<'a, A> NativeCtx<'a, A, Unchecked> {
     pub fn __accept_pending<R: ActorMail>(&mut self, pending: Pending<R>) {
         pending.disarm();
     }
+}
 
+impl<'a, A> NativeCtx<'a, A, Anyone, Unchecked> {
     /// #1757: the per-dispatch constructor — moves the single dispatched
     /// [`Envelope`] into the ctx so a handler can retain it via
     /// [`Self::take_inbound`] (and so the dispatcher's settlement tail
@@ -314,11 +328,12 @@ impl<'a, A> NativeCtx<'a, A, Unchecked> {
             task_holds: Vec::new(),
             _mode: PhantomData,
             _actor: PhantomData,
+            _sender: PhantomData,
         }
     }
 }
 
-impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     /// Build a guest ctx over this actor's own binding, with `outbound` as
     /// its hub egress. The registry the guest's host fns read is the one the
     /// binding's own mailer routes through, so the two cannot disagree.
@@ -332,7 +347,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 }
 
-impl<M: ReplyMode, A> Drop for NativeCtx<'_, A, M> {
+impl<M: ReplyMode, A, S> Drop for NativeCtx<'_, A, S, M> {
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): handler-end flush. One
     /// `NativeCtx` is built per dispatched envelope (and one for
     /// `unwire`), so its scope *is* the handler's lifetime — dropping it

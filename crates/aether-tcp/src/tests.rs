@@ -15,8 +15,8 @@ use super::{
     TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{
-    ActorPath, Addressable, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked, Undeclared,
-    actor,
+    ActorPath, Addressable, Anyone, ErasedActorRef, PathRefusal, PathRefused, ProtocolPath, ProtocolRef, Unchecked,
+    Undeclared, actor,
 };
 use aether_data::{ErasedActorPath, Kind, LoadName, SessionToken, Uuid};
 use aether_kinds::descriptors;
@@ -238,7 +238,7 @@ impl NativeActor for DataOnlyConsumer {
     }
 
     #[handler::unchecked(reason = "test: relays the self-bind, reply target pinned to this consumer")]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Unchecked>, _mail: ForwardBindSelf) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Anyone, Unchecked>, _mail: ForwardBindSelf) {
         let _ = self;
         let tcp = ErasedActorPath::new(TcpCapability::NAMESPACE).expect("a canonical path");
         let bind = BindListenerSelf { addr: "127.0.0.1:0".into(), name: Some("data-only".into()) };

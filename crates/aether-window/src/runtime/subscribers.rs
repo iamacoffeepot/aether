@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use aether_actor::{ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
+use aether_actor::{Anyone, ErasedActorRef, ProtocolRef, ReplyMode, ResolveError, Subscriber};
 use aether_data::{ActorMail, ErasedActorPath, Kind, KindId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -144,9 +144,9 @@ macro_rules! window_subscribers {
             /// Prove an explicit subscription's path live (ADR-0231 §3: its
             /// decode already proved the path handles the kind silently) and
             /// hold the proof under `selector`.
-            pub fn subscribe_path<A, M: ReplyMode>(
+            pub fn subscribe_path<A, S, M: ReplyMode>(
                 &mut self,
-                ctx: &mut NativeCtx<'_, A, M>,
+                ctx: &mut NativeCtx<'_, A, S, M>,
                 selector: WindowSelector,
                 subscription: &WindowSubscription,
             ) -> Result<(), ResolveError> {
@@ -161,9 +161,9 @@ macro_rules! window_subscribers {
 
             /// Prove an explicit subscription's path live and remove its key
             /// from the set `selector` names.
-            pub fn unsubscribe_path<A, M: ReplyMode>(
+            pub fn unsubscribe_path<A, S, M: ReplyMode>(
                 &mut self,
-                ctx: &NativeCtx<'_, A, M>,
+                ctx: &NativeCtx<'_, A, S, M>,
                 selector: WindowSelector,
                 subscription: &WindowSubscription,
             ) -> Result<(), ResolveError> {
@@ -185,7 +185,7 @@ macro_rules! window_subscribers {
             /// silent or unchecked handler, so its events could never be handled.
             pub fn subscribe_self<A, M: ReplyMode>(
                 &mut self,
-                ctx: &mut NativeCtx<'_, A, M>,
+                ctx: &mut NativeCtx<'_, A, Anyone, M>,
                 selector: WindowSelector,
                 kind: KindId,
             ) -> Result<(), String> {
@@ -224,9 +224,9 @@ macro_rules! window_subscribers {
             /// `kind` is not published here, or `payload` does not decode as
             /// it; nothing is sent.
             #[cfg(feature = "synthetic")]
-            pub fn publish_encoded<A, M: ReplyMode>(
+            pub fn publish_encoded<A, S, M: ReplyMode>(
                 &self,
-                ctx: &mut NativeCtx<'_, A, M>,
+                ctx: &mut NativeCtx<'_, A, S, M>,
                 window: &ErasedActorPath,
                 kind: KindId,
                 payload: &[u8],
@@ -248,9 +248,9 @@ published_window_kinds!(window_subscribers);
 impl WindowSubscribers {
     /// Hold `subscriber` for `K` under `selector`, and monitor it on its
     /// first row.
-    pub fn subscribe<K: Published, A, M: ReplyMode>(
+    pub fn subscribe<K: Published, A, S, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, A, M>,
+        ctx: &mut NativeCtx<'_, A, S, M>,
         selector: WindowSelector,
         subscriber: ProtocolRef<Subscriber<K>>,
     ) {
@@ -272,7 +272,7 @@ impl WindowSubscribers {
 
     pub fn unsubscribe_self<A, M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, A, M>,
+        ctx: &NativeCtx<'_, A, Anyone, M>,
         selector: WindowSelector,
         kind: KindId,
     ) -> Result<(), String> {
@@ -426,7 +426,7 @@ pub mod fixture {
     }
 
     impl Watcher {
-        fn record<K: Kind, A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, M>, mail: &K) {
+        fn record<K: Kind, A, M: ReplyMode>(&self, ctx: &NativeCtx<'_, A, aether_actor::Anyone, M>, mail: &K) {
             let _ = self.report.send(Receipt {
                 watcher: self.key.clone(),
                 kind: K::ID,
@@ -604,7 +604,10 @@ pub mod fixture {
         #[cfg(feature = "desktop")]
         pub fn desktop_turn<T>(
             &mut self,
-            turn: impl FnOnce(&mut DesktopWindows, &mut NativeCtx<'_, crate::WindowCapability, aether_actor::Single>) -> T,
+            turn: impl FnOnce(
+                &mut DesktopWindows,
+                &mut NativeCtx<'_, crate::WindowCapability, aether_actor::Anyone, aether_actor::Single>,
+            ) -> T,
         ) -> Option<T> {
             self.driver
                 .host_turn(|state, ctx| match &mut state.backend {

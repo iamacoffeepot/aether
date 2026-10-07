@@ -36,8 +36,8 @@ pub(super) fn dependency_refusal(actor: &str, namespace: &str) -> String {
 /// path, its type's dependencies before the republish, and after. A
 /// dependency the type already declared was live when the instance was
 /// created, so only an added one is checked.
-pub(super) fn replacement_refusal<'a, A, M: ReplyMode>(
-    ctx: &NativeCtx<'_, A, M>,
+pub(super) fn replacement_refusal<'a, A, S, M: ReplyMode>(
+    ctx: &NativeCtx<'_, A, S, M>,
     instances: impl IntoIterator<Item = (&'a str, &'a [Dependency], &'a [Dependency])>,
 ) -> Option<String> {
     let refused: Vec<String> = instances

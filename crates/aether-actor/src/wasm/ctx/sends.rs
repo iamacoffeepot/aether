@@ -2,7 +2,7 @@
 //! marker dropped, so a helper that only sends mail needs no `M: ReplyMode`
 //! parameter.
 //!
-//! [`WasmCtx<'_, A, M>`](WasmCtx) is generic over its reply class (ADR-0112,
+//! [`WasmCtx<'_, A, S, M>`](WasmCtx) is generic over its reply class (ADR-0112,
 //! ADR-0134) because the marker selects which reply surface the handler is
 //! allowed to reach: `reply` / `reply_to` exist only on `Unchecked`, not on
 //! `Single`. That is load-bearing at the handler
@@ -69,7 +69,7 @@ pub struct Sends<'a, A = Erased> {
     _actor: PhantomData<fn() -> A>,
 }
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// The reply-class-free view of this ctx's outbound surface (see
     /// [`Sends`]). Hand it to a helper that only sends mail, so the helper
     /// stays callable from a `single` and a `unchecked` handler alike
@@ -101,7 +101,7 @@ impl<A> Sends<'_, A> {
     }
 }
 
-// The same routing contract `MailSender for WasmCtx<'_, A, M>` implements — the
+// The same routing contract `MailSender for WasmCtx<'_, A, S, M>` implements — the
 // view routes through the same registry, so a helper handed a `Sends` sends
 // exactly what its caller would have sent.
 impl<A> MailSender for Sends<'_, A> {

@@ -1,0 +1,37 @@
+error: `#[handler::event]` states no sender in its ctx type: an event arrives from a publisher this actor subscribed to, so its sender is the actor's own choice. Only `#[handler::tell]` and `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle (ADR-0231 §11)
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:34:56
+   |
+34 |     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_, Self, Listener>, _mail: Tick) {}
+   |                                                        ^^^^^^^^
+
+error: `#[handler::response]` states no sender in its ctx type: a response answers this actor's own request, so its sender is whoever the actor asked. Only `#[handler::tell]` and `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle (ADR-0231 §11)
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:48:56
+   |
+48 |     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_, Self, Listener>, _mail: Tick) {}
+   |                                                        ^^^^^^^^
+
+error: `#[handler::unchecked(..)]` states no sender in its ctx type: it gives up the reply check, so the engine has no declared reply to refuse a request through. Only `#[handler::tell]` and `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle (ADR-0231 §11)
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:62:56
+   |
+62 |     fn on_tick(&mut self, _ctx: &mut WasmCtx<'_, Self, Listener, Unchecked>, _mail: Tick) {}
+   |                                                        ^^^^^^^^
+
+error: `#[fallback]` states no sender in its ctx type: it catches mail no handler names, so no kind's send could carry the requirement. Only `#[handler::tell]` and `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle (ADR-0231 §11)
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:76:55
+   |
+76 |     fn on_any(&mut self, _ctx: &mut WasmCtx<'_, Self, Listener>, _mail: Mail<'_>) {}
+   |                                                       ^^^^^^^^
+
+error: a lifecycle hook states no sender in its ctx type: it dispatches no mail, so there is no sender. Only `#[handler::tell]` and `#[handler::request]` on an actor's own `#[actor]` impl state what their sender must handle (ADR-0231 §11)
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:89:55
+   |
+89 |     fn unwire(&mut self, _ctx: &mut WasmCtx<'_, Self, Listener>) {}
+   |                                                       ^^^^^^^^
+
+warning: unused imports: `ActorInitError`, `Mail`, `Unchecked`, `WasmActor`, `WasmCtx`, and `WasmInitCtx`
+  --> tests/ui/rejects_sender_requirement_on_event_handler.rs:10:20
+   |
+10 | use aether_actor::{ActorInitError, Mail, Unchecked, WasmActor, WasmCtx, WasmInitCtx, actor, protocol};
+   |                    ^^^^^^^^^^^^^^  ^^^^  ^^^^^^^^^  ^^^^^^^^^  ^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -19,7 +19,7 @@
 
 use aether_actor::__macro_internals::{WasmPlacementFacts, dependency_records_len, write_dependency_records};
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, Declared, DependencyLink, DependencyList,
+    ActorInitError, ActorTypeTag, Addressable, Anyone, Contract, Contracts, Declared, DependencyLink, DependencyList,
     DependencyResolver, DependsOn, Erased, One, ReplyShape, Silent, Unchecked, Undeclared, WasmActor, WasmCtx,
     WasmInitCtx, actor, handler_set,
 };
@@ -107,7 +107,7 @@ impl WasmActor for ManifestProbe {
     // issues its own replies, so the manifest reports `ReplyContract::Unchecked`
     // (no single static reply kind).
     #[handler::unchecked(reason = "test: the manifest carries an unchecked row's reason")]
-    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _poke: Poke) {}
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _poke: Poke) {}
 
     /// # Agent
     /// Catch-all for anything else.
@@ -151,7 +151,7 @@ trait ContractSet {
     fn on_set_silent(&mut self, _ctx: &mut WasmCtx<'_>, _mail: SetSilent) {}
 
     #[handler::unchecked(reason = "test: a handler set carries an unchecked row's reason")]
-    fn on_set_unchecked(&mut self, _ctx: &mut WasmCtx<'_, Erased, Unchecked>, _mail: SetUnchecked) {}
+    fn on_set_unchecked(&mut self, _ctx: &mut WasmCtx<'_, Erased, Anyone, Unchecked>, _mail: SetUnchecked) {}
 }
 
 struct ContractProbe;

@@ -80,7 +80,7 @@ macro_rules! close_observed_actor {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+                _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
                 _kind: KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -107,7 +107,7 @@ macro_rules! shutdown_dispatch {
         impl Dispatch<Self> for $type {
             fn dispatch(
                 _state: &mut Self,
-                ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+                ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
                 kind: KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -196,7 +196,7 @@ impl NativeActor for StubLog {
 impl Dispatch<Self> for StubLog {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Self, crate::Unchecked>,
+        _ctx: &mut NativeCtx<'_, Self, crate::Anyone, crate::Unchecked>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

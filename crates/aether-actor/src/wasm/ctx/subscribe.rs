@@ -9,7 +9,7 @@ use crate::model::{
     CallerAddressable, Contract, DependencyResolver, DependsOn, Publishes, SentBy, SilentRow, Singleton,
 };
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Subscribe this actor to kind `K` from publisher `P` (ADR-0232 §3),
     /// inheriting the handler's causal chain like [`Self::send`]. A window
     /// subscribe covers every window.

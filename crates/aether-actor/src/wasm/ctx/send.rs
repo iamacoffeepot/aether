@@ -17,7 +17,7 @@ use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, send_through_host};
 
-impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// Issue 1987: send `payload` through a held reference, threading this
     /// actor's own id as the send's `from` (ADR-0232 §1). The target is a
     /// [`Target`]: an [`ActorRef<R>`](crate::ActorRef) is kind-checked, so the
@@ -34,7 +34,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// The ctx's own actor must cover what the target's handler requires of
     /// its sender (ADR-0231 §11): nothing for most handlers, and the protocol
-    /// `P` for one that takes `sender: ProtocolRef<P>`. The erased ctx names
+    /// `P` for one whose ctx names `P` as its sender. The erased ctx names
     /// no actor, so it does not send such a kind.
     pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
     where
@@ -49,7 +49,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
     /// names only `R`, the kind is inferred from the payload. When `R`'s
-    /// handler for the kind takes `sender: ProtocolRef<P>`, it compiles only
+    /// handler for the kind names a protocol `P` as its sender, it compiles only
     /// when this actor has a handler for each of `P`'s kinds
     /// ([`SentBy<A, R>`](SentBy), ADR-0231 §11); the call site is the same
     /// line either way. The erased ctx has no flat send. The recipient is the
@@ -198,7 +198,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 // always goes through the host so its reply carries a correlation. For a
 // childless component with no captured `self_id` match the recipient is
 // always `Remote`, so the path is identical to a bare `mail::send_mail`.
-impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
+impl<A, S, M: ReplyMode> MailSender for WasmCtx<'_, A, S, M> {
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()
     }
@@ -213,7 +213,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
 // unchecked-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for WasmCtx<'_, A, Unchecked> {
+impl<A, S> OutboundReply for WasmCtx<'_, A, S, Unchecked> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {

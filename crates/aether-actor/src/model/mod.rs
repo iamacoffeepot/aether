@@ -41,7 +41,9 @@ pub use self::declared::{
 pub use self::declared::{dependency_records_len, write_dependency_records};
 #[doc(hidden)]
 pub use self::protocol::ProtocolCast;
-pub use self::protocol::{Anyone, At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet};
+pub use self::protocol::{
+    Anyone, At, CastTarget, CoveredBy, CoversRows, Protocol, Row, RowAt, RowReply, RowSet, SenderRequirement,
+};
 pub use self::publish::{Publisher, Publishes, Subscriber};
 pub use self::sendable::{SendableTo, SentBy};
 
@@ -681,16 +683,18 @@ pub trait HandlesKind<K: Kind>: Addressable {
     /// (ADR-0231 §11): the protocol the sender must cover, or [`Anyone`] when
     /// it asks nothing.
     ///
-    /// `#[actor]` reads it from the handler's signature. A `#[handler::tell]`
-    /// or `#[handler::request]` that takes a fourth parameter
-    /// `sender: ProtocolRef<P>` requires `P`, and every other handler requires
-    /// [`Anyone`]. That one parameter drives two checks, so they cannot
-    /// drift. Every typed send verb bounds the sending actor against this
-    /// type ([`SentBy`]), so an actor that lacks one of `P`'s handlers cannot
-    /// build the send. And the handler's dispatch arm casts the mail's sender
-    /// to `P` before the handler runs and hands it the proven reference, so
-    /// mail from a route the build cannot see, such as a relayed call or mail
-    /// with no sender, is refused and never reaches the handler.
+    /// `#[actor]` reads it from the handler's ctx type, whose type arguments
+    /// are receiver, sender, mode. A `#[handler::tell]` or
+    /// `#[handler::request]` whose ctx names a protocol `P` as its sender
+    /// (`NativeCtx<'_, Self, P>`) requires `P`, and every other handler
+    /// requires [`Anyone`]. That one type argument drives two checks, so they
+    /// cannot drift. Every typed send verb bounds the sending actor against
+    /// this type ([`SentBy`]), so an actor that lacks one of `P`'s handlers
+    /// cannot build the send. And the handler's dispatch arm casts the mail's
+    /// sender to `P` before the handler runs and hands it the ctx typed by
+    /// `P`, whose `sender()` is the proven reference, so mail from a route
+    /// the build cannot see, such as a relayed call or mail with no sender,
+    /// is refused and never reaches the handler.
     type Sender: Protocol;
 }
 
