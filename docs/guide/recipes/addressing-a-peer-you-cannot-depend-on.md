@@ -129,7 +129,8 @@ fn on_view_subscribe(&mut self, ctx: &mut WasmCtx<'_>, _subscribe: ViewSubscribe
         return;
     };
 
-    self.viewers.add(viewer);
+    let watch = ctx.watch(viewer, NoContext);
+    self.viewers.add(viewer, watch);
     // …
 }
 ```
@@ -144,8 +145,11 @@ that and returns. An erased reference has no send verb
 `aether.view_projection` and answers nothing. The cast answers `None` when
 the sender's published rows do not cover the protocol, and the handler refuses
 that subscription. `Viewers::add` (`crates/aether-kit/src/camera/viewers.rs`)
-stores the typed reference keyed by its erased twin, so a second subscription
-from the same actor is held once.
+stores the typed reference and the id of the watch on it, keyed by the
+reference's erased twin, so a second subscription from the same actor is held
+once. The camera watches the cast reference so that a subscriber that closes
+without unsubscribing is removed
+([Watching another actor](../systems/components.md#watching-another-actor)).
 
 Later pushes go through the stored `ProtocolRef<Subscriber<ViewProjection>>`
 with `send_to(reference, &kind)`, as `Viewers::send` does for every view the
@@ -212,8 +216,9 @@ send to, the proof is typed: an `ActorRef<R>` or a `ProtocolRef<P>`
 kept only where nothing is sent through it: comparing identity, keying a
 table, naming a path, or monitoring. The camera holds no address of its own:
 `Viewers` stores the proof each subscriber handed over, cast once to
-`Subscriber<ViewProjection>`, keyed by the erased reference a removal
-compares, so the camera has nothing to resolve.
+`Subscriber<ViewProjection>`, beside the id of the watch on that subscriber,
+keyed by the erased reference a removal compares, so the camera has nothing
+to resolve.
 
 A position that arrives in a payload is proven once, at receipt. A native
 actor does that with the ctx verb `resolve_live`

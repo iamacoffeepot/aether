@@ -28,7 +28,8 @@
 //! - [`CameraRay`] `{ pixel }` is answered with the world-space ray through a
 //!   pixel of the viewport ([`CameraRayResult`]).
 //! - `aether.render.view_subscribe` / `view_unsubscribe` add and remove the
-//!   sender as a viewer.
+//!   sender as a viewer. A viewer is also removed when it closes, by any
+//!   exit: the camera watches each viewer it adds (ADR-0079 §8).
 //!
 //! # The viewport
 //!
@@ -48,6 +49,12 @@
 //! reference has no codec), so a republish of this module drops them and each
 //! must subscribe again; the camera says how many at warn. The renderer does
 //! so when it is sent `aether.render.view_from` again.
+//!
+//! The watches on those viewers stand: the host moves each with the mailbox.
+//! A viewer that subscribes again is watched through the standing watch, so
+//! its new row holds the right id. One that never does leaves a watch with no
+//! row, which sends the viewer nothing and which the host ends when the
+//! viewer closes; the replacement's departure handler then removes nothing.
 
 pub mod controller;
 
@@ -57,8 +64,8 @@ mod viewers;
 
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, ActorPath, PriorState, ReplyMode, Sends, Subscriber, WasmActor, WasmCtx};
-use aether_actor::{WasmDropCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ActorPath, Departed, NoContext, PriorState, ReplyMode, Sends, Subscriber};
+use aether_actor::{WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_data::{ErasedActorPath, Kind, LoadName};
 use aether_kinds::{Tick, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleSubscribeResult};
@@ -309,7 +316,9 @@ impl WasmActor for CameraComponent {
         pose::pixel_ray(&view, ray.pixel).map_or(CameraRayResult::NoRay, CameraRayResult::Ok)
     }
 
-    /// Add the sender as a viewer and send it the current view.
+    /// Add the sender as a viewer and send it the current view. The camera
+    /// watches the viewer, so one that closes without unsubscribing is
+    /// removed by [`Self::on_viewer_gone`].
     ///
     /// # Agent
     /// Sent by an actor that wants this camera's view; the renderer sends it
@@ -326,19 +335,34 @@ impl WasmActor for CameraComponent {
             return;
         };
 
-        self.viewers.add(viewer);
+        let watch = ctx.watch(viewer, NoContext);
+        self.viewers.add(viewer, watch);
         if let Extent::Known(extent) = self.extent {
             ctx.send_to(viewer, &pose::view_projection(self.pose, self.lens, extent));
         }
     }
 
-    /// Remove the sender as a viewer. A sender that never subscribed changes
-    /// nothing.
+    /// Remove the sender as a viewer and end the watch on it. A sender that
+    /// never subscribed changes nothing.
     #[handler::tell]
     fn on_view_unsubscribe(&mut self, ctx: &mut WasmCtx<'_>, _unsubscribe: ViewUnsubscribe) {
-        if let Some(sender) = ctx.sender() {
-            self.viewers.remove(sender);
+        let Some(sender) = ctx.sender() else {
+            return;
+        };
+
+        if let Some(watch) = self.viewers.remove(sender) {
+            ctx.unwatch(watch);
         }
+    }
+
+    /// Remove a viewer that closed. The watch ended at this notice, so there
+    /// is none to end.
+    ///
+    /// # Agent
+    /// The engine's notice that a watched viewer closed; never sent by hand.
+    #[handler::event]
+    fn on_viewer_gone(&mut self, _ctx: &mut WasmCtx<'_>, event: Departed<Subscriber<ViewProjection>>) {
+        self.viewers.remove(event.actor.erase());
     }
 
     /// Follow the window's size.

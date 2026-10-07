@@ -696,6 +696,7 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "aether-render",
+ "aether-substrate",
  "aether-window",
  "inventory",
  "tracing",
