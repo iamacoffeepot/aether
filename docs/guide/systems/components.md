@@ -738,6 +738,37 @@ The worked example is the environment bootstrap script,
 import, merge, and publish sequence through the two kind-checked references
 (see [Building an environment](workspace.md#building-an-environment)).
 
+### Requiring something of the sender
+
+A guest that will mail its sender back states what the sender must handle on
+the handler that takes the first mail, as a fourth parameter
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+§11):
+
+```rust
+#[handler::request]
+fn on_dial(&mut self, ctx: &mut WasmCtx<'_>, dial: Dial, sender: ProtocolRef<Consumer>) -> Dialed {
+    self.consumers.push(sender);
+    ctx.send_to(sender, &Ready { tag: dial.tag });
+    Dialed::Ok
+}
+```
+
+`#[handler::tell]` and `#[handler::request]` take it. A component that sends
+`Dial` writes the plain `ctx.send::<Dialer>(&Dial { .. })`, which builds only
+when the component has a handler for each of `Consumer`'s kinds. The engine
+casts the sender to `Consumer` before `on_dial` runs and hands it the proven
+reference, so the handler holds a `ProtocolRef<Consumer>` without calling
+`ctx.cast`. A sender that reaches the guest another way and does not cover the
+protocol never runs the handler: a request is answered with the reply's
+`From<PathRefused>`, naming the sender, and a tell is refused, logged in the
+guest's log, and reported to a caller relayed through `aether.rpc.server`.
+The bundle fixture's `SenderGate`
+(`crates/aether-test-fixtures-bundle/src/sender_gate.rs`) is the worked
+example. See
+[Reply classes](../foundations/actor-model.md#reply-classes) for the rule on
+both transports.
+
 ## Watching another actor
 
 A component that keeps state on behalf of another actor needs to learn when

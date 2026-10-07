@@ -108,7 +108,9 @@ impl aether_actor::Addressable for CommitChild {
 impl aether_actor::ChildOf<CommitParent> for CommitChild {
     type Index = aether_actor::Here;
 }
-impl aether_actor::HandlesKind<CloseChild> for CommitChild {}
+impl aether_actor::HandlesKind<CloseChild> for CommitChild {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for CommitChild {
     type Config = ();
     type Params = ();
@@ -181,9 +183,15 @@ impl aether_actor::Addressable for CommitParent {
     type Resolver = aether_actor::Many;
 }
 impl aether_actor::Root for CommitParent {}
-impl aether_actor::HandlesKind<StageBurst> for CommitParent {}
-impl aether_actor::HandlesKind<CloseBurst> for CommitParent {}
-impl aether_actor::HandlesKind<CommitQuery> for CommitParent {}
+impl aether_actor::HandlesKind<StageBurst> for CommitParent {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<CloseBurst> for CommitParent {
+    type Sender = aether_actor::Anyone;
+}
+impl aether_actor::HandlesKind<CommitQuery> for CommitParent {
+    type Sender = aether_actor::Anyone;
+}
 impl aether_actor::Lifecycle<Self> for CommitParent {
     type Config = ();
     type Params = ();

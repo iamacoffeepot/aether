@@ -183,7 +183,9 @@ impl NativeActor for Sink {
     fn on_note(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Note) {}
 }
 
-impl HandlesKind<CastOnly> for Sink {}
+impl HandlesKind<CastOnly> for Sink {
+    type Sender = aether_actor::Anyone;
+}
 
 /// Sends a [`Carrier`] of the courier's blob to each recipient.
 #[aether_data::kind(name = "test.blob_mail.send_carrier")]

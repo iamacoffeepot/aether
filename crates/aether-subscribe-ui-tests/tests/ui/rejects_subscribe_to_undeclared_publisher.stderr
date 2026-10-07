@@ -1,7 +1,7 @@
 error[E0277]: `Subscriber` does not declare a dependency on `LifecycleCapability`
-  --> tests/ui/rejects_subscribe_to_undeclared_publisher.rs:24:9
+  --> tests/ui/rejects_subscribe_to_undeclared_publisher.rs:29:9
    |
-24 |     ctx.subscribe::<LifecycleCapability, Tick>();
+29 |     ctx.subscribe::<LifecycleCapability, Tick>();
    |         ^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `DependsOn<LifecycleCapability>` is not implemented for `Subscriber`

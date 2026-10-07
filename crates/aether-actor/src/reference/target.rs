@@ -3,7 +3,7 @@
 use aether_data::ActorMail;
 
 use super::{ActorRef, ErasedActorRef, ProtocolRef};
-use crate::model::{HandlesKind, Protocol, RowAt};
+use crate::model::{Anyone, HandlesKind, Protocol, RowAt};
 
 mod sealed {
     use crate::reference::{ActorRef, ProtocolRef};
@@ -70,7 +70,7 @@ pub struct Direct;
 ///     type Resolver = One;
 /// }
 ///
-/// impl HandlesKind<()> for Peer {}
+/// impl HandlesKind<()> for Peer { type Sender = aether_actor::Anyone; }
 ///
 /// fn ping(ctx: &mut WasmCtx<'_>, peer: ActorRef<Peer>) {
 ///     ctx.send_to(peer, &());
@@ -136,12 +136,52 @@ pub struct Direct;
 ///     sendable(pinging, &Pong::default());
 /// }
 /// ```
+///
+/// A target also carries what its handler for the kind requires of the actor
+/// that sends it ([`Sender`](Target::Sender), ADR-0231 §11), and each ctx
+/// verb that takes a target requires the ctx's own actor to cover it. An
+/// erased ctx names no actor, so it does not send a kind whose handler
+/// requires something of its sender:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{ActorRef, Addressable, Erased, HandlesKind, One, Protocol, Row, Silent, WasmCtx};
+/// use aether_kinds::Ping;
+///
+/// struct Holding;
+///
+/// impl Protocol for Holding {
+///     type Rows = (Row<Ping, Silent>,);
+/// }
+///
+/// struct Gate;
+///
+/// impl Addressable for Gate {
+///     const NAMESPACE: &'static str = "example.gate";
+///     type Resolver = One;
+/// }
+///
+/// impl HandlesKind<()> for Gate {
+///     type Sender = Holding;
+/// }
+///
+/// fn take(ctx: &mut WasmCtx<'_, Erased>, gate: ActorRef<Gate>) {
+///     ctx.send_to(gate, &());
+/// }
+/// ```
 pub trait Target<K: ActorMail, I = Direct>: sealed::Sealed {
+    /// What the target's handler for `K` requires of the sending actor
+    /// (ADR-0231 §11): [`HandlesKind::Sender`] for an [`ActorRef<R>`], and
+    /// [`Anyone`] for a [`ProtocolRef<P>`], whose rows only a handler that
+    /// asks nothing of its sender covers. A borrow carries its target's.
+    type Sender: Protocol;
+
     /// The proof this target sends through, with its actor type forgotten.
     fn erased(&self) -> ErasedActorRef;
 }
 
 impl<R: HandlesKind<K>, K: ActorMail> Target<K> for ActorRef<R> {
+    type Sender = R::Sender;
+
     fn erased(&self) -> ErasedActorRef {
         self.erase()
     }
@@ -151,12 +191,16 @@ impl<P: Protocol, K: ActorMail, I> Target<K, I> for ProtocolRef<P>
 where
     P::Rows: RowAt<K, I>,
 {
+    type Sender = Anyone;
+
     fn erased(&self) -> ErasedActorRef {
         self.target()
     }
 }
 
 impl<K: ActorMail, I, T: Target<K, I> + ?Sized> Target<K, I> for &T {
+    type Sender = T::Sender;
+
     fn erased(&self) -> ErasedActorRef {
         (**self).erased()
     }

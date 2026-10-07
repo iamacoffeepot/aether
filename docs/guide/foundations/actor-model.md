@@ -337,8 +337,8 @@ handler's mail arrives:
 
 | Attribute | Its mail is | Return | Parameters |
 |---|---|---|---|
-| `#[handler::request]` | a request it must answer | `O` or `Pending<O>` | 3 |
-| `#[handler::tell]` | a command that needs no answer | none | 3 |
+| `#[handler::request]` | a request it must answer | `O` or `Pending<O>` | 3, or 4 with its sender requirement |
+| `#[handler::tell]` | a command that needs no answer | none | 3, or 4 with its sender requirement |
 | `#[handler::event]` | a publication it subscribed to | none | 3 |
 | `#[handler::response]` | the answer to this actor's own request | none | 3, or 4 with its stored context |
 
@@ -365,6 +365,38 @@ handler runs either way and receives the take as it is. A `response` with no
 fourth parameter may still call `ctx.take_context` itself, for example to try
 several context kinds in turn.
 
+A `tell` or a `request` states what its sender must handle as a fourth
+parameter, `sender: ProtocolRef<P>`
+([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §11).
+A receiver that mails its sender back later, such as a session that delivers
+frames to whoever dialed it, needs the sender to handle those kinds, and this
+is where it says so:
+
+```rust
+#[handler::tell]
+fn on_take_focus(&mut self, ctx: &mut WasmCtx<'_>, _take: TakeFocus, sender: ProtocolRef<FocusHolder>) {
+    self.holder = Some(sender);
+    ctx.send_to(sender, &FocusGained);
+}
+```
+
+The one parameter drives two checks. At build time, an actor sends this kind
+with the plain `ctx.send::<Window>(&TakeFocus)` only when it has a handler for
+each of `FocusHolder`'s kinds; one that lacks a handler gets an error naming
+it, and nothing is added at the call site. At receipt, the engine casts the
+sender to `FocusHolder` before the handler runs and hands it the proven
+reference, so the handler never writes `ctx.cast`. Mail the build cannot see,
+such as a call relayed from MCP or mail with no sender, fails that cast and
+never reaches the handler: the refusal is logged in the receiver's log, a tell
+relayed by `aether.rpc.server` ends its call with the refusal, and a request
+is answered with its own reply, built from a `PathRefused` naming the sender,
+so a request that takes a sender replies a kind that is `From<PathRefused>`.
+A kind whose handler requires something of its sender is not sent through a
+`ProtocolRef`: a protocol's rows are covered only by handlers that ask
+nothing. The parameter is refused on an `event`, a `response`, an unchecked
+handler, a `Departed<W>` handler, a batched `&[K]` handler, and a handler in a
+set.
+
 The **unchecked** class (`#[handler::unchecked(reason = "…")]`) takes an `Unchecked`
 ctx and issues its own replies by hand (`ctx.reply` / `ctx.reply_to`), which the
 engine does not check. It gives up the reply check, so it is only for a handler
@@ -386,9 +418,10 @@ trace, and cost tails do. Incremental or unbounded delivery publishes to
 subscribers (`Publishes<K>` / `subscribe`).
 
 `#[actor]` records each handler's answer as a type-level **contract row**,
-`impl Contract<K> for A { type Reply = …; type Index = … }`: the reply kind `O`
-for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for an
-unchecked handler. Each row names its position in the actor's one type-level
+`impl Contract<K> for A { type Reply = …; type Sender = …; type Index = … }`:
+the reply kind `O` for `-> O` or `-> Pending<O>`, `Silent` for `-> ()`, and
+`Undeclared` for an unchecked handler, and as `Sender` the protocol its
+`sender` parameter names, or `Anyone` when it takes none. Each row names its position in the actor's one type-level
 row list, `Contracts::Rows`, so a row exists only where a handler does: a
 hand-written row for a kind the actor does not handle does not compile, and a
 handled kind of a public actor is declared `pub` (ADR-0231 §10). It also emits
@@ -407,8 +440,8 @@ declares one: each method is a row, `-> O` single and no return silent, and the
 explicit return `-> Undeclared` unchecked. The trait becomes a unit struct whose
 `impl Protocol` lists the rows as
 `type Rows = (Row<K, O>, …)`. `MeshLoader: CoveredBy<R>` holds when the target
-`R` has a contract row for every kind with the exact reply. Rows match by kind,
-never by method name; a `#[fallback]` has no row and an unchecked handler's
+`R` has a contract row for every kind with the exact reply, from a handler
+that asks nothing of its sender. Rows match by kind, never by method name; a `#[fallback]` has no row and an unchecked handler's
 `Undeclared` row covers only an explicit unchecked protocol row. That row promises
 the target handles the kind without imposing a reply-handler obligation on the
 sender. Coverage is sealed: `aether-actor` computes it

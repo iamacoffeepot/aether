@@ -6,7 +6,7 @@
 
 use core::str::from_utf8;
 
-use aether_actor::{__LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
+use aether_actor::{__ActorPath, __LiveRoute, __PublishedRows, __ResolvedPath, AssetCatalog};
 use aether_codec::frame::max_frame_size;
 use aether_data::{BlobHash, ErasedActorPath, MAX_READ_BYTES, wire};
 use wasmtime::{Caller, Linker};
@@ -800,6 +800,42 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let answer = __PublishedRows { rows };
             let bytes = wire::to_vec(&answer)
                 .map_err(|error| wasmtime::Error::msg(format!("published_rows: encode failed: {error}")))?;
+            deliver_bytes_to_guest(&mut caller, &bytes)
+        },
+    )?;
+
+    // HOST_FN_OK: ADR-0231 §11 — the guest half of the native
+    // `NativeCtx::actor_path` read: the position of a reference the guest
+    // holds goes in, and the canonical path of the route record there comes
+    // out. It closes the one direction the address reads left open:
+    // `resolve_path_p32`, `live_route_p32`, and `route_rows_p32` take a path,
+    // `published_rows_p32` takes a position and answers rows, and this takes
+    // a position and answers the path. The host reads it through
+    // `NativeBinding::actor_path_at`, the `Registry::actor_path_at` read the
+    // native `actor_path` makes, so the guest and native answers cannot drift
+    // apart.
+    //
+    // Its one caller is a guest dispatch arm that refuses a sender its
+    // handler's `sender: ProtocolRef<P>` requirement does not admit. The arm
+    // names that sender in the error it logs and in the `PathRefused` a
+    // request's reply is built from, inside the same dispatch, before the
+    // handler would have run, so no mail can serve the read. No guest ctx
+    // verb exposes it.
+    //
+    // The guest passes the position. The host encodes the answer as one
+    // `__ActorPath` — the canonical path of the route record there, and none
+    // for a position that holds no record — and delivers it as the packed
+    // `(ptr << 32) | len`, like `published_rows_p32`. The path is the name
+    // `describe_component` and every reply's sender already expose, and the
+    // host mints nothing, so a guest that passes an arbitrary position gets
+    // no reference from it.
+    linker.func_wrap(
+        "aether",
+        "actor_path_p32",
+        |mut caller: Caller<'_, ComponentCtx>, position: u64| -> wasmtime::Result<u64> {
+            let path = caller.data().binding.actor_path_at(MailboxId(position)).map(|path| path.to_string());
+            let bytes = wire::to_vec(&__ActorPath { path })
+                .map_err(|error| wasmtime::Error::msg(format!("actor_path: encode failed: {error}")))?;
             deliver_bytes_to_guest(&mut caller, &bytes)
         },
     )?;

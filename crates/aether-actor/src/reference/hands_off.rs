@@ -3,7 +3,7 @@
 use aether_data::ActorMail;
 
 use super::{ActorRef, Direct, ProtocolRef, Target};
-use crate::model::{Contract, HandlesKind, Protocol, RowAt};
+use crate::model::{Anyone, Contract, HandlesKind, Protocol, RowAt};
 
 mod sealed {
     use crate::reference::{ActorRef, ProtocolRef};
@@ -25,7 +25,11 @@ mod sealed {
 /// to it with a `K` payload is answered by it with the `R` the requester
 /// waits for (ADR-0243 §9).
 ///
-/// An [`ActorRef<T>`] qualifies when `T`'s [`Contract<K>`] row replies `R`, a
+/// An [`ActorRef<T>`] qualifies when `T`'s [`Contract<K>`] row replies `R`
+/// and its handler asks nothing of its sender ([`Anyone`]): the hand-off is
+/// made in the name of whichever actor holds the reply, which no bound here
+/// names, so a handler that requires something of its sender is not a
+/// hand-off target (ADR-0231 §11). A
 /// [`ProtocolRef<P>`] when `P`'s row for `K` is [`Row<K, R>`](crate::Row), and
 /// a borrow of either qualifies too. `R` is [`ActorMail`], so a [`Silent`] or
 /// [`Undeclared`] row never qualifies, and an [`ErasedActorRef`] proves no
@@ -37,16 +41,20 @@ mod sealed {
 /// [`ErasedActorRef`]: crate::ErasedActorRef
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot take a held `{R}` for `{K}`",
-    label = "no row of this target answers `{K}` with `{R}`",
-    note = "a held reply hands off to an `ActorRef<T>` whose handler for `{K}` replies `{R}`, or a `ProtocolRef<P>` \
-            whose row for `{K}` is `Row<{K}, {R}>`; an `ErasedActorRef` proves no row (#6895)"
+    label = "no row of this target answers `{K}` with `{R}` from any sender",
+    note = "a held reply hands off to an `ActorRef<T>` whose handler for `{K}` replies `{R}` and takes no `sender` \
+            parameter, or a `ProtocolRef<P>` whose row for `{K}` is `Row<{K}, {R}>`; an `ErasedActorRef` proves no \
+            row (#6895)"
 )]
 pub trait HandsOff<K: ActorMail, R: ActorMail, I = Direct>: Target<K, I> + sealed::Sealed<K, R, I> {}
 
 // Each impl is `do_not_recommend`, so a failed hand-off reports the
 // `HandsOff` message rather than the reply equality or borrow it bounds.
 #[diagnostic::do_not_recommend]
-impl<T: HandlesKind<K> + Contract<K, Reply = R>, K: ActorMail, R: ActorMail> HandsOff<K, R> for ActorRef<T> {}
+impl<T: HandlesKind<K> + Contract<K, Reply = R, Sender = Anyone>, K: ActorMail, R: ActorMail> HandsOff<K, R>
+    for ActorRef<T>
+{
+}
 
 #[diagnostic::do_not_recommend]
 impl<P: Protocol, K: ActorMail, R: ActorMail, I> HandsOff<K, R, I> for ProtocolRef<P> where

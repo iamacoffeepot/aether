@@ -79,12 +79,14 @@ those two kinds.
 A consumer actor binds itself to its sessions with a `_self` kind:
 `ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
 `ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
-consumer from the proven sender, so the actor never names its own position. It
-casts the sender to `TcpConsumer` once, at receipt (ADR-0231 §4), and replies
-`Err` without binding or dialing when the sender's published rows do not
-cover the protocol, or when the mail has no actor sender. A component that
-binds itself can check its coverage at compile time with
-`TcpConsumer: CoveredBy<Self>`, as the `tcp_load_probe` fixture does.
+consumer from the proven sender, so the actor never names its own position.
+Both handlers require `TcpConsumer` of their sender (ADR-0231 §11): the send
+builds only for an actor with silent handlers for `session_data` and
+`session_closed`, and an actor that lacks one gets a build error naming it.
+The engine casts the sender before the handler runs, so a `_self` kind that
+arrives another way, such as a call relayed from MCP, is answered
+`Err(Consumer(..))` naming the sender and the handler it lacks, and nothing
+is bound or dialed. Mail with no actor sender is refused with no reply.
 
 An agent, or a capability binding a different actor, names that actor in the
 `consumer` field of `bind_listener` or `connect`. The field is a

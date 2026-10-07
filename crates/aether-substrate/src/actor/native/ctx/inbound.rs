@@ -10,7 +10,8 @@
 use std::fmt::Display;
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, OutboundReply, PathRefused, ReplyMode, Unchecked};
+use aether_actor::__macro_internals::SenderRefused;
+use aether_actor::{CastTarget, ErasedActorRef, OutboundReply, PathRefused, ProtocolRef, ReplyMode, Unchecked};
 use aether_data::wire::{self, DecodeCtx};
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 use aether_kinds::DecodeRefused;
@@ -123,31 +124,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         None
     }
 
-    /// Answer a decode refusal of a `kind` payload to the reply target with a
-    /// [`DecodeRefused`] naming the kind and `error`, when the target opts in:
-    /// it is an actor that asked under a correlation, and its published
-    /// contract carries a `DecodeRefused` row. The notice goes through the
+    /// Answer a refusal of a `kind` payload made before its handler ran, a
+    /// refused decode or a refused sender, to the reply target with a
+    /// [`DecodeRefused`] naming the kind and `error`, when the target opts in
+    /// (see `NativeBinding::refusal_listener`). The notice goes through the
     /// binding's reply path, so it joins the in-flight chain and is handled
     /// before that chain's `Settled`, and this actor is its sender.
-    ///
-    /// The opt-in is the target's own declared handler, which only the RPC
-    /// server declares: a wire payload is untrusted and its caller cannot
-    /// read actor logs. Every other sender is typed code, so a refusal it
-    /// causes is a codec bug the warn records, and it hears nothing.
     fn answer_decode_refusal(&self, kind: KindId, error: &impl Display) {
-        let SourceAddr::Component(target) = self.source.addr else {
-            return;
-        };
-        if self.source.correlation_id == Source::NO_CORRELATION {
-            return;
-        }
-        let opted_in = self
-            .binding
-            .mailer()
-            .registry()
-            .published_contract(target)
-            .is_some_and(|contract| contract.handles(DecodeRefused::ID));
-        if !opted_in {
+        if self.binding.refusal_listener(self.source).is_none() {
             return;
         }
 
@@ -160,6 +144,53 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             self.in_flight_root,
             self.outbound_parent(),
         );
+    }
+
+    /// The mail's sender as the protocol `P` its handler requires
+    /// (ADR-0231 §11), by the guard cast [`Self::cast`] runs.
+    fn prove_sender<P: CastTarget>(&self) -> Option<ProtocolRef<P>> {
+        self.sender().and_then(|sender| self.cast::<P>(sender))
+    }
+
+    /// Why the sender of a `K` did not cast to `P`, logged once as an error
+    /// in this actor's log. Reads the sender's path and the rows it
+    /// published; both are paid only here, after the cast refused.
+    #[cold]
+    fn refused_sender<P: CastTarget, K: Kind>(&self) -> SenderRefused {
+        let sender = self.sender();
+        let rows = sender.and_then(|sender| self.binding.mailer().registry().published_rows_at(sender.id()));
+        let refused = SenderRefused::of::<P>(sender.map(|sender| self.binding.actor_path(sender)), rows.as_deref());
+
+        tracing::error!(
+            target: "aether_substrate::mail",
+            kind = K::NAME,
+            refusal = %refused,
+            "handler did not run: its sender is refused",
+        );
+        refused
+    }
+
+    /// Prove a tell's sender as `P` before its handler runs (ADR-0231 §11),
+    /// or refuse the mail: the `#[actor]` arm of a `#[handler::tell]` that
+    /// takes `sender: ProtocolRef<P>` calls it and passes the proven
+    /// reference as the handler's fourth argument. Hidden macro plumbing,
+    /// like [`Self::__decode_inbound`]; no handler calls it.
+    ///
+    /// # Errors
+    ///
+    /// The [`SenderRefused`] when the sender does not cast to `P`, or the
+    /// mail has none. The refusal is logged, the reply target hears it only
+    /// when it opts in (see `NativeBinding::refusal_listener`), and the handler
+    /// does not run.
+    #[doc(hidden)]
+    pub fn __sender_or_refuse<P: CastTarget, K: Kind>(&self) -> Result<ProtocolRef<P>, SenderRefused> {
+        if let Some(proven) = self.prove_sender::<P>() {
+            return Ok(proven);
+        }
+
+        let refused = self.refused_sender::<P, K>();
+        self.answer_decode_refusal(K::ID, &refused);
+        Err(refused)
     }
 
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
@@ -317,5 +348,39 @@ impl<A> NativeCtx<'_, A, Unchecked> {
             return Some(());
         }
         self.__refuse_inbound_unanswered::<K>(error)
+    }
+
+    /// Prove a request's sender as `P` before its handler runs
+    /// (ADR-0231 §11), or answer the request: the `#[actor]` arm of a
+    /// `#[handler::request]` that takes `sender: ProtocolRef<P>` calls it and
+    /// passes the proven reference as the handler's fourth argument.
+    ///
+    /// A refused sender is answered at once with the row's reply `O`, built
+    /// from a [`PathRefused`] naming the sender's path, through
+    /// [`OutboundReply::reply`], so the requester hears the refusal as its
+    /// typed reply and no [`DecodeRefused`] follows. A `Pending<O>` row is
+    /// answered the same way. `O: From<PathRefused>` is what makes every such
+    /// request answerable, and a reply that lacks it fails to build at the
+    /// handler's return type. Mail with no sender has no path to name, so it
+    /// is refused as a tell's is.
+    ///
+    /// # Errors
+    ///
+    /// The [`SenderRefused`] when the sender does not cast to `P`, or the
+    /// mail has none. The refusal is logged and the handler does not run.
+    #[doc(hidden)]
+    pub fn __sender_or_answer<P: CastTarget, K: Kind, O: ActorMail + From<PathRefused>>(
+        &mut self,
+    ) -> Result<ProtocolRef<P>, SenderRefused> {
+        if let Some(proven) = self.prove_sender::<P>() {
+            return Ok(proven);
+        }
+
+        let refused = self.refused_sender::<P, K>();
+        match refused.path_refused() {
+            Some(path) => OutboundReply::reply(self, &O::from(path)),
+            None => self.answer_decode_refusal(K::ID, &refused),
+        }
+        Err(refused)
     }
 }

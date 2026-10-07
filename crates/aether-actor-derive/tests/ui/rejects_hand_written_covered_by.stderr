@@ -9,11 +9,16 @@ help: the trait `Protocol` is not implemented for `NotAProtocol`
    |
 16 | struct NotAProtocol;
    | ^^^^^^^^^^^^^^^^^^^
-help: the trait `Protocol` is implemented for `Subscriber<K>`
-  --> $WORKSPACE/crates/aether-actor/src/model/publish.rs
+help: the following other types implement trait `Protocol`
+  --> $WORKSPACE/crates/aether-actor/src/model/protocol.rs
+   |
+   | impl Protocol for Anyone {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^ `Anyone`
+   |
+  ::: $WORKSPACE/crates/aether-actor/src/model/publish.rs
    |
    | impl<K: ActorMail> Protocol for Subscriber<K> {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Subscriber<K>`
    = note: required for `NotAProtocol` to implement `model::protocol::covered_sealed::Sealed<Target>`
 note: required by a bound in `CoveredBy`
   --> $WORKSPACE/crates/aether-actor/src/model/protocol.rs

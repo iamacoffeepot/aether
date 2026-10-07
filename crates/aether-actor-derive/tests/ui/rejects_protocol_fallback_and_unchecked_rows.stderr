@@ -11,7 +11,7 @@ error[E0308]: mismatched types
 note: method defined here
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
    |
-   |     pub fn send_to<K: ActorMail, I>(&mut self, target: impl Target<K, I>, payload: &K) {
+   |     pub fn send_to<K: ActorMail, I, T: Target<K, I>>(&mut self, target: T, payload: &K)
    |            ^^^^^^^
 
 error[E0277]: `FallbackOnly` has no contract row for `Ping`

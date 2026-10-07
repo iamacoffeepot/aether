@@ -14,7 +14,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 // Handler-signature kinds must be importable at file root because
-// `#[actor]` emits `impl HandlesKind<K> for X {}` markers against the
+// `#[actor]` emits `impl HandlesKind<K> for X { type Sender = aether_actor::Anyone; }` markers against the
 // identity always-on, outside the `feature = "runtime"` gate.
 use aether_kinds::Advance;
 

@@ -145,19 +145,24 @@ The rules:
 10. A contract row, a declared dependency, a declared inline child, and a
     module listing exist only at a position of their actor's or module's one
     declaration list (§10).
+11. A handler states what its sender must handle as a fourth parameter,
+    `sender: ProtocolRef<P>`. A typed send of that kind compiles only for an
+    actor that covers `P`, and the engine casts the sender to `P` before the
+    handler runs (§11).
 
 | § | Decision | On main |
 |---|---|---|
 | 1 | Static reply check on typed sends | not built |
 | 2 | `#[protocol]` and `CoveredBy` | built: `Row`, `RowReply`, `RowSet`, `CoversRows`, `Protocol`, `CoveredBy` (`crates/aether-actor/src/model/protocol.rs`) and `#[protocol]` (`crates/aether-actor-derive/src/protocol.rs`), over the per-handler `Contract<K>` rows and per-actor `Contracts::CONTRACTS`; `includes` and protocol-to-protocol coverage are not built |
 | 3 | `ProtocolRef<P>`, `ProtocolPath<P>`, contextual decode, `resolve` | `ProtocolPath<P>` and `ActorPath::narrow` built (`crates/aether-actor/src/path/`), with the path text as their only wire form. `ProtocolPath<P>`'s decode proves coverage against the `Live` or `Dropped` route at its path through `Kind::decode_with` and `DecodeCtx` (`crates/aether-data/src/wire/context.rs`, over the registry's `PublishedRoutes` answer in `crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`), and it has no `Deserialize`; `ActorPath<R>`'s decode checks its leaf namespace, and the type constructors `ActorPath::<R>::instance` and `ActorPath::<C>::child` replace the declared links. `ProtocolRef<P>` built (`crates/aether-actor/src/reference/protocol_ref.rs`), a `Target` for each kind `P` lists through a row index the compiler infers (`RowAt`, `crates/aether-actor/src/model/protocol.rs`), with the native liveness-only `resolve` over a `ProtocolPath<P>` (`Registry::resolve_protocol`, `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). Reference narrowing built: `ActorRef::narrow` (`crates/aether-actor/src/reference/actor_ref.rs`) and its spawn-result sibling `InlineChild::narrow` (`crates/aether-actor/src/wasm/ctx/child.rs`), with the guest `send_to` verbs taking a `ProtocolRef<P>` target, and a wasm handler set's rows reaching its adopter's `Contracts::Rows` so an adopter covers a protocol listing a set kind; the widget panel holds its children as such references (`crates/aether-widget/src/lanes.rs`). The guest's published-routes answer is built (#7501): every guest decode starts from one context (`crates/aether-actor/src/wasm/decode.rs`) whose routes answer through the `route_rows_p32` host fn, the `Registry::route_rows` read the native decode makes, so a guest decodes a `ProtocolPath<P>` in mail, in its config, in an inline child's config, and in saved state, and its `resolve` takes either typed path (`crates/aether-actor/src/path/typed_path.rs`). Not built: `ProtocolRef<P>` narrowing, which needs protocol-to-protocol coverage (§2) |
-| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm and its protocol arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). The protocol arm's exact-rows rule is written once in `crates/aether-actor/src/model/protocol.rs`, and `#[protocol]` opts each protocol in through a hidden marker. Its consumers are the window's and the lifecycle capability's typed subscriber fan-out and the tcp session's `ProtocolRef<TcpConsumer>`, cast from a `connect_self` or `bind_listener_self` sender. The guest cast is built (`WasmCtx::cast` in `crates/aether-actor/src/wasm/ctx/cast.rs`): one host fn, `published_rows_p32`, answers the rows `Registry::published_rows_at` reads for both casts, and the guest applies the same `CastTarget::admits`; its first consumers are the HTTP stream handles, whose `ProtocolRef<ResponseSink>`, `ProtocolRef<RequestCreditSink>`, and `ProtocolRef<WebSocketSink>` are cast from the dispatching sender. No send verb takes an erased reference (#6932): `Target` and the harness's `SendTarget` have no `ErasedActorRef` impl, and the public `send_envelope_tracked_to` and `send_envelope_detached_to` are removed, so the boundary items and the deferred reply envelope are the only native doors that carry runtime bytes. The cast's `AnyKind` arm is not built |
+| 4 | Published rows, no erased send verb, the cast | published rows built on the route record for both transports (`RouteContract`, `crates/aether-substrate/src/mail/registry/contract.rs`); the native cast built for its `Subscriber<K>` arm and its protocol arm (`ctx.cast`, `CastTarget`; `Registry::cast` in `crates/aether-substrate/src/mail/registry/mailbox/proven.rs`). The protocol arm's exact-rows rule is written once in `crates/aether-actor/src/model/protocol.rs`, and `#[protocol]` opts each protocol in through a hidden marker. Its consumers are the window's and the lifecycle capability's typed subscriber fan-out and the tcp session's `ProtocolRef<TcpConsumer>`, which the `connect_self` and `bind_listener_self` handlers are handed by the cast their arm runs (§11). The guest cast is built (`WasmCtx::cast` in `crates/aether-actor/src/wasm/ctx/cast.rs`): one host fn, `published_rows_p32`, answers the rows `Registry::published_rows_at` reads for both casts, and the guest applies the same `CastTarget::admits`; its first consumers are the HTTP stream handles, whose `ProtocolRef<ResponseSink>`, `ProtocolRef<RequestCreditSink>`, and `ProtocolRef<WebSocketSink>` are cast from the dispatching sender. No send verb takes an erased reference (#6932): `Target` and the harness's `SendTarget` have no `ErasedActorRef` impl, and the public `send_envelope_tracked_to` and `send_envelope_detached_to` are removed, so the boundary items and the deferred reply envelope are the only native doors that carry runtime bytes. The cast's `AnyKind` arm is not built |
 | 5 | Replace preserves contracts | built, the fallback rule included: `crates/aether-data/src/contract.rs`, `crates/aether-substrate/src/mail/registry/contract.rs`, `crates/aether-component/src/trampoline/runtime/contract.rs` |
 | 6 | Unchecked rows | built: `Undeclared` row, `ReplyContract::Unchecked` on both manifests, and explicit `-> Undeclared` protocol rows with exact static and runtime coverage |
 | 7 | Ctx typed by its actor | built, every ctx on both transports |
 | 8 | Silent subscribers and watchers | built for the wasm `subscribe` (`crates/aether-actor/src/wasm/ctx/subscribe.rs`) and for the window's and the lifecycle capability's subscriber references (`ProtocolRef<Subscriber<K>>`, `crates/aether-window/src/runtime/subscribers.rs`, `crates/aether-lifecycle/src/subscribers.rs`); the `monitor` bound is not |
 | 9 | Relays | built: `forward_to` takes a typed `Target`, so a relay compiles only for a kind its target's type or protocol lists, and `DeferredReply::hand_off` exists |
 | 10 | Markers exist only at a declared position | built: `Here`, `There<I>`, `Gap`, `ListIndex`, `RowIndex`, `Declared` (`crates/aether-actor/src/model/declared.rs`), `Contracts::Rows` and the `Index` of `Contract<K>`, `DependsOn<R>`, `Spawns<C>`, and `Rebuildable<M>`, emitted by `#[actor]` (`crates/aether-actor-derive/src/reply_markers.rs`, `wasm_expand.rs`, `native_expand.rs`, `handler_set.rs`) and `export!` (`crates/aether-actor/src/wasm/mod.rs`). The checks read the declaration lists: the native birth check (`crates/aether-substrate/src/actor/native/dependencies.rs`) and `export!`'s guest `Dependency` records read `Declared::Depends` through `DependencyList`, and `export!`'s inline-child coverage check reads `Declared::Spawns` through `ListedIn`, so a hand-written `Declared` is checked as an emitted one is. A type no `#[actor]` built still writes its own `Contracts` and dispatch (#6887, #6888) |
+| 11 | A handler's sender requirement | built: `HandlesKind::Sender`, its mirror `Contract::Sender`, `Anyone`, `SentBy`, and `Target::Sender` (`crates/aether-actor/src/model/`, `crates/aether-actor/src/reference/target.rs`), bounded on every typed send verb of both ctxs, on `InlineChild::send`, on `InlineParent::send` through `AllHandle<K, A>`, and on `subscribe`. `#[actor]` reads the fourth parameter of a tell or a request (`crates/aether-actor-derive/src/handler_parse.rs`) and its arm calls the cast helper before the handler: native in `crates/aether-substrate/src/actor/native/ctx/inbound.rs`, guest in `crates/aether-actor/src/wasm/ctx/sender.rs`, whose refused tell returns `DISPATCH_REFUSED_SENDER` for the host to answer (`crates/aether-substrate/src/actor/wasm/component/dispatch.rs`). The guest names its sender through one host fn, `actor_path_p32`, the guest half of the native `actor_path` read. Its first consumers are the tcp capability's `connect_self` and `bind_listener_self`. Not built: the requirement in the handler manifests, so `describe_handlers` does not show it and a relay cannot refuse before delivery |
 
 ### 1. The static reply check
 
@@ -691,8 +696,9 @@ the registry's published rows through the ctx and nothing else (R-0005).
 Two arms are built: `Subscriber<K>`, and the protocol arm, which every
 `#[protocol]` type opts into through a hidden marker whose rule is the one
 exact-rows check `aether-actor` writes, so the marker cannot choose rows.
-Its first consumer is the tcp capability's reflexive consumer binding. The
-guest cast (`WasmCtx::cast`) reads the same rows through one host fn,
+Its first consumer was the tcp capability's reflexive consumer binding, which
+now states the protocol on its handler and is handed the cast's result (§11).
+The guest cast (`WasmCtx::cast`) reads the same rows through one host fn,
 `published_rows_p32`, which answers a `Live` route's published rows and
 mints nothing, and applies the same sealed rule; its first consumers are the
 HTTP stream handles, which cast the dispatching sender to the sink protocol
@@ -713,7 +719,9 @@ its path allowlist. The guest SDK mints its own from the host's answer, through
 the crate-private `ProtocolRef` constructor, so no gated mint name is used.
 
 A typed link (§3) replaces a cast wherever the link is made by actors that can
-name the protocol. The cast remains for what arrives untyped.
+name the protocol. The cast remains for what arrives untyped. A handler that
+needs its sender to cover a protocol does not write the cast: it states the
+protocol in its signature, and its dispatch arm casts before it runs (§11).
 
 #### Ingress bridges: a private stand-in
 
@@ -1060,6 +1068,178 @@ coverage check read. Its rows are not yet: a hand-written `Contracts::Rows`,
 does not serve. Deriving dispatch from the row list is #6887, and reading
 `HandlesKind<K>` and `Replies<K>` off the rows is #6888.
 
+### 11. A handler states what its sender must handle
+
+A typed send checks that the sending actor declared the recipient and that the
+recipient handles the kind. Some receivers mail their sender back later: a tcp
+session delivers frames to the actor that dialed it, and a window tells the
+actor that took key focus when it loses it. Such a receiver needs its sender
+to handle those kinds, and a requirement written as a cast in the handler body
+is invisible to the sender's author and to the compiler.
+
+The receiving handler states the requirement in its signature, as a fourth
+parameter:
+
+```rust
+#[handler::request]
+fn on_connect_self(
+    state: &mut Self::State,
+    ctx: &mut NativeCtx<'_>,
+    mail: ConnectSelf,
+    sender: ProtocolRef<TcpConsumer>,
+) -> Pending<ConnectResult> {
+    let (pending, held) = ctx.hold::<ConnectResult>();
+    dial(state, ctx, held, mail.addr, mail.name, Some(sender));
+    pending
+}
+```
+
+```rust
+// the sender's call site is the plain send
+ctx.send::<TcpCapability>(&ConnectSelf { addr, name });
+```
+
+`#[actor]` reads `P` out of the parameter type, as it reads the kind out of
+the third parameter. The one parameter drives two checks, so they cannot
+drift apart.
+
+#### The build-time check
+
+`HandlesKind<K>` carries the requirement as an associated type:
+
+```rust
+pub trait HandlesKind<K: Kind>: Addressable {
+    type Sender: Protocol;
+}
+
+pub struct Anyone;
+impl Protocol for Anyone {
+    type Rows = ();
+}
+
+// sealed, one blanket impl
+pub trait SentBy<A, R> {}
+impl<K: Kind, A, R: HandlesKind<K>> SentBy<A, R> for K where R::Sender: CoveredBy<A> {}
+```
+
+A handler with a sender parameter emits `type Sender = P`. Every other
+handler emits `type Sender = Anyone`, a protocol with no rows, which every
+type covers, the erased ctx's `Erased` included. So every existing handler and
+every existing send builds unchanged, and no verb, type, or argument is added
+at the call site.
+
+`HandlesKind` is the home because it is the one marker every typed send
+reads, and some recipients have it with no contract row: a fallback-only
+native actor gets a blanket `impl<K> HandlesKind<K>`. `Contract<K>` mirrors
+the type as `Contract::Sender`, held equal to it by a supertrait bound, so a
+protocol's coverage reads the requirement from the row it already reads and a
+target that lacks a row is reported once.
+
+| Verb | Bound |
+|---|---|
+| `send`, `send_detached`, `send_tracked`, `send_with_context`, `send_many` (guest) and `send`, `send_detached`, `send_with_context` (native) | `K: SentBy<A, R>` on the payload, with `A` the ctx's actor |
+| `send_to` and `Sends::send_to` (guest); `send_to`, `send_detached_to`, `send_to_with_context`, `send_detached_to_with_context`, `fanout`, `send_encoded_detached_to` (native) | `Target<K, I>` carries `type Sender`, and the verb requires `T::Sender: CoveredBy<A>`. An `ActorRef<R>` carries `R`'s requirement, a `ProtocolRef<P>` carries `Anyone` |
+| `InlineChild::send` | `K: SentBy<A, C>` |
+| `InlineParent::send` | `A::Parents: AllHandle<K, A>`: every declared parent's requirement is covered |
+| `MailSender::send_detached_to`, which names no actor | `Target<K, I, Sender = Anyone>` |
+| `ActorRef::narrow`, `ActorPath::narrow`, `InlineChild::narrow` | a protocol row is covered only by a handler whose requirement is `Anyone`, so a requiring kind cannot be reached through a `ProtocolRef`, whose send checks nothing about its sender |
+| a held reply handed off to an `ActorRef<T>` (`HandsOff`) | `T`'s handler requires `Anyone`: the hand-off is made in the name of whoever holds the reply |
+| `ctx.subscribe` / `ctx.unsubscribe` | the publisher's request kind is `SentBy<A, P>` |
+| `forward_to` (native) | unchecked: a relay sends on behalf of another, and the receipt check covers it |
+
+An erased ctx has no actor to check, so it cannot send a requiring kind
+through an `ActorRef` and builds for every other kind.
+
+An actor that lacks a handler fails at the send, and the error names the
+sending actor, the handler it lacks, the protocol, and the kind being sent:
+
+```text
+error[E0277]: `HalfHolder` has no contract row for `FocusLost`
+   |
+81 |         ctx.send::<Window>(&TakeFocus);
+   |             ----           ^^^^^^^^^^ no handler for `FocusLost` on this target
+   = note: a `#[fallback]` does not count as handling a kind
+   = note: required for `FocusHolder` to implement `CoveredBy<HalfHolder>`
+   = note: required for `TakeFocus` to implement `SentBy<HalfHolder, Window>`
+```
+
+#### The receipt check
+
+The build cannot see every route. JSON through MCP, a call relayed by
+`aether.rpc.server`, a bundle delivered by `aether.render` or `aether.trace`,
+a harness push, and mail with no sender all reach a handler without passing a
+typed send. So the engine makes the same check at receipt: the dispatch arm
+of a handler that takes `sender: ProtocolRef<P>` casts `ctx.sender()` to `P`
+before the handler runs, with the guard cast of §4 (`CastTarget::admits` over
+the rows the sender's route published). When the cast passes, the handler
+runs and is handed the proven reference. When it fails, the handler never
+runs. Mail with no sender fails the same way, with no special case.
+
+No handler writes the cast and no ctx verb is added. The helper the arm calls
+is hidden macro plumbing, like `__decode_inbound`. A handler with no sender
+parameter gets no cast and no branch. The cast reads no lock or atomic of its
+own.
+
+| Mail | Outcome |
+|---|---|
+| a tell from an actor whose route does not cover `P` | the handler does not run; an error is logged in the receiver's log naming the kind, the sender's path, and the first kind the sender lacks |
+| a tell relayed by `aether.rpc.server` with a call id | the same, and the caller's call ends `RpcError::DecodeRefused`, through the notice `aether.mail.decode_refused` the server already handles |
+| a tell relayed fire-and-forget | logged only; the wire carries no call to answer |
+| a request from a sender that does not cover `P` | answered at once with the row's own reply, built from `PathRefused { path: <sender>, reason: Uncovered { kind } }`, and no notice follows. A request handler that takes a sender must reply a kind that is `From<PathRefused>`, or it does not build, so every such request is answered |
+| any mail with no sender | refused and logged; there is no path to name in a reply |
+
+A relay with only a `#[fallback]` publishes no row, so a requiring kind
+relayed through it is refused: the handler would be handed a reference to the
+relay, which would warn-drop what the receiver mails it. A relay that declared
+a silent handler for every kind of `P` would pass, and would then really
+receive that mail.
+
+The refusal reuses `aether.mail.decode_refused` and `RpcError::DecodeRefused`:
+one notice for every refusal made before a handler runs.
+
+On a guest receiver the arm runs the same cast through `WasmCtx::cast`. The
+guest holds only the sender's position, so it reads the sender's path for its
+log line and its reply through one host fn, `actor_path_p32`, called only on
+the refusal path. It is the guest half of the native `NativeCtx::actor_path`
+read: the position of a reference the guest holds goes in, the canonical path
+of the route record there comes out, a position holding no record answers no
+path, and nothing is minted. It closes the missing direction among the
+guest's address reads: `resolve_path_p32`, `live_route_p32`, and
+`route_rows_p32` take a path, `published_rows_p32` takes a position and
+answers rows, and this takes a position and answers the path. No guest ctx
+verb exposes it. A refused request is answered by the guest with its typed
+reply. A refused tell returns the dispatch code `DISPATCH_REFUSED_SENDER`,
+and the host frees the reply handle and answers the notice to a reply target
+that opted in, as the native arm does. The notice the host writes names the
+kind and the sender; the handler the sender lacks is named in the guest's own
+log, since the protocol is the guest's type.
+
+Under this rule a typed sender is refused at build time, so the receipt
+refusal is reached only by a route the build cannot see, or by a
+`ProtocolRef` obtained through a run-time cast.
+
+#### What the macro refuses
+
+- `sender: ProtocolRef<P>` on a `#[handler::event]`, a `#[handler::response]`,
+  a `#[handler::unchecked(..)]`, a `Departed<W>` handler, a batched `&[K]`
+  handler, and a handler-set handler, each with a message. An event's sender
+  is a publisher the actor chose, a response's is whoever the actor asked, an
+  unchecked handler has no declared reply to refuse through, a batch is the
+  high-rate path the cast stays off, and a set's rows are pasted onto every
+  adopter.
+- `sender: Option<ProtocolRef<P>>`. It would let a handler run for a sender
+  that failed the check.
+
+#### What stays run-time only
+
+The engine's cast reads the rows the sender's route published while `Live`.
+An inline child whose alias is not yet published has no rows to read, so a
+requiring kind it sends before then is refused at receipt though it built.
+The handler manifests carry a kind and a `ReplyContract` and nothing about the
+sender, so `describe_handlers` and `describe_component` do not show the
+requirement, and the relay boundary cannot refuse before delivery; adding it
+is a change to two manifest formats and the inventory wire kind.
+
 ## Scenario sweep
 
 "Compiles" and "compile error" describe the send site. "Runtime guard" means a
@@ -1105,6 +1285,8 @@ Sender: an actor `A` with a typed ctx; target typed (`ActorRef<R>` or `ProtocolR
 | `WireCtx<'_, '_, Self>` | check applies; subscriptions and first requests made in `wire` are checked |
 | init ctx (`WasmInitCtx`) | not applicable; it sends nothing |
 | generic helper over `A` | compiles when the helper states `A: HandlesKind<O>` and every caller satisfies it |
+| an actor that lacks a handler the recipient's handler requires of its sender (§11) | compile error at the send, naming the handler |
+| a relay, or mail with no sender, reaching a handler that requires something of its sender (§11) | runtime guard: the arm's cast refuses, and the handler does not run |
 | erased ctx (`Erased`) | no typed send (ADR-0232) |
 | non-actor (MCP, RPC `Call`, harness, chassis threads, embedder) | exempt |
 

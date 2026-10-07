@@ -94,7 +94,9 @@ macro_rules! shutdown_on_kind_actor {
     ($type:ident, $namespace:literal, $kind:ty) => {
         close_observed_state!($type, $namespace);
 
-        impl HandlesKind<$kind> for $type {}
+        impl HandlesKind<$kind> for $type {
+            type Sender = aether_actor::Anyone;
+        }
 
         shutdown_dispatch!($type, $kind);
     };
@@ -131,7 +133,9 @@ macro_rules! unit_shutdown_actor {
 
         impl aether_actor::Root for $type {}
 
-        impl HandlesKind<$kind> for $type {}
+        impl HandlesKind<$kind> for $type {
+            type Sender = aether_actor::Anyone;
+        }
 
         impl aether_actor::Lifecycle<Self> for $type {
             type Config = ();

@@ -11,7 +11,7 @@ use aether_data::{ActorMail, MailboxId};
 
 use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{Addressable, CoveredBy, HandlesKind};
+use crate::model::{Addressable, CoveredBy, HandlesKind, SentBy};
 use crate::reference::{ErasedActorRef, ProtocolRef};
 use crate::wasm::inline::ChainMode;
 
@@ -74,12 +74,14 @@ impl<C: Addressable> InlineChild<C> {
         Self { id, child: PhantomData }
     }
 
-    /// Send `payload` to this child, checked against `C`'s handler set.
+    /// Send `payload` to this child, checked against `C`'s handler set and
+    /// against what `C`'s handler for the kind requires of its sender, which
+    /// the ctx's actor `A` must cover (ADR-0231 §11).
     ///
     /// Routes as [`WasmCtx::send_to`] does — through the inline
     /// registry's cluster router, in place through the membrane for a resident
     /// child, inheriting the handler's causal chain (ADR-0080 §7).
-    pub fn send<K: ActorMail, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
+    pub fn send<K: ActorMail + SentBy<A, C>, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
     where
         C: HandlesKind<K>,
     {

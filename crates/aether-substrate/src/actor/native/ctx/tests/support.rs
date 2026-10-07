@@ -95,7 +95,9 @@ impl Kind for CastOnly {
 impl aether_data::ActorMail for CastOnly {}
 impl aether_data::CrossesActors for CastOnly {}
 
-impl HandlesKind<CastOnly> for StubActor {}
+impl HandlesKind<CastOnly> for StubActor {
+    type Sender = aether_actor::Anyone;
+}
 
 #[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {

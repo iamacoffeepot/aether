@@ -371,7 +371,19 @@ impl Registry {
     /// The crate-private path behind
     /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
     pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ErasedActorPath> {
-        self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
+        self.actor_path_at(actor.id())
+    }
+
+    /// The canonical path of the route record at `position`, or `None` when
+    /// no record stands there: the read [`Self::actor_path`] makes, for a
+    /// position that arrived unproven. It mints nothing, so a position that
+    /// arrived from a guest gets a name and no reference.
+    ///
+    /// Its callers are [`Self::actor_path`] and
+    /// `NativeBinding::actor_path_at`, the read behind the wasm guest's
+    /// `actor_path_p32` host fn.
+    pub(crate) fn actor_path_at(&self, position: MailboxId) -> Option<ErasedActorPath> {
+        self.routes.load().entry_for(&position).map(|route| route.canonical_name.clone())
     }
 }
 

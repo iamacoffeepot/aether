@@ -321,6 +321,15 @@ impl NativeBinding {
         self.mailer.actor_path(reference)
     }
 
+    /// The canonical path of the route record at `position`, as
+    /// `Registry::actor_path_at` answers it: the same route-table read
+    /// [`Self::actor_path`] makes, for a position a guest passes. The read
+    /// behind the `actor_path_p32` host fn.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn actor_path_at(&self, position: MailboxId) -> Option<ErasedActorPath> {
+        self.mailer.registry().actor_path_at(position)
+    }
+
     /// The reference for a host-stamped position that holds a route record,
     /// or `None`. The path behind
     /// [`NativeCtx::sender`](crate::actor::native::ctx::NativeCtx::sender).

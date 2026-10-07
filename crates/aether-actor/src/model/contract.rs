@@ -21,9 +21,9 @@
 use aether_data::{ActorId, ActorMail, Kind, KindId, MailboxId, ReplyContract, fnv1a_64_bytes, fnv1a_64_fold};
 use aether_kinds::MonitorNotice;
 
-use super::Addressable;
 use super::declared::RowIndex;
 use super::protocol::{Protocol, RowSet};
+use super::{Addressable, HandlesKind};
 use crate::reference::{ActorRef, ProtocolRef};
 
 /// The row of a handler that sends no reply (`-> ()`).
@@ -116,9 +116,17 @@ impl SilentRow for Undeclared {}
     label = "no handler for `{K}` on this target",
     note = "a `#[fallback]` does not count as handling a kind"
 )]
-pub trait Contract<K: Kind>: Contracts {
+pub trait Contract<K: Kind>: Contracts + HandlesKind<K, Sender = <Self as Contract<K>>::Sender> {
     /// The reply kind, [`Silent`], or [`Undeclared`].
     type Reply: ReplyShape;
+
+    /// What the row's handler requires of its sender: the protocol its
+    /// `sender: ProtocolRef<P>` parameter names, or [`Anyone`](super::Anyone) when it takes
+    /// none. The supertrait bound holds it equal to
+    /// [`HandlesKind::Sender`], which the typed sends read, so a row cannot
+    /// state one requirement to a send and another to a protocol's coverage.
+    /// Coverage reads it here, so a target that lacks a row is reported once.
+    type Sender: Protocol;
 
     /// The row's position in [`Contracts::Rows`]: [`Here`](crate::Here) for
     /// the first handler, [`There<I>`](crate::There) past it. Written by the

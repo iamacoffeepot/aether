@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_actor::wasm::NO_INBOUND_SOURCE;
-use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE};
+use aether_actor::{DISPATCH_HANDLED_HOLD, DISPATCH_HANDLED_RELEASE, DISPATCH_REFUSED_SENDER};
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::reply_table::{HeldChain, NO_REPLY_HANDLE, ReplyEntry};
@@ -161,6 +161,15 @@ impl Component {
     /// fails the delivery, which the trampoline turns into an ADR-0063
     /// fail-fast: the requester's reply would not be guaranteed.
     ///
+    /// ADR-0231 §11: an arm whose handler requires something of its sender
+    /// reports `DISPATCH_REFUSED_SENDER` when this mail's sender does not
+    /// cover it and the arm sent no reply. The handler did not run and the
+    /// guest logged why. The handle is freed, as for a single arm, and the
+    /// refusal is answered to the reply target as a native arm answers it:
+    /// `aether.mail.decode_refused`, only to a target that opted in, on the
+    /// inbound's chain. The guest names the missing handler in its own log;
+    /// the notice names the kind and the sender.
+    ///
     /// ADR-0238 decision 3: the envelope's blob attachments are pinned in
     /// the instance's blob table for the `receive` call and unpinned when it
     /// returns, whether it returned or trapped. A dropped delivery pins
@@ -242,6 +251,11 @@ impl Component {
         match result {
             Ok(DISPATCH_HANDLED_RELEASE | DISPATCH_UNKNOWN_KIND) => {
                 self.store.data_mut().reply_table.take(handle);
+            }
+            Ok(DISPATCH_REFUSED_SENDER) => {
+                let ctx = self.store.data_mut();
+                ctx.reply_table.take(handle);
+                ctx.answer_refused_sender(env);
             }
             Ok(DISPATCH_HANDLED_HOLD) if handle != NO_REPLY_HANDLE => {
                 let ctx = self.store.data_mut();

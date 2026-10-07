@@ -191,6 +191,15 @@ unsafe extern "C" {
     /// answered; one naming no `Live` route answers no rows.
     #[link_name = "published_rows_p32"]
     pub fn published_rows(position: u64) -> u64;
+    /// ADR-0231 §11: the canonical path of the route record at `position`,
+    /// the position of a reference the guest holds; the guest half of the
+    /// native `NativeCtx::actor_path` read. The return is the packed
+    /// `(ptr << 32) | len` of a live guest buffer holding the wire-encoded
+    /// answer, a `__ActorPath`, which the SDK decodes and frees as
+    /// [`asset_catalog`] does. Any position is answered; one holding no
+    /// route record answers no path.
+    #[link_name = "actor_path_p32"]
+    pub fn actor_path(position: u64) -> u64;
     /// ADR-0079 §8: watch the actor at `target` for the calling actor `from`,
     /// through the watched type whose tag is `tag`, and return the
     /// watch's id. A standing watch of that watcher, target, and watched type
@@ -428,6 +437,21 @@ pub unsafe fn live_route(_path_ptr: u32, _path_len: u32) -> u64 {
 #[must_use]
 pub unsafe fn published_rows(_position: u64) -> u64 {
     panic!("aether-actor: published_rows called outside the FFI guest");
+}
+
+/// Host-side stub for the FFI `aether::actor_path` import (ADR-0231 §11).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063: the host build of the SDK
+/// has no FFI host to call, so any invocation is a bug.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn actor_path(_position: u64) -> u64 {
+    panic!("aether-actor: actor_path called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::watch` import (ADR-0079 §8).

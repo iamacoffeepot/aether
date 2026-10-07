@@ -76,7 +76,7 @@
 #![forbid(unsafe_code)]
 
 // Handler-signature kinds must be importable at module root because
-// `#[actor]` emits `impl HandlesKind<K> for InventoryCapability {}`
+// `#[actor]` emits `impl HandlesKind<K> for InventoryCapability { type Sender = aether_actor::Anyone; }`
 // markers always-on, outside the `feature = "runtime"` gate. The reply
 // kinds are named only by the gated handler bodies, so they ride the
 // runtime gate below.

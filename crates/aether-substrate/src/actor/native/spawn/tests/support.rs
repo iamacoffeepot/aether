@@ -51,7 +51,9 @@ impl Addressable for PokeSink {
     type Resolver = Many;
 }
 
-impl HandlesKind<ActivationPoke> for PokeSink {}
+impl HandlesKind<ActivationPoke> for PokeSink {
+    type Sender = aether_actor::Anyone;
+}
 
 pub(super) struct ActivationProbe {
     events: crossbeam_channel::Sender<ActivationEvent>,

@@ -54,7 +54,7 @@
 //! Caps that fan-out every kind they're addressed at — broadcast
 //! today, hub-as-actor in the future — author with a `#[fallback]`
 //! method instead of `#[handler]`s. The macro emits a blanket
-//! `impl<K: Kind> HandlesKind<K> for X {}` so a typed send like
+//! `impl<K: Kind> HandlesKind<K> for X { type Sender = aether_actor::Anyone; }` so a typed send like
 //! `ctx.send::<BroadcastCapability>(&payload)`, from an actor that declares
 //! `#[actor(depends(BroadcastCapability))]`, compiles for every K, and
 //! overrides [`Dispatch::dispatch_fallback`] to

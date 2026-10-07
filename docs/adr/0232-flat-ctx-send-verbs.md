@@ -280,6 +280,12 @@ leave a second way to send per cap.)*
 
 ## Amendments
 
+- **2026-10-06 (ADR-0231 §11).** Every flat verb gains one bound on its
+  payload, `K: SentBy<A, R>`, beside `SendableTo<R>`, and every verb that
+  takes a `Target` requires `T::Sender: CoveredBy<A>`: the ctx's own actor
+  covers what the recipient's handler requires of its sender. A handler that
+  takes no `sender: ProtocolRef<P>` parameter requires `Anyone`, so no
+  existing call site changes.
 - **ADR-0230 §5.** The deletion of `ctx.actor::<R>()` stands. Its replacement
   at the call site is the flat verbs above, proven by `depends(R)`; the
   `Reaches<R>` bound goes with it.

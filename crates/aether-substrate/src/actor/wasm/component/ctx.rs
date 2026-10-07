@@ -2,10 +2,13 @@ use std::cell::Cell;
 use std::mem;
 use std::sync::Arc;
 
+use aether_data::Kind;
+use aether_kinds::DecodeRefused;
 use rustc_hash::FxHashMap;
 
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::envelope::Envelope;
 use crate::actor::wasm::blob_table::BlobTable;
 use crate::actor::wasm::kind_manifest::Dependency;
 use crate::actor::wasm::reply_table::{HeldChain, ReplyEntry, ReplyMail, ReplyOrigin, ReplyTable};
@@ -819,6 +822,43 @@ impl ComponentCtx {
             lineage,
             identity: from,
         });
+    }
+
+    /// Answer a guest arm's refusal of its sender (ADR-0231 §11) to the
+    /// refused mail's reply target, as a native arm answers it: an
+    /// `aether.mail.decode_refused` naming the kind, only to a target that
+    /// opted in (see `NativeBinding::refusal_listener`), stamped on the
+    /// refused mail's chain so it is handled before that chain's `Settled`.
+    /// It goes out as a reply of the routed recipient, through the same body
+    /// as the guest's own replies, so a held outbox holds it too.
+    ///
+    /// The host knows the sender and the kind. Which handler the sender lacks
+    /// is in the guest's own log, since the protocol the handler requires is
+    /// the guest's type, so the notice's text points there.
+    ///
+    /// Consumer: [`super::Component::deliver`], for `DISPATCH_REFUSED_SENDER`.
+    pub(super) fn answer_refused_sender(&self, env: &Envelope) {
+        let Some(target) = self.binding.refusal_listener(env.sender) else {
+            return;
+        };
+
+        let Some(sender) = self.binding.stamped_sender(target) else {
+            return;
+        };
+
+        let sender = self.binding.actor_path(sender);
+        let error = format!(
+            "the sender `{sender}` does not handle every kind the handler requires of its sender; the receiver's \
+             log names the first one it lacks"
+        );
+        let payload =
+            EncodedMail { bytes: DecodeRefused { kind: env.kind, error }.encode_into_bytes(), attachments: None };
+        let origin = ReplyOrigin {
+            correlation: env.sender.correlation_id,
+            from: env.recipient,
+            lineage: Some((env.mail_id, env.root)),
+        };
+        self.reply(target, DecodeRefused::ID, payload, 1, origin);
     }
 
     /// Send the guest's `answer` to a reply handle. `lineage`, as
