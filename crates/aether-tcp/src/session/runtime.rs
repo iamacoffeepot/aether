@@ -18,6 +18,7 @@ pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 
+pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -25,6 +26,8 @@ pub use crate::config::TcpSessionConfig;
 
 use aether_actor::{ProtocolRef, runtime};
 use aether_codec::frame::pop_frame;
+// `MonitorNotice` is named by `on_monitor_notice`'s signature.
+use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
 use crate::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite, TcpConsumer};
@@ -54,6 +57,11 @@ pub struct TcpSessionState {
     /// name, because a name cannot reach a nested actor such as a component
     /// loaded beneath a parent at `parent/NS:key`.
     pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    /// The session's monitor on `consumer`, taken in `wire`: the consumer's
+    /// close arrives as a `MonitorNotice` and closes this session. `None`
+    /// before `wire`, and for a session with no consumer. It deregisters
+    /// when this state drops.
+    pub consumer_watch: Option<MonitorHandle>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
@@ -148,6 +156,7 @@ impl NativeActor for TcpSessionActor {
             peer: config.peer,
             session_name: config.session_name,
             consumer: config.consumer,
+            consumer_watch: None,
             read_buffer: Vec::new(),
             write_half,
             shutdown,
@@ -157,7 +166,13 @@ impl NativeActor for TcpSessionActor {
         })
     }
 
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+        // `init` cannot take the monitor: `NativeInitCtx` has no `monitor`.
+        // A consumer that closed before this ran, such as one that closed
+        // while the connection was being accepted or dialed, is noticed the
+        // same way, once this session's birth promotes.
+        state.consumer_watch = state.consumer.map(|consumer| ctx.monitor(consumer));
+
         if let Some(start) = state.read_start.take() {
             let _ = start.send(());
         }
@@ -180,6 +195,31 @@ impl NativeActor for TcpSessionActor {
             peer = %state.peer,
             "tcp session closed",
         );
+    }
+
+    /// The consumer closed, so nothing is left to deliver to: close this
+    /// session. The close is the ordinary one: `unwire` shuts the socket
+    /// both ways and joins the read thread, so the peer reads end of stream.
+    /// No `SessionClosed` is sent, since the consumer is the actor that
+    /// closed.
+    ///
+    /// The host stamps the departed actor as the notice's sender. The
+    /// consumer is the only actor this session monitors, and the sender is
+    /// compared to it all the same, so a notice with no sender, or one for a
+    /// session with no consumer, closes nothing.
+    #[handler::event]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        let Some(consumer) = state.consumer else {
+            return;
+        };
+
+        let consumer_closed = departed == consumer.erase();
+        if consumer_closed {
+            ctx.shutdown();
+        }
     }
 
     /// Sidecar read wake. Drain every pending chunk, append it to the

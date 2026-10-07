@@ -45,6 +45,11 @@ pub trait TcpConsumer {
 /// and a consumer that has closed are answered
 /// `Err(BindListenerError::Consumer(..))` without binding. `None` leaves the listener observer-less and drops
 /// inbound bytes. A consumer binding itself sends [`BindListenerSelf`].
+///
+/// The listener lives until [`UnbindListener`] names it or its consumer
+/// closes, and each session it accepts closes when that consumer closes; a
+/// listener bound with `None` ends only by the unbind or the engine's
+/// teardown.
 #[aether_data::kind(name = "aether.tcp.bind_listener", no_serde)]
 pub struct BindListener {
     pub addr: String,
@@ -62,7 +67,8 @@ pub struct BindListener {
 /// [`SessionClosed`], and a sender that reaches the cap another way, such as
 /// a relayed call, is answered `Err(Consumer(..))` without binding.
 /// `addr` and `name` mean what they mean on [`BindListener`].
-/// Reply: `BindListenerResult`.
+/// The listener and the sessions it accepts close when the sender closes,
+/// so the sender need not unbind before it does. Reply: `BindListenerResult`.
 #[aether_data::kind(name = "aether.tcp.bind_listener_self")]
 pub struct BindListenerSelf {
     pub addr: String,
@@ -81,6 +87,8 @@ pub struct BindListenerSelf {
 /// decode without a reply, and a never-registered, non-covering, or closed
 /// consumer is answered `Err(ConnectError::Consumer(..))` without dialing.
 /// `None` leaves the session observer-less and drops inbound bytes. A consumer dialing for itself sends [`ConnectSelf`].
+///
+/// The session closes when its consumer closes, with no [`SessionClosed`].
 #[aether_data::kind(name = "aether.tcp.connect", no_serde)]
 pub struct Connect {
     pub addr: String,
@@ -97,7 +105,8 @@ pub struct Connect {
 /// with silent handlers for [`SessionData`] and [`SessionClosed`], and a
 /// sender that reaches the cap another way, such as a relayed call, is
 /// answered `Err(Consumer(..))` without dialing. `addr` and `name` mean what
-/// they mean on [`Connect`]. Reply: [`ConnectResult`].
+/// they mean on [`Connect`]. The session closes when the sender closes, with
+/// no [`SessionClosed`]. Reply: [`ConnectResult`].
 #[aether_data::kind(name = "aether.tcp.connect_self")]
 pub struct ConnectSelf {
     pub addr: String,
@@ -321,8 +330,7 @@ pub struct SessionWrite {
 /// gracefully. A consumer actor closes the session through the
 /// host-stamped sender of the [`SessionData`] it receives
 /// (`ctx.sender()`, then `ctx.send_to`). The session's handler calls
-/// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
-/// the parent actor that spawned it.
+/// `ctx.shutdown()`, and no [`SessionClosed`] follows.
 #[aether_data::kind(name = "aether.tcp.session_close", default)]
 pub struct SessionClose {}
 
@@ -330,6 +338,8 @@ pub struct SessionClose {}
 /// consumer on peer EOF, read error, or frame rejection. Carries the
 /// session subname, the peer address, and a human-readable reason. A
 /// trailing partial frame at close is dropped and noted in the reason.
+/// A session that closes because it was sent [`SessionClose`], because a
+/// write failed, or because its consumer closed sends none.
 #[aether_data::kind(name = "aether.tcp.session_closed")]
 pub struct SessionClosed {
     pub session_name: String,

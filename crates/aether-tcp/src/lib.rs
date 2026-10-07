@@ -11,7 +11,12 @@
 //!
 //! `TcpCapability` is the supervisor of its listener fleet: it spawns
 //! listeners, monitors them, and replies to unbind requests on their
-//! close. The cap holds its own listener entries, each with the proof
+//! close. It does not monitor consumers and keeps no record of sessions.
+//! Each listener and each session monitors the consumer it delivers to and
+//! closes itself when that consumer closes, so a listener that closes this
+//! way reaches the cap as the same listener notice an unbind produces. A
+//! listener's close does not close the sessions it accepted. The cap holds
+//! its own listener entries, each with the proof
 //! its spawn returned; it does NOT walk the chassis-wide actor registry
 //! to enumerate children. Cap handlers don't introspect the registry — the
 //! cap-as-supervisor pattern keeps the actor model intact (caps
@@ -42,8 +47,12 @@
 //! `Err(Consumer(..))`. So every session holds its consumer as a
 //! `ProtocolRef<TcpConsumer>`.
 //!
-//! Listener (mailed to `aether.tcp.listener:<name>`):
+//! Listener (mailed to `aether.tcp/aether.tcp.listener:<name>`):
 //! - `Close` → cooperative shutdown via `ctx.shutdown()`
+//!
+//! A listener also closes when the consumer it was bound with closes, and
+//! a session when its consumer closes; one bound with no consumer does
+//! neither.
 //!
 //! ## Threading
 //!

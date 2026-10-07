@@ -122,6 +122,34 @@ Listener/session names live under the engine's lineage. They are not globally
 unique across engines and should be discovered from result/notification data,
 not guessed from hashes.
 
+## Lifetimes
+
+A listener and a session each monitor the consumer they deliver to and close
+themselves when it closes (ADR-0079 §8). A consumer that closes, by whatever
+exit, therefore leaves nothing bound or connected on its behalf, and it need
+not unbind first.
+
+- A listener lives until `aether.tcp.unbind_listener` names it, until the
+  consumer it was bound with closes, or until the engine tears down. A
+  listener bound with no consumer ends only by the first or the last.
+- A session lives until its peer closes or a read fails, a frame is rejected,
+  a write fails, it is sent `aether.tcp.session_close`, or its consumer
+  closes. Accepted and outbound sessions follow the same rule.
+- A listener's close does not close the sessions it accepted. A session
+  accepted from an unbound listener keeps delivering until one of its own
+  ends above is reached.
+- A republish of the consumer keeps its mailbox, so it closes nothing: the
+  listener and its sessions deliver to the successor.
+- A session closed because its consumer closed sends no `session_closed`,
+  since the consumer is the actor that closed. Its peer sees the connection
+  close.
+
+A listener that closes because its consumer closed leaves
+`aether.tcp.list_listeners` the way an unbound one does, and an unbind parked
+on it at that moment is answered `Ok`. The capability does not monitor
+consumers and keeps no record of sessions, so nothing lists sessions or closes
+them by name.
+
 ## Concurrency boundary
 
 Blocking accept/read loops and outbound connect run on sidecar threads. The
@@ -130,8 +158,9 @@ are currently unbounded; frame limits and kernel buffers do not turn those
 handoffs into a general bounded-queue contract. Actors retain state ownership
 and serialize control transitions. Session writes are the current exception to
 the sidecar rule: `session_write` calls the socket's full-write loop on the actor
-dispatcher and can briefly block there under kernel backpressure. Closing must
-make all of these converge:
+dispatcher and can briefly block there under kernel backpressure. Closing, by
+any exit in [Lifetimes](#lifetimes) including the consumer closing, must make
+all of these converge:
 
 - socket shutdown;
 - sidecar exit or detach;

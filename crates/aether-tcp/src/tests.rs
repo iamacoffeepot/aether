@@ -33,6 +33,8 @@ use aether_substrate::testing::{
 };
 use aether_substrate::{ChassisTarget, ReplyTarget};
 
+mod consumer_close;
+
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
@@ -138,7 +140,17 @@ impl NativeActor for SessionConsumer {
     fn on_session_closed(&mut self, _ctx: &mut NativeCtx<'_>, mail: SessionClosed) {
         let _ = self.captures.send(CapturedSessionMail::Closed(mail));
     }
+
+    #[handler::tell]
+    fn on_shut_down(&mut self, ctx: &mut NativeCtx<'_>, _mail: ShutDown) {
+        ctx.shutdown();
+    }
 }
+
+/// Tells a [`SessionConsumer`] to shut itself down, the way a consumer that
+/// is done, or is torn down, closes without unbinding anything.
+#[aether_data::kind(name = "test.tcp.shut_down", copy)]
+struct ShutDown;
 
 /// The key [`ConsumerHost`] spawns its nested [`SessionConsumer`] under.
 const NESTED_CONSUMER_KEY: &str = "probe";

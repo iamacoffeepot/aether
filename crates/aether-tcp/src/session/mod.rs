@@ -12,6 +12,14 @@
 //! caller initiates writes synchronously and they're typically
 //! fast.
 //!
+//! Lifetime: a session lives until its peer closes or a read fails, a
+//! frame is rejected, a write fails, it is sent
+//! [`SessionClose`](crate::kinds::SessionClose), or its consumer closes.
+//! It monitors its consumer from `wire` and shuts itself down on the
+//! consumer's `MonitorNotice`, sending no `SessionClosed`, since the
+//! consumer is the actor that closed; a session with no consumer monitors
+//! nothing. The close of the listener that accepted it does not close it.
+//!
 //! Shutdown: `unwire` flips the read thread's shutdown flag and
 //! calls `stream.shutdown(Both)` on the write half. The kernel
 //! aborts any blocked `read()` on the read half, the read thread
@@ -23,8 +31,8 @@
 //! receipt. The dispatcher appends read chunks to a reassembly
 //! buffer, pops complete ADR-0072 length-prefix frames, and delivers one
 //! targeted `SessionData` mail per frame. Peer EOF and read errors produce
-//! a targeted `SessionClosed`; observer-less sessions preserve the previous
-//! drop-on-the-floor behavior.
+//! a targeted `SessionClosed`; a session with no consumer drops its inbound
+//! frames.
 
 use super::{TcpCapability, TcpListenerActor};
 

@@ -14,6 +14,7 @@ pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 pub use std::time::Duration;
 
+pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -21,6 +22,8 @@ pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
 use aether_actor::{ProtocolRef, Single, runtime};
+// `MonitorNotice` is named by `on_monitor_notice`'s signature.
+use aether_kinds::MonitorNotice;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
 use crate::kinds::{Close, ConnectionReady, TcpConsumer};
@@ -40,6 +43,11 @@ pub struct TcpListenerState {
     /// receipt (ADR-0230, ADR-0231 §3/§4), handed to every session this
     /// listener accepts.
     pub consumer: Option<ProtocolRef<TcpConsumer>>,
+    /// The listener's monitor on `consumer`, taken in `wire`: the consumer's
+    /// close arrives as a `MonitorNotice` and closes this listener. `None`
+    /// before `wire`, and for a listener bound with no consumer. It
+    /// deregisters when this state drops.
+    pub consumer_watch: Option<MonitorHandle>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_start: Option<mpsc::Sender<()>>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -165,6 +173,7 @@ impl NativeActor for TcpListenerActor {
         Ok(TcpListenerState {
             local_port: port,
             consumer: config.consumer,
+            consumer_watch: None,
             shutdown,
             accept_start: Some(accept_start_tx),
             accept_thread: Some(thread),
@@ -173,7 +182,12 @@ impl NativeActor for TcpListenerActor {
         })
     }
 
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) -> Result<(), BootError> {
+        // `init` cannot take the monitor: `NativeInitCtx` has no `monitor`.
+        // A consumer that closed before this ran is noticed the same way,
+        // once this listener's birth promotes.
+        state.consumer_watch = state.consumer.map(|consumer| ctx.monitor(consumer));
+
         if let Some(start) = state.accept_start.take() {
             let _ = start.send(());
         }
@@ -203,11 +217,35 @@ impl NativeActor for TcpListenerActor {
         ctx.shutdown();
     }
 
+    /// The consumer closed, so nothing is left to deliver to: close this
+    /// listener. The close is the one an unbind causes: `unwire` stops the
+    /// accept thread, and the cap's monitor on this listener removes its
+    /// entry.
+    ///
+    /// The host stamps the departed actor as the notice's sender. The
+    /// consumer is the only actor this listener monitors, and the sender is
+    /// compared to it all the same, so a notice with no sender, or one for a
+    /// listener bound with no consumer, closes nothing.
+    #[handler::event]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        let Some(consumer) = state.consumer else {
+            return;
+        };
+
+        let consumer_closed = departed == consumer.erase();
+        if consumer_closed {
+            ctx.shutdown();
+        }
+    }
+
     /// Sidecar wake. Drain every pending accepted connection and
     /// spawn a `TcpSessionActor` per stream. Each session is a
-    /// child of this listener (parent `Source` stamps as our own
-    /// mailbox), so on session close the close fan-out reaches
-    /// us via the standard monitor path.
+    /// child of this listener, and the listener does not monitor
+    /// it: a session's close is not reported here, and this
+    /// listener's close does not close its sessions.
     ///
     /// The accept thread fires one wake mail per accepted
     /// connection, but the handler drains until empty regardless
