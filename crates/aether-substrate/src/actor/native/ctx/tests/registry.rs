@@ -1,6 +1,7 @@
 //! Registry reads off a ctx: a proven reference answers its actor's
 //! canonical path, before and after that actor departs, and so does the
-//! sender reference a real dispatch stamps.
+//! sender reference a real dispatch stamps, which also answers where its
+//! actor stands by creation order.
 
 use std::sync::Arc;
 
@@ -64,4 +65,27 @@ fn actor_path_names_the_sender_a_real_dispatch_stamps() {
         Some((pinger.erase(), expected)),
         "a departed sender still holds its route record, so a knock it sent before departing still proves it",
     );
+}
+
+/// The renderer orders draws by the lineage order of the sender each dispatch
+/// stamped. Two pingers knock in the reverse of the order they were created;
+/// the order read for each stamped sender is its own actor's, so they compare
+/// by creation. It catches a ctx read wired to the wrong reference, such as
+/// the reading actor's own, which would answer one order for every sender.
+#[test]
+fn lineage_order_ranks_stamped_senders_by_creation() {
+    let mut rig = ReaderRig::boot();
+    let (first, second) = (rig.pinger("first"), rig.pinger("second"));
+
+    rig.ping(second);
+    rig.ping(first);
+
+    let stamped: Vec<_> =
+        rig.senders().into_iter().map(|sender| sender.expect("a routed send carries its sender").0).collect();
+    assert_eq!(stamped, [second.erase(), first.erase()], "the knocks arrived in the reverse of creation order");
+    let orders = rig
+        .driver
+        .host_turn(move |_reader, ctx| stamped.iter().map(|sender| ctx.lineage_order(*sender)).collect::<Vec<_>>())
+        .expect("the reader is live");
+    assert!(orders[1] < orders[0], "the first-created pinger sorts before the second");
 }

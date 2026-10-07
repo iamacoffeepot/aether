@@ -17,8 +17,8 @@ use crate::actor::native::envelope::Envelope;
 #[cfg(feature = "wasm")]
 use crate::actor::wasm::module::Module;
 use crate::mail::attachments::plain_payload;
-use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
+use crate::mail::registry::{AddressResolutionError, LineageOrder};
 #[cfg(feature = "wasm")]
 use crate::mail::registry::{AdmissionRefusal, Admitted};
 use crate::memory::MemoryReport;
@@ -122,6 +122,40 @@ impl<M: ReplyMode, A, S> NativeCtx<'_, A, S, M> {
     #[must_use]
     pub fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath {
         self.binding.actor_path(reference)
+    }
+
+    /// Where the actor `reference` proves stands in the actor tree by
+    /// creation order (ADR-0248 §5): an opaque value to compare with others
+    /// read the same way. A parent sorts before its children, a child between
+    /// its parent and its parent's next sibling, and siblings and root actors
+    /// in the order they were created. The answer names no mailbox position
+    /// and is never mailed. A typed holder passes `reference.erase()`.
+    ///
+    /// It reads one loaded snapshot of the published route table, one probe
+    /// per path segment and at most `MAX_SCOPE_PATH_DEPTH`, and sends no
+    /// mail. It still answers, unchanged, after the actor departs, because a
+    /// route keeps its record and its birth serial through `Dropped`, and it
+    /// cannot fail for a reference the registry minted: an actor's place is
+    /// fixed when its route is first reserved, and it never moves.
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference` or for one of
+    /// its ancestors. The registry mints a reference only for a route that
+    /// holds a record, and refuses a birth whose parent holds none
+    /// (`SpawnError::ParentUnknown`), so every ancestor of a route held one
+    /// when the route was born. A route leaves the table only when a
+    /// `Starting` reservation is cancelled, or a claim is withdrawn before
+    /// any actor could have observed it; neither follows a mint that
+    /// survives, and whatever a starting actor staged beneath itself is
+    /// discarded with it. Every other unwind retires its route to `Dropped`
+    /// instead. So this is a broken invariant, not an answer (ADR-0063).
+    ///
+    /// Consumer: the render capability's overlay commit, which lays one
+    /// actor's screen-space draws over another's by the sender's order.
+    #[must_use]
+    pub fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder {
+        self.binding.lineage_order(reference)
     }
 
     /// The receive surface — handler kinds, docs, fallback, and config kind —

@@ -10,7 +10,7 @@ use std::fmt;
 use std::io;
 
 use crate::config::SecretError;
-use crate::mail::registry::NameConflict;
+use crate::mail::registry::{NameConflict, RegisterError};
 
 /// Failure modes capability boot can raise. Per ADR-0063, any boot
 /// error aborts the chassis before user code runs — no partial boots.
@@ -72,6 +72,15 @@ impl StdError for BootError {
 impl From<NameConflict> for BootError {
     fn from(e: NameConflict) -> Self {
         Self::MailboxAlreadyClaimed { name: e.name }
+    }
+}
+
+impl From<RegisterError> for BootError {
+    fn from(error: RegisterError) -> Self {
+        match error {
+            RegisterError::NameConflict(conflict) => conflict.into(),
+            refused @ RegisterError::ParentUnknown { .. } => Self::Other(Box::new(refused)),
+        }
     }
 }
 

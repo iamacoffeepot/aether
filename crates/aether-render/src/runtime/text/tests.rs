@@ -48,8 +48,8 @@ fn draw(runs: Vec<TextRun>) -> DrawText {
 /// The quads of the last overlay batch the frame has accumulated, which
 /// must be a textured batch over the reserved glyph atlas.
 fn glyph_quads(state: &RenderCapabilityState) -> Vec<TexturedQuad> {
-    let Some(OverlayBatch::Textured { texture_id, quads, .. }) = state.overlay_frame.last() else {
-        panic!("a text draw accumulates a textured batch, got {} batches", state.overlay_frame.len());
+    let Some(OverlayBatch::Textured { texture_id, quads, .. }) = state.overlay_frame.filed().last() else {
+        panic!("a text draw accumulates a textured batch, got {} batches", state.overlay_frame.filed().len());
     };
     assert_eq!(*texture_id, GLYPH_ATLAS_TEXTURE_ID, "a text batch samples the reserved glyph atlas");
     quads.clone()

@@ -853,6 +853,36 @@ surfaces when the second one tries to register. For an instanced actor (below)
 the colliding unit is the full `NAMESPACE:subname` under one parent, not the
 shared prefix.
 
+The tree is ordered, and the order is creation order
+([ADR-0248](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0248-lineage-is-an-ordered-tree.md)).
+A parent's children stand in the order they were created, and so do the root
+actors: the chassis composition chain as written, then the boot list as
+written, then whatever is loaded later. Nothing else orders actors. There is
+no reorder verb, rank, or ordering declaration, and an actor never states
+where it stands. The registry stamps each route with a birth serial when the
+route is first reserved, before `init` runs, so the order is the order the
+registry saw the requests and does not depend on how long each `init` takes.
+The serial stays with the route through a republish and after the actor
+closes, and a closed actor's name is never registered again, so a place is
+for life.
+
+A native actor reads where another stands with
+`ctx.lineage_order(reference)`, which answers an opaque `LineageOrder` to
+compare with others: a parent sorts before its children, a child between its
+parent and its parent's next sibling, and siblings in creation order. The
+value names no mailbox and is never mailed. Each reader gives the one order
+its own meaning; the renderer paints overlay draws by it
+([Rendering](../systems/rendering.md)). A parent that needs control over
+where things stand creates empty children first, in the order it wants, and
+creates its content beneath them.
+
+So that the read has no failure to report, a birth names a parent that holds
+a route record. Every production birth already does, because a child's name
+is built from its parent's. A name nested beneath a parent the registry has
+never seen is refused where the birth is applied: `SpawnError::ParentUnknown`
+for a spawn, `RegistryEffectError::ParentUnknown` for a staged effect. A test
+fixture that stands a route at `a/b:k` registers `a` first.
+
 A dash in a namespace is a naming convention, not addressing grammar. Use it
 only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera-controller` is the controller actor beside the bare

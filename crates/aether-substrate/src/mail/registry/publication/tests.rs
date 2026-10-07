@@ -502,7 +502,8 @@ impl Addressable for Guest {
 }
 
 impl Fixture {
-    /// Register a live route at `name`'s lineage position.
+    /// Register a live route at `name`'s lineage position. A nested name
+    /// needs its parent registered first (ADR-0248 §5).
     fn register(&self, name: &str) {
         self.registry
             .try_register_inbox_with_id(&auth(), lineage_mailbox_id(name), name, noop_handler())
@@ -525,6 +526,7 @@ fn a_route_is_a_guest_where_a_published_module_holds_its_leaf_namespace() {
     fixture.publish(&fixture.module(&[(Guest::NAMESPACE, &[KEPT])])).expect("publish the guest's module");
 
     let guests = [Guest::NAMESPACE, "test.publication.guest:k", "test.publication.host/test.publication.guest:k"];
+    fixture.register("test.publication.host");
     for name in guests.into_iter().chain(["test.publication.unpublished"]) {
         fixture.register(name);
     }
@@ -566,7 +568,9 @@ fn a_publish_extends_the_short_path_index_without_touching_native_paths() {
     let fixture = Fixture::new();
     let native = format!("{NATIVE_ROOT}/{NATIVE_INSTANCED}:k");
     let guest = format!("{PARENT}/{CHILD}:k");
+    fixture.register(NATIVE_ROOT);
     fixture.register(&native);
+    fixture.register(PARENT);
     fixture.register(&guest);
     let expand = |short: &str| {
         let path = ErasedActorPath::new(short).expect("a well-formed short path");
@@ -639,6 +643,7 @@ fn a_hole_under_a_multi_type_guest_parent_resolves_to_its_live_holder() {
     );
 
     let first = format!("{PARENT}/{FIRST}:k");
+    fixture.register(PARENT);
     fixture.register(&first);
     assert_eq!(expand(&short), Ok(first));
 

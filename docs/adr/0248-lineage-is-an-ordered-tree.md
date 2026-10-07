@@ -29,7 +29,7 @@ Issues #7513 (draw order) and #7514 (input) hold earlier code reading. Where the
 ## Terms
 
 - **Sequence.** The order of one parent's children, and of the root actors among themselves.
-- **Position.** The opaque, comparable value a reader gets for one actor: where it stands in the whole tree.
+- **Lineage order.** The opaque, comparable value a reader gets for one actor: where it stands in the whole tree. "Position" is the SDK's word for the mailbox id a reference proves, and is not used for tree order.
 - **Layer.** An empty child created only to hold a place in its parent's sequence. Content is created beneath it.
 - **Member.** An actor that has stated a pointer region to the window (section 8).
 - **Key focus.** The one slot each window has that narrows who hears that window's keys (section 9). It is separate from the sequence. Plain "focus" is not used for it: at this mailbox `aether.window.focus` (`FocusWindow`) and `aether.window.focus_changed` (`WindowFocus`) already name operating-system window focus.
@@ -85,7 +85,7 @@ What a layer needs from the engine today, read from the code:
 
 Mail sent in an order is not processed in that order, so no rule here sequences deliveries.
 
-- **Drawing.** Every actor draws during the frame in any order. The renderer commits the frame when the engine-only `Frame` mail arrives (`on_frame` → `commit_scene`), and the driver sends `Frame` only after the frame's stages have settled (`run_frame_advance` then `send_render_and_drain` in `crates/aether-chassis-desktop/src/driver/mod.rs`). At that commit the renderer groups the batches by sender (`ctx.sender()`, stamped by the host) and sorts the groups by position.
+- **Drawing.** Every actor draws during the frame in any order. The renderer commits the frame when the engine-only `Frame` mail arrives (`on_frame` → `commit_scene`), and the driver sends `Frame` only after the frame's stages have settled (`run_frame_advance` then `send_render_and_drain` in `crates/aether-chassis-desktop/src/driver/mod.rs`). At that commit the renderer files each batch under its sender (`ctx.sender()`, stamped by the host) and sorts the batches by their senders' lineage order.
 - **Input.** Each pointer event has one recipient, and key events are routed by the key focus slot of the window they arrive for, so there is nothing to order.
 
 ```rust
@@ -94,7 +94,7 @@ state.overlay_frame.push(OverlayBatch::shapes(mail));
 
 // plan: filed under its sender; sorted once, at commit
 state.overlay_frame.file(ctx.sender(), OverlayBatch::shapes(mail));
-// commit_scene: groups by position, back to front; inside a group, arrival order
+// commit_scene: sorted by lineage order, back to front; inside one sender, arrival order
 ```
 
 The sequence does not depend on presence. An actor that submits nothing in a frame is an empty group and nothing shifts. Draws stay immediate mode (ADR-0105): an actor that skips a frame vanishes for that frame. Under `replay_cache_when_idle` the replayed list keeps its groups. A `LifecycleAdvance` that is warn-dropped sends no `Frame`, so no partial set of draws is ever sorted. Retained draws (ADR-0246) are world-space sets ordered by depth and by their program, and this ADR does not touch them.
@@ -143,19 +143,19 @@ The stamp is taken at reservation, when the route is `Starting`, and kept when i
 
 Ancestry needs nothing new. A mailbox id is the fold of its path one segment at a time (`lineage_mailbox_id`), so the id of every ancestor falls out of folding the actor's own canonical name, and a path has at most `MAX_SCOPE_PATH_DEPTH = 8` segments.
 
-A reader asks for a position through one new read on `NativeCtx`, beside `actor_path`:
+A reader asks for a lineage order through one new read on `NativeCtx`, beside `actor_path`:
 
 ```rust
 // main: crates/aether-substrate/src/actor/native/ctx/registry.rs
 pub fn actor_path(&self, reference: ErasedActorRef) -> ErasedActorPath
 
 // plan
-pub fn position(&self, reference: ErasedActorRef) -> Position
+pub fn lineage_order(&self, reference: ErasedActorRef) -> LineageOrder
 ```
 
-A `Position` holds one step per path segment, root first, each step the birth serial of that prefix. Positions compare step by step. A parent's position is a prefix of its child's, so the parent sorts behind the child, and two siblings differ at the step that holds their own serials. The read is at most 8 hash probes in one loaded snapshot of the route view and takes no lock. `Position` is opaque and ordered: it exposes no `MailboxId`, has no constructor outside the registry, and is not a kind field, so it is never mailed.
+A `LineageOrder` holds one step per path segment, root first, each step the birth serial of that prefix. Two values compare step by step. A parent's lineage order is a prefix of its child's, so the parent sorts behind the child, and two siblings differ at the step that holds their own serials. The read is at most 8 hash probes in one loaded snapshot of the route view and takes no lock. `LineageOrder` is opaque and ordered: it exposes no `MailboxId`, has no constructor outside the registry, and is not a kind field, so it is never mailed.
 
-Mail dispatch does not read the serial. `route_lookup` (`mailbox/resolve.rs`) reads `lifecycle` only. The cost on that path is 8 more bytes per route slot. This protects the renderer and the window, the two readers that would otherwise each keep their own order, and it touches the registry's birth arms, which run once per actor.
+Mail dispatch does not read the serial. `route_lookup` (`mailbox/resolve.rs`) reads `lifecycle` only. The cost on that path is 8 more bytes per route slot: the record grows from 64 bytes to 72, and the registry benchmark's read and owner bands did not move down with it. This protects the renderer and the window, the two readers that would otherwise each keep their own order, and it touches the registry's birth arms, which run once per actor.
 
 Whether every prefix of a live actor's path holds a route record:
 
@@ -164,28 +164,28 @@ Whether every prefix of a live actor's path holds a route record:
 - An inline alias requires its target parent to be `Starting` or `Live` (`PublishAlias`).
 - A closed ancestor keeps its record as `Dropped`, serial included.
 
-So the three creation paths each build on an existing record. The registry itself does not check it: `ReserveStarting` and `PublishLive` accept any name that passes the path grammar. The plan adds that check to the stamping arms (one probe of the parent prefix at birth), so `position` has no failure to report. This is open question 3.
+So the three creation paths each build on an existing record. The registry did not check it: `ReserveStarting` and `PublishLive` accepted any name that passed the path grammar. The four stamping arms now check it, with one probe of the parent prefix at birth: a name nested beneath a parent that holds no record, in any lifecycle, is refused with `RegistryEffectError::ParentUnknown`, which a spawn reports as `SpawnError::ParentUnknown`. The birth is the operation that can be wrong, so the birth returns the error, and `lineage_order` has no failure to report: it returns a `LineageOrder`, never an `Option`. The alternative, a read that treats a missing prefix as a step that sorts first, would give an orphan a made-up place in silence.
 
-### 6. A position is for life
+### 6. A lineage order is for life
 
-Every actor has a position from the moment its route is reserved. No actor is unplaced and no draw is refused for want of one.
+Every actor has a lineage order from the moment its route is reserved. No actor is unplaced and no draw is refused for want of one.
 
-A position stands across a republish. The mailbox and its record stay (`RepublishContract` clones the record), so a republished component keeps its place.
+A lineage order stands across a republish. The mailbox and its record stay (`RepublishContract` clones the record), so a republished component keeps its place.
 
-A closed actor never returns to its position, because it never returns at all. `DropMailbox` leaves the record as `Dropped`, and `PreparedSpawn` and `ReserveStarting` both refuse a birth whose id already holds any record, `Dropped` included (`route_conflict_failure` answers `SubnameRetired`; ADR-0079 §7). A component that is dropped and brought back is spawned under a new key, which is a new actor with a new serial, so it is last among its siblings. The code leaves no choice between keeping and renewing a position here.
+A closed actor never returns to its place, because it never returns at all. `DropMailbox` leaves the record as `Dropped`, and `PreparedSpawn` and `ReserveStarting` both refuse a birth whose id already holds any record, `Dropped` included (`route_conflict_failure` answers `SubnameRetired`; ADR-0079 §7). A component that is dropped and brought back is spawned under a new key, which is a new actor with a new serial, so it is last among its siblings. The code leaves no choice between keeping and renewing a lineage order here.
 
-One path does reuse a name: a `Starting` reservation that is cancelled removes its record (`CancelStarting`), and a retry under the same name is stamped again, later. That actor never lived, so the plan lets it take the later serial. This is open question 4.
+Two paths do reuse a name. A `Starting` reservation that is cancelled removes its record (`CancelStarting`), and so does a claim withdrawn before any actor could have observed it (`WithdrawClaim`, which takes a `BootAuthority`, so only pre-seal boot code reaches it). A retry under the same name is stamped again, later. That actor never lived, so the plan lets it take the later serial. This is open question 4.
 
 ### 7. Senders that are not ordinary actors
 
-The sort has no special case. A batch sorts where its sender's position puts it, and a batch with no sender has the empty position, which is a prefix of every other and so sorts behind everything. Read from the code, and proposed:
+The sort has no special case. A batch sorts where its sender's lineage order puts it. A batch with no sender has none, and that case has a name: the renderer files every batch at a `Placement`, `Unplaced` for mail with no sender and `At(LineageOrder)` for mail an actor sent, read once when the batch is filed. `Unplaced` is declared first, so it sorts behind everything and `LineageOrder` needs no public empty value. Read from the code, and proposed:
 
 | Draws from | Sender the renderer sees | Where it sorts (proposed) |
 |---|---|---|
-| MCP `send_mail` | `aether.rpc.server`, which delivers each call with `deliver_detached` (`crates/aether-rpc/src/server/runtime.rs`) | At that root's boot position: behind every component in the boot list and every later load |
+| MCP `send_mail` | `aether.rpc.server`, which delivers each call with `deliver_detached` (`crates/aether-rpc/src/server/runtime.rs`) | At that root's place in boot order: behind every component in the boot list and every later load |
 | MCP `send_mail_traced` | `aether.rpc.server` too: `aether.trace` delivers with `deliver_forwarded`, which pins the reply target to the inbound one (`crates/aether-trace/src/runtime.rs`) | The same |
-| `capture_frame` pre-mails and after-mails | `aether.render` itself, which delivers them with `deliver_detached` (`crates/aether-render/src/runtime/mod.rs`) | At the render capability's boot position |
-| A harness or driver root push | None: `push_root` stamps `Source::NONE` or a settling inbox (`crates/aether-substrate/src/chassis/builder/root_pusher.rs`), and `NativeCtx::sender` answers `None` for both | Behind everything |
+| `capture_frame` pre-mails and after-mails | `aether.render` itself, which delivers them with `deliver_detached` (`crates/aether-render/src/runtime/mod.rs`) | At the render capability's place in boot order |
+| A harness or driver root push | None when the push has no reply inbox: `push_root` stamps `Source::NONE` (`crates/aether-substrate/src/chassis/builder/root_pusher.rs`), and the SubstrateHarness stamps a session, and `NativeCtx::sender` answers `None` for both. A push with a reply inbox carries that inbox's claimed mailbox as its sender (`SettlingInbox::reply_source`) | Behind everything with no sender; with a reply inbox, where the inbox's claimed mailbox stands. No draw is pushed that way today |
 
 `ctx.sender()` reads the mail's reply target (`crates/aether-substrate/src/actor/native/ctx/inbound.rs`), which is why a forwarded mail keeps its original sender.
 
@@ -195,7 +195,7 @@ The effect is that a draw mailed straight to the renderer from a session, a capt
 
 A member states the region in which it takes the pointer: a rectangle in window pixels, or the whole window. The statement is mail to `aether.window`. A member that draws nothing can still take the pointer: the camera controller states the whole window.
 
-A pointer event goes to the frontmost member whose region holds the point, and to nobody else. Frontmost is by position, read through the same `NativeCtx::position`. Subscriptions still decide which kinds an actor is sent.
+A pointer event goes to the frontmost member whose region holds the point, and to nobody else. Frontmost is by lineage order, read through the same `NativeCtx::lineage_order`. Subscriptions still decide which kinds an actor is sent.
 
 **A press owns its release.** The window remembers which member was sent each button press. The drag's moves, wheel and release go to that same member wherever the pointer is by then. A window that loses operating-system focus forgets its owners, because those releases never arrive. An owner that closes takes its entries with it.
 
@@ -215,7 +215,7 @@ Key focus is separate from the sequence. It is state the window manager holds: o
 - **An actor may hold key focus in several windows.** Each is taken, released and lost on its own.
 - **Nothing takes key focus merely to receive keys.** Taking it means everyone outside the scope stops hearing them.
 - **The window tells an actor when it gains key focus and when it loses it**, and in which window.
-- **The pointer is unaffected.** A press goes to the frontmost member under it by position, whoever holds key focus.
+- **The pointer is unaffected.** A press goes to the frontmost member under it by lineage order, whoever holds key focus.
 
 | Moment | The window's slot | Hears that window's keys |
 |---|---|---|
@@ -335,7 +335,7 @@ The renderer's turn now pays for layout and for rasterising a glyph it has not s
 ## Consequences
 
 - **A cross-actor overlay can be drawn.** It is created beneath a layer that was created after the scene's layer, and it is over the scene on every frame.
-- **Nobody declares an order.** Existing drawers (`aether-widget`'s `emit_layer`, the kit bundle tile, the fixtures) change nothing to be ordered. They change only if they must stand somewhere other than where creation put them, and then they move beneath a layer.
+- **Nobody declares an order.** Existing drawers (the kit bundle tile, the fixtures) change nothing to be ordered. They change only if they must stand somewhere other than where creation put them, and then they move beneath a layer.
 - **ADR-0117 is completed in part.** Order between roots, and between an actor and a child that draws for itself, is built, with no key and no edges. A widget subtree still reaches the renderer through one sender.
 - **Keys can be kept from the scene.** The console takes key focus while it is open and the camera controller stops hearing keys, with no change to the camera controller.
 - **ADR-0164 §4 changes for pointer, key and text events.** The lines are written on that ADR when this is implemented.
@@ -364,7 +364,7 @@ The renderer's turn now pays for layout and for rasterising a glyph it has not s
 
 **2. Session draws.** Section 7 puts MCP, capture and harness draws behind every component with no special case. The alternative is one stated place for them in front of everything, which is a special case in the renderer's sort. Lean: no special case.
 
-**3. A prefix with no record.** The registry accepts a multi-segment name whose parent prefix holds no record. Options: the stamping arms refuse it (one more probe per birth), or `position` treats a missing prefix as a step that sorts first. Lean: refuse at birth, so the read is total.
+**3. A prefix with no record.** Decided in section 5: the stamping arms refuse the birth, so the read is total.
 
 **4. A cancelled reservation retried under the same name.** It is stamped again and takes the later serial. The alternative is to remember the first serial across the cancel, which needs state the registry does not keep today. Lean: the later serial.
 
@@ -379,8 +379,6 @@ The renderer's turn now pays for layout and for rasterising a glyph it has not s
 - Where in a component load the `PreparedSpawn` effect is submitted relative to module compilation. If it follows compilation, two loads sent together are ordered by how long each compiles.
 - That every caller of `PreparedRoute::named` passes a one-segment name. That constructor hashes the whole name where a multi-segment path must be folded.
 - That `spawn_substrate`'s `components` list reaches the same awaited loader as the boot list.
-- That a harness reply inbox's source never reads as an actor sender. `NativeCtx::sender` answers an actor only for `SourceAddr::Component`, or for a reply; the inbox's variant was not read.
-- What republishing the route view costs per birth with the added field. The record grows by 8 bytes and is cloned where it is today.
 - How actors from another journal are born.
 
 ## Alternatives considered

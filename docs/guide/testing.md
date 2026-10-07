@@ -157,14 +157,17 @@ the journal back through the same expectations on the `SeededJournal` the engine
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
-space, and submission order through `committed_overlay_snapshot` (on
+space, and commit order through `committed_overlay_snapshot` (on
 `aether-harness-substrate-capture`'s `RenderHarnessExt`); then use
 `CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
 through projection, blending, rasterization, and GPU readback. The typed snapshot
 contains only batches accepted into the recorded draw plan, so missing textures,
 invalid/empty clips, and an over-budget overlay pass cannot masquerade as rendered
 work. It localizes a malformed submission, while the rendered capture proves the
-pipeline actually produced the intended pixels.
+pipeline actually produced the intended pixels. The snapshot lists batches in
+commit order, the painter order the frame was recorded in: lineage order
+between senders and each sender's own send order inside it, never the order the
+mail arrived in. A harness send has no sender, so its batches come first.
 
 Assert what a capability's work produced — a reply, `committed_overlay_snapshot` /
 `committed_shape_snapshot`, or pixels — and never whether a kind was dispatched to it.

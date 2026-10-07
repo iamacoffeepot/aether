@@ -56,7 +56,7 @@ use crate::chassis::inbox::inbox_channel;
 use crate::config::ConfigMember;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
-use crate::mail::registry::{BootAuthority, InboxHandler, NameConflict, Registry, lineage_mailbox_id};
+use crate::mail::registry::{BootAuthority, InboxHandler, RegisterError, Registry, lineage_mailbox_id};
 use crate::runtime::lifecycle::FatalAborter;
 
 mod pumped;
@@ -184,23 +184,29 @@ pub fn registered_binding(
 /// `Registry::resolve_address`, and a spawn claiming the same path all meet
 /// it. A root name folds to its name hash, the position it always had.
 ///
+/// A nested path needs its parent standing: the registry refuses a name
+/// nested beneath a parent that holds no record (ADR-0248 §5), so a fixture
+/// registers `a` before `a/b:k`, as production births do.
+///
 /// The reference is proven by the registry's own liveness read, the same
 /// one a handler's `ctx.resolve_live` takes, so a fixture proof and a
 /// production proof come from the same code.
 ///
 /// # Panics
-/// Panics if `name` is already registered.
+/// Panics if `name` is already registered, or is nested beneath a parent
+/// that is not.
 pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
     try_registered_ref(registry, name, handler).expect("the fixture name is free")
 }
 
 /// [`registered_ref`] for a fixture that needs the refusal: `Err` when `name`
-/// is already registered, where `registered_ref` panics.
+/// is already registered or its parent holds no record, where
+/// `registered_ref` panics.
 pub fn try_registered_ref(
     registry: &Registry,
     name: &str,
     handler: Arc<dyn InboxHandler>,
-) -> Result<ErasedActorRef, NameConflict> {
+) -> Result<ErasedActorRef, RegisterError> {
     registry
         .try_register_inbox_with_id(&boot_authority(), lineage_mailbox_id(name), name, handler)
         .map(|id| registry.resolve_live(id).expect("a freshly registered inbox proves"))

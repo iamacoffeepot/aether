@@ -5,6 +5,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::mail::registry::effect::ActivationToken;
+use crate::mail::registry::names::lineage_mailbox_id;
 use crate::mail::registry::publication::PublicationTable;
 use crate::mail::{KindId, MailboxId};
 
@@ -19,6 +20,21 @@ pub(super) fn staged_route<'a>(
     id: MailboxId,
 ) -> Option<&'a RouteRecord> {
     staged.get(&id).map_or_else(|| inner.mailboxes.get(&id), |route| route.as_ref())
+}
+
+/// Whether a birth under `name` names a parent the registry holds a record
+/// for, in any lifecycle (ADR-0248 §5). A root name has no parent and always
+/// passes. The parent's record is found at the fold of the parent's own path
+/// and must carry that path as its canonical name, the same two facts
+/// `Registry::lineage_order` reads for every ancestor, so a birth this admits
+/// leaves that read nothing to miss.
+pub(super) fn parent_stands(staged: &FxHashMap<MailboxId, Option<RouteRecord>>, inner: &Inner, name: &str) -> bool {
+    let Some((parent, _)) = name.rsplit_once('/') else {
+        return true;
+    };
+
+    staged_route(staged, inner, lineage_mailbox_id(parent))
+        .is_some_and(|record| record.canonical_name.as_str() == parent)
 }
 
 pub(super) fn staged_kind<'a>(

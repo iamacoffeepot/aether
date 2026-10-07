@@ -54,6 +54,11 @@ pub enum SpawnError {
     SubnameRetired { full_name: String },
     /// The full name is currently bound to a live mailbox.
     SubnameInUse { full_name: String },
+    /// The full name is nested beneath a parent the registry holds no record
+    /// for (ADR-0248 §5): every actor's ancestors hold records, so the
+    /// registry refuses a birth that would break that. Decided where the
+    /// birth is applied, so a staged birth learns of it on its completion.
+    ParentUnknown { full_name: String },
     /// `A::init` returned an error. The actor's partial state dropped
     /// before this returns; no dispatcher thread was spawned.
     InitFailed(BootError),

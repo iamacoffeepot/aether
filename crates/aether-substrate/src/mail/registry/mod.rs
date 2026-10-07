@@ -50,9 +50,11 @@ pub use dispatch::{DispatchParts, MailDispatch, OwnedDispatch};
 pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 #[doc(hidden)]
 pub use effect::{PreparedAliasRetirement, PreparedAliasRoute, RegistryInventory, RegistrySubscription};
-pub use errors::{DropError, KindConflict, NameConflict};
+pub use errors::{DropError, KindConflict, NameConflict, RegisterError};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
-pub use mailbox::{AdoptRefused, ChildRefused, MailboxEntry, Registry, ResolveLiveError, RouteResolution};
+pub use mailbox::{
+    AdoptRefused, ChildRefused, LineageOrder, MailboxEntry, Registry, ResolveLiveError, RouteResolution,
+};
 pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use metrics::RegistryQueueMetrics;
 pub(crate) use names::{canonical_mailbox_id, lineage_mailbox_id};
