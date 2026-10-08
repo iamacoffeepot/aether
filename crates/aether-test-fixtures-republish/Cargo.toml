@@ -55,6 +55,10 @@ publish = false
 # - `memory_reader` (issue 7622): a guest that asks the inventory cap for the
 #   engine's memory report and answers its requester with it. It names no type
 #   of the lib.
+# - `context_relay` (issue 7653): a root `test.context.relay` that asks the
+#   party that joined it through a held reference and answers its caller from
+#   the reply handler, and the root `test.context.party` it asks. It names no
+#   type of the lib.
 [lib]
 crate-type = ["rlib"]
 
@@ -177,6 +181,10 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "republish_hooks_v2"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "context_relay"
 crate-type = ["cdylib"]
 
 [lints]

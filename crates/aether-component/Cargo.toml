@@ -121,6 +121,8 @@ aether-test-fixtures-short-path = { path = "../aether-test-fixtures-short-path" 
 # `harness_guest_addresses` composes the inventory cap and resolves short
 # paths through its `ResolveAddress`, as an external caller does;
 # `harness_guest_memory` has a guest ask it for the engine's memory report.
+# `harness_guest_relay` loads the `context_relay` example of the republish
+# fixtures crate.
 aether-inventory = { path = "../aether-inventory" }
 # `harness_inline_dependencies` composes the in-memory clipboard to satisfy
 # the inline-dependency fixture's declared `ClipboardCapability`.
