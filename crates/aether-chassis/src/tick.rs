@@ -114,8 +114,10 @@ pub fn apply_manifest_tick_settings(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChassisSettings, ConfigSources, DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, apply_manifest_tick_settings,
+        ChassisSettings, ConfigSources, DEFAULT_TICK_HZ, TickConfig, TickConfigLayer, TickOverlay,
+        apply_manifest_tick_settings,
     };
+    use aether_substrate::config::StageArgv as _;
     use confique::Config as _;
     use std::env;
     use std::sync::Mutex;
@@ -202,5 +204,28 @@ mod tests {
             DEFAULT_TICK_HZ,
             "an explicit env pin of the compiled default still beats the manifest tick_hz"
         );
+    }
+
+    #[test]
+    fn a_staged_command_line_with_no_tick_flag_lets_the_manifest_cadence_apply() {
+        // The bug this catches: a command line stages the tick overlay whether or
+        // not `--tick-hz` was passed, and the gate read that empty layer as the
+        // operator having pinned a cadence, so a package's `tick_hz` of 30 never
+        // beat the default 60. The second half holds the other side: a staged
+        // `--tick-hz 60` is a real pin of the compiled default and beats the
+        // manifest.
+        let settings = ChassisSettings { tick_hz: Some(30), ..ChassisSettings::default() };
+
+        let mut sources = ConfigSources::hermetic();
+        TickOverlay::default().stage_argv(&mut sources);
+        apply_manifest_tick_settings(&mut sources, &settings).expect("apply tick settings");
+        let resolved = sources.resolve::<TickConfig>().expect("resolve tick config");
+        assert_eq!(resolved.hz, 30, "no tick flag, so the manifest cadence applies");
+
+        let mut sources = ConfigSources::hermetic();
+        TickOverlay { hz: Some(DEFAULT_TICK_HZ) }.stage_argv(&mut sources);
+        apply_manifest_tick_settings(&mut sources, &settings).expect("apply tick settings");
+        let resolved = sources.resolve::<TickConfig>().expect("resolve tick config");
+        assert_eq!(resolved.hz, DEFAULT_TICK_HZ, "a staged pin of the default beats the manifest");
     }
 }
