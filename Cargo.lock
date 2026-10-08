@@ -1078,6 +1078,7 @@ dependencies = [
  "aether-component",
  "aether-data",
  "aether-fs",
+ "aether-inventory",
  "aether-kinds",
  "aether-test-fixtures-kinds",
 ]

@@ -813,6 +813,38 @@ pub struct ObjectSpawn {
     pub namespace: String,
 }
 
+/// Issue 7622: asks the memory reader for the engine's memory report. It is
+/// answered with a [`MemoryReadResult`] built from the inventory cap's
+/// `ListMemoryResult`.
+#[aether_data::kind(name = "aether.test_fixtures.memory_query")]
+pub struct MemoryQuery;
+
+/// Issue 7622: one row of the engine's memory ledger, as the memory reader
+/// copies it from the inventory cap's reply.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRow {
+    /// The owner's actor path.
+    pub owner: String,
+    /// What the bytes are.
+    pub label: String,
+    pub bytes: u64,
+}
+
+/// Issue 7622: the memory reader's answer to a [`MemoryQuery`]. A reader that
+/// closed before the inventory cap answered sends `Unanswered` in its place
+/// (ADR-0243 §6); the report itself cannot fail.
+#[aether_data::kind(name = "aether.test_fixtures.memory_read_result")]
+pub enum MemoryReadResult {
+    Rows { owners: Vec<MemoryRow> },
+    Unanswered,
+}
+
+impl aether_actor::HeldReply for MemoryReadResult {
+    fn unanswered() -> Self {
+        Self::Unanswered
+    }
+}
+
 /// Issue 7086: asks the republish gate how many times its `wire` hook has
 /// run on this instance. It replies a [`CountReport`].
 #[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]

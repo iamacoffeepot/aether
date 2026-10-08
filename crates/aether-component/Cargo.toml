@@ -119,7 +119,8 @@ aether-test-fixtures-republish = { path = "../aether-test-fixtures-republish" }
 # names each fixture type's namespace through the rlib.
 aether-test-fixtures-short-path = { path = "../aether-test-fixtures-short-path" }
 # `harness_guest_addresses` composes the inventory cap and resolves short
-# paths through its `ResolveAddress`, as an external caller does.
+# paths through its `ResolveAddress`, as an external caller does;
+# `harness_guest_memory` has a guest ask it for the engine's memory report.
 aether-inventory = { path = "../aether-inventory" }
 # `harness_inline_dependencies` composes the in-memory clipboard to satisfy
 # the inline-dependency fixture's declared `ClipboardCapability`.
