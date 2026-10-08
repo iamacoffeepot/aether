@@ -673,6 +673,85 @@ pub struct DestroyInstances {
     pub instances_id: u32,
 }
 
+/// One staged render resource, named across the three id spaces the
+/// renderer hands out. Plain textures, texture arrays and volume textures
+/// share the texture id space, so `Texture` names any of the three. The
+/// ids the renderer keeps for itself (the white texture and the glyph
+/// atlas) name nothing here.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum RenderResource {
+    Texture { texture_id: u32 },
+    Geometry { geometry_id: u32 },
+    Instances { instances_id: u32 },
+}
+
+/// `aether.render.await_resident` — ask to be answered once every named
+/// resource is resident (ADR-0251 section 5). A resource is *staged* when
+/// the renderer holds its bytes and the GPU object is missing or behind
+/// them, and *resident* when the GPU object exists and holds every staged
+/// byte, so drawing it uploads nothing. Send this after the creates,
+/// updates and layer writes it should cover: mail from one sender arrives
+/// in order.
+///
+/// - The reply means each named resource was resident at some point after
+///   the request arrived. A resource that is updated after it became
+///   resident does not reopen the wait; to hear about a later update, ask
+///   again after sending it.
+/// - A resource named twice counts once, toward the wait and in `bytes`.
+/// - An empty list is answered `Ok { bytes: 0 }` at once.
+/// - A request whose resources are all resident already, or that names an
+///   id that names nothing, is answered at once.
+/// - A request that has to wait settles its own chain first, so a sender
+///   in a `Tick` handler does not hold the frame loop, and a `send_mail`
+///   over MCP returns with no reply for it. The reply is sent in the frame
+///   whose upload step finds the last named resource resident. With no
+///   device or no frames nothing uploads and nothing is answered.
+/// - The named resources upload before the ones no request has named
+///   (ADR-0251 section 6). That is the only ordering signal the renderer
+///   takes.
+///
+/// Reply: [`AwaitResidentResult`].
+#[aether_data::kind(name = "aether.render.await_resident")]
+pub struct AwaitResident {
+    pub resources: Vec<RenderResource>,
+}
+
+/// Reply to [`AwaitResident`]. `Ok` carries the bytes the named resources
+/// hold on the GPU, each resource counted once and as the memory report
+/// counts it: a geometry's vertex plus index bytes, an instance buffer's
+/// capacity times its record stride, a texture's declared pixel bytes,
+/// every layer of a texture array written or not, and a volume's bytes.
+/// `Err` says why no such answer is coming.
+#[aether_data::kind(name = "aether.render.await_resident_result", eq)]
+pub enum AwaitResidentResult {
+    Ok { bytes: u64 },
+    Err(AwaitResidentError),
+}
+
+/// Why an [`AwaitResident`] was not answered `Ok`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AwaitResidentError {
+    /// `resource` named nothing when the request arrived: an id never
+    /// handed out, one already destroyed, or one the renderer keeps for
+    /// itself. It is the first such resource in the request, and nothing
+    /// is waited on.
+    Unknown { resource: RenderResource },
+    /// `resource` was destroyed before it became resident. The other
+    /// resources the request named are unaffected and still upload.
+    Destroyed { resource: RenderResource },
+    /// The render device failed for good, so nothing more uploads this
+    /// session. `error` is the device's own failure text.
+    DeviceUnusable { error: String },
+    /// The renderer closed before the request was answered.
+    Closed,
+}
+
+impl HeldReply for AwaitResidentResult {
+    fn unanswered() -> Self {
+        Self::Err(AwaitResidentError::Closed)
+    }
+}
+
 /// A run of a geometry's indices: `count` indices starting at index
 /// `first`. Both count indices, never bytes and never triangles. A
 /// `count` of zero is inside every geometry and draws nothing.

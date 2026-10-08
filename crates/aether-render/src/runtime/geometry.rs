@@ -20,7 +20,7 @@ use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
-use super::upload::Piece;
+use super::upload::{Piece, Residency};
 use crate::VertexFormat;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
@@ -130,6 +130,13 @@ impl StagedGeometry {
     #[must_use]
     pub fn is_resident(&self) -> bool {
         self.realized.is_some() && !self.dirty
+    }
+
+    /// What the geometry holds on the device once resident: its vertex
+    /// plus index bytes, the count its memory charge uses.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        (self.vertex_bytes().len() + self.index_bytes().len()) as u64
     }
 
     /// Realize the GPU buffers if they aren't yet, or re-create them if
@@ -312,11 +319,22 @@ impl GeometryRegistry {
             return Piece::Missing;
         };
         if entry.is_resident() {
-            return Piece::Resident;
+            return Piece::Resident { bytes: entry.device_bytes() };
         }
 
         entry.ensure_realized(device, queue);
-        Piece::Landed
+        Piece::Landed { bytes: entry.device_bytes() }
+    }
+
+    /// Where the geometry at `geometry_id` stands for a wait on it
+    /// (ADR-0251 section 5). Only a live id is looked up: a geometry
+    /// destroyed under a draw set answers to no id, so it is `Unknown`.
+    pub(super) fn residency(&self, geometry_id: u32) -> Residency {
+        let Some(entry) = self.entries.get(&geometry_id) else {
+            return Residency::Unknown;
+        };
+
+        Residency::live(entry.is_resident(), entry.device_bytes())
     }
 
     /// Drop every buffer realization built against the current device
@@ -728,14 +746,14 @@ mod tests {
             panic!("geometry create accepted");
         };
 
-        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Landed);
+        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Landed { bytes: 52 });
         let uploaded =
             registry.entries[&geometry_id].realized.as_ref().expect("the upload realized it").vertex_buffer.clone();
 
         registry.held_mut(geometry_id).ensure_realized(&booted.device, &booted.queue);
         let drawn = &registry.entries[&geometry_id].realized.as_ref().expect("still realized").vertex_buffer;
         assert_eq!(*drawn, uploaded, "the first draw must use the buffers the queue made");
-        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Resident);
+        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Resident { bytes: 52 });
         assert_eq!(registry.upload(geometry_id + 1, &booted.device, &booted.queue), Piece::Missing);
     }
 

@@ -33,14 +33,14 @@
 //!   the verdict and similarity directly.
 
 use crate::runtime::config::parse_clear_color;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::iter;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ReplyMode, runtime};
+use aether_actor::{HeldReply, ReplyMode, runtime};
 use aether_data::ErasedActorPath;
 
 use aether_kinds::{CaptureFrame, CaptureFrameResult, MonitorNotice};
@@ -149,18 +149,19 @@ use self::overlay::{OverlayFrame, Placement};
 use self::program::{DispatchResources, ProgramRegistry};
 use self::text::{FontParse, FontParseOutput, TextState};
 pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
-use self::upload::{Resource, UploadQueue};
+use self::upload::{Arrival, Residency, UploadQueue};
 use self::view_source::FollowedView;
 
 use super::{
-    CreateDrawSet, CreateDrawSetResult, CreateFont, CreateFontResult, CreateGeometry, CreateGeometryResult,
-    CreateInstances, CreateInstancesResult, CreateTexture, CreateTextureArray, CreateTextureArrayResult,
-    CreateTextureResult, CreateTextureVolume, CreateTextureVolumeResult, DRAW_TRIANGLE_BYTES, DestroyDrawSet,
-    DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawScreenTriangles,
-    DrawShapes, DrawText, DrawTexturedQuads, DrawTriangle, FontMetricsRequest, FontMetricsResult, Frame, Occluded,
-    PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
-    ProgramTimingsResult, RenderCapability, UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances,
-    UpdateTexture, ViewFrom, ViewFromResult, ViewProjection, WriteTextureLayer,
+    AwaitResident, AwaitResidentError, AwaitResidentResult, CreateDrawSet, CreateDrawSetResult, CreateFont,
+    CreateFontResult, CreateGeometry, CreateGeometryResult, CreateInstances, CreateInstancesResult, CreateTexture,
+    CreateTextureArray, CreateTextureArrayResult, CreateTextureResult, CreateTextureVolume, CreateTextureVolumeResult,
+    DRAW_TRIANGLE_BYTES, DestroyDrawSet, DestroyGeometry, DestroyInstances, DestroyTexture, DrawMaterialCoverage,
+    DrawMaterialTextured, DrawScreenTriangles, DrawShapes, DrawText, DrawTexturedQuads, DrawTriangle,
+    FontMetricsRequest, FontMetricsResult, Frame, Occluded, PreSettled, ProgramDestroy, ProgramDispatch,
+    ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderResource,
+    UpdateDrawSet, UpdateDrawSetResult, UpdateGeometry, UpdateInstances, UpdateTexture, ViewFrom, ViewFromResult,
+    ViewProjection, WriteTextureLayer,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -207,9 +208,10 @@ pub struct RenderCapabilityState {
     draw_sets: DrawSetRegistry,
     /// ADR-0170 authored render programs: the session-scoped registry.
     programs: ProgramRegistry,
-    /// The staged resources waiting for the upload step (ADR-0251). Every
-    /// create, update and layer write names its resource here, and every
-    /// destroy takes it out.
+    /// The staged resources waiting for the upload step, and the
+    /// `await_resident` requests waiting on them (ADR-0251). Every create,
+    /// update and layer write names its resource here, and every destroy
+    /// takes it out.
     uploads: UploadQueue,
     /// Dispatches queued since the last frame record. Unlike the draw
     /// accumulators these are one-shot — a program executes once per
@@ -282,6 +284,15 @@ enum RecoveryTarget {
     Desktop,
     Offscreen((u32, u32)),
     Unavailable,
+}
+
+/// Answer a request before its handler returns, on the caller's chain:
+/// the `Pending` receipt of a reply that is already sent.
+fn answer_now<R: HeldReply, M: ReplyMode, A, S>(ctx: &mut NativeCtx<'_, A, S, M>, reply: &R) -> Pending<R> {
+    let (pending, held) = ctx.hold::<R>();
+    held.answer(ctx, reply);
+
+    pending
 }
 
 fn select_recovery_target(has_desktop_targets: bool, offscreen_size: Option<(u32, u32)>) -> RecoveryTarget {
@@ -591,7 +602,7 @@ impl RenderCapabilityState {
 
         let created = self.textures.create_array(mail, gpu.device.limits().max_texture_array_layers);
         if let CreateTextureArrayResult::Ok { texture_id } = created {
-            self.uploads.staged(Resource::Texture { texture_id });
+            self.uploads.staged(RenderResource::Texture { texture_id });
         }
 
         created
@@ -738,6 +749,7 @@ impl RenderCapabilityState {
         self.wire_pipeline = None;
         self.gpu = None;
         self.device_recovery.fail_replacement(ticket, reason.clone());
+        self.uploads.abandon(ctx, &reason);
         self.fail_pending_capture_for_device(ctx, format!("capture_frame failed: {reason}"));
     }
 
@@ -784,20 +796,81 @@ impl RenderCapabilityState {
 
     /// Run the frame's upload step (ADR-0251 section 2): offer pieces from
     /// the front of the upload queue to the registries until the frame's
-    /// allowance is uploaded or nothing is queued. Without a device
-    /// nothing uploads and the queue keeps what it holds.
-    fn upload_staged(&mut self) {
+    /// allowance is uploaded or nothing is queued, awaited resources
+    /// first (section 6). A wait whose last resource the step finds
+    /// resident is answered here; `ctx` is the render actor's own, which
+    /// answers it. Without a device nothing uploads, nothing is answered
+    /// and the queue keeps what it holds.
+    fn upload_staged<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
 
-        self.uploads.step(|resource| match resource {
-            Resource::Texture { texture_id } => {
+        self.uploads.step(ctx, |resource| match resource {
+            RenderResource::Texture { texture_id } => {
                 self.textures.upload_piece(texture_id, &gpu.device, &gpu.queue, &gpu.texture_bindings)
             }
-            Resource::Geometry { geometry_id } => self.geometries.upload(geometry_id, &gpu.device, &gpu.queue),
-            Resource::Instances { instances_id } => self.instances.upload(instances_id, &gpu.device, &gpu.queue),
+            RenderResource::Geometry { geometry_id } => self.geometries.upload(geometry_id, &gpu.device, &gpu.queue),
+            RenderResource::Instances { instances_id } => self.instances.upload(instances_id, &gpu.device, &gpu.queue),
         });
+    }
+
+    /// Where `resource` stands, as the registry that owns its id space
+    /// reads it.
+    fn residency(&self, resource: RenderResource) -> Residency {
+        match resource {
+            RenderResource::Texture { texture_id } => self.textures.residency(texture_id),
+            RenderResource::Geometry { geometry_id } => self.geometries.residency(geometry_id),
+            RenderResource::Instances { instances_id } => self.instances.residency(instances_id),
+        }
+    }
+
+    /// Decide what an `AwaitResident` naming `resources` gets, before any
+    /// ticket is made (ADR-0251 section 5). A resource named twice counts
+    /// once. A device that is unusable for good refuses the request,
+    /// because nothing more uploads; a lost device that will be replaced
+    /// does not. The first resource that names nothing refuses it. When
+    /// every resource is resident the request is answered with their
+    /// bytes, and otherwise the reply is owed for the ones still staged.
+    fn await_arrival(&mut self, resources: Vec<RenderResource>) -> Arrival {
+        self.device_recovery.refresh();
+        if let Some(error) = self.device_recovery.unusable_error() {
+            return Arrival::Answered(AwaitResidentResult::Err(AwaitResidentError::DeviceUnusable { error }));
+        }
+
+        let mut named = HashSet::new();
+        let mut staged = Vec::new();
+        let mut bytes = 0;
+        for resource in resources.into_iter().filter(|resource| named.insert(*resource)) {
+            match self.residency(resource) {
+                Residency::Unknown => {
+                    return Arrival::Answered(AwaitResidentResult::Err(AwaitResidentError::Unknown { resource }));
+                }
+                Residency::Staged => staged.push(resource),
+                Residency::Resident { bytes: resident } => bytes += resident,
+            }
+        }
+        if staged.is_empty() {
+            return Arrival::Answered(AwaitResidentResult::Ok { bytes });
+        }
+
+        Arrival::Owed { staged, bytes }
+    }
+
+    /// Owe an `AwaitResident` its reply without holding the sender's
+    /// chain (`NativeCtx::defer`, ADR-0243 §1), and hand the wait to the
+    /// upload queue, which answers it. `staged` and `bytes` are an
+    /// [`Arrival::Owed`]'s.
+    fn owe_resident<M: ReplyMode, A, S>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, S, M>,
+        staged: Vec<RenderResource>,
+        bytes: u64,
+    ) -> Pending<AwaitResidentResult> {
+        let (pending, held) = ctx.defer::<AwaitResidentResult>();
+        self.uploads.wait(staged, bytes, held);
+
+        pending
     }
 
     /// Commit the frame's accumulators into the lists the record path reads.
@@ -1163,7 +1236,7 @@ impl NativeActor for RenderCapability {
         }
         let created = state.textures.create(mail);
         if let CreateTextureResult::Ok { texture_id } = created {
-            state.uploads.staged(Resource::Texture { texture_id });
+            state.uploads.staged(RenderResource::Texture { texture_id });
         }
 
         created
@@ -1177,18 +1250,19 @@ impl NativeActor for RenderCapability {
         }
         let texture_id = mail.texture_id;
         state.textures.update(mail);
-        state.uploads.staged(Resource::Texture { texture_id });
+        state.uploads.staged(RenderResource::Texture { texture_id });
     }
 
-    /// `DestroyTexture`, on the owned texture registry.
+    /// `DestroyTexture`, on the owned texture registry. A wait on the
+    /// texture is answered `Destroyed`.
     #[handler::tell]
-    fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
+    fn on_destroy_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         if state.warn_drop_if_unusable("destroy_texture") {
             return;
         }
         let texture_id = mail.texture_id;
         state.textures.destroy(mail);
-        state.uploads.forget(Resource::Texture { texture_id });
+        state.uploads.refuse(ctx, RenderResource::Texture { texture_id });
     }
 
     /// `CreateTextureArray` (ADR-0246 decision 6), on the owned texture
@@ -1227,7 +1301,7 @@ impl NativeActor for RenderCapability {
         }
         let texture_id = mail.texture_id;
         state.textures.write_layer(mail);
-        state.uploads.staged(Resource::Texture { texture_id });
+        state.uploads.staged(RenderResource::Texture { texture_id });
     }
 
     /// `CreateTextureVolume` (ADR-0246 decision 6), on the owned texture
@@ -1246,7 +1320,7 @@ impl NativeActor for RenderCapability {
         }
         let created = state.textures.create_volume(mail);
         if let CreateTextureVolumeResult::Ok { texture_id } = created {
-            state.uploads.staged(Resource::Texture { texture_id });
+            state.uploads.staged(RenderResource::Texture { texture_id });
         }
 
         created
@@ -1267,7 +1341,7 @@ impl NativeActor for RenderCapability {
         }
         let created = state.geometries.create(mail);
         if let CreateGeometryResult::Ok { geometry_id } = created {
-            state.uploads.staged(Resource::Geometry { geometry_id });
+            state.uploads.staged(RenderResource::Geometry { geometry_id });
         }
 
         created
@@ -1281,19 +1355,21 @@ impl NativeActor for RenderCapability {
         }
         let geometry_id = mail.geometry_id;
         state.geometries.update(mail);
-        state.uploads.staged(Resource::Geometry { geometry_id });
+        state.uploads.staged(RenderResource::Geometry { geometry_id });
     }
 
     /// `DestroyGeometry` (ADR-0171), on the owned geometry registry —
-    /// mirrors `destroy_texture`.
+    /// mirrors `destroy_texture`. A wait on the geometry is answered
+    /// `Destroyed`, even when a draw set still holds its buffers: the id
+    /// names nothing any more.
     #[handler::tell]
-    fn on_destroy_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
+    fn on_destroy_geometry(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
         if state.warn_drop_if_unusable("destroy_geometry") {
             return;
         }
         let geometry_id = mail.geometry_id;
         state.geometries.destroy(mail);
-        state.uploads.forget(Resource::Geometry { geometry_id });
+        state.uploads.refuse(ctx, RenderResource::Geometry { geometry_id });
     }
 
     /// `CreateInstances` (ADR-0246), on the owned instance registry —
@@ -1310,7 +1386,7 @@ impl NativeActor for RenderCapability {
         }
         let created = state.instances.create(mail);
         if let CreateInstancesResult::Ok { instances_id } = created {
-            state.uploads.staged(Resource::Instances { instances_id });
+            state.uploads.staged(RenderResource::Instances { instances_id });
         }
 
         created
@@ -1324,18 +1400,53 @@ impl NativeActor for RenderCapability {
         }
         let instances_id = mail.instances_id;
         state.instances.update(mail);
-        state.uploads.staged(Resource::Instances { instances_id });
+        state.uploads.staged(RenderResource::Instances { instances_id });
     }
 
-    /// `DestroyInstances` (ADR-0246), on the owned instance registry.
+    /// `DestroyInstances` (ADR-0246), on the owned instance registry. A
+    /// wait on the buffer is answered `Destroyed`.
     #[handler::tell]
-    fn on_destroy_instances(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyInstances) {
+    fn on_destroy_instances(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DestroyInstances) {
         if state.warn_drop_if_unusable("destroy_instances") {
             return;
         }
         let instances_id = mail.instances_id;
         state.instances.destroy(mail);
-        state.uploads.forget(Resource::Instances { instances_id });
+        state.uploads.refuse(ctx, RenderResource::Instances { instances_id });
+    }
+
+    /// `AwaitResident` (ADR-0251 section 5): answer once every named
+    /// resource is resident. A request that needs no wait (every resource
+    /// resident already, an id that names nothing, an empty list, a
+    /// device unusable for good) is answered before the handler returns,
+    /// on the caller's chain. Any other is owed without holding that
+    /// chain, and the upload step answers it in the frame it finds the
+    /// last named resource resident.
+    ///
+    /// # Agent
+    /// Reply: `AwaitResidentResult`. Send it after the creates, updates
+    /// and layer writes it should cover, naming each resource as
+    /// `{"Geometry": {"geometry_id": 3}}`, `{"Texture": {"texture_id": 1}}`
+    /// or `{"Instances": {"instances_id": 0}}`; a texture array and a
+    /// volume are `Texture`. `Ok { bytes }` means each was on the GPU at
+    /// some point after the request arrived, so drawing them uploads
+    /// nothing, and `bytes` is what they hold there. The named resources
+    /// upload before unnamed ones. A request that has to wait returns no
+    /// reply inside a `send_mail` call, because its chain settles first;
+    /// a component receives the reply in its `#[handler::response]`
+    /// frames later. A resource updated after the answer is not reported
+    /// again: ask again after the update. `Err` names the resource that
+    /// named nothing or was destroyed while awaited.
+    #[handler::request]
+    fn on_await_resident(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: AwaitResident,
+    ) -> Pending<AwaitResidentResult> {
+        match state.await_arrival(mail.resources) {
+            Arrival::Answered(result) => answer_now(ctx, &result),
+            Arrival::Owed { staged, bytes } => state.owe_resident(ctx, staged, bytes),
+        }
     }
 
     /// `CreateDrawSet` (ADR-0246), on the owned draw-set registry —
@@ -1675,7 +1786,7 @@ impl NativeActor for RenderCapability {
         // submission, on the device recovery published, and before any
         // target records, so a resource this frame draws for the first
         // time is found resident when its turn in the queue has come.
-        state.upload_staged();
+        state.upload_staged(ctx);
         state.commit_scene(replay_cache_when_idle);
         #[cfg(feature = "desktop")]
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
@@ -2194,6 +2305,186 @@ mod tests {
 
             assert_eq!(resident(&render), frames, "each frame uploads one piece, and nothing drew them");
         }
+    }
+
+    /// The bytes of a triangle list over `vertices` zeroed `Float32x3`
+    /// vertices: 12 a vertex, plus the 12 of its three indices.
+    fn triangle(vertices: usize) -> (Vec<VertexAttribute>, Blob, Blob) {
+        let layout = vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }];
+        let indices = [0u32, 1, 2].iter().flat_map(|index| index.to_le_bytes()).collect::<Vec<u8>>();
+
+        (layout, Blob::from(vec![0u8; vertices * 12]), Blob::from(indices))
+    }
+
+    /// Create a [`triangle`] geometry and return its id.
+    fn created_triangle(render: &mut RenderFixture, vertices: usize) -> RenderResource {
+        let (layout, vertices, indices) = triangle(vertices);
+        let created: CreateGeometryResult = render.request(&CreateGeometry { layout, vertices, indices });
+        let CreateGeometryResult::Ok { geometry_id } = created else {
+            panic!("the create is accepted: {created:?}");
+        };
+
+        RenderResource::Geometry { geometry_id }
+    }
+
+    /// Every `AwaitResidentResult` the egress holds, oldest first, and
+    /// nothing else: these tests take each create's reply as they make it.
+    fn await_replies(render: &RenderFixture) -> Vec<AwaitResidentResult> {
+        render.session_replies().iter().map(SessionReply::decode).collect()
+    }
+
+    fn frame(render: &mut RenderFixture) {
+        render.send(&Frame { replay_cache_when_idle: true, windows: Vec::new() });
+    }
+
+    /// ADR-0251 section 5. A staged geometry is awaited: nothing is
+    /// answered until a frame uploads it, then exactly one `Ok` carries
+    /// its vertex plus index bytes, and neither a later frame nor a later
+    /// update answers again. It catches a wait answered before the
+    /// upload, one answered on every landing, one reopened by an update,
+    /// and a wrong byte count. The `ask` returning at all is the proof
+    /// the reply is owed without holding the sender's chain.
+    #[test]
+    fn an_awaited_geometry_is_answered_once_with_its_bytes() {
+        if !require_wgpu_adapter() {
+            return;
+        }
+        let mut render =
+            RenderFixture::boot(RenderParams { offscreen_size: Some((64, 48)), ..RenderParams::default() });
+        let geometry = created_triangle(&mut render, 3);
+        let RenderResource::Geometry { geometry_id } = geometry else {
+            panic!("a triangle is a geometry");
+        };
+
+        render.ask(&AwaitResident { resources: vec![geometry] });
+        assert_eq!(await_replies(&render), [], "nothing is answered while the geometry is only staged");
+
+        frame(&mut render);
+        assert_eq!(
+            await_replies(&render),
+            [AwaitResidentResult::Ok { bytes: 36 + 12 }],
+            "the frame that uploads it answers once, with its vertex plus index bytes",
+        );
+
+        frame(&mut render);
+        let (_, vertices, indices) = triangle(6);
+        render.send(&UpdateGeometry { geometry_id, vertices, indices });
+        frame(&mut render);
+        assert_eq!(await_replies(&render), [], "an answered wait is not answered again by a frame or an update");
+        assert_eq!(render.read(|state| state.uploads.unanswered()), 0, "the answered wait left the queue");
+    }
+
+    /// ADR-0251 section 6, with the allowance at one piece a frame. G1 is
+    /// staged before G2 and only G2 is awaited: the first frame uploads
+    /// G2 and answers its wait, and G1 is still staged. It catches a step
+    /// that takes from the unawaited lane first, and a wait that leaves
+    /// its resource behind what was already queued.
+    #[test]
+    fn an_awaited_resource_uploads_before_earlier_unawaited_ones() {
+        if !require_wgpu_adapter() {
+            return;
+        }
+        let params = RenderParams { offscreen_size: Some((64, 48)), ..RenderParams::default() };
+        let mut render = RenderFixture::boot_uploading(params, 1);
+        let earlier = created_triangle(&mut render, 3);
+        let awaited = created_triangle(&mut render, 6);
+
+        render.ask(&AwaitResident { resources: vec![awaited] });
+        frame(&mut render);
+
+        assert_eq!(
+            await_replies(&render),
+            [AwaitResidentResult::Ok { bytes: 72 + 12 }],
+            "the one piece of the frame went to the awaited geometry",
+        );
+        assert_eq!(
+            render.read(|state| state.residency(earlier)),
+            Residency::Staged,
+            "the geometry staged first, which nobody awaits, is still to upload",
+        );
+    }
+
+    /// With the allowance at one piece a frame, G1 is made resident and
+    /// G2 is staged, then one request names G1, G2 and G2 again: it is
+    /// answered by the next frame with G1's bytes plus G2's once. It
+    /// catches a duplicate counted into the countdown, which leaves the
+    /// wait one short for ever, a duplicate counted into the bytes, and a
+    /// resource resident on arrival left out of them.
+    #[test]
+    fn a_resource_named_twice_counts_once_and_one_already_resident_counts_on_arrival() {
+        if !require_wgpu_adapter() {
+            return;
+        }
+        let params = RenderParams { offscreen_size: Some((64, 48)), ..RenderParams::default() };
+        let mut render = RenderFixture::boot_uploading(params, 1);
+        let resident = created_triangle(&mut render, 3);
+        frame(&mut render);
+        let staged = created_triangle(&mut render, 6);
+
+        render.ask(&AwaitResident { resources: vec![resident, staged, staged] });
+        assert_eq!(await_replies(&render), [], "the staged geometry is still to upload");
+        frame(&mut render);
+
+        assert_eq!(
+            await_replies(&render),
+            [AwaitResidentResult::Ok { bytes: (36 + 12) + (72 + 12) }],
+            "one frame ends the wait, and each geometry's bytes are counted once",
+        );
+    }
+
+    /// With no device, two geometries are awaited by one request and the
+    /// first is destroyed: the wait is answered `Destroyed` naming it,
+    /// and destroying the second answers nothing. It catches a wait left
+    /// held after a destroy, and a wait answered a second time through
+    /// the id it left on the other resource's list.
+    #[test]
+    fn destroying_an_awaited_resource_answers_the_wait_with_the_error() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+        let first = created_triangle(&mut render, 3);
+        let second = created_triangle(&mut render, 3);
+        let (RenderResource::Geometry { geometry_id: first_id }, RenderResource::Geometry { geometry_id: second_id }) =
+            (first, second)
+        else {
+            panic!("a triangle is a geometry");
+        };
+
+        render.ask(&AwaitResident { resources: vec![first, second] });
+        assert_eq!(await_replies(&render), [], "precondition: with no device the wait is owed");
+
+        render.send(&DestroyGeometry { geometry_id: first_id });
+        assert_eq!(
+            await_replies(&render),
+            [AwaitResidentResult::Err(AwaitResidentError::Destroyed { resource: first })],
+            "the destroy answers the wait, naming what was destroyed",
+        );
+
+        render.send(&DestroyGeometry { geometry_id: second_id });
+        assert_eq!(await_replies(&render), [], "the answered wait is not reached through its other resource");
+        assert_eq!(render.read(|state| state.uploads.unanswered()), 0, "no wait is left in the queue");
+    }
+
+    /// With no device: an id never handed out and a reserved texture id
+    /// that is live in the registry are each answered `Unknown` at once,
+    /// and an empty list `Ok` with no bytes, and the queue holds no wait
+    /// after any of them. It catches a request that can never be
+    /// satisfied being owed, and a sender allowed to wait on a texture
+    /// the renderer keeps for itself.
+    #[test]
+    fn an_unknown_id_and_an_empty_list_answer_at_once() {
+        let mut render = RenderFixture::boot(RenderParams::default());
+        render.cap.host_turn(|state, _ctx| state.textures.ensure_white()).expect("the slot is live");
+        let never_created = RenderResource::Geometry { geometry_id: 99 };
+        let reserved = RenderResource::Texture { texture_id: WHITE_TEXTURE_ID };
+        let staged = created_triangle(&mut render, 3);
+
+        let unknown: AwaitResidentResult = render.request(&AwaitResident { resources: vec![staged, never_created] });
+        let kept: AwaitResidentResult = render.request(&AwaitResident { resources: vec![reserved] });
+        let empty: AwaitResidentResult = render.request(&AwaitResident { resources: Vec::new() });
+
+        assert_eq!(unknown, AwaitResidentResult::Err(AwaitResidentError::Unknown { resource: never_created }));
+        assert_eq!(kept, AwaitResidentResult::Err(AwaitResidentError::Unknown { resource: reserved }));
+        assert_eq!(empty, AwaitResidentResult::Ok { bytes: 0 });
+        assert_eq!(render.read(|state| state.uploads.unanswered()), 0, "none of the three is owed a reply");
     }
 
     /// Catches a volume create routed through the device wait: its answer

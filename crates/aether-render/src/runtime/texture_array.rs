@@ -125,6 +125,31 @@ impl StagedTextureArray {
         }
     }
 
+    /// Whether the device holds the whole array: its texture exists and
+    /// every layer is uploaded or cleared on it (ADR-0251 section 3). An
+    /// array a draw realized is not resident while a layer no mail wrote
+    /// is still to be cleared.
+    #[must_use]
+    pub fn is_resident(&self) -> bool {
+        let realized = self.realized.is_some();
+        let complete = self.next_piece() == LayerPiece::Nothing;
+
+        realized && complete
+    }
+
+    /// What the array holds on the device once resident: every layer's
+    /// bytes, written or not, the count its memory charge uses.
+    ///
+    /// # Panics
+    /// Panics if a layer's byte count overflows, fail-fast per ADR-0063:
+    /// `create_array` refuses such an array before it stages it.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        layer_bytes(self.format, self.side, self.mips)
+            .expect("create_texture_array refuses an overflowing layer")
+            .saturating_mul(self.layers as usize) as u64
+    }
+
     /// First use by the record path: create the GPU texture if this
     /// device has none and upload every staged layer, one `write_texture`
     /// per level. Runs at record time on the driver thread, where a
@@ -172,13 +197,13 @@ impl StagedTextureArray {
     pub(super) fn upload_layer(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, zeros: &mut Vec<u8>) -> Piece {
         let texture = self.device_texture(device);
         match self.next_piece() {
-            LayerPiece::Nothing => return Piece::Resident,
+            LayerPiece::Nothing => return Piece::Resident { bytes: self.device_bytes() },
             LayerPiece::Write { layer } => self.upload_staged(queue, &texture, layer),
             LayerPiece::Clear { layer } => self.clear(queue, &texture, layer, zeros),
         }
 
         match self.next_piece() {
-            LayerPiece::Nothing => Piece::Landed,
+            LayerPiece::Nothing => Piece::Landed { bytes: self.device_bytes() },
             LayerPiece::Write { .. } | LayerPiece::Clear { .. } => Piece::More,
         }
     }
@@ -579,7 +604,7 @@ mod tests {
         let mut zeros = Vec::new();
         let staged = registry.arrays.get_mut(&array_id).expect("the array is staged");
         staged.ensure_realized(&booted.device, &booted.queue);
-        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Landed);
+        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Landed { bytes: 60 });
         assert!(staged.realized.is_some(), "precondition: the array is realized on the old device");
         assert_eq!(
             states(staged),
@@ -656,11 +681,11 @@ mod tests {
         assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::More);
         assert_eq!(states(staged), [State::Uploaded(1), State::Unwritten, State::Uploaded(2)]);
 
-        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Landed);
+        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Landed { bytes: 60 });
         assert_eq!(states(staged), [State::Uploaded(1), State::Cleared, State::Uploaded(2)]);
         assert_eq!(zeros.len(), 16, "the clear writes from zeros as long as the base level, the largest");
 
-        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Resident);
+        assert_eq!(staged.upload_layer(&booted.device, &booted.queue, &mut zeros), Piece::Resident { bytes: 60 });
         assert_eq!(staged.realized.as_ref(), Some(&texture), "every piece writes into the one texture");
     }
 
