@@ -1,10 +1,10 @@
 //! Session-scoped geometry registry for the `aether.render` cap
 //! (ADR-0171), mirroring the texture registry's staged-then-realized
 //! lifecycle: the staged vertex/index bytes are the CPU source of truth,
-//! and the wgpu buffers are realized lazily at first GPU use — the
-//! draw-pass record path (the next ADR-0171 slice) is what triggers
-//! realization. `create_geometry` / `update_geometry` only touch the
-//! staging side.
+//! and `create_geometry` / `update_geometry` only touch the staging
+//! side. The wgpu buffers are made by the upload queue's step in a later
+//! frame (ADR-0251), or by the draw-pass record path when a pass names
+//! the geometry before its turn in the queue.
 //!
 //! A draw set holds the geometries it names (ADR-0246 decision 2). The
 //! registry counts those holds and keeps two promises for them: a held
@@ -20,6 +20,7 @@ use aether_substrate::memory::{Charged, MemoryGauge};
 use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
+use super::upload::Piece;
 use crate::VertexFormat;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
@@ -63,7 +64,7 @@ pub(super) fn wgpu_vertex_attributes(layout: &[VertexAttribute]) -> Vec<wgpu::Ve
         .collect()
 }
 
-/// The wgpu buffers a staged geometry realizes into at first GPU use:
+/// The wgpu buffers a staged geometry realizes into:
 /// the packed vertex buffer, the 32-bit index buffer, the resident
 /// indexed-indirect/control block, and the index count a direct draw
 /// issues. The three buffers are storage-visible so an authored compute
@@ -77,7 +78,7 @@ pub struct RealizedGeometry {
 
 /// A geometry registered via `create_geometry`: the declared layout
 /// (fixed at create), the staged bytes (the CPU source of truth), plus
-/// the lazily-realized GPU buffers. `dirty` flags staging the GPU copy
+/// the GPU buffers once the upload queue or a draw has made them. `dirty` flags staging the GPU copy
 /// hasn't caught up to yet — an update may resize the bytes, so the
 /// next realization re-creates the buffers rather than uploading in
 /// place.
@@ -124,12 +125,20 @@ impl StagedGeometry {
         u32::try_from(self.index_bytes().len() / size_of::<u32>()).expect("index count fits u32")
     }
 
+    /// Whether the device holds every staged byte: the buffers exist and
+    /// no update has replaced the bytes since they were made.
+    #[must_use]
+    pub fn is_resident(&self) -> bool {
+        self.realized.is_some() && !self.dirty
+    }
+
     /// Realize the GPU buffers if they aren't yet, or re-create them if
     /// `update_geometry` dirtied the staging since the last use — an
     /// update replaces the bytes wholesale and may resize them, so a
     /// dirty geometry re-creates rather than re-uploading in place.
-    /// Runs at record time on the driver thread, where a device + queue
-    /// are available (the ADR-0171 draw-pass slice is the caller).
+    /// Runs on the driver thread, where a device + queue are available:
+    /// from the upload queue's step, and from the draw-pass record path
+    /// for a geometry a pass names first.
     ///
     /// # Panics
     /// Panics if the index count exceeds `u32` — unreachable behind the
@@ -290,6 +299,24 @@ impl GeometryRegistry {
             .get(&geometry_id)
             .or_else(|| self.holds.retired(geometry_id))
             .expect("a held geometry id is live or retired")
+    }
+
+    /// Offer the geometry at `geometry_id` to the upload queue's step
+    /// (ADR-0251): the whole geometry is one piece, uploaded through the
+    /// same [`StagedGeometry::ensure_realized`] its first draw would call,
+    /// so that draw then finds it resident and makes nothing. Only a live
+    /// id is looked up: a geometry destroyed under a draw set answers to
+    /// no id, and the set that holds it realizes it when it draws.
+    pub(super) fn upload(&mut self, geometry_id: u32, device: &wgpu::Device, queue: &wgpu::Queue) -> Piece {
+        let Some(entry) = self.entries.get_mut(&geometry_id) else {
+            return Piece::Missing;
+        };
+        if entry.is_resident() {
+            return Piece::Resident;
+        }
+
+        entry.ensure_realized(device, queue);
+        Piece::Landed
     }
 
     /// Drop every buffer realization built against the current device
@@ -680,6 +707,36 @@ mod tests {
 
         registry.release(geometry_id);
         assert_eq!(registry.memory.bytes(), 0, "the last release subtracts the retired entry's bytes");
+    }
+
+    /// ADR-0251: a geometry the upload queue uploaded is the geometry its
+    /// first draw then uses. The named bug: the queue given a realization
+    /// path of its own that leaves the geometry dirty, so the first draw
+    /// re-creates the buffers and the early upload bought nothing; and a
+    /// resident geometry answered as an upload, which would charge the
+    /// frame's allowance for no work.
+    #[test]
+    fn a_geometry_the_queue_uploaded_keeps_its_buffers_at_first_draw() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let booted = boot_offscreen(None);
+        let mut registry = GeometryRegistry::new();
+        let CreateGeometryResult::Ok { geometry_id } =
+            registry.create(create(skinned_layout(), vec![7u8; 40], indices_bytes(&[0, 1, 0])))
+        else {
+            panic!("geometry create accepted");
+        };
+
+        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Landed);
+        let uploaded =
+            registry.entries[&geometry_id].realized.as_ref().expect("the upload realized it").vertex_buffer.clone();
+
+        registry.held_mut(geometry_id).ensure_realized(&booted.device, &booted.queue);
+        let drawn = &registry.entries[&geometry_id].realized.as_ref().expect("still realized").vertex_buffer;
+        assert_eq!(*drawn, uploaded, "the first draw must use the buffers the queue made");
+        assert_eq!(registry.upload(geometry_id, &booted.device, &booted.queue), Piece::Resident);
+        assert_eq!(registry.upload(geometry_id + 1, &booted.device, &booted.queue), Piece::Missing);
     }
 
     #[test]

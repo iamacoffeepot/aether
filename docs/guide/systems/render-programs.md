@@ -159,9 +159,11 @@ replies its own reason:
 
 Indices are little-endian `u32` values, and every one of them must fall inside
 the vertex count the vertex bytes imply. Validation and id assignment are
-CPU-side, so a `create_geometry` reply arrives without a booted GPU; the wgpu
-vertex and index buffers are realized lazily at the first draw pass that uses
-the geometry.
+CPU-side, so a `create_geometry` reply arrives without a booted GPU. The wgpu
+vertex and index buffers are created in a later frame by the renderer's upload
+queue, a fixed number of resources a frame, or by the first draw pass that uses
+the geometry if that comes first
+([Rendering](rendering.md#when-staged-bytes-reach-the-gpu)).
 
 The `vertices` and `indices` fields arrive as `Blob`s and are staged as received,
 with JSON callers sending the same byte arrays as before.
@@ -213,8 +215,10 @@ buffer.
 
 The substrate keeps its own copy of every record, and that copy is the source
 of truth. A create and any number of updates are accepted before a GPU device
-exists; the GPU buffer is created at the first use and afterwards receives only
-the bytes written since the last one. After a render device replacement the
+exists. The GPU buffer is created by the renderer's upload queue, or at the
+first draw that uses it if that comes first, and afterwards receives only the
+bytes written since the last upload: an update puts the buffer back on the
+queue, and its written range goes up in a later frame or at the next draw. After a render device replacement the
 records come back under the same id with the contents they had, as texture and
 geometry bytes do.
 
@@ -298,8 +302,12 @@ was. An accepted write replaces the layer in place: the id does not change,
 and only that layer is uploaded.
 
 The substrate keeps the blob of each written layer, and those blobs are the
-source of truth. Writes are accepted at any time after creation; the GPU
-texture is created at the first dispatch that binds the array. After a render
+source of truth. Writes are accepted at any time after creation. The array
+reaches the GPU a layer at a time from the renderer's upload queue: the written
+layers first, then each layer no mail has written, which the queue clears by
+writing zeros. A dispatch that binds the array before the queue is done uploads
+every written layer in that frame and leaves the unwritten ones to the queue
+([Rendering](rendering.md#when-staged-bytes-reach-the-gpu)). After a render
 device replacement the array comes back under the same id with every written
 layer as it was.
 

@@ -78,8 +78,11 @@ pub fn check(plan: &ProgramPlan, draw_sets: &DrawSetRegistry, dispatch: &Program
 /// Realize every buffer the listed sets hold, once per row. Rows are
 /// resolved every frame and no buffer handle is kept between frames: a
 /// geometry re-creates its buffers when an update dirtied it, and an
-/// instance buffer uploads its dirty byte range only here, so each row
-/// has to be visited each frame in any case. The lookups go through
+/// instance buffer uploads its dirty byte range. The upload queue does
+/// both ahead of the draw when it reaches the buffer first (ADR-0251),
+/// and a row is then found resident; a buffer it has not reached, or one
+/// destroyed under its set, is made here, so each row has to be visited
+/// each frame in any case. The lookups go through
 /// `held_mut`, which also reaches a buffer destroyed under a set.
 ///
 /// # Panics

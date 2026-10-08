@@ -193,6 +193,7 @@ mod tests {
                 vertex_buffer_bytes: 1024,
                 clear_color: DEFAULT_CLEAR_COLOR.to_owned(),
                 pass_timings: false,
+                upload_pieces_per_frame: 32,
             };
             let driver =
                 PumpedDriver::boot(boot_bare_test_chassis(&registry, &mailer), tuning, RenderParams::default());

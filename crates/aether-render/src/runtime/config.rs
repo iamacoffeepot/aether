@@ -59,6 +59,20 @@ pub struct RenderTuningConfig {
     /// absent-with-reason.
     #[config(default = false)]
     pub pass_timings: bool,
+    /// How many pieces the upload step uploads in one frame.
+    ///
+    /// Staged resources reach the device ahead of their first draw, from
+    /// a queue the frame handler steps once a frame (ADR-0251). A piece
+    /// is the smallest upload that step makes: a whole geometry, an
+    /// instance buffer's staged range, a whole texture, a whole volume,
+    /// or one layer of a texture array with all its levels. The allowance
+    /// is a count and not bytes or time because the measured cost of an
+    /// upload follows the number of device objects it makes, and a fixed
+    /// count needs no clock. Read once at boot; zero is refused there,
+    /// since a resource a draw names is uploaded at that draw whatever
+    /// this is set to.
+    #[config(default = 32)]
+    pub upload_pieces_per_frame: u32,
 }
 
 /// sRGB `rrggbb` to the linear RGB a clear takes, falling back to the
@@ -198,6 +212,7 @@ mod tests {
             vertex_buffer_bytes: 1024,
             clear_color: "101010".to_owned(),
             pass_timings: false,
+            upload_pieces_per_frame: 32,
         });
         apply_manifest_clear_color(&mut sources, Some("f6f2e9")).expect("apply over a pin");
         let resolved = sources.resolve::<RenderTuningConfig>().expect("resolve");
