@@ -379,7 +379,7 @@ uploads nothing.
 |---|---|
 | Geometry | the whole geometry |
 | Instance buffer | the range written since its last upload |
-| Texture | the whole texture |
+| Texture | the whole texture on its first upload, then the rows updated since the last |
 | Volume texture | the whole volume |
 | Texture array | one layer, with all its levels |
 

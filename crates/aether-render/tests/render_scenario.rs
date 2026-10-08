@@ -2466,3 +2466,96 @@ fn the_two_blends_agree_on_an_opaque_source_and_part_on_a_covered_one() {
          {half_premultiplied} against {opaque_straight}",
     );
 }
+
+/// A texture already on the device takes an update of a band of rows that
+/// does not start at row 0: the band changes and the rows above and below
+/// it keep their colour, so the upload has the right origin and slice.
+#[test]
+fn update_of_a_realized_texture_changes_only_the_updated_rows() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut harness = SubstrateHarness::builder().size(frame_width, frame_height).with_render().build().expect("boot");
+
+    let (texture_width, texture_height) = (8u32, 6u32);
+    let created = harness
+        .execute(vec![(
+            "create",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<RenderCapability>(),
+                &CreateTexture {
+                    sampling: TextureSampling::Nearest,
+                    ..sampled_linear(
+                        texture_width,
+                        texture_height,
+                        TextureFormat::R8,
+                        vec![32u8; (texture_width * texture_height) as usize],
+                    )
+                },
+            ),
+        )])
+        .expect("create r8 texture");
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
+        CreateTextureResult::Ok { texture_id } => texture_id,
+        CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
+    };
+
+    let draw = || {
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                blend: QuadBlend::Straight,
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: vec![TexturedQuad {
+                    x: 16.0,
+                    y: 12.0,
+                    width: 32.0,
+                    height: 24.0,
+                    u0: 0.0,
+                    v0: 0.0,
+                    u1: 1.0,
+                    v1: 1.0,
+                    tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+                }],
+            },
+        )
+    };
+
+    harness
+        .execute(vec![("realize", HarnessOp::capture_with_mails(vec![draw()], vec![]))])
+        .expect("draw so the texture is realized");
+
+    let update = envelope(
+        "aether.render",
+        &UpdateTexture {
+            texture_id,
+            x: 0,
+            y: 2,
+            width: texture_width,
+            height: 2,
+            pixels: vec![224u8; (texture_width * 2) as usize],
+        },
+    );
+    let captured = harness
+        .execute(vec![("snap", HarnessOp::capture_with_mails(vec![update, draw()], vec![]))])
+        .expect("capture after the update");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode capture png");
+
+    // Each texture row is four pixels tall on screen, starting at y = 12.
+    let red_at_row = |row: u32| -> u8 {
+        let (x, y) = (32u32, 12 + row * 4 + 2);
+        img.rgba[((y * img.width + x) * 4) as usize]
+    };
+    let (above, band_first, band_last, below) = (red_at_row(1), red_at_row(2), red_at_row(3), red_at_row(4));
+
+    assert!(
+        band_first > above.saturating_add(80) && band_last > below.saturating_add(80),
+        "the updated rows should be brighter than their neighbours; above={above} band={band_first},{band_last} \
+         below={below}",
+    );
+    assert_eq!(above, red_at_row(0), "a row above the band keeps its colour");
+    assert_eq!(below, red_at_row(5), "a row below the band keeps its colour");
+}

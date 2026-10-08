@@ -452,11 +452,10 @@ fn texture_bind_group(
     })
 }
 
-/// Re-upload the full staged `pixels` into an already-realized texture.
-/// Used when an `update_texture` mail changed the staged CPU pixels: the
-/// render cap re-uploads the whole texture at the next record rather
-/// than tracking dirty sub-rects on the GPU. `pixels` must match the
-/// realized texture format's byte count.
+/// Upload the full staged `pixels` into a texture: the first upload at
+/// realization. `pixels` must match the realized texture format's byte
+/// count. A later `update_texture` sends only its rows through
+/// [`upload_texture_rows`].
 pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixels: &[u8]) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -472,6 +471,30 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
             rows_per_image: Some(realized.height.max(1)),
         },
         wgpu::Extent3d { width: realized.width.max(1), height: realized.height.max(1), depth_or_array_layers: 1 },
+    );
+}
+
+/// Upload whole rows of the staged pixels into an already-realized texture,
+/// starting at row `first_row`, full width. `rows` is the contiguous staged
+/// slice of those rows, a whole number of rows of the realized format.
+///
+/// # Panics
+/// Panics if `rows` is longer than a `u32` byte count, fail-fast per ADR-0063:
+/// the staging was sized from `u32` extents.
+pub fn upload_texture_rows(queue: &wgpu::Queue, realized: &RealizedTexture, first_row: u32, rows: &[u8]) {
+    let bytes_per_row = realized.width.max(1) * texture_bytes_per_pixel(realized.format);
+    let row_count = u32::try_from(rows.len()).expect("a texture's staged rows fit the u32 extents it was created with")
+        / bytes_per_row;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &realized.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: 0, y: first_row, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        rows,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(row_count) },
+        wgpu::Extent3d { width: realized.width.max(1), height: row_count, depth_or_array_layers: 1 },
     );
 }
 
