@@ -1243,16 +1243,23 @@ mod tests {
     use super::ActorRingConfig;
     use super::ActorRingConfigLayer;
     use super::ChassisBootConfig;
+    use super::CommonEnv;
+    use super::ObjectSource;
     use super::chassis_residual_knobs;
     use super::{
         DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY, DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, RegistryQueueCapacities,
         RegistryQueueConfig, RegistryQueueConfigLayer, SchedulerTuningConfigLayer,
     };
+    use crate::boot_manifest::ChassisSettings;
+    use crate::cli::CommonOverlay;
+    use crate::package::{NamedObject, NamespacePath, PackageManifest, Sha256, encode_manifest};
     use aether_actor::log::DEFAULT_RING_CAP;
     use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
     use aether_lifecycle::{LifecycleConfig, LifecycleConfigLayer};
     use aether_substrate::SchedulerTuning;
-    use aether_substrate::config::ConfigError;
+    use aether_substrate::config::{ConfigError, ConfigSources, StageArgv as _};
+    use clap::Parser as _;
+    use std::collections::BTreeMap;
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -1478,5 +1485,98 @@ mod tests {
         let result = super::load_config_file(&malformed);
         let _ = fs::remove_file(&malformed);
         assert!(matches!(result, Err(ConfigError::ConfigFile { .. })), "malformed config file must hard-error");
+    }
+
+    /// The command-line root a chassis binary has, reduced to the common
+    /// overlay: parsing it stages every overlay whether or not a flag of it
+    /// was passed, which is the staging the fs gate has to read through.
+    #[derive(clap::Parser)]
+    struct ProbeCli {
+        #[command(flatten)]
+        common: CommonOverlay,
+    }
+
+    /// A package root with one named object, an object store, and an asset
+    /// tree. Returns the root; the caller removes it.
+    fn package_with_assets_and_a_named_object() -> (PathBuf, PackageManifest) {
+        let id = CONFIG_FILE_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("aether-gate-package-{}-{id}", process::id()));
+        fs::create_dir_all(root.join("pack").join("objects")).expect("create object store");
+        fs::create_dir_all(root.join("pack").join("assets")).expect("create asset tree");
+
+        let path = NamespacePath::new("modules/a.wasm").expect("test setup: a well-formed path");
+        let manifest = PackageManifest {
+            settings: ChassisSettings::default(),
+            entries: Vec::new(),
+            named: BTreeMap::from([(path, NamedObject { sha256: Sha256([0xef; 32]), size: 258 })]),
+        };
+        fs::write(root.join("pack").join("manifest"), encode_manifest(&manifest)).expect("write manifest");
+
+        (root, manifest)
+    }
+
+    /// Resolve the common env the way a chassis boot does: parse `args` as a
+    /// command line, stage it onto a hermetic stack (no ambient `AETHER_*`),
+    /// and read it.
+    fn resolve_from_command_line(args: &[&str]) -> CommonEnv {
+        let cli = ProbeCli::try_parse_from(args).expect("test setup: the command line parses");
+        let mut sources = ConfigSources::hermetic();
+        cli.common.stage_argv(&mut sources);
+
+        CommonEnv::from_sources(sources).expect("resolve the common env")
+    }
+
+    #[test]
+    fn a_package_boot_with_no_fs_flag_takes_the_package_side() {
+        // The bug this catches: a command line stages every overlay, including
+        // the fs one with no flag passed, and the gate read that staged-but-empty
+        // layer as an operator pin. A packaged engine then kept the plain
+        // directory for `objects` and never rooted `assets` inside the package.
+        // The expected paths are written as literal joins so the test does not
+        // restate the helpers it checks.
+        let (root, manifest) = package_with_assets_and_a_named_object();
+        let package = root.to_str().expect("a utf-8 temp path");
+
+        let env = resolve_from_command_line(&["probe", "--package", package]);
+
+        let ObjectSource::Package { root: objects, named } = &env.object_source else {
+            panic!("a package boot with no fs flag must read the package's objects, got {:?}", env.object_source);
+        };
+        assert_eq!(objects, &root.join("pack").join("objects"));
+        assert_eq!(named, &manifest.named);
+        assert_eq!(env.namespace_roots.assets, root.join("pack").join("assets"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_package_boot_with_an_fs_root_flag_keeps_the_pinned_directories() {
+        // The bug this catches: the package winning over an operator's explicit
+        // `--assets-dir` / `--objects-dir`, which the precedence exists to
+        // protect. Passing the flags must still select the plain directory.
+        let (root, _manifest) = package_with_assets_and_a_named_object();
+        let package = root.to_str().expect("a utf-8 temp path");
+        let assets = root.join("pinned-assets");
+        let objects = root.join("pinned-objects");
+
+        let env = resolve_from_command_line(&[
+            "probe",
+            "--package",
+            package,
+            "--assets-dir",
+            assets.to_str().expect("a utf-8 temp path"),
+            "--objects-dir",
+            objects.to_str().expect("a utf-8 temp path"),
+        ]);
+
+        assert!(
+            matches!(env.object_source, ObjectSource::Directory),
+            "an fs root flag keeps the plain directory, got {:?}",
+            env.object_source
+        );
+        assert_eq!(env.namespace_roots.assets, assets);
+        assert_eq!(env.namespace_roots.objects, objects);
+
+        fs::remove_dir_all(&root).ok();
     }
 }

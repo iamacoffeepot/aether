@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fmt;
 
+use confique::Layer as _;
 use confique::meta::Meta;
 
 use super::error::ConfigError;
@@ -89,6 +90,17 @@ pub trait StageArgv {
     fn stage_argv(self, sources: &mut ConfigSources);
 }
 
+/// One member's staged argv overlay and what the stack needs to know of it,
+/// all fixed when the layer is staged.
+struct StagedArgv {
+    /// The member's staged argv layer.
+    layer: Box<dyn Any>,
+    /// The config type's name, for the orphan error.
+    type_name: &'static str,
+    /// True when the staged layer set at least one field.
+    sets_a_field: bool,
+}
+
 /// The builder's config source stack (ADR-0156 §5): the layers below `default`
 /// that the composition boundary resolves each member against, in precedence
 /// programmatic > argv > env > file > default. Assembled adjacent to
@@ -122,12 +134,10 @@ pub struct ConfigSources {
     /// Per-member argv overlay layers keyed by config `TypeId`. Each holds the
     /// member's `<C::Layer as confique::Config>::Layer` produced by its
     /// `Overlay::into_layer` (a confique partial layer, not necessarily
-    /// `Send`). The parallel `argv_names` keeps each staged layer's `type_name`
-    /// for the staged-but-never-composed boot error, mirroring
-    /// `override_names`; both are kept in lockstep by `set_argv` / `take_argv`,
-    /// so a layer still present after resolution names its orphaned config type.
-    argv: HashMap<TypeId, Box<dyn Any>>,
-    argv_names: HashMap<TypeId, &'static str>,
+    /// `Send`). Each record keeps the layer's `type_name` for the
+    /// staged-but-never-composed boot error, so a layer still present after
+    /// resolution names its orphaned config type.
+    argv: HashMap<TypeId, StagedArgv>,
     /// ADR-0235: the `--secrets-dir` directory, when one was given. A
     /// `#[config(secrets)]` member's resolve binds its refs to it; the stack
     /// holds only the path, never a value.
@@ -146,7 +156,6 @@ impl ConfigSources {
             overrides: HashMap::new(),
             override_names: HashMap::new(),
             argv: HashMap::new(),
-            argv_names: HashMap::new(),
             secrets_dir: None,
         }
     }
@@ -166,7 +175,6 @@ impl ConfigSources {
             overrides: HashMap::new(),
             override_names: HashMap::new(),
             argv: HashMap::new(),
-            argv_names: HashMap::new(),
             secrets_dir: None,
         }
     }
@@ -198,8 +206,9 @@ impl ConfigSources {
     /// output) — the typed argv handoff the chassis makes adjacent to
     /// composition, folded into the bulk stack that rides `Builder::with_config_sources`.
     pub fn set_argv<C: FromArgvThenEnv + 'static>(&mut self, layer: <C::Layer as confique::Config>::Layer) {
-        self.argv.insert(TypeId::of::<C>(), Box::new(layer));
-        self.argv_names.insert(TypeId::of::<C>(), type_name::<C>());
+        let sets_a_field = !layer.is_empty();
+        let staged = StagedArgv { layer: Box::new(layer), type_name: type_name::<C>(), sets_a_field };
+        self.argv.insert(TypeId::of::<C>(), staged);
     }
 
     /// Resolve member `C` off the stack. Sugar for
@@ -249,10 +258,7 @@ impl ConfigSources {
     }
 
     fn take_argv<C: FromArgvThenEnv + 'static>(&mut self) -> Option<<C::Layer as confique::Config>::Layer> {
-        // Drop the name in lockstep with the layer so the orphan-argv tripwire
-        // only ever sees layers no member consumed.
-        self.argv_names.remove(&TypeId::of::<C>());
-        self.argv.remove(&TypeId::of::<C>()).map(|boxed| *boxed.downcast().expect("argv-layer TypeId keys C"))
+        self.argv.remove(&TypeId::of::<C>()).map(|staged| *staged.layer.downcast().expect("argv-layer TypeId keys C"))
     }
 
     /// The derive-`Config` resolution path: programmatic override, else the
@@ -266,7 +272,6 @@ impl ConfigSources {
     /// Returns [`ConfigError`] when the file section or a known env/argv value
     /// is malformed.
     pub fn resolve_layered<C: FromArgvThenEnv + 'static>(&mut self, section: &str) -> Result<C, ConfigError> {
-        use confique::Layer as _;
         // Consume the staged argv layer unconditionally — even when a
         // programmatic override outranks it — so the orphan-argv tripwire
         // (which keys off layers left behind) never mistakes a legitimately
@@ -327,8 +332,8 @@ impl ConfigSources {
     /// Returns [`ConfigError::OrphanArgv`] naming the first argv layer left
     /// unconsumed.
     pub fn validate_no_orphan_argv(&self) -> Result<(), ConfigError> {
-        if let Some(name) = self.argv_names.values().next() {
-            return Err(ConfigError::OrphanArgv { type_name: (*name).to_owned() });
+        if let Some(staged) = self.argv.values().next() {
+            return Err(ConfigError::OrphanArgv { type_name: staged.type_name.to_owned() });
         }
         Ok(())
     }
@@ -339,10 +344,12 @@ impl ConfigSources {
         self.overrides.contains_key(&type_id)
     }
 
-    /// Whether an argv overlay is staged for member `C`.
+    /// Whether an argv overlay is staged for member `C` and sets at least one
+    /// field. A staged layer that sets nothing (no flag of the member was
+    /// passed) does not count: resolution falls through it to the lower layers.
     #[must_use]
-    fn has_argv(&self, type_id: TypeId) -> bool {
-        self.argv.contains_key(&type_id)
+    fn argv_sets_a_field(&self, type_id: TypeId) -> bool {
+        self.argv.get(&type_id).is_some_and(|staged| staged.sets_a_field)
     }
 
     /// The highest-precedence source layer present for a member declaring
@@ -353,7 +360,7 @@ impl ConfigSources {
         if self.has_override(type_id) {
             return ConfigProvenance::Programmatic;
         }
-        if self.has_argv(type_id) {
+        if self.argv_sets_a_field(type_id) {
             return ConfigProvenance::Argv;
         }
         // A hermetic stack (`SubstrateHarness`) resolves programmatic > argv >
@@ -385,7 +392,6 @@ mod tests {
 
     #[test]
     fn config_sources_programmatic_override_short_circuits_argv_and_file() {
-        use confique::Layer as _;
         // Tripwire: the programmatic layer is the top of the stack — a staged
         // override wins over an argv overlay (and never touches env/file). Drifts
         // if `resolve_layered`'s override short-circuit is dropped or reordered.
@@ -403,10 +409,11 @@ mod tests {
         // Tripwire: per-member provenance reports the highest-precedence layer
         // present — programmatic > argv > file (each checked before the env
         // branch, so present-layer detection is deterministic regardless of
-        // ambient env). Drifts if the layer-detection precedence in
-        // `ConfigSources::provenance` changes. A file section is staged in each
-        // case, so a higher layer must still win.
-        use confique::Layer as _;
+        // ambient env). A staged argv layer that sets nothing does not shadow
+        // the file beneath it. Drifts if the layer-detection precedence in
+        // `ConfigSources::provenance` changes, or it goes back to counting a
+        // layer's presence rather than a field set. A file section is staged in
+        // each case, so a higher layer must still win.
         let meta = &<PrecedenceConfig as confique::Config>::META;
         let type_id = TypeId::of::<PrecedenceConfig>();
 
@@ -415,7 +422,13 @@ mod tests {
 
         let mut argv_sources = ConfigSources::new(Some(precedence_file_table(11)));
         argv_sources.set_argv::<PrecedenceConfig>(<PrecedenceConfig as confique::Config>::Layer::empty());
-        assert_eq!(argv_sources.provenance(type_id, "precedence", meta), ConfigProvenance::Argv);
+        assert_eq!(argv_sources.provenance(type_id, "precedence", meta), ConfigProvenance::File);
+
+        let mut set_sources = ConfigSources::new(Some(precedence_file_table(11)));
+        let mut layer = <PrecedenceConfig as confique::Config>::Layer::empty();
+        layer.count = Some(33);
+        set_sources.set_argv::<PrecedenceConfig>(layer);
+        assert_eq!(set_sources.provenance(type_id, "precedence", meta), ConfigProvenance::Argv);
 
         let mut override_sources = ConfigSources::new(Some(precedence_file_table(11)));
         override_sources.set_override(PrecedenceConfig { count: 1 });
@@ -445,7 +458,6 @@ mod tests {
 
     #[test]
     fn orphan_argv_layer_is_rejected_then_cleared_by_resolution() {
-        use confique::Layer as _;
         // Tripwire (issue 3872): the converse of the override guard on the argv
         // channel. A staged argv layer no member consumes is a hard `OrphanArgv`
         // naming the config type — the silent-drop the ADR-0156 §5 inversion

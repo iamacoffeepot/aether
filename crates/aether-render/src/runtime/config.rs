@@ -155,6 +155,7 @@ pub struct RenderParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_substrate::config::StageArgv as _;
 
     #[test]
     fn the_default_field_decodes_to_the_field_it_always_was() {
@@ -206,5 +207,26 @@ mod tests {
         apply_manifest_clear_color(&mut sources, None).expect("apply nothing");
         let resolved = sources.resolve::<RenderTuningConfig>().expect("resolve");
         assert_eq!(resolved.clear_color, DEFAULT_CLEAR_COLOR, "no manifest colour leaves the default");
+    }
+
+    #[test]
+    fn a_staged_command_line_with_no_render_flag_lets_the_manifest_colour_apply() {
+        // The bug this catches: a command line stages the render overlay whether
+        // or not a render flag was passed, and the gate read that empty layer as
+        // an operator pin, so a shipped package's paper never replaced the dark
+        // default. The second half holds the other side: a staged
+        // `--render-clear-color` beats the manifest.
+        let mut sources = ConfigSources::hermetic();
+        RenderTuningOverlay::default().stage_argv(&mut sources);
+        apply_manifest_clear_color(&mut sources, Some("f6f2e9")).expect("apply");
+        let resolved = sources.resolve::<RenderTuningConfig>().expect("resolve");
+        assert_eq!(resolved.clear_color, "f6f2e9", "no render flag, so the manifest colour applies");
+
+        let mut sources = ConfigSources::hermetic();
+        RenderTuningOverlay { clear_color: Some("101010".to_owned()), ..RenderTuningOverlay::default() }
+            .stage_argv(&mut sources);
+        apply_manifest_clear_color(&mut sources, Some("f6f2e9")).expect("apply over a staged flag");
+        let resolved = sources.resolve::<RenderTuningConfig>().expect("resolve");
+        assert_eq!(resolved.clear_color, "101010", "a staged flag beats the manifest");
     }
 }
