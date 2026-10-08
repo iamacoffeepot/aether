@@ -845,6 +845,63 @@ impl aether_actor::HeldReply for MemoryReadResult {
     }
 }
 
+/// Issue 7653: the protocol the context relay asks through a reference it
+/// kept, one row: a [`RelayAsk`] answered with a [`RelayAskResult`]. Any actor
+/// that answers the ask covers it.
+#[aether_actor::protocol]
+pub trait RelayParty {
+    fn ask(mail: RelayAsk) -> RelayAskResult;
+}
+
+/// Issue 7653: tells the context relay to keep its sender as the party it
+/// asks. A sender that does not cover [`RelayParty`] is not kept.
+#[aether_data::kind(name = "aether.test_fixtures.relay_join", default)]
+pub struct RelayJoin;
+
+/// Issue 7653: tells a relay party to send [`RelayJoin`] to the relay.
+#[aether_data::kind(name = "aether.test_fixtures.relay_introduce", default)]
+pub struct RelayIntroduce;
+
+/// Issue 7653: the relay's question to its party.
+#[aether_data::kind(name = "aether.test_fixtures.relay_ask", copy)]
+pub struct RelayAsk {
+    pub question: u32,
+}
+
+/// Issue 7653: the party's answer to a [`RelayAsk`]: the question plus
+/// [`RELAY_PARTY_OFFSET`].
+#[aether_data::kind(name = "aether.test_fixtures.relay_ask_result")]
+pub struct RelayAskResult {
+    pub value: u32,
+}
+
+/// Issue 7653: what the relay party adds to the question it answers, so an
+/// answer cannot be mistaken for the question echoed back.
+pub const RELAY_PARTY_OFFSET: u32 = 1000;
+
+/// Issue 7653: asks the context relay to put `question` to its party and
+/// answer with what the party said. It is answered with a [`RelayQueryResult`].
+#[aether_data::kind(name = "aether.test_fixtures.relay_query", copy)]
+pub struct RelayQuery {
+    pub question: u32,
+}
+
+/// Issue 7653: the context relay's answer to a [`RelayQuery`]. A relay that
+/// closed before its party answered sends `Unanswered` in its place
+/// (ADR-0243 §6).
+#[aether_data::kind(name = "aether.test_fixtures.relay_query_result")]
+pub enum RelayQueryResult {
+    Answered { value: u32 },
+    Nobody,
+    Unanswered,
+}
+
+impl aether_actor::HeldReply for RelayQueryResult {
+    fn unanswered() -> Self {
+        Self::Unanswered
+    }
+}
+
 /// Issue 7086: asks the republish gate how many times its `wire` hook has
 /// run on this instance. It replies a [`CountReport`].
 #[aether_data::kind(name = "aether.test_fixtures.wire_count_query", default)]

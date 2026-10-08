@@ -62,6 +62,10 @@ A `ReadResult` that arrives without a `MeshLoadContext` does not run it; the arm
 logs an error in the actor's log ring instead. Spell the parameter
 `Option<MeshLoadContext>` for a handler that is correct without it.
 
+A request to an actor you hold a reference to (an `ActorRef<R>` or a `ProtocolRef<P>`
+kept from an earlier mail) takes `send_to_with_context(reference, &kind, context)`
+instead; the reply handler receives the context the same way.
+
 A `Held<R>` is move-only. Park it in actor state, in a request context passed by
 value to `send_with_context`, or in the state `on_dehydrate` saves with
 `save_state_kind`; a take or `PriorState::decode_kind` claims it back. Misuse

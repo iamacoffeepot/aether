@@ -11,9 +11,9 @@ use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{ReplyMode, Unchecked};
 use crate::model::{
-    Addressable, Anyone, CallerAddressable, CoveredBy, DependencyResolver, DependsOn, SendableTo, SentBy, Singleton,
+    Anyone, CallerAddressable, CoveredBy, DependencyResolver, DependsOn, SendableTo, SentBy, Singleton,
 };
-use crate::reference::{ActorRef, ErasedActorRef, Target};
+use crate::reference::{ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, send_through_host};
 
@@ -99,7 +99,7 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.push_tracked(self.actor_ref::<R>(), payload)
+        self.push_tracked(self.actor_ref::<R>().erase(), payload)
     }
 
     /// Send a request to the declared dependency `R` and store `context`
@@ -125,7 +125,36 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        let request = self.push_tracked(self.actor_ref::<R>(), payload);
+        let request = self.push_tracked(self.actor_ref::<R>().erase(), payload);
+        self.inline.insert_request_context(request, context);
+        request
+    }
+
+    /// Send a request through a held reference and store `context` under the
+    /// minted correlation id, for the reply handler to take back as its
+    /// context parameter. The guest twin of the native ctx's
+    /// `send_to_with_context`: [`Self::send_with_context`] reaches only a
+    /// declared dependency, and [`Self::send_to`] stores no context.
+    ///
+    /// The target is a [`Target`] with the bound [`Self::send_to`] states. The
+    /// context moves into the table (ADR-0243 §4), so it may carry a
+    /// [`Held`](crate::Held) reply. The send goes through the host even to a
+    /// member of this actor's own inline cluster, so the id is always a real
+    /// correlation and the context always reaches its reply.
+    ///
+    /// Its consumer is the context relay fixture, which asks the party that
+    /// joined it and answers its own caller from the reply handler.
+    #[must_use]
+    pub fn send_to_with_context<K: ActorMail, I, T: Target<K, I>>(
+        &mut self,
+        target: T,
+        payload: &K,
+        context: impl Kind,
+    ) -> RequestId
+    where
+        T::Sender: CoveredBy<A>,
+    {
+        let request = self.push_tracked(target.erased(), payload);
         self.inline.insert_request_context(request, context);
         request
     }
@@ -184,7 +213,7 @@ impl<A, S, M: ReplyMode> WasmCtx<'_, A, S, M> {
     /// no reply handle, so its answer could never come back. Through the host
     /// the reply arrives as a correlated top-level dispatch (ADR-0114
     /// addressing amendment, ADR-0139).
-    fn push_tracked<R: Addressable, K: ActorMail>(&self, recipient: ActorRef<R>, payload: &K) -> RequestId {
+    fn push_tracked<K: ActorMail>(&self, recipient: ErasedActorRef, payload: &K) -> RequestId {
         send_through_host(recipient.id().0, K::ID.0, encode_guest(payload), 1, ChainMode::Inherit, self.mailbox);
         RequestId(mail::prev_correlation())
     }
