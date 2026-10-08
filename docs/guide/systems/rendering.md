@@ -336,7 +336,13 @@ Public ids do not change across a successful replacement. Sampled textures
 upload again from their retained CPU pixels, texture arrays from the retained
 blob of each written layer, volume textures from the blob they were created
 with, and registered geometry realizes again from its
-retained vertex/index bytes. GPU-only writable textures keep
+retained vertex/index bytes. The replacement puts nothing on the upload queue:
+a resource that was still queued uploads on the new device when its turn
+comes, and one that had already left the queue uploads at its first use
+there (see [When staged bytes reach the GPU](#when-staged-bytes-reach-the-gpu)).
+The unwritten layers of a texture array are owed their clear again on the new
+device; the queue gives it only to an array that was still queued, and wgpu
+clears the rest at the first draw through the array. GPU-only writable textures keep
 their ids but restart transparent; an actor that needs their contents sends its
 ordinary program dispatch on the next repaint. A capture that was ready but
 had not begun may cross the successful transaction and record once. Loss with
@@ -353,6 +359,55 @@ headless, naming `aether.render` as the dependency that is not live, and a
 `capture_frame` there is answered `NotPresent`. The minimal hub chassis does not
 install an `aether.render` mailbox either. `SubstrateHarness` composes the real
 offscreen `RenderCapability` for render/capture tests.
+
+### When staged bytes reach the GPU
+
+Create, update and layer-write mail only stages bytes: the handler validates,
+keeps the bytes and answers. The GPU buffer or texture is made later, in one of
+two ways
+([ADR-0251](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0251-staged-render-resources-upload-ahead-of-use.md)).
+
+**The upload queue, ahead of use.** Every create, update and layer write puts
+its resource on one queue, once, in arrival order; a destroy takes it off. Each
+frame the renderer uploads a fixed number of *pieces* from the front of the
+queue, before it records any pass. A resource that is staged and then given
+frames is on the GPU before anything draws it, so the frame that first draws it
+uploads nothing.
+
+| Resource | One piece |
+|---|---|
+| Geometry | the whole geometry |
+| Instance buffer | the range written since its last upload |
+| Texture | the whole texture |
+| Volume texture | the whole volume |
+| Texture array | one layer, with all its levels |
+
+The allowance is the boot knob `AETHER_RENDER_UPLOAD_PIECES_PER_FRAME`
+(`--render-upload-pieces-per-frame`), default 32. It is a count and not bytes
+or time, because the cost of an upload follows the number of GPU objects it
+makes. It is read once at boot, and zero is refused there.
+
+**First use, when a draw gets there first.** A resource that a recorded pass
+names before the queue has reached it is uploaded in that frame, as it always
+was. Drawing a resource is how a sender says it is needed now, and correctness
+never depends on the queue: the queue only moves work earlier. When the queue
+later reaches a resource a draw already uploaded, it leaves the queue at no
+cost.
+
+**A texture array goes up a layer at a time, unwritten layers included.** An
+array is staged by many mails and can be far larger than one frame should
+carry, so it alone is divisible. The queue uploads its written layers first,
+then clears each layer no mail has written by writing zeros to it, and the
+array leaves the queue only when every layer is written or cleared on the GPU.
+The clears matter because a GPU texture's never-written layers are cleared by
+wgpu in the first submission that draws through the texture, all at once; an
+array with many unwritten layers would otherwise cost one long frame the first
+time it is drawn. A dispatch that binds the array early uploads its written
+layers in that frame and leaves the unwritten ones to the queue.
+
+The white texture and the glyph atlas, which the renderer keeps for itself,
+are never queued: the frame that draws with one uploads it. With no device, or
+no frames, nothing uploads.
 
 ## How to use it
 

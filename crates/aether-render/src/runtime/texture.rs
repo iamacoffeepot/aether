@@ -1,8 +1,11 @@
 //! Session-scoped texture registry for the `aether.render` cap
-//! (ADR-0105). Staged CPU pixels are the source of truth; the wgpu texture
-//! and bind group are realized lazily at record time. `create_texture` /
-//! `update_texture` only touch the staging side — the pumped runtime
-//! records against the realized side on the driver thread.
+//! (ADR-0105). Staged CPU pixels are the source of truth, and
+//! `create_texture` / `update_texture` only touch the staging side. The
+//! wgpu texture and bind group are made on the driver thread: by the
+//! upload queue's step in a later frame (ADR-0251), or by the record path
+//! when a draw names the texture before its turn in the queue. The two
+//! reserved textures are never queued; the frame that draws with one
+//! uploads it.
 
 use std::collections::HashMap;
 
@@ -16,15 +19,15 @@ use aether_substrate::session_ids::SessionIds;
 use super::text::ATLAS_SIZE;
 use super::texture_array::StagedTextureArray;
 use super::texture_volume::StagedTextureVolume;
+use super::upload::Piece;
 use crate::kinds::{CreateTexture, CreateTextureResult, DestroyTexture, UpdateTexture};
 use crate::{TextureFormat, TextureSampling, TextureUsage};
 
 /// A texture registered via `create_texture`: the staged pixels (the CPU
-/// source of truth), plus the lazily-realized GPU texture + bind group.
-/// `create_texture` / `update_texture` only touch the staging side; the
-/// wgpu resources are realized at record time (the `RenderGpu` boots lazily
-/// on the first frame). `dirty` flags staging that the GPU copy hasn't
-/// caught up to yet — the next record re-uploads the whole texture. A
+/// source of truth), plus the GPU texture + bind group once the upload
+/// queue or a draw has made them. `create_texture` / `update_texture`
+/// only touch the staging side. `dirty` flags staging that the GPU copy
+/// hasn't caught up to yet — the next upload sends the whole texture. A
 /// `Writable` texture (ADR-0170) has no CPU staging: `pixels` stays
 /// empty, `update` warn-drops, and realization clears the GPU render
 /// target instead of uploading.
@@ -128,10 +131,20 @@ impl StagedTexture {
         true
     }
 
+    /// Whether the device holds every staged byte: the texture exists and
+    /// no update has dirtied the pixels since. A `Writable` texture has
+    /// no staged pixels and is never dirty, so it is resident once its
+    /// render target exists.
+    #[must_use]
+    pub fn is_resident(&self) -> bool {
+        self.realized.is_some() && !self.dirty
+    }
+
     /// Realize the GPU texture if it isn't yet, or re-upload the
     /// staged pixels if `update_texture` dirtied them since the last
-    /// record. Runs at record time on the driver thread, where a
-    /// device + queue are available. A `Writable` texture realizes as a
+    /// upload. Runs on the driver thread, where a device + queue are
+    /// available: from the upload queue's step, and from the record path
+    /// for a texture a draw names first. A `Writable` texture realizes as a
     /// cleared render target (ADR-0170) and has no staging to re-upload
     /// (`update` rejects it, so `dirty` never sets).
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture_bindings: &TextureBindings) {
@@ -211,6 +224,11 @@ pub struct TextureRegistry {
     pub volumes: HashMap<u32, Charged<StagedTextureVolume>>,
     /// What every staged texture, array, and volume charges its bytes to.
     pub(super) memory: MemoryGauge,
+    /// Zero bytes, as many as the largest level a layer clear has
+    /// written so far. Every clear of an unwritten array layer sends a
+    /// prefix of it, so clearing an array allocates once and not once per
+    /// layer.
+    zeros: Vec<u8>,
 }
 
 /// What a texture id names: a plain texture, a texture array or a
@@ -272,6 +290,7 @@ impl TextureRegistry {
             arrays: HashMap::new(),
             volumes: HashMap::new(),
             memory,
+            zeros: Vec::new(),
         }
     }
 
@@ -336,6 +355,43 @@ impl TextureRegistry {
         }
         for volume in self.volumes.values_mut() {
             volume.invalidate_device_resources();
+        }
+    }
+
+    /// Offer the texture, array or volume at `texture_id` to the upload
+    /// queue's step (ADR-0251). A plain texture and a volume are one
+    /// piece each, uploaded through the `ensure_realized` their first use
+    /// would call; an array gives one layer. A reserved id answers
+    /// `Missing`: the renderer stages the white texture and the glyph
+    /// atlas for a draw in the same frame, so they are never queued.
+    pub(super) fn upload_piece(
+        &mut self,
+        texture_id: u32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture_bindings: &TextureBindings,
+    ) -> Piece {
+        if is_reserved(texture_id) {
+            return Piece::Missing;
+        }
+        if let Some(entry) = self.entries.get_mut(&texture_id) {
+            if entry.is_resident() {
+                return Piece::Resident;
+            }
+            entry.ensure_realized(device, queue, texture_bindings);
+            return Piece::Landed;
+        }
+        if let Some(volume) = self.volumes.get_mut(&texture_id) {
+            if volume.is_resident() {
+                return Piece::Resident;
+            }
+            volume.ensure_realized(device, queue);
+            return Piece::Landed;
+        }
+
+        match self.arrays.get_mut(&texture_id) {
+            Some(array) => array.upload_layer(device, queue, &mut self.zeros),
+            None => Piece::Missing,
         }
     }
 

@@ -6,8 +6,10 @@
 //! and the arrays and lives in its own map, so an id names one of the
 //! three and every reader of another map already treats a volume id as
 //! unknown. The received blob is the source of truth, as the blob of a
-//! written layer is for an array: the wgpu texture is realized lazily at
-//! record time and rebuilt from the blob on a replacement device.
+//! written layer is for an array: the wgpu texture is made by the upload
+//! queue's step (ADR-0251), or at the first dispatch that binds the
+//! volume if that comes first, and rebuilt from the blob on a
+//! replacement device.
 
 use aether_data::Blob;
 
@@ -17,7 +19,7 @@ use crate::TextureFormat;
 use crate::kinds::{CreateTextureVolume, CreateTextureVolumeResult};
 
 /// A volume registered via `create_texture_volume`: its fixed shape, the
-/// blob it was created from, and the lazily-realized GPU texture. `dirty`
+/// blob it was created from, and the GPU texture once made. `dirty`
 /// says the blob has not reached the current device's texture yet.
 pub struct StagedTextureVolume {
     pub format: TextureFormat,
@@ -44,10 +46,18 @@ impl StagedTextureVolume {
         self.dirty = true;
     }
 
+    /// Whether the device holds the blob: the texture exists and has
+    /// received it.
+    #[must_use]
+    pub fn is_resident(&self) -> bool {
+        self.realized.is_some() && !self.dirty
+    }
+
     /// Create the GPU texture if it does not exist yet and upload the
     /// blob if this device's texture has not received it: every slice in
-    /// one `write_texture`. Runs at record time on the driver thread,
-    /// where a device and queue are available.
+    /// one `write_texture`. Runs on the driver thread, where a device and
+    /// queue are available: from the upload queue's step, and from the
+    /// record path for a volume a dispatch binds first.
     ///
     /// # Panics
     /// Panics if the blob is not contiguous, fail-fast per ADR-0063:
@@ -148,6 +158,7 @@ mod tests {
         UpdateTexture, WriteTextureLayer,
     };
     use crate::runtime::surface::boot_offscreen;
+    use crate::runtime::texture_array::Layer;
     use crate::{Mips, TextureSampling, TextureUsage};
 
     fn volume(width: u32, height: u32, depth: u32, pixels: Vec<u8>) -> CreateTextureVolume {
@@ -232,7 +243,7 @@ mod tests {
             "update_texture and write_texture_layer naming a volume must leave it untouched",
         );
         assert_eq!(registry.entries[&plain_id].pixels.bytes(), [9; 4], "and must not reach the plain texture");
-        assert!(registry.arrays[&array_id].written[0].is_none(), "or the array");
+        assert!(matches!(registry.arrays[&array_id].contents[0], Layer::Unwritten), "or the array");
 
         registry.destroy(DestroyTexture { texture_id: volume_id });
         assert!(!registry.volumes.contains_key(&volume_id), "destroy_texture releases a volume");

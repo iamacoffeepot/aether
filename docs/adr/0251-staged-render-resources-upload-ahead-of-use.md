@@ -3,7 +3,10 @@
 - **Status:** Proposed
 - **Date:** 2026-10-07
 
-This ADR is text only; the engine change is its own issue (7635).
+The engine change is two issues. Issue 7635 implements sections 1, 2, 3, 4 and
+7: the queue, the per-frame step, the array clears, and first use. A second
+issue that depends on it implements sections 5 and 6: the wait request and its
+ordering.
 
 Three terms are used throughout. A resource is **staged** when the renderer
 holds its bytes and has made no device object for it. It is **resident** when
@@ -49,10 +52,12 @@ Three facts follow from the runs.
   their layers. The first submit whose draws use the arrays is long, and a
   second square loaded into the same engine submits in 0.22–0.25 ms. Writing
   every layer and level when the array is created removes the long submit;
-  writing all 35.9 MB in one frame costs 26 ms in the write calls. The reading
-  is that wgpu clears never-written layers the first time a draw uses the
-  texture; that is inferred from these runs and not confirmed in wgpu's
-  source.
+  writing all 35.9 MB in one frame costs 26 ms in the write calls. wgpu clears
+  never-written layers the first time a draw uses the texture. That is
+  confirmed in the wgpu-core 30.0.1 source: each texture keeps an init tracker
+  per level and layer, and `initialize_texture_memory`, called from the queue
+  submit, clears every range a submitted command buffer reads that the tracker
+  still holds.
 
 Content that streams in is loaded before it is seen. The engine should use
 that time: upload when a resource is staged, a little each frame, so the frame
@@ -109,17 +114,37 @@ like any other, behind the layers that were staged. An array therefore
 reaches the device whole over several frames, and no later draw is the first
 use of an unwritten layer.
 
-How a layer is cleared is the implementation's choice. A clear issued on the
-device, which sends no bytes, is the first thing to try; uploading zeros is
-the fallback. Whichever is used must leave wgpu with nothing to clear at
-first use, which the implementation shows by measuring the first-draw
-submit.
+A layer is cleared by writing zeros to it: one `Queue::write_texture` per
+level, each covering the whole level. In wgpu-core 30.0.1 a write that covers
+a whole level of a layer takes that level and layer out of the texture's init
+tracker, so the first submit that draws through the array has nothing to
+clear. The zeros come from one buffer the renderer keeps, as long as the
+largest level cleared so far.
+
+A clear issued on the device, which would send no bytes, is not used.
+`CommandEncoder::clear_texture` requires `Features::CLEAR_TEXTURE`, which the
+render device does not request. It needs a command encoder, and the step runs
+before the frame has one. And wgpu-core's `clear_texture_cmd` does not take
+the range out of the init tracker, so the first submit that draws through the
+array would clear it again. The measured first-draw submit is the proof that
+zeros leave wgpu nothing to clear.
 
 ### 4. First use still uploads
 
 A resource that a recorded pass names before the queue reached it is realized
 then, as today. Correctness never depends on the queue; the queue only moves
 work earlier. Drawing a resource is how a sender says it is needed now.
+
+For a texture array, first use uploads the written layers and leaves the
+unwritten ones as they are: they are still cleared by the queue, and the array
+stays queued until every layer is written or cleared. The record path's first
+use is not wgpu's first use. A program that is dispatched every frame with
+nothing to draw realizes the arrays it binds at once, while wgpu clears an
+unwritten layer only in the first submit that draws through the array. Calling
+the unwritten layers cleared at the record path's first use would take the
+array off the queue with that clear still owed. If a real draw does come
+first, wgpu clears the remaining layers in that submit as today, and the
+queue's later zero writes to them are redundant and harmless.
 
 ### 5. An actor asks to be answered when resources are resident
 

@@ -287,8 +287,9 @@ pub enum TextureUsage {
 /// dimensions, assigns the next `texture_id` past any previously
 /// created texture (the same id-assignment shape ADR-0103 uses for
 /// instrument ids), stages any pixels CPU-side, and replies as soon as
-/// the id is assigned — the wgpu texture is realized lazily at the
-/// next frame record. Reply: `CreateTextureResult`. The headless chassis
+/// the id is assigned — the wgpu texture is made in a later frame by
+/// the renderer's upload queue (ADR-0251), or by the first frame that
+/// draws with it if that comes first. Reply: `CreateTextureResult`. The headless chassis
 /// composes no render actor. `pixels` arrives as a `Blob` and is staged as
 /// received, without a copy.
 #[aether_data::kind(name = "aether.render.create_texture")]
@@ -306,8 +307,8 @@ pub struct CreateTexture {
 /// `UpdateTexture.texture_id`. `Err` carries a human-readable reason —
 /// a zero dimension, a dimension past the device's
 /// `max_texture_dimension_2d` (named against the limit, since the
-/// texture is realized lazily and an unchecked one would fault the
-/// frame that first drew with it rather than this reply), a `pixels`
+/// texture is made after this reply and an unchecked one would fault
+/// the frame that made it rather than this reply), a `pixels`
 /// length that doesn't match the texture format's byte count (or isn't
 /// empty for a `Writable` texture), or `Linear` sampling on the
 /// non-filterable `R32Float` format.
@@ -445,7 +446,9 @@ pub struct WriteTextureLayer {
 /// is checked against the three-dimensional limit every render device is
 /// requested at, so the create needs no device: it is answered inside the
 /// call, before the render device exists as after, and the wgpu texture
-/// is realized at the first dispatch that binds the volume. The engine
+/// is made in a later frame by the renderer's upload queue (ADR-0251),
+/// or at the first dispatch that binds the volume if that comes first.
+/// The engine
 /// keeps the pixels it is given, so a volume survives a render device
 /// replacement under the same id. Reply: `CreateTextureVolumeResult`.
 #[aether_data::kind(name = "aether.render.create_texture_volume")]
@@ -539,7 +542,9 @@ pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
 /// reason — assigns the next `geometry_id` past any previously created
 /// geometry (the same id-assignment shape as texture ids), stages the
 /// bytes CPU-side, and replies as soon as the id is assigned; the wgpu
-/// vertex/index buffers are realized lazily at first GPU use. Geometry
+/// vertex/index buffers are made in a later frame by the renderer's
+/// upload queue (ADR-0251), a fixed number of resources a frame, or at
+/// the first draw that names the geometry if that comes first. Geometry
 /// uploads happen at subject-load cadence — deformation is program
 /// content riding the uniform blob, never per-frame re-creation. Reply:
 /// `CreateGeometryResult`. The headless chassis composes no render actor.
@@ -571,8 +576,10 @@ pub enum CreateGeometryResult {
 /// same rules as `CreateGeometry` and swaps wholesale (the byte lengths
 /// may change). Fire-and-forget; an unknown `geometry_id` or an invalid
 /// replacement logs and drops, leaving the previous content staged. The
-/// staged bytes update immediately; the GPU buffers re-realize at the
-/// next GPU use. While a draw set names the geometry (ADR-0246 decision
+/// staged bytes update immediately; the GPU buffers are made again by
+/// the renderer's upload queue (ADR-0251), or at the next draw that
+/// names the geometry if that comes first. While a draw set names the
+/// geometry (ADR-0246 decision
 /// 2) the replacement may change the vertex contents only: one with a
 /// different vertex count, or with indices that are not byte-for-byte
 /// the ones staged, logs and drops the same way, because the set's

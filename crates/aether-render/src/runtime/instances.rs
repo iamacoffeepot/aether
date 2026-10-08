@@ -4,7 +4,9 @@
 //! a draw. The registry owns a CPU copy of every buffer's bytes and that
 //! copy is the source of truth: a create and any number of updates are
 //! accepted before a device exists, an update writes into the copy and
-//! widens one dirty byte range, and a render device replacement
+//! widens one dirty byte range, the upload queue's step or the first
+//! draw sends that range to the device (ADR-0251), and a render device
+//! replacement
 //! (ADR-0173) re-uploads the copy under the same id. The wgpu buffer is
 //! created once per device and written in place, so its capacity and
 //! identity hold for as long as a draw set names it.
@@ -20,6 +22,7 @@ use aether_substrate::session_ids::SessionIds;
 
 use super::holds::Holds;
 use super::surface::render_limits;
+use super::upload::Piece;
 use crate::kinds::{
     CreateInstances, CreateInstancesResult, DestroyInstances, UpdateInstances, VertexAttribute, vertex_stride_bytes,
 };
@@ -62,8 +65,9 @@ impl StagedInstances {
     /// bytes it has not caught up to, and return it. The buffer is
     /// created at `capacity × stride` bytes and only ever written in
     /// place afterwards, so the handle a caller keeps stays the one
-    /// drawn from. Runs at record time on the driver thread, where a
-    /// device and queue are available.
+    /// drawn from. Runs on the driver thread, where a device and queue
+    /// are available: from the upload queue's step (ADR-0251), and from
+    /// the record path for a buffer a draw set names first.
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> &wgpu::Buffer {
         let size = self.records.len() as u64;
         let buffer = self.realized.get_or_insert_with(|| {
@@ -79,6 +83,13 @@ impl StagedInstances {
             queue.write_buffer(buffer, range.start as u64, &self.records[range]);
         }
         buffer
+    }
+
+    /// Whether the device holds every staged byte: the buffer exists and
+    /// no record written since is waiting to be uploaded.
+    #[must_use]
+    pub fn is_resident(&self) -> bool {
+        self.realized.is_some() && self.dirty.is_none()
     }
 
     /// The GPU buffer, once [`Self::ensure_realized`] has made it on the
@@ -241,6 +252,24 @@ impl InstancesRegistry {
             .get(&instances_id)
             .or_else(|| self.holds.retired(instances_id))
             .expect("a held instances id is live or retired")
+    }
+
+    /// Offer the buffer at `instances_id` to the upload queue's step
+    /// (ADR-0251): its staged range is one piece, uploaded through the
+    /// same [`StagedInstances::ensure_realized`] its first draw would
+    /// call. Only a live id is looked up: a buffer destroyed under a draw
+    /// set answers to no id, and the set that holds it realizes it when
+    /// it draws.
+    pub(super) fn upload(&mut self, instances_id: u32, device: &wgpu::Device, queue: &wgpu::Queue) -> Piece {
+        let Some(entry) = self.entries.get_mut(&instances_id) else {
+            return Piece::Missing;
+        };
+        if entry.is_resident() {
+            return Piece::Resident;
+        }
+
+        entry.ensure_realized(device, queue);
+        Piece::Landed
     }
 
     /// Drop every buffer built against the current device while keeping

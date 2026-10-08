@@ -256,9 +256,11 @@ space: the corners `(-0.8, -0.8)`, `(0.8, -0.8)`, and `(0.0, 0.8)`, each with
 The reply is `aether.render.create_geometry_result` with
 `{ "Ok": { "geometry_id": 0 } }` — call it `GEOMETRY_ID`. A rejection names its
 class: an empty layout, vertex bytes that do not divide by the stride, index
-bytes that do not divide by four, or an index past the vertex count. The bytes
-stay staged on the CPU until the first draw pass uses the geometry, when the
-GPU buffers are created.
+bytes that do not divide by four, or an index past the vertex count. The reply
+means the bytes are staged on the CPU. The GPU buffers are created in a later
+frame by the renderer's upload queue, or by the first draw pass that uses the
+geometry if that comes first
+([Rendering](../systems/rendering.md#when-staged-bytes-reach-the-gpu)).
 
 Both byte fields accept a literal array as above; for a real mesh, use the
 harness blob embeds instead — `{ "$file": "/absolute/path/mesh.bin" }` reads

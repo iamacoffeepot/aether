@@ -220,6 +220,8 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
                     vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
                     clear_color: clear_color.clone(),
                     pass_timings,
+                    // The knob's compiled default: a harness run uploads as a shipped engine does.
+                    upload_pieces_per_frame: 32,
                 },
                 params,
             )

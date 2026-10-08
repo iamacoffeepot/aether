@@ -73,9 +73,9 @@ mod awaiting_device;
 // when its set is made or patched, holding the geometries and instance
 // buffers they name.
 mod draw_set;
-// The ADR-0171 geometry registry: staged vertex/index bytes realized
-// lazily as wgpu buffers at first GPU use (the draw-pass slice records
-// against the realized side).
+// The ADR-0171 geometry registry: staged vertex/index bytes, made into
+// wgpu buffers by the upload queue or by the first draw that names them
+// (the draw-pass slice records against the realized side).
 mod geometry;
 // The hold counts and retired entries a resource registry keeps for the
 // draw sets naming its entries (ADR-0246 decision 2).
@@ -110,6 +110,9 @@ mod texture_array;
 // Volume textures in the texture registry (ADR-0246 decision 6): width
 // by height by depth, given whole at creation and immutable after.
 mod texture_volume;
+// The ADR-0251 upload queue: the staged resources waiting to reach the
+// device ahead of their first draw, a fixed number of pieces a frame.
+mod upload;
 // The view source the renderer follows: the hold `view_from` installs and
 // the two ways it is released.
 mod view_source;
@@ -146,6 +149,7 @@ use self::overlay::{OverlayFrame, Placement};
 use self::program::{DispatchResources, ProgramRegistry};
 use self::text::{FontParse, FontParseOutput, TextState};
 pub use self::texture::{GLYPH_ATLAS_TEXTURE_ID, TextureRegistry, WHITE_TEXTURE_ID};
+use self::upload::{Resource, UploadQueue};
 use self::view_source::FollowedView;
 
 use super::{
@@ -190,8 +194,8 @@ pub struct RenderCapabilityState {
     /// The atlas pixels are the reserved glyph-atlas entry of `textures`.
     text: TextState,
     /// ADR-0171 geometry resources: the session-scoped registry. Staged
-    /// here at create/update; the draw-pass record path realizes and
-    /// consumes the wgpu buffers.
+    /// here at create/update; the upload step makes the wgpu buffers, or
+    /// the draw-pass record path when it names a geometry first.
     geometries: GeometryRegistry,
     /// ADR-0246 instance records: the session-scoped registry. Its CPU
     /// copy of each buffer is the source of truth; the draw-set record
@@ -203,6 +207,10 @@ pub struct RenderCapabilityState {
     draw_sets: DrawSetRegistry,
     /// ADR-0170 authored render programs: the session-scoped registry.
     programs: ProgramRegistry,
+    /// The staged resources waiting for the upload step (ADR-0251). Every
+    /// create, update and layer write names its resource here, and every
+    /// destroy takes it out.
+    uploads: UploadQueue,
     /// Dispatches queued since the last frame record. Unlike the draw
     /// accumulators these are one-shot — a program executes once per
     /// dispatch and its output persists in its writable registry
@@ -570,7 +578,9 @@ impl RenderCapabilityState {
     }
 
     /// The reply a `CreateTextureArray` gets from the device as it stands,
-    /// checked against that device's layer ceiling.
+    /// checked against that device's layer ceiling. An accepted array
+    /// joins the upload queue here, which serves the create answered at
+    /// once and the one that waited for the first device alike.
     fn answer_create_texture_array(&mut self, mail: CreateTextureArray) -> CreateTextureArrayResult {
         if let Err(error) = self.service_device_for_request() {
             return CreateTextureArrayResult::Err { error };
@@ -579,7 +589,12 @@ impl RenderCapabilityState {
             return CreateTextureArrayResult::Err { error: "the render device is not published".to_owned() };
         };
 
-        self.textures.create_array(mail, gpu.device.limits().max_texture_array_layers)
+        let created = self.textures.create_array(mail, gpu.device.limits().max_texture_array_layers);
+        if let CreateTextureArrayResult::Ok { texture_id } = created {
+            self.uploads.staged(Resource::Texture { texture_id });
+        }
+
+        created
     }
 
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
@@ -669,6 +684,11 @@ impl RenderCapabilityState {
     /// canonical desktop target map are built off to the side; registry
     /// realizations are then switched in the same actor-owned commit. A
     /// failed device or surface acquisition is terminal.
+    ///
+    /// The upload queue is left as it is (ADR-0251 section 7). Every
+    /// resource is staged again by the replacement and none is queued by
+    /// it: what was still queued uploads on the new device as before, and
+    /// what is drawn realizes at its first use there.
     fn recover_gpu_if_needed<M: ReplyMode, A, S>(&mut self, ctx: &mut NativeCtx<'_, A, S, M>) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
@@ -760,6 +780,24 @@ impl RenderCapabilityState {
         let generation = self.device_recovery.force_current_loss()?;
         gpu.device.destroy();
         Ok(generation)
+    }
+
+    /// Run the frame's upload step (ADR-0251 section 2): offer pieces from
+    /// the front of the upload queue to the registries until the frame's
+    /// allowance is uploaded or nothing is queued. Without a device
+    /// nothing uploads and the queue keeps what it holds.
+    fn upload_staged(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+
+        self.uploads.step(|resource| match resource {
+            Resource::Texture { texture_id } => {
+                self.textures.upload_piece(texture_id, &gpu.device, &gpu.queue, &gpu.texture_bindings)
+            }
+            Resource::Geometry { geometry_id } => self.geometries.upload(geometry_id, &gpu.device, &gpu.queue),
+            Resource::Instances { instances_id } => self.instances.upload(instances_id, &gpu.device, &gpu.queue),
+        });
     }
 
     /// Commit the frame's accumulators into the lists the record path reads.
@@ -995,6 +1033,13 @@ impl NativeActor for RenderCapability {
         params: RenderParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
+        if config.upload_pieces_per_frame == 0 {
+            let refusal = "the render knob upload_pieces_per_frame (AETHER_RENDER_UPLOAD_PIECES_PER_FRAME, \
+                           --render-upload-pieces-per-frame) is 0; it counts the pieces uploaded each frame and must \
+                           be at least 1";
+            return Err(BootError::Other(refusal.into()));
+        }
+
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -1011,6 +1056,7 @@ impl NativeActor for RenderCapability {
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(config.pass_timings),
+            uploads: UploadQueue::new(config.upload_pieces_per_frame),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
             clear_color: {
@@ -1115,7 +1161,12 @@ impl NativeActor for RenderCapability {
         if let Err(error) = state.service_device_for_request() {
             return CreateTextureResult::Err { error };
         }
-        state.textures.create(mail)
+        let created = state.textures.create(mail);
+        if let CreateTextureResult::Ok { texture_id } = created {
+            state.uploads.staged(Resource::Texture { texture_id });
+        }
+
+        created
     }
 
     /// `UpdateTexture` (ADR-0105), on the owned texture registry.
@@ -1124,7 +1175,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("update_texture") {
             return;
         }
+        let texture_id = mail.texture_id;
         state.textures.update(mail);
+        state.uploads.staged(Resource::Texture { texture_id });
     }
 
     /// `DestroyTexture`, on the owned texture registry.
@@ -1133,7 +1186,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("destroy_texture") {
             return;
         }
+        let texture_id = mail.texture_id;
         state.textures.destroy(mail);
+        state.uploads.forget(Resource::Texture { texture_id });
     }
 
     /// `CreateTextureArray` (ADR-0246 decision 6), on the owned texture
@@ -1170,13 +1225,16 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("write_texture_layer") {
             return;
         }
+        let texture_id = mail.texture_id;
         state.textures.write_layer(mail);
+        state.uploads.staged(Resource::Texture { texture_id });
     }
 
     /// `CreateTextureVolume` (ADR-0246 decision 6), on the owned texture
     /// registry. Validation and id assignment read no device, so the
     /// reply is given here, before the first device exists as after; the
-    /// volume realizes at the first dispatch that binds it.
+    /// volume reaches the device from the upload queue, or at the first
+    /// dispatch that binds it if that comes first.
     #[handler::request]
     fn on_create_texture_volume(
         state: &mut Self::State,
@@ -1186,12 +1244,18 @@ impl NativeActor for RenderCapability {
         if let Err(error) = state.service_device_for_request() {
             return CreateTextureVolumeResult::Err { error };
         }
-        state.textures.create_volume(mail)
+        let created = state.textures.create_volume(mail);
+        if let CreateTextureVolumeResult::Ok { texture_id } = created {
+            state.uploads.staged(Resource::Texture { texture_id });
+        }
+
+        created
     }
 
     /// `CreateGeometry` (ADR-0171), on the owned geometry registry —
     /// validation and id assignment are CPU-side, so the reply needs no
-    /// booted GPU; the buffers realize lazily at first GPU use.
+    /// booted GPU; the buffers are made by the upload queue, or at the
+    /// first draw that names the geometry if that comes first.
     #[handler::request]
     fn on_create_geometry(
         state: &mut Self::State,
@@ -1201,7 +1265,12 @@ impl NativeActor for RenderCapability {
         if let Err(error) = state.service_device_for_request() {
             return CreateGeometryResult::Err { error };
         }
-        state.geometries.create(mail)
+        let created = state.geometries.create(mail);
+        if let CreateGeometryResult::Ok { geometry_id } = created {
+            state.uploads.staged(Resource::Geometry { geometry_id });
+        }
+
+        created
     }
 
     /// `UpdateGeometry` (ADR-0171), on the owned geometry registry.
@@ -1210,7 +1279,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("update_geometry") {
             return;
         }
+        let geometry_id = mail.geometry_id;
         state.geometries.update(mail);
+        state.uploads.staged(Resource::Geometry { geometry_id });
     }
 
     /// `DestroyGeometry` (ADR-0171), on the owned geometry registry —
@@ -1220,7 +1291,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("destroy_geometry") {
             return;
         }
+        let geometry_id = mail.geometry_id;
         state.geometries.destroy(mail);
+        state.uploads.forget(Resource::Geometry { geometry_id });
     }
 
     /// `CreateInstances` (ADR-0246), on the owned instance registry —
@@ -1235,7 +1308,12 @@ impl NativeActor for RenderCapability {
         if let Err(error) = state.service_device_for_request() {
             return CreateInstancesResult::Err { error };
         }
-        state.instances.create(mail)
+        let created = state.instances.create(mail);
+        if let CreateInstancesResult::Ok { instances_id } = created {
+            state.uploads.staged(Resource::Instances { instances_id });
+        }
+
+        created
     }
 
     /// `UpdateInstances` (ADR-0246), on the owned instance registry.
@@ -1244,7 +1322,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("update_instances") {
             return;
         }
+        let instances_id = mail.instances_id;
         state.instances.update(mail);
+        state.uploads.staged(Resource::Instances { instances_id });
     }
 
     /// `DestroyInstances` (ADR-0246), on the owned instance registry.
@@ -1253,7 +1333,9 @@ impl NativeActor for RenderCapability {
         if state.warn_drop_if_unusable("destroy_instances") {
             return;
         }
+        let instances_id = mail.instances_id;
         state.instances.destroy(mail);
+        state.uploads.forget(Resource::Instances { instances_id });
     }
 
     /// `CreateDrawSet` (ADR-0246), on the owned draw-set registry —
@@ -1589,6 +1671,11 @@ impl NativeActor for RenderCapability {
         if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
+        // Upload ahead of use (ADR-0251): after the wait on the previous
+        // submission, on the device recovery published, and before any
+        // target records, so a resource this frame draws for the first
+        // time is found resident when its turn in the queue has come.
+        state.upload_staged();
         state.commit_scene(replay_cache_when_idle);
         #[cfg(feature = "desktop")]
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
@@ -1695,7 +1782,7 @@ impl NativeActor for RenderCapability {
 mod tests {
     use super::super::{
         Blend, Mips, OutputSlot, PassStage, ProgramPass, Sampling, ScreenTriangle, ScreenVertex, Shape, SlotExtent,
-        SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, Wrap,
+        SlotShape, SlotSpec, TextureFormat, TextureSampling, TextureUsage, VertexAttribute, VertexFormat, Wrap,
     };
     use super::texture::{StagedTexture, TexturePixels};
     use super::*;
@@ -1752,6 +1839,7 @@ mod tests {
             instances: InstancesRegistry::new(),
             draw_sets: DrawSetRegistry::new(),
             programs: ProgramRegistry::new(false),
+            uploads: UploadQueue::new(32),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,
             clear_color: wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 },
@@ -1798,12 +1886,19 @@ mod tests {
 
     impl RenderFixture {
         pub(super) fn boot(params: RenderParams) -> Self {
+            Self::boot_uploading(params, 32)
+        }
+
+        /// [`Self::boot`] with the upload step's allowance chosen: how
+        /// many pieces it uploads in one frame.
+        fn boot_uploading(params: RenderParams, upload_pieces_per_frame: u32) -> Self {
             let (registry, mailer, egress) = fresh_substrate_and_rx();
             let chassis = boot_bare_test_chassis(&registry, &mailer);
             let tuning = RenderTuningConfig {
                 vertex_buffer_bytes: 1024,
                 clear_color: DEFAULT_CLEAR_COLOR.to_owned(),
                 pass_timings: false,
+                upload_pieces_per_frame,
             };
             let cap = PumpedDriver::boot(chassis, tuning, params);
             Self { cap, egress }
@@ -2066,6 +2161,39 @@ mod tests {
             "the unparsable register gets its own refusal: {refused:?}",
         );
         assert!(render.read(|state| state.awaiting_device.is_empty()), "nothing waits once the device is installed");
+    }
+
+    /// ADR-0251 sections 1 and 2. Three geometries are created and never
+    /// drawn, with the allowance at one piece a frame: each frame makes
+    /// one more of them resident. It catches an `on_frame` that never
+    /// runs the upload step or runs it before the device exists, a step
+    /// that ignores the knob, and a create that does not queue what it
+    /// staged.
+    #[test]
+    fn with_one_piece_a_frame_three_staged_geometries_become_resident_one_per_frame() {
+        if !require_wgpu_adapter() {
+            return;
+        }
+        let params = RenderParams { offscreen_size: Some((64, 48)), ..RenderParams::default() };
+        let mut render = RenderFixture::boot_uploading(params, 1);
+        let resident = |render: &RenderFixture| {
+            render.read(|state| state.geometries.entries.values().filter(|entry| entry.is_resident()).count())
+        };
+        for _ in 0..3 {
+            let created: CreateGeometryResult = render.request(&CreateGeometry {
+                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+                vertices: Blob::from(vec![0u8; 36]),
+                indices: Blob::from([0u32, 1, 2].iter().flat_map(|index| index.to_le_bytes()).collect::<Vec<u8>>()),
+            });
+            assert!(matches!(created, CreateGeometryResult::Ok { .. }), "the create is accepted: {created:?}");
+        }
+        assert_eq!(resident(&render), 0, "precondition: staging alone uploads nothing");
+
+        for frames in 1..=3 {
+            render.send(&Frame { replay_cache_when_idle: true, windows: Vec::new() });
+
+            assert_eq!(resident(&render), frames, "each frame uploads one piece, and nothing drew them");
+        }
     }
 
     /// Catches a volume create routed through the device wait: its answer
