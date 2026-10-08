@@ -459,18 +459,19 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     const LISTENER_NAME: &str = "duplicate-staged-listener";
     let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>();
-    let (consumer, _deliveries) = spawn_consumer(&chassis, "duplicate-name-consumer");
+    let (alpha_consumer, _alpha_deliveries) = spawn_consumer(&chassis, "duplicate-name-alpha");
+    let (beta_consumer, _beta_deliveries) = spawn_consumer(&chassis, "duplicate-name-beta");
     let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
     let session_beta = SessionToken(Uuid::from_u128(0x4066_DB7A));
 
     let (_, settled_alpha) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: consumer.clone() },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: alpha_consumer },
         Some(ReplyTarget::Session { session: session_alpha, correlation: 1 }),
     );
     let (_, settled_beta) = chassis.send_tracked(
         tcp,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: beta_consumer },
         Some(ReplyTarget::Session { session: session_beta, correlation: 2 }),
     );
     await_settled(&settled_alpha, "the alpha duplicate-name bind");
@@ -501,7 +502,14 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
         .collect();
     assert_eq!(successes.len(), 1, "one staged child owns the parent-local name: {replies:?}");
     assert_eq!(failures.len(), 1, "the duplicate staged child receives one rejection: {replies:?}");
-    assert!(failures[0].contains("spawn failed"), "the duplicate is rejected by staged spawn authority");
+    // Two orders exist: the second bind is handled while the first listener is still staged, or after it stands.
+    // Different consumers keep the second off the standing-listener answer, so both orders reach the child
+    // reservation, which holds a name from staging through life and refuses it with `SubnameInUse`.
+    assert!(
+        failures[0].contains("spawn failed") && failures[0].contains("SubnameInUse"),
+        "the duplicate is rejected by the parent-local name reservation: {}",
+        failures[0],
+    );
 
     let live_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), successes[0]);
     assert!(TcpListener::bind(live_addr).is_err(), "the accepted listener retains its socket");
